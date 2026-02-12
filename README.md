@@ -28,12 +28,16 @@
 Note - this is specifically set up to run on `sheep`, Northwestern MSR's
 GPU server. TODO make sure this works elsewhere/make the instructions more general.
 ```bash
+WANDB_API_KEY=<your_wandb_api_key_here>
+
 docker build -t polyumi
 docker run -e DISPLAY=$DISPLAY   -v /tmp/.X11-unix:/tmp/.X11-unix --gpus all --device /dev/dri:/dev/dri \
 -v $(pwd)/data:/data \
 -e HOST_BIND_PATH=$(pwd)/data \
+-e WANDB_API_KEY=$WANDB_API_KEY \
 -v $XDG_RUNTIME_DIR/docker.sock:/var/run/docker.sock \
 -v $(pwd):/ros2_ws \
+--shm-size=16g \
 -it polyumi
 # remove the mount of ros2_ws if you don't want to edit code on the host machine
 ```
