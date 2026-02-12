@@ -23,7 +23,9 @@ from tqdm import tqdm
 @click.option('-n', '--num_workers', type=int, default=None)
 @click.option('-np', '--no_docker_pull', is_flag=True, default=False, help="pull docker image from docker hub")
 @click.argument('session_dir', nargs=-1)
-def main(docker_image, num_workers, no_docker_pull, session_dir):
+@click.option('--host_data_dir', envvar='HOST_BIND_PATH', default=None,
+              help="Optional host root path for docker-in-docker volume mounts. If set, container paths under /data are mapped to this host path.")
+def main(docker_image, num_workers, no_docker_pull, session_dir, host_data_dir):
     if num_workers is None:
         num_workers = multiprocessing.cpu_count()
 
@@ -56,6 +58,17 @@ def main(docker_image, num_workers, no_docker_pull, session_dir):
                         continue
                     mount_target = pathlib.Path('/data')
 
+                    host_root = pathlib.Path(os.path.expanduser(host_data_dir)).absolute() if host_data_dir else None
+                    container_root = pathlib.Path('/data')
+                    if host_root is not None:
+                        try:
+                            rel_path = video_dir.relative_to(container_root)
+                            host_video_dir = host_root.joinpath(rel_path)
+                        except ValueError:
+                            host_video_dir = video_dir
+                    else:
+                        host_video_dir = video_dir
+
                     video_path = mount_target.joinpath('raw_video.mp4')
                     json_path = mount_target.joinpath('imu_data.json')
 
@@ -64,7 +77,7 @@ def main(docker_image, num_workers, no_docker_pull, session_dir):
                         'docker',
                         'run',
                         '--rm', # delete after finish
-                        '--volume', str(video_dir) + ':' + '/data',
+                        '--volume', str(host_video_dir) + ':' + str(mount_target),
                         docker_image,
                         'node',
                         '/OpenImuCameraCalibrator/javascript/extract_metadata_single.js',

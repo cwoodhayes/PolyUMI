@@ -28,9 +28,10 @@
 Note - this is specifically set up to run on `sheep`, Northwestern MSR's
 GPU server. TODO make sure this works elsewhere/make the instructions more general.
 ```bash
-docker build -it polyumi
+docker build -t polyumi
 docker run -e DISPLAY=$DISPLAY   -v /tmp/.X11-unix:/tmp/.X11-unix --gpus all --device /dev/dri:/dev/dri \
 -v $(pwd)/data:/data \
+-e HOST_BIND_PATH=$(pwd)/data \
 -v $XDG_RUNTIME_DIR/docker.sock:/var/run/docker.sock \
 -it polyumi
 ```

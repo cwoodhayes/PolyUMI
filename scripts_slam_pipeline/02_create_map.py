@@ -20,6 +20,17 @@ from tqdm import tqdm
 import numpy as np
 import cv2
 from umi.common.cv_util import draw_predefined_mask
+from typing import Optional
+
+
+def _to_host(container_path: pathlib.Path, host_root: Optional[pathlib.Path], container_root: pathlib.Path) -> pathlib.Path:
+    if host_root is None:
+        return container_path
+    try:
+        rel_path = container_path.relative_to(container_root)
+    except ValueError:
+        return container_path
+    return host_root.joinpath(rel_path)
 
 # %%
 @click.command()
@@ -28,7 +39,9 @@ from umi.common.cv_util import draw_predefined_mask
 @click.option('-d', '--docker_image', default="chicheng/orb_slam3:latest")
 @click.option('-np', '--no_docker_pull', is_flag=True, default=False, help="pull docker image from docker hub")
 @click.option('-nm', '--no_mask', is_flag=True, default=False, help="Whether to mask out gripper and mirrors. Set if map is created with bare GoPro no on gripper.")
-def main(input_dir, map_path, docker_image, no_docker_pull, no_mask):
+@click.option('--host_data_dir', envvar='HOST_BIND_PATH', default=None,
+              help="Optional host root path for docker-in-docker volume mounts. If set, container paths under /data are mapped to this host path.")
+def main(input_dir, map_path, docker_image, no_docker_pull, no_mask, host_data_dir):
     video_dir = pathlib.Path(os.path.expanduser(input_dir)).absolute()
     for fn in ['raw_video.mp4', 'imu_data.json']:
         assert video_dir.joinpath(fn).is_file()
@@ -64,6 +77,9 @@ def main(input_dir, map_path, docker_image, no_docker_pull, no_mask):
             slam_mask, color=255, mirror=True, gripper=False, finger=True)
         cv2.imwrite(str(mask_write_path.absolute()), slam_mask)
 
+    host_root = pathlib.Path(os.path.expanduser(host_data_dir)).absolute() if host_data_dir else None
+    container_root = pathlib.Path('/data')
+
     map_mount_source = pathlib.Path(map_path)
     map_mount_target = pathlib.Path('/map').joinpath(map_mount_source.name)
 
@@ -72,8 +88,8 @@ def main(input_dir, map_path, docker_image, no_docker_pull, no_mask):
         'docker',
         'run',
         '--rm', # delete after finish
-        '--volume', str(video_dir) + ':' + '/data',
-        '--volume', str(map_mount_source.parent) + ':' + str(map_mount_target.parent),
+        '--volume', str(_to_host(video_dir, host_root, container_root)) + ':' + str(mount_target),
+        '--volume', str(_to_host(map_mount_source.parent, host_root, container_root)) + ':' + str(map_mount_target.parent),
         docker_image,
         '/ORB_SLAM3/Examples/Monocular-Inertial/gopro_slam',
         '--vocabulary', '/ORB_SLAM3/Vocabulary/ORBvoc.txt',

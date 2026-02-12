@@ -16,6 +16,8 @@ RUN bash Miniforge3-$(uname)-$(uname -m).sh -b -p /opt/mamba && \
     rm Miniforge3-$(uname)-$(uname -m).sh
 
 SHELL ["/bin/bash", "-c"]
-COPY . .
+COPY conda_environment.yaml .
 RUN mamba env create -f conda_environment.yaml
+
+COPY . .
 RUN echo "source /opt/mamba/etc/profile.d/conda.sh && conda activate umi" >> ~/.bashrc 
