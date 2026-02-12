@@ -33,7 +33,9 @@ docker run -e DISPLAY=$DISPLAY   -v /tmp/.X11-unix:/tmp/.X11-unix --gpus all --d
 -v $(pwd)/data:/data \
 -e HOST_BIND_PATH=$(pwd)/data \
 -v $XDG_RUNTIME_DIR/docker.sock:/var/run/docker.sock \
+-v $(pwd):/ros2_ws \
 -it polyumi
+# remove the mount of ros2_ws if you don't want to edit code on the host machine
 ```
 
 ### Original UMI install
