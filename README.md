@@ -24,6 +24,18 @@
 <sup>3</sup>Toyota Research Institute
 
 ## 🛠️ Installation
+### Docker dev env install
+Note - this is specifically set up to run on `sheep`, Northwestern MSR's
+GPU server. TODO make sure this works elsewhere/make the instructions more general.
+```bash
+docker build -it polyumi
+docker run -e DISPLAY=$DISPLAY   -v /tmp/.X11-unix:/tmp/.X11-unix --gpus all --device /dev/dri:/dev/dri \
+-v $(pwd)/data:/data \
+-v $XDG_RUNTIME_DIR/docker.sock:/var/run/docker.sock \
+-it polyumi
+```
+
+### Original UMI install
 Only tested on Ubuntu 22.04
 
 Install docker following the [official documentation](https://docs.docker.com/engine/install/ubuntu/) and finish [linux-postinstall](https://docs.docker.com/engine/install/linux-postinstall/).
