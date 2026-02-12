@@ -21,3 +21,7 @@ RUN mamba env create -f conda_environment.yaml
 
 COPY . .
 RUN echo "source /opt/mamba/etc/profile.d/conda.sh && conda activate umi" >> ~/.bashrc 
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    cp /root/.local/bin/uv /usr/local/bin/uv
+RUN uv tool install hf
