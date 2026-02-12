@@ -7,23 +7,23 @@
         "--security-opt",
         "seccomp=unconfined",
         "-e DISPLAY=${env:DISPLAY}",
-        "-v /tmp/.X11-unix:/tmp/.X11-unix",
+        // "-v /tmp/.X11-unix:/tmp/.X11-unix",
         "--network=host",
-        "--gpus=all",
-        "--device /dev/dri:/dev/dri"
-    ]
-    // "customizations": {
-    //     "vscode": {
-    //         "extensions": [
-    //             "ms-azuretools.vscode-docker",
-    //             "ms-python.python",
-    //             "ms-vscode.cpptools",
-    //             "twxs.cmake",
-    //             "ms-vscode.cmake-tools",
-    //             "ms-iot.vscode-ros",
-    //             "smilerobotics.urdf",
-    //             "yzhang.markdown-all-in-one"
-    //         ]
-    //     }
-    // }
+        "--gpus=all"
+        // "--device /dev/dri:/dev/dri"
+    ],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-azuretools.vscode-docker",
+                "ms-python.python",
+                "ms-vscode.cpptools",
+                "twxs.cmake",
+                "ms-vscode.cmake-tools",
+                "ms-iot.vscode-ros",
+                "smilerobotics.urdf",
+                "yzhang.markdown-all-in-one"
+            ]
+        }
+    }
 }
