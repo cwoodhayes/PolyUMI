@@ -24,35 +24,33 @@
 <sup>3</sup>Toyota Research Institute
 
 ## 🛠️ Installation
-Only tested on Ubuntu 22.04
+### Docker dev env install
+Note - this is specifically set up to run on `sheep`, Northwestern MSR's
+GPU server. TODO make sure this works elsewhere/make the instructions more general.
+```bash
+WANDB_API_KEY=<your_wandb_api_key_here>
 
-Install docker following the [official documentation](https://docs.docker.com/engine/install/ubuntu/) and finish [linux-postinstall](https://docs.docker.com/engine/install/linux-postinstall/).
-
-Install system-level dependencies:
-```console
-$ sudo apt install -y libosmesa6-dev libgl1-mesa-glx libglfw3 patchelf
+docker build -t polyumi
+docker run -e DISPLAY=$DISPLAY   -v /tmp/.X11-unix:/tmp/.X11-unix --gpus all --device /dev/dri:/dev/dri \
+-v $(pwd)/data:/data \
+-e HOST_BIND_PATH=$(pwd)/data \
+-e WANDB_API_KEY=$WANDB_API_KEY \
+-v $XDG_RUNTIME_DIR/docker.sock:/var/run/docker.sock \
+-v $(pwd):/ros2_ws \
+--shm-size=16g \
+-it polyumi
+# remove the mount of ros2_ws if you don't want to edit code on the host machine
 ```
 
-We recommend [Miniforge](https://github.com/conda-forge/miniforge?tab=readme-ov-file#miniforge3) instead of the standard anaconda distribution for faster installation: 
-```console
-$ mamba env create -f conda_environment.yaml
-```
-
-Activate environment
-```console
-$ conda activate umi
-(umi)$ 
-```
-
-## Running UMI SLAM pipeline
+## Running UMI SLAM pipeline (on container)
 Download example data
-```console
-(umi)$ wget --recursive --no-parent --no-host-directories --cut-dirs=2 --relative --reject="index.html*" https://real.stanford.edu/umi/data/example_demo_session/
+```bash
+wget --recursive --no-parent --no-host-directories --cut-dirs=2 --relative --reject="index.html*" https://real.stanford.edu/umi/data/example_demo_session/
 ```
 
 Run SLAM pipeline
-```console
-(umi)$ python run_slam_pipeline.py example_demo_session
+```bash
+python run_slam_pipeline.py example_demo_session
 
 ...
 Found following cameras:
@@ -72,29 +70,30 @@ For this dataset, 99% of the data are useable (successful SLAM), with 0 demonstr
 Despite our significant effort on robustness improvement, OBR_SLAM3 is still the most fragile part of UMI pipeline. If you are an expert in SLAM, please consider contributing to our fork of [OBR_SLAM3](https://github.com/cheng-chi/ORB_SLAM3) which is specifically optimized for UMI workflow.
 
 Generate dataset for training.
-```console
-(umi)$ python scripts_slam_pipeline/07_generate_replay_buffer.py -o example_demo_session/dataset.zarr.zip example_demo_session
+```bash
+python scripts_slam_pipeline/07_generate_replay_buffer.py -o /data/example_demo_session/dataset.zarr.zip /data/example_demo_session
 ```
 
-## Training Diffusion Policy
+## Training Diffusion Policy (on container)
 Single-GPU training. Tested to work on RTX3090 24GB.
-```console
-(umi)$ python train.py --config-name=train_diffusion_unet_timm_umi_workspace task.dataset_path=example_demo_session/dataset.zarr.zip
+```bash
+python train.py --config-name=train_diffusion_unet_timm_umi_workspace task.dataset_path=/data/example_demo_session/dataset.zarr.zip
 ```
 
 Multi-GPU training.
-```console
-(umi)$ accelerate --num_processes <ngpus> train.py --config-name=train_diffusion_unet_timm_umi_workspace task.dataset_path=example_demo_session/dataset.zarr.zip
+```bash
+accelerate --num_processes <ngpus> train.py --config-name=train_diffusion_unet_timm_umi_workspace task.dataset_path=example_demo_session/dataset.zarr.zip
 ```
 
 Downloading in-the-wild cup arrangement dataset (processed).
-```console
-(umi)$ wget https://real.stanford.edu/umi/data/zarr_datasets/cup_in_the_wild.zarr.zip
+```bash
+wget https://real.stanford.edu/umi/data/zarr_datasets/cup_in_the_wild.zarr.zip
 ```
 
 Multi-GPU training.
-```console
-(umi)$ accelerate --num_processes <ngpus> train.py --config-name=train_diffusion_unet_timm_umi_workspace task.dataset_path=cup_in_the_wild.zarr.zip
+TODO this doesn't yet work on `sheep`.
+```bash
+accelerate launch train.py --config-name=train_diffusion_unet_timm_umi_workspace task.dataset_path=/data/cup_in_the_wild.zarr.zip
 ```
 
 ## 🦾 Real-world Deployment
@@ -136,18 +135,18 @@ Our in-the-wild cup arragement policy is trained with the distribution of ["espr
 <img width="90%" src="assets/umi_cup.gif">
 
 Download pre-trained checkpoint.
-```console
-(umi)$ wget https://real.stanford.edu/umi/data/pretrained_models/cup_wild_vit_l_1img.ckpt
+```bash
+wget https://real.stanford.edu/umi/data/pretrained_models/cup_wild_vit_l_1img.ckpt
 ```
 
 Grant permission to the HDMI capture card.
-```console
-(umi)$ sudo chmod -R 777 /dev/bus/usb
+```bash
+sudo chmod -R 777 /dev/bus/usb
 ```
 
 Launch eval script.
-```console
-(umi)$ python eval_real.py --robot_config=example/eval_robots_config.yaml -i cup_wild_vit_l.ckpt -o data/eval_cup_wild_example
+```bash
+python eval_real.py --robot_config=example/eval_robots_config.yaml -i cup_wild_vit_l.ckpt -o data/eval_cup_wild_example
 ```
 After the script started, use your spacemouse to control the robot and the gripper (spacemouse buttons). Press `C` to start the policy. Press `S` to stop.
 

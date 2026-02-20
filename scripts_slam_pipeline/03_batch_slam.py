@@ -20,6 +20,17 @@ import cv2
 import av
 import numpy as np
 from umi.common.cv_util import draw_predefined_mask
+from typing import Optional
+
+
+def _to_host(container_path: pathlib.Path, host_root: Optional[pathlib.Path], container_root: pathlib.Path) -> pathlib.Path:
+    if host_root is None:
+        return container_path
+    try:
+        rel_path = container_path.relative_to(container_root)
+    except ValueError:
+        return container_path
+    return host_root.joinpath(rel_path)
 
 
 # %%
@@ -44,7 +55,9 @@ def runner(cmd, cwd, stdout_path, stderr_path, timeout, **kwargs):
 @click.option('-ml', '--max_lost_frames', type=int, default=60)
 @click.option('-tm', '--timeout_multiple', type=float, default=16, help='timeout_multiple * duration = timeout')
 @click.option('-np', '--no_docker_pull', is_flag=True, default=False, help="pull docker image from docker hub")
-def main(input_dir, map_path, docker_image, num_workers, max_lost_frames, timeout_multiple, no_docker_pull):
+@click.option('--host_data_dir', envvar='HOST_BIND_PATH', default=None,
+              help="Optional host root path for docker-in-docker volume mounts. If set, container paths under /data are mapped to this host path.")
+def main(input_dir, map_path, docker_image, num_workers, max_lost_frames, timeout_multiple, no_docker_pull, host_data_dir):
     input_dir = pathlib.Path(os.path.expanduser(input_dir)).absolute()
     input_video_dirs = [x.parent for x in input_dir.glob('demo*/raw_video.mp4')]
     input_video_dirs += [x.parent for x in input_dir.glob('map*/raw_video.mp4')]
@@ -71,6 +84,9 @@ def main(input_dir, map_path, docker_image, num_workers, max_lost_frames, timeou
         if p.returncode != 0:
             print("Docker pull failed!")
             exit(1)
+
+    host_root = pathlib.Path(os.path.expanduser(host_data_dir)).absolute() if host_data_dir else None
+    container_root = pathlib.Path('/data')
 
     with tqdm(total=len(input_video_dirs)) as pbar:
         # one chunk per thread, therefore no synchronization needed
@@ -109,8 +125,8 @@ def main(input_dir, map_path, docker_image, num_workers, max_lost_frames, timeou
                     'docker',
                     'run',
                     '--rm', # delete after finish
-                    '--volume', str(video_dir) + ':' + '/data',
-                    '--volume', str(map_mount_source.parent) + ':' + str(map_mount_target.parent),
+                    '--volume', str(_to_host(video_dir, host_root, container_root)) + ':' + '/data',
+                    '--volume', str(_to_host(map_mount_source.parent, host_root, container_root)) + ':' + str(map_mount_target.parent),
                     docker_image,
                     '/ORB_SLAM3/Examples/Monocular-Inertial/gopro_slam',
                     '--vocabulary', '/ORB_SLAM3/Vocabulary/ORBvoc.txt',
