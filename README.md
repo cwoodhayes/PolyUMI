@@ -1,1 +1,3 @@
-# PolyUMI-firmware
+# {Repo Name}
+
+Author: Conor Hayes
