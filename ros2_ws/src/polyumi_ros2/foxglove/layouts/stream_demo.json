@@ -2,7 +2,7 @@
   "configById": {
     "Image!3rp9676": {
       "imageMode": {
-        "imageTopic": "/image_raw/compressed"
+        "imageTopic": "/gopro/image_raw/compressed"
       },
       "cameraState": {
         "distance": 20,
@@ -45,7 +45,7 @@
       }
     },
     "RawMessages!29pqw16": {
-      "topicPath": "/camera_info"
+      "topicPath": "/gopro/camera_info"
     },
     "Tab!2xvuj86": {
       "activeTabIdx": 0,

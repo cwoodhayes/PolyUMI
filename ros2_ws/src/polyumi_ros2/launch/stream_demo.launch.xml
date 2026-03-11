@@ -4,7 +4,8 @@
     <arg name="port" value="8765"/>
   </include>
 
-  <node pkg="v4l2_camera" exec="v4l2_camera_node" name="gopro" output="screen">
+  <node pkg="v4l2_camera" exec="v4l2_camera_node" name="gopro" output="screen"
+    namespace="gopro">
     <param name="video_device" value="/dev/video2"/>
     <param name="image_size" value="[1920,1080]"/>
     <param name="pixel_format" value="YUYV"/>
