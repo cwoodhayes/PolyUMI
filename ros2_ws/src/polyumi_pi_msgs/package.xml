@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>polytouch_msgs</name>
+  <name>polyumi_pi_msgs</name>
   <version>0.0.1</version>
   <description>Protobuf messages for communication with PolyTouch CE Finger</description>
   <maintainer email="cwoodhayes@gmail.com">conorbot</maintainer>
