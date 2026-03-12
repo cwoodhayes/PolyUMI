@@ -1,6 +1,10 @@
 """Manages the LED strip that lights the sensor surface."""
 
+import logging
+
 import rpi_hardware_pwm
+
+log = logging.getLogger('pi_led_manager')
 
 
 class LEDManager:
@@ -8,7 +12,9 @@ class LEDManager:
 
     # transistor controlling led strip is connected here
     # pin 12 on the actual header, which is PWM channel 0 on the BCM2710
-    GPIO_PIN = 18
+    # due to customizing /boot/firmware/config.txt (see that file),
+    # pwm0 connects to GPIO12 aka pin 32 on the header
+    GPIO_PIN = 32
     PWM_CHANNEL = 0
 
     def __init__(self) -> None:
@@ -28,6 +34,9 @@ class LEDManager:
         """
         duty_cycle = int(brightness * 100)
         self.pwm.change_duty_cycle(duty_cycle)
+        log.info(
+            f'Set LED brightness to {brightness:.2f} (duty cycle: {duty_cycle}%)'
+        )
 
     def __del__(self) -> None:
         """Clean up the PWM on deletion."""
