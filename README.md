@@ -61,7 +61,7 @@ This demo is the streaming demo for the PolyUMI Franka end-effector, which inclu
 
 ```bash
 # launch the demo
-ros2 launch polyumi_ros2 stream_demo.launch.xml
+ros2 launch polyumi_ros2 franka_demo.launch.xml
 ```
 Then open [foxglove](https://app.foxglove.dev) in your browser, and connect to `ws://localhost:8765` (the default).
 Drag and drop `ros2_ws/src/polyumi_ros2/foxglove/stream_demo.json` into the UI.

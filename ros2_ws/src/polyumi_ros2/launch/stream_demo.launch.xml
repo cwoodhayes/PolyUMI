@@ -5,6 +5,8 @@
 
   <include file="$(find-pkg-share foxglove_bridge)/launch/foxglove_bridge_launch.xml">
     <arg name="port" value="8765"/>
+    <arg name="capabilities"
+      value="['clientPublish','parameters','parametersSubscribe','services','connectionGraph','assets']"/>
   </include>
 
   <node pkg="v4l2_camera" exec="v4l2_camera_node" name="gopro" output="screen"
