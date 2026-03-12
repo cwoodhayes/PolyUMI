@@ -1,0 +1,168 @@
+"""Code for streaming camera data."""
+
+import io
+import json
+import logging
+import time
+
+import numpy as np
+import zmq
+from libcamera import controls  # type: ignore
+from picamera2 import Picamera2
+from polyumi_pi_msgs import camera_frame_pb2
+
+log = logging.getLogger('pi_cam_process')
+
+
+class CameraStreamer:
+    """Class for streaming camera data."""
+
+    def __init__(self, port: int, fps: int, zmq_context: zmq.Context):
+        """Initialize the camera streamer."""
+        self.port = port
+        self.fps = fps
+        self.zmq_context = zmq_context
+        self.cam = Picamera2()
+
+    @classmethod
+    def info(cls) -> str:
+        """Return a camera information string."""
+        cam = Picamera2()
+        msg = []
+        controls = json.dumps(cam.camera_controls, indent=2, default=str)
+        msg.append(f'Camera controls: {controls}')
+
+        info = json.dumps(cam.sensor_modes, indent=2, default=str)
+        msg.append(f'Camera sensor modes: {info}')
+
+        return '\n\n\n'.join(msg)
+
+    def start(self) -> None:
+        """Start streaming camera data."""
+        socket = self.zmq_context.socket(zmq.PUSH)
+        socket.setsockopt(zmq.SNDHWM, 2)
+        socket.setsockopt(zmq.LINGER, 0)
+        socket.bind(f'tcp://*:{self.port}')
+        log.info(f'ZMQ PUSH bound on tcp://*:{self.port}')
+
+        self.configure_camera()
+        self.cam.start()
+        self.set_initial_controls()
+
+        log.info(f'Publishing to tcp://<pi_ip>:{self.port}')
+
+        interval = 1.0 / self.fps
+        first_frame_logged = False
+        try:
+            while True:
+                t_start = time.monotonic()
+
+                # Capture and encode frame as JPEG
+                data = io.BytesIO()
+                self.cam.capture_file(data, format='jpeg')
+                metadata = self.cam.capture_metadata()
+                if not first_frame_logged:
+                    log.info(f'First-frame metadata: {metadata}')
+                    first_frame_logged = True
+                log.debug(metadata)
+
+                msg = camera_frame_pb2.CameraFrame()
+                msg.timestamp_ns = metadata['SensorTimestamp']
+                msg.jpeg_data = data.getvalue()
+                msg.width = 540
+                msg.height = 480
+                try:
+                    socket.send(msg.SerializeToString(), zmq.NOBLOCK)
+                except zmq.Again:
+                    log.debug('Dropped frame: receiver not ready.')
+
+                log.debug(
+                    f'Captured frame at {msg.timestamp_ns} ns, '
+                    f'size={len(msg.jpeg_data)} bytes'
+                )
+
+                elapsed = time.monotonic() - t_start
+                sleep_time = interval - elapsed
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+
+        except KeyboardInterrupt:
+            log.info('Interrupted, shutting down.')
+        finally:
+            self.cam.stop()
+            socket.close()
+
+    def compute_scaler_crop(
+        self,
+        width: int,
+        height: int,
+    ) -> tuple[int, int, int, int]:
+        """Compute a top-right ScalerCrop rect for the requested aspect."""
+        bounds = self.cam.camera_controls.get('ScalerCrop')
+        rects: list[tuple[int, int, int, int]] = []
+        if isinstance(bounds, tuple):
+            for item in bounds:
+                if isinstance(item, tuple) and len(item) == 4:
+                    rects.append(
+                        (
+                            int(item[0]),
+                            int(item[1]),
+                            int(item[2]),
+                            int(item[3]),
+                        )
+                    )
+
+        if rects:
+            base_x, base_y, sensor_width, sensor_height = max(
+                rects,
+                key=lambda rect: rect[2] * rect[3],
+            )
+        else:
+            base_x = 0
+            base_y = 0
+            sensor_width, sensor_height = self.cam.sensor_resolution
+
+        target_aspect = width / height
+        sensor_aspect = sensor_width / sensor_height
+
+        if target_aspect > sensor_aspect:
+            crop_width = sensor_width
+            crop_height = int(round(crop_width / target_aspect))
+        else:
+            crop_height = sensor_height
+            crop_width = int(round(crop_height * target_aspect))
+
+        x = base_x + max(0, sensor_width - crop_width)
+        y = base_y
+        return (x, y, crop_width, crop_height)
+
+    def configure_camera(self) -> None:
+        """Configure the camera for our specific use-case."""
+        # we want the 2nd mode for full FOV.
+        mode = self.cam.sensor_modes[1]
+        config = self.cam.create_video_configuration(
+            main={'size': (2304 // 2, 1296 // 2), 'format': 'YUV420'},
+            sensor={
+                'output_size': mode['size'],
+                'bit_depth': mode['bit_depth'],
+            },
+        )
+        self.cam.configure(config)
+
+    def set_initial_controls(self) -> None:
+        """Set initial camera controls for our use-case."""
+        scaler_crop = self.compute_scaler_crop(width=540, height=480)
+        # empirically determined in m
+        dist_to_sensor = 0.11
+        self.cam.set_controls(
+            {
+                'ScalerCrop': scaler_crop,
+                'AfMode': controls.AfModeEnum.Manual,
+                'LensPosition': 1.0 / dist_to_sensor,
+            }
+        )
+        log.info(
+            f'Requested ScalerCrop={scaler_crop}, '
+            f'sensor={self.cam.sensor_resolution}, '
+            f'control_bounds={self.cam.camera_controls.get("ScalerCrop")}'
+        )
