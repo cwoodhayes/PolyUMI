@@ -7,9 +7,9 @@ requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.135.1",
     "numpy>=2.4.3",
-    # "picamera2>=0.3.34",
     "protobuf>=7.34.0",
     "pyzmq>=27.1.0",
+    "rpi-hardware-pwm>=0.3.1",
     "sounddevice>=0.5.5",
     "typer>=0.24.1",
     "uvicorn>=0.41.0",

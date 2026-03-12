@@ -18,6 +18,7 @@ import numpy as np
 import typer
 import zmq
 from cam_streamer import CameraStreamer
+from led_manager import LEDManager
 from libcamera import controls  # type: ignore
 from picamera2 import Picamera2
 from polyumi_pi_msgs import camera_frame_pb2
@@ -43,10 +44,14 @@ def stream(
     log.info(f'Log level: {logging.getLevelName(log.level)}')
     context = zmq.Context()
     streamer = CameraStreamer(port=port, fps=fps, zmq_context=context)
+    led = LEDManager()
+
     try:
+        led.set_brightness(1.0)
         streamer.start()
     finally:
         context.term()
+        led.set_brightness(0.0)
 
 
 if __name__ == '__main__':
