@@ -93,7 +93,7 @@ class PiReceiverNode(Node):
                 log.error(f'ZMQ recv error: {e}')
                 break
 
-            self.get_logger().info(f'Received {len(raw)} bytes from ZMQ')
+            self.get_logger().debug(f'Received {len(raw)} bytes from ZMQ')
             proto = camera_frame_pb2.CameraFrame()
             proto.ParseFromString(raw)
 
