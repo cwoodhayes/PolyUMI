@@ -9,6 +9,7 @@
 
   <buildtool_depend>python3-grpc-tools</buildtool_depend>
   <buildtool_depend>python3-protobuf</buildtool_depend>
+  <buildtool_depend>protobuf-compiler</buildtool_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

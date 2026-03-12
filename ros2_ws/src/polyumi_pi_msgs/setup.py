@@ -1,6 +1,7 @@
 """Setup for the polyumi_pi_msgs package."""
 
 import shutil
+import subprocess
 from pathlib import Path
 
 from setuptools import find_packages, setup
@@ -10,26 +11,25 @@ package_name = 'polyumi_pi_msgs'
 
 def compile_protos():
     """Compile the protobuf files."""
-    from grpc_tools import protoc  # type: ignore
-
     package_dir = Path(__file__).resolve().parent
     proto_root = package_dir / package_name
     proto_files = sorted(proto_root.glob('*.proto'))
+    protoc = shutil.which('protoc')
+
+    if protoc is None:
+        raise RuntimeError(
+            'protoc executable not found on PATH. Install protobuf-compiler.'
+        )
 
     for proto_file in proto_files:
         proto_cmd = [
-            'grpc_tools.protoc',
+            protoc,
             f'-I={proto_root}',
+            f'--pyi_out={proto_root}',
             f'--python_out={proto_root}',
+            str(proto_file),
         ]
-        proto_cmd.append(str(proto_file))
-
-        result = protoc.main(proto_cmd)
-
-        if result != 0:
-            raise RuntimeError(
-                f'Failed to compile protobuf file: {proto_file}'
-            )
+        subprocess.run(proto_cmd, check=True)
 
 
 compile_protos()
