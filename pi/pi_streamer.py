@@ -18,6 +18,7 @@ from io import BytesIO
 import numpy as np
 import typer
 import zmq
+from libcamera import controls
 from picamera2 import Picamera2
 from polyumi_pi_msgs import camera_frame_pb2
 
@@ -85,11 +86,39 @@ def compute_scaler_crop(
     return (x, y, crop_width, crop_height)
 
 
+def configure_camera(cam: Picamera2) -> None:
+    """Configure the camera for our specific use-case."""
+    # we want the 2nd mode for full FOV.
+    mode = cam.sensor_modes[1]
+    config = cam.create_video_configuration(
+        main={'size': (2304 // 2, 1296 // 2), 'format': 'YUV420'},
+        sensor={'output_size': mode['size'], 'bit_depth': mode['bit_depth']},
+    )
+    cam.configure(config)
+
+
+def set_initial_controls(cam: Picamera2) -> None:
+    """Set initial camera controls for our use-case."""
+    scaler_crop = compute_scaler_crop(cam, width=540, height=480)
+    # empirically determined in m
+    dist_to_sensor = 0.11
+    cam.set_controls(
+        {
+            'ScalerCrop': scaler_crop,
+            'AfMode': controls.AfModeEnum.Manual,
+            'LensPosition': 1.0 / dist_to_sensor,
+        }
+    )
+    log.info(
+        f'Requested ScalerCrop={scaler_crop}, '
+        f'sensor={cam.sensor_resolution}, '
+        f'control_bounds={cam.camera_controls.get("ScalerCrop")}'
+    )
+
+
 @app.command()
 def stream(
     port: int = typer.Option(5555, help='ZMQ PUSH port to bind on.'),
-    width: int = typer.Option(540, help='Capture width in pixels.'),
-    height: int = typer.Option(480, help='Capture height in pixels.'),
     fps: int = typer.Option(10, min=1, help='Target capture framerate (Hz).'),
 ):
     """Stream MJPEG frames over ZMQ."""
@@ -102,24 +131,11 @@ def stream(
     log.info(f'ZMQ PUSH bound on tcp://*:{port}')
 
     cam = Picamera2()
-    # we want the 2nd mode for full FOV.
-    mode = cam.sensor_modes[1]
-    config = cam.create_video_configuration(
-        main={'size': (2304 // 2, 1296 // 2), 'format': 'YUV420'},
-        sensor={'output_size': mode['size'], 'bit_depth': mode['bit_depth']},
-    )
-    cam.configure(config)
+    configure_camera(cam)
     cam.start()
+    set_initial_controls(cam)
 
-    scaler_crop = compute_scaler_crop(cam, width=width, height=height)
-    log.info(f'Camera started at {width}x{height} @ {fps}Hz')
     log.info(f'Publishing to tcp://<pi_ip>:{port}')
-    cam.set_controls({'ScalerCrop': scaler_crop})
-    log.info(
-        f'Requested ScalerCrop={scaler_crop}, '
-        f'sensor={cam.sensor_resolution}, '
-        f'control_bounds={cam.camera_controls.get("ScalerCrop")}'
-    )
 
     interval = 1.0 / fps
     first_frame_logged = False
@@ -139,8 +155,8 @@ def stream(
             msg = camera_frame_pb2.CameraFrame()
             msg.timestamp_ns = metadata['SensorTimestamp']
             msg.jpeg_data = data.getvalue()
-            msg.width = width
-            msg.height = height
+            msg.width = 540
+            msg.height = 480
             try:
                 socket.send(msg.SerializeToString(), zmq.NOBLOCK)
             except zmq.Again:
