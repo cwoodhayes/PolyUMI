@@ -20,6 +20,7 @@ import threading
 import rclpy
 import zmq
 from builtin_interfaces.msg import Time
+from foxglove_msgs.msg import RawAudio
 from polyumi_pi_msgs import audio_chunk_pb2, camera_frame_pb2
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
@@ -75,6 +76,11 @@ class PiReceiverNode(Node):
             'camera/image/compressed',
             qos_profile=10,
         )
+        self.audio_pub = self.create_publisher(
+            RawAudio,
+            'audio/raw',
+            qos_profile=10,
+        )
 
         self._zmq_context = zmq.Context()
 
@@ -95,6 +101,7 @@ class PiReceiverNode(Node):
         self.get_logger().info(
             f'Receiving audio from tcp://{self._pi_host}:{self._audio_port}'
         )
+        self.get_logger().info('Publishing audio on /pi/audio/raw')
 
     def _camera_recv_loop(self):
         sock = self._zmq_context.socket(zmq.PULL)
@@ -133,13 +140,14 @@ class PiReceiverNode(Node):
 
             proto = audio_chunk_pb2.AudioChunk()
             proto.ParseFromString(raw)
-            self.get_logger().info(
-                'AudioChunk received: '
-                f'ts={proto.timestamp_ns} '
-                f'bytes={len(proto.pcm_data)} '
-                f'sr={proto.sample_rate} '
-                f'ch={proto.channels}'
-            )
+
+            ros_msg = RawAudio()
+            ros_msg.timestamp = ns_to_ros_time(proto.timestamp_ns)
+            ros_msg.data = list(proto.pcm_data)
+            ros_msg.format = 'pcm-s16'
+            ros_msg.sample_rate = proto.sample_rate
+            ros_msg.number_of_channels = proto.channels
+            self.audio_pub.publish(ros_msg)
 
     def destroy_node(self):
         """Terminate ZMQ resources before shutting down the ROS2 node."""
