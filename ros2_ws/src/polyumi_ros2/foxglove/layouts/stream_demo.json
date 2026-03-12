@@ -42,24 +42,11 @@
         "poseEstimateXDeviation": 0.5,
         "poseEstimateYDeviation": 0.5,
         "poseEstimateThetaDeviation": 0.26179939
-      }
+      },
+      "foxglovePanelTitle": "Wrist Camera"
     },
     "RawMessages!29pqw16": {
       "topicPath": "/gopro/camera_info"
-    },
-    "Tab!2xvuj86": {
-      "activeTabIdx": 0,
-      "tabs": [
-        {
-          "title": "Overview",
-          "layout": {
-            "direction": "column",
-            "first": "Image!3rp9676",
-            "second": "RawMessages!29pqw16",
-            "splitPercentage": 66.66666666666666
-          }
-        }
-      ]
     },
     "Image!2gdeq90": {
       "cameraState": {
@@ -106,12 +93,39 @@
         "calibrationTopic": "/gopro/camera_info",
         "flipHorizontal": false,
         "rotation": 0
-      }
+      },
+      "foxglovePanelTitle": "Touch Sensor"
+    },
+    "Audio!1ops55o": {
+      "volume": 1,
+      "slidingViewWidth": 10,
+      "topic": "/pi/audio/raw",
+      "muted": true,
+      "foxglovePanelTitle": "Fingertip Mic"
+    },
+    "Tab!2xvuj86": {
+      "activeTabIdx": 0,
+      "tabs": [
+        {
+          "title": "Overview",
+          "layout": {
+            "direction": "column",
+            "first": "Image!3rp9676",
+            "second": "RawMessages!29pqw16",
+            "splitPercentage": 66.66666666666666
+          }
+        }
+      ]
     }
   },
   "layout": {
     "direction": "row",
-    "first": "Image!2gdeq90",
+    "first": {
+      "first": "Image!2gdeq90",
+      "second": "Audio!1ops55o",
+      "direction": "column",
+      "splitPercentage": 75.68995186456033
+    },
     "second": "Tab!2xvuj86"
   },
   "globalVariables": {},

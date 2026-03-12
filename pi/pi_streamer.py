@@ -56,6 +56,7 @@ def stream_audio(
     port: int = typer.Option(5556, help='ZMQ PUSH port to bind on.'),
     sample_rate: int = typer.Option(44100, help='Audio sample rate (Hz).'),
     chunk_ms: int = typer.Option(20, help='Audio chunk size (ms).'),
+    channels: int = typer.Option(2, help='Number of audio channels.'),
 ):
     """Stream audio data over ZMQ."""
     log.info(f'Log level: {logging.getLevelName(log.level)}')
@@ -65,6 +66,7 @@ def stream_audio(
         sample_rate=sample_rate,
         zmq_context=context,
         chunk_ms=chunk_ms,
+        channels=channels,
     )
     try:
         log.info('Starting audio streamer...')
