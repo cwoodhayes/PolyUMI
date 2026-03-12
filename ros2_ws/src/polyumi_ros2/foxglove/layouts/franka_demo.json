@@ -90,7 +90,6 @@
       },
       "imageMode": {
         "imageTopic": "/pi/camera/image/compressed",
-        "calibrationTopic": "/gopro/camera_info",
         "flipHorizontal": false,
         "rotation": 0
       },
@@ -120,13 +119,13 @@
     "3D!19dmjcl": {
       "cameraState": {
         "perspective": true,
-        "distance": 3.6805182047108196,
-        "phi": 69.42859235491319,
-        "thetaOffset": 33.599979073665025,
+        "distance": 3.874229689168957,
+        "phi": 74.6236356644666,
+        "thetaOffset": 29.524416569727183,
         "targetOffset": [
-          0.09685672099353404,
-          0.005813963720268054,
-          -6.022153194963359e-18
+          0.24662853676203328,
+          0.2689217657909375,
+          -1.955573336071132e-17
         ],
         "target": [
           0,
@@ -247,7 +246,7 @@
         "first": "Image!2gdeq90",
         "second": "Audio!1ops55o",
         "direction": "column",
-        "splitPercentage": 75.68995186456033
+        "splitPercentage": 72.13771585647628
       },
       "second": "Tab!2xvuj86"
     },

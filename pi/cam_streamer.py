@@ -18,6 +18,9 @@ log = logging.getLogger('pi_cam_process')
 class CameraStreamer:
     """Class for streaming camera data."""
 
+    VIEW_WIDTH = 540
+    VIEW_HEIGHT = 480
+
     def __init__(self, port: int, fps: int, zmq_context: zmq.Context):
         """Initialize the camera streamer."""
         self.port = port
@@ -80,8 +83,8 @@ class CameraStreamer:
                 msg = camera_frame_pb2.CameraFrame()
                 msg.timestamp_ns = metadata['SensorTimestamp']
                 msg.jpeg_data = data.getvalue()
-                msg.width = 540
-                msg.height = 480
+                msg.width = self.VIEW_WIDTH
+                msg.height = self.VIEW_HEIGHT
                 try:
                     socket.send(msg.SerializeToString(), zmq.NOBLOCK)
                 except zmq.Again:
@@ -164,9 +167,11 @@ class CameraStreamer:
 
     def set_initial_controls(self) -> None:
         """Set initial camera controls for our use-case."""
-        scaler_crop = self.compute_scaler_crop(width=540, height=480)
+        scaler_crop = self.compute_scaler_crop(
+            width=self.VIEW_WIDTH, height=self.VIEW_HEIGHT
+        )
         # empirically determined in m
-        dist_to_sensor = 0.11
+        dist_to_sensor = 0.2
         self.cam.set_controls(
             {
                 'ScalerCrop': scaler_crop,
