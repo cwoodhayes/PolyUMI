@@ -54,7 +54,7 @@ class PiReceiverNode(Node):
         """Initialize ROS publishers, parameters, and receive thread."""
         super().__init__('pi_receiver_node')
 
-        self.declare_parameter('pi_host', 'polyumi-pi.local')
+        self.declare_parameter('pi_host', '10.106.10.62')
         self.declare_parameter('port', 5555)
 
         self._pi_host = (
@@ -93,7 +93,8 @@ class PiReceiverNode(Node):
                 log.error(f'ZMQ recv error: {e}')
                 break
 
-            proto = camera_frame_pb2.CameraFrame()  # pyright: ignore[reportAttributeAccessIssue]
+            self.get_logger().debug(f'Received {len(raw)} bytes from ZMQ')
+            proto = camera_frame_pb2.CameraFrame()
             proto.ParseFromString(raw)
 
             ros_msg = CompressedImage()

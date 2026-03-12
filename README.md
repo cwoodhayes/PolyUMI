@@ -19,6 +19,11 @@ TODO
 - flash the image as configured by me
 - install various things
 
+```bash
+sudo apt install \
+    protobuf-compiler
+```
+
 #### Library setup
 Run on your PC:
 ```bash

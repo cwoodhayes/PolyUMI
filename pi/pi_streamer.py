@@ -42,6 +42,7 @@ def stream(
     cam.configure(config)
     cam.start()
     log.info(f'Camera started at {width}x{height} @ {fps}Hz')
+    log.info(f'Publishing to tcp://<pi_ip>:{port}')
 
     interval = 1.0 / fps
     try:

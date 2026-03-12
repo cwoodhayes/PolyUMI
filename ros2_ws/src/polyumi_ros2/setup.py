@@ -54,6 +54,8 @@ setup(
         ],
     },
     entry_points={
-        'console_scripts': [],
+        'console_scripts': [
+            'pi_receiver_node = polyumi_ros2.pi_receiver_node:main',
+        ],
     },
 )
