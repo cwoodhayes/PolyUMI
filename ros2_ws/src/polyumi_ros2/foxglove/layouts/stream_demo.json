@@ -60,9 +60,60 @@
           }
         }
       ]
+    },
+    "Image!2gdeq90": {
+      "cameraState": {
+        "distance": 20,
+        "perspective": true,
+        "phi": 60,
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "thetaOffset": 60,
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followMode": "follow-pose",
+      "scene": {},
+      "transforms": {},
+      "topics": {},
+      "layers": {},
+      "publish": {
+        "type": "point",
+        "poseTopic": "/move_base_simple/goal",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "imageMode": {
+        "imageTopic": "/pi/camera/image/compressed",
+        "calibrationTopic": "/gopro/camera_info",
+        "flipHorizontal": false,
+        "rotation": 0
+      }
     }
   },
-  "layout": "Tab!2xvuj86",
+  "layout": {
+    "direction": "row",
+    "first": "Image!2gdeq90",
+    "second": "Tab!2xvuj86"
+  },
   "globalVariables": {},
   "playbackConfig": {
     "speed": 1

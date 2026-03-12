@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <launch>
   <arg name="pi_host" description="IP address or dns name of the Raspberry Pi"
-    value="10.106.10.62"/>
+    default="10.106.10.62"/>
 
   <include file="$(find-pkg-share foxglove_bridge)/launch/foxglove_bridge_launch.xml">
     <arg name="port" value="8765"/>
