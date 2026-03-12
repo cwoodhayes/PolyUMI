@@ -8,15 +8,12 @@ Usage:
     python pi_streamer.py stream --port 5555 --width 640 --height 480 --fps 10
 """
 
-import io
-import json
 import logging
 import os
-import time
 
-import numpy as np
 import typer
 import zmq
+from audio_streamer import AudioStreamer
 from cam_streamer import CameraStreamer
 from led_manager import LEDManager
 from libcamera import controls  # type: ignore
@@ -36,7 +33,7 @@ def info():
 
 
 @app.command()
-def stream(
+def stream_video(
     port: int = typer.Option(5555, help='ZMQ PUSH port to bind on.'),
     fps: int = typer.Option(10, min=1, help='Target capture framerate (Hz).'),
 ):
@@ -52,6 +49,28 @@ def stream(
     finally:
         context.term()
         led.set_brightness(0.0)
+
+
+@app.command()
+def stream_audio(
+    port: int = typer.Option(5556, help='ZMQ PUSH port to bind on.'),
+    sample_rate: int = typer.Option(44100, help='Audio sample rate (Hz).'),
+    chunk_ms: int = typer.Option(20, help='Audio chunk size (ms).'),
+):
+    """Stream audio data over ZMQ."""
+    log.info(f'Log level: {logging.getLevelName(log.level)}')
+    context = zmq.Context()
+    streamer = AudioStreamer(
+        port=port,
+        sample_rate=sample_rate,
+        zmq_context=context,
+        chunk_ms=chunk_ms,
+    )
+    try:
+        log.info('Starting audio streamer...')
+        streamer.start()
+    finally:
+        context.term()
 
 
 if __name__ == '__main__':

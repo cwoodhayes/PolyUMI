@@ -20,7 +20,7 @@ import threading
 import rclpy
 import zmq
 from builtin_interfaces.msg import Time
-from polyumi_pi_msgs import camera_frame_pb2
+from polyumi_pi_msgs import audio_chunk_pb2, camera_frame_pb2
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import CompressedImage
@@ -56,12 +56,18 @@ class PiReceiverNode(Node):
 
         self.declare_parameter('pi_host', '10.106.10.62')
         self.declare_parameter('port', 5555)
+        self.declare_parameter('audio_port', 5556)
 
         self._pi_host = (
             self.get_parameter('pi_host').get_parameter_value().string_value
         )
         self._port = (
             self.get_parameter('port').get_parameter_value().integer_value
+        )
+        self._audio_port = (
+            self.get_parameter('audio_port')
+            .get_parameter_value()
+            .integer_value
         )
 
         self.camera_pub = self.create_publisher(
@@ -77,9 +83,17 @@ class PiReceiverNode(Node):
         )
         recv_thread.start()
 
+        audio_recv_thread = threading.Thread(
+            target=self._audio_recv_loop, daemon=True
+        )
+        audio_recv_thread.start()
+
         self.get_logger().info(
             f'Receiving from tcp://{self._pi_host}:{self._port}, '
             f'publishing on /pi/camera/image/compressed'
+        )
+        self.get_logger().info(
+            f'Receiving audio from tcp://{self._pi_host}:{self._audio_port}'
         )
 
     def _camera_recv_loop(self):
@@ -104,6 +118,28 @@ class PiReceiverNode(Node):
             ros_msg.data = list(proto.jpeg_data)
 
             self.camera_pub.publish(ros_msg)
+
+    def _audio_recv_loop(self):
+        sock = self._zmq_context.socket(zmq.SUB)
+        sock.setsockopt(zmq.SUBSCRIBE, b'')
+        sock.connect(f'tcp://{self._pi_host}:{self._audio_port}')
+
+        while rclpy.ok():
+            try:
+                raw = sock.recv()
+            except zmq.ZMQError as e:
+                log.error(f'ZMQ audio recv error: {e}')
+                break
+
+            proto = audio_chunk_pb2.AudioChunk()
+            proto.ParseFromString(raw)
+            self.get_logger().info(
+                'AudioChunk received: '
+                f'ts={proto.timestamp_ns} '
+                f'bytes={len(proto.pcm_data)} '
+                f'sr={proto.sample_rate} '
+                f'ch={proto.channels}'
+            )
 
     def destroy_node(self):
         """Terminate ZMQ resources before shutting down the ROS2 node."""
