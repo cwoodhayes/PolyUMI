@@ -21,6 +21,8 @@ from libcamera import controls  # type: ignore
 from picamera2 import Picamera2
 from polyumi_pi_msgs import camera_frame_pb2
 
+from polyumi_pi.files.session import SessionFiles
+
 logging.basicConfig(level=os.environ.get('LOG_LEVEL', 'INFO').upper())
 log = logging.getLogger('pi_streamer')
 
@@ -177,6 +179,11 @@ def record_episode(
     log.info('Record command not implemented yet.')
 
     # instantiate a session.
+    session = SessionFiles.create()
+    log.info(
+        f'Created session with ID {session.metadata.session_id} '
+        f'at {session.path}'
+    )
 
 
 if __name__ == '__main__':

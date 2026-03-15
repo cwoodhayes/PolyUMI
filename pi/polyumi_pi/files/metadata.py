@@ -2,7 +2,6 @@
 
 import json
 import pathlib
-import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -12,14 +11,16 @@ from polyumi_pi.files import base
 
 def _get_git_hash() -> str:
     """Get the current git commit hash."""
-    result = subprocess.run(
-        ['git', 'rev-parse', 'HEAD'],
-        capture_output=True,
-        text=True,
-        check=True,
-        cwd=pathlib.Path(__file__).resolve().parent,
-    )
-    return result.stdout.strip()
+    try:
+        from polyumi_pi._version import COMMIT_HASH
+
+        return COMMIT_HASH
+    except ImportError as err:
+        print(
+            'Missing required _version.py file. Please run deploy.sh '
+            'on host PC to generate it.'
+        )
+        raise err
 
 
 _GIT_HASH = _get_git_hash()

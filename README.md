@@ -40,6 +40,7 @@ cd pi
 uv venv --system-site-packages
 uv sync --no-dev
 uv pip install -e ~/polyumi_pi_msgs
+uv pip install -e .
 ```
 
 **Recommended for Development**: if using VS Code, add the `rsync` commands above to your `.vscode/tasks.json` as a build command.
@@ -51,7 +52,7 @@ This demo streams data from all sensors simultaneously into Foxglove.
 
 On the RPi, from the `pi` directory after the setup steps in [Library Setup](#library-setup) above:
 ```bash
-python main.py
+python polyumi_pi/main.py stream
 ```
 
 On PC:
@@ -67,6 +68,12 @@ This demo is the streaming demo for the PolyUMI Franka end-effector, which inclu
 
 TODO - explain how to get matt's franka repo
 
+On the RPi, from the `pi` directory after the setup steps in [Library Setup](#library-setup) above:
+```bash
+python polyumi_pi/main.py stream
+```
+
+On PC:
 ```bash
 # launch the demo
 ros2 launch polyumi_ros2 franka_demo.launch.xml

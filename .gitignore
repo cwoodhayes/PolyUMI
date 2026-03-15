@@ -1,3 +1,6 @@
+# generated files
+pi/polyumi_pi/_version.py
+
 # matt doesn't like ide config stuff :(
 .idea
 .vscode
