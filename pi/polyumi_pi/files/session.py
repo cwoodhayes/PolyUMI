@@ -49,7 +49,9 @@ class SessionFiles(SessionDataABC):
         # is generated in the metadata file and I don't want to duplicate
         # that logic here.
         metadata = SessionMetadata(path=pathlib.Path('/tmp/metadata.json'))
-        folder_name = metadata.created_at.strftime(
+        # using local tz for folder names since this is a human readable
+        # helpful name.
+        folder_name = metadata.created_at.astimezone().strftime(
             r'session_%Y-%m-%d_%H-%M-%S'
         )
         path = base_dir / folder_name
