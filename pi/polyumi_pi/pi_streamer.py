@@ -126,7 +126,11 @@ def stream(
     chunk_ms: int = typer.Option(20, help='Audio chunk size (ms).'),
     channels: int = typer.Option(1, help='Number of audio channels.'),
 ):
-    """Stream both video and audio data over ZMQ."""
+    """
+    Stream both video and audio data over ZMQ.
+
+    Intended for use on arm EE during inference.
+    """
     log.info(f'Log level: {logging.getLevelName(log.level)}')
     led = LEDManager()
     cam_process: multiprocessing.Process | None = None
@@ -156,6 +160,21 @@ def stream(
         _stop_child_process(cam_process)
         _stop_child_process(audio_process)
         led.set_brightness(0.0)
+
+
+@app.command()
+def record_episode(
+    fps: int = typer.Option(10, min=1, help='Target capture framerate (Hz).'),
+    sample_rate: int = typer.Option(16000, help='Audio sample rate (Hz).'),
+    chunk_ms: int = typer.Option(20, help='Audio chunk size (ms).'),
+    channels: int = typer.Option(1, help='Number of audio channels.'),
+):
+    """
+    Record an episode; video and audio data is routed to local files.
+
+    Intended for use on PolyUMI gripper during data recording.
+    """
+    log.info('Record command not implemented yet.')
 
 
 if __name__ == '__main__':

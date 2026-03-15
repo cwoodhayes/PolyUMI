@@ -13,4 +13,5 @@ ignore = [
     "E203",  # whitespace before ':'
     "F401",  # unused import
     "F403",  # from ... import * used; unable to detect undefined names
+    "D105",  # missing docstring in magic method
 ]

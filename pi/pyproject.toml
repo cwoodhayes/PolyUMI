@@ -19,4 +19,7 @@ dependencies = [
 # this should be installed using apt on the Pi, not pip
 # but for development convenience we can install it in the 
 # PC virtualenv here with uv
-dev = ["picamera2"]
+dev = [
+    "picamera2",
+    "pytest>=9.0.2",
+    ]
