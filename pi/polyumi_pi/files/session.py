@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from polyumi_pi.files.audio import AudioFile
 from polyumi_pi.files.base import SessionDataABC
 from polyumi_pi.files.metadata import SessionMetadata
+from polyumi_pi.files.video import VideoFile
 
 DEFAULT_SESSION_BASE_DIR = pathlib.Path('~/recordings/').expanduser()
 
@@ -23,6 +24,7 @@ class SessionFiles(SessionDataABC):
 
     metadata: SessionMetadata
     audio: AudioFile | None = None
+    video: VideoFile | None = None
 
     @classmethod
     def from_file(cls, path: pathlib.Path) -> SessionFiles:
@@ -43,7 +45,12 @@ class SessionFiles(SessionDataABC):
             AudioFile.from_file(audio_path) if audio_path.is_file() else None
         )
 
-        return cls(path=path, metadata=metadata, audio=audio)
+        video_path = path / 'video.avi'
+        video = (
+            VideoFile.from_file(video_path) if video_path.is_file() else None
+        )
+
+        return cls(path=path, metadata=metadata, audio=audio, video=video)
 
     @classmethod
     def create(
@@ -91,4 +98,17 @@ class SessionFiles(SessionDataABC):
             sample_rate=sample_rate,
             channels=channels,
             sample_width=sample_width,
+        )
+
+    def init_video(self, fps: float, width: int, height: int):
+        """Create a video file for this session."""
+        if self.video is not None:
+            raise ValueError('Video file already exists for this session.')
+
+        video_path = self.path / 'video.avi'
+        self.video = VideoFile(
+            path=video_path,
+            fps=fps,
+            width=width,
+            height=height,
         )
