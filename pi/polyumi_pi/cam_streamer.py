@@ -28,7 +28,7 @@ class CameraStreamer:
 
     def __init__(
         self,
-        port: int,
+        port: int | None,
         fps: int,
         zmq_context: zmq.Context,
         session: SessionFiles | None = None,
@@ -55,11 +55,16 @@ class CameraStreamer:
 
     def start(self) -> None:
         """Start streaming camera data."""
-        socket = self.zmq_context.socket(zmq.PUSH)
-        socket.setsockopt(zmq.SNDHWM, 2)
-        socket.setsockopt(zmq.LINGER, 0)
-        socket.bind(f'tcp://*:{self.port}')
-        log.info(f'ZMQ PUSH bound on tcp://*:{self.port}')
+        streaming_enabled = self.port is not None
+        socket = None
+        if streaming_enabled:
+            socket = self.zmq_context.socket(zmq.PUSH)
+            socket.setsockopt(zmq.SNDHWM, 2)
+            socket.setsockopt(zmq.LINGER, 0)
+            socket.bind(f'tcp://*:{self.port}')
+            log.info(f'ZMQ PUSH bound on tcp://*:{self.port}')
+        else:
+            log.info('ZMQ video streaming disabled (port is None).')
 
         self.configure_camera()
         self.cam.start()
@@ -84,9 +89,7 @@ class CameraStreamer:
 
         with contextlib.ExitStack() as stack:
             if self.session is not None and self.session.video is not None:
-                video_recorder = stack.enter_context(
-                    self.session.video.recording()
-                )
+                video_recorder = stack.enter_context(self.session.video.recording())
             else:
                 video_recorder = None
 
@@ -108,15 +111,14 @@ class CameraStreamer:
                     msg.jpeg_data = data.getvalue()
                     msg.width = self.VIEW_WIDTH
                     msg.height = self.VIEW_HEIGHT
-                    try:
-                        socket.send(msg.SerializeToString(), zmq.NOBLOCK)
-                    except zmq.Again:
-                        log.debug('Dropped frame: receiver not ready.')
+                    if socket is not None:
+                        try:
+                            socket.send(msg.SerializeToString(), zmq.NOBLOCK)
+                        except zmq.Again:
+                            log.debug('Dropped frame: receiver not ready.')
 
                     if video_recorder is not None:
-                        video_recorder.write_frame(
-                            data.getvalue(), msg.timestamp_ns
-                        )
+                        video_recorder.write_frame(data.getvalue(), msg.timestamp_ns)
 
                     log.debug(
                         f'Captured frame at {msg.timestamp_ns} ns, '
@@ -134,7 +136,8 @@ class CameraStreamer:
                 signal.signal(signal.SIGINT, prev_sigint)
                 signal.signal(signal.SIGTERM, prev_sigterm)
                 self.cam.stop()
-                socket.close()
+                if socket is not None:
+                    socket.close()
 
     def compute_scaler_crop(
         self,

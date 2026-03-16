@@ -193,7 +193,7 @@ def record_episode(
     log.info(f'Log level: {logging.getLevelName(log.level)}')
 
     # TODO remove--make it so we don't stream here.
-    video_port = 5555
+    video_port = None
     audio_port = None
 
     # instantiate a session.
