@@ -21,6 +21,7 @@ from libcamera import controls  # type: ignore
 from picamera2 import Picamera2
 from polyumi_pi_msgs import camera_frame_pb2
 
+from polyumi_pi.files.audio import AudioFile
 from polyumi_pi.files.session import SessionFiles
 
 logging.basicConfig(level=os.environ.get('LOG_LEVEL', 'INFO').upper())
@@ -183,6 +184,12 @@ def record_episode(
     log.info(
         f'Created session with ID {session.metadata.session_id} '
         f'at {session.path}'
+    )
+    session.audio = AudioFile(
+        path=session.path / 'audio.wav',
+        sample_rate=sample_rate,
+        channels=channels,
+        sample_width=2,
     )
 
 

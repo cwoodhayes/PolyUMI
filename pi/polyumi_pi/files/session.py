@@ -5,6 +5,7 @@ from __future__ import annotations
 import pathlib
 from dataclasses import dataclass
 
+from polyumi_pi.files.audio import AudioFile
 from polyumi_pi.files.base import SessionDataABC
 from polyumi_pi.files.metadata import SessionMetadata
 
@@ -21,6 +22,7 @@ class SessionFiles(SessionDataABC):
     """
 
     metadata: SessionMetadata
+    audio: AudioFile | None = None
 
     @classmethod
     def from_file(cls, path: pathlib.Path) -> SessionFiles:
@@ -36,7 +38,10 @@ class SessionFiles(SessionDataABC):
 
         metadata = SessionMetadata.from_file(metadata_path)
 
-        return cls(path=path, metadata=metadata)
+        audio_path = path / 'audio.wav'
+        audio = AudioFile.from_file(audio_path) if audio_path.is_file() else None
+
+        return cls(path=path, metadata=metadata, audio=audio)
 
     @classmethod
     def create(
