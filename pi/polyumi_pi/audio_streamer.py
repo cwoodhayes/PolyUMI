@@ -24,14 +24,25 @@ class AudioStreamer:
 
     def __init__(
         self,
-        port: int,
+        port: int | None,
         sample_rate: int,
         zmq_context: zmq.Context,
         chunk_ms: int = 20,
         channels: int = 2,
         session: SessionFiles | None = None,
     ):
-        """Initialize the audio streamer."""
+        """
+        Initialize the audio streamer.
+
+        Args:
+            port: ZMQ TCP port to publish audio chunks on, or None to disable
+            sample_rate: Audio sample rate in Hz.
+            zmq_context: Shared ZMQ context used to create the publisher socket
+            chunk_ms: Audio callback chunk size in milliseconds.
+            channels: Number of audio input channels to capture.
+            session: Optional session object used for WAV recording metadata.
+
+        """
         self.port = port
         self.sample_rate = sample_rate
         self.zmq_context = zmq_context
@@ -72,12 +83,29 @@ class AudioStreamer:
         # Number of frames per callback chunk
         blocksize = int(self.sample_rate * self.chunk_ms / 1000)
 
+        streaming_enabled = self.port is not None
+        if self.session is not None and self.session.audio is not None:
+            log.info(
+                f'Audio will be recorded to {self.session.audio.path} '
+                f'at {self.sample_rate} Hz, {self.channels} channels, '
+                f'{blocksize} frames/chunk.'
+            )
+        elif not streaming_enabled:
+            log.warning(
+                'Audio streaming and recording are both disabled. No audio will'
+                ' be captured.'
+            )
+
         # ZMQ setup
-        sock = self.zmq_context.socket(zmq.PUSH)
-        sock.setsockopt(zmq.SNDHWM, 200)
-        sock.setsockopt(zmq.LINGER, 0)
-        sock.bind(f'tcp://*:{self.port}')
-        log.info(f'PUSH AudioChunk on tcp://*:{self.port}')
+        sock = None
+        if streaming_enabled:
+            sock = self.zmq_context.socket(zmq.PUSH)
+            sock.setsockopt(zmq.SNDHWM, 200)
+            sock.setsockopt(zmq.LINGER, 0)
+            sock.bind(f'tcp://*:{self.port}')
+            log.info(f'PUSH AudioChunk on tcp://*:{self.port}')
+        else:
+            log.info('ZMQ audio streaming disabled (port is None).')
 
         # Small queue to decouple sounddevice callback from ZMQ publish
         audio_queue: queue.Queue = queue.Queue(maxsize=100)
@@ -105,18 +133,19 @@ class AudioStreamer:
                 log.warning(f'[sounddevice] {status}')
             ts = time.time_ns()
             pcm_bytes = bytes(indata)
-            try:
-                audio_queue.put_nowait((pcm_bytes, ts))
-            except queue.Full:
-                callback_drops += 1
-                try:
-                    audio_queue.get_nowait()
-                except queue.Empty:
-                    pass
+            if streaming_enabled:
                 try:
                     audio_queue.put_nowait((pcm_bytes, ts))
                 except queue.Full:
                     callback_drops += 1
+                    try:
+                        audio_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        audio_queue.put_nowait((pcm_bytes, ts))
+                    except queue.Full:
+                        callback_drops += 1
 
             # write to the file if enabled
             if (
@@ -140,7 +169,7 @@ class AudioStreamer:
         )
 
         # Publisher thread - keeps ZMQ sends off the audio callback
-        def publisher():
+        def publisher(socket: zmq.Socket):
             nonlocal callback_drops, sent_chunks, last_stats
             while not stop_event.is_set() or not audio_queue.empty():
                 try:
@@ -150,7 +179,7 @@ class AudioStreamer:
                 msg = self.build_chunk(
                     pcm_bytes, self.sample_rate, self.channels, ts
                 )
-                sock.send(msg)
+                socket.send(msg)
                 sent_chunks += 1
 
                 now = time.monotonic()
@@ -165,8 +194,12 @@ class AudioStreamer:
                     callback_drops = 0
                     last_stats = now
 
-        pub_thread = threading.Thread(target=publisher, daemon=True)
-        pub_thread.start()
+        pub_thread = None
+        if streaming_enabled:
+            pub_thread = threading.Thread(
+                target=publisher, args=(sock,), daemon=True
+            )
+            pub_thread.start()
 
         wav_writer = None
         # Start capture stream
@@ -192,7 +225,9 @@ class AudioStreamer:
                     stop_event.set()
 
         stop_event.set()
-        pub_thread.join(timeout=2.0)
+        if pub_thread is not None:
+            pub_thread.join(timeout=2.0)
         signal.signal(signal.SIGINT, prev_sigint)
         signal.signal(signal.SIGTERM, prev_sigterm)
-        sock.close()
+        if sock is not None:
+            sock.close()

@@ -17,9 +17,6 @@ import zmq
 from audio_streamer import AudioStreamer
 from cam_streamer import CameraStreamer
 from led_manager import LEDManager
-from libcamera import controls  # type: ignore
-from picamera2 import Picamera2
-from polyumi_pi_msgs import camera_frame_pb2
 
 from polyumi_pi.files.audio import AudioFile
 from polyumi_pi.files.session import SessionFiles
@@ -185,7 +182,7 @@ def record_episode(
 
     # TODO remove--make it so we don't stream here.
     video_port = 5555
-    audio_port = 5556
+    audio_port = None
 
     # instantiate a session.
     session = SessionFiles.create()
