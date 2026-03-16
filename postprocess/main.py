@@ -77,6 +77,71 @@ def _list_remote_sessions(host: str) -> list[str]:
     ]
 
 
+def _encode_session_video(
+    session_path: pathlib.Path,
+    fps: float,
+    output_name: str,
+    include_audio: bool,
+) -> None:
+    """Encode JPEG frames in a session directory into an MP4."""
+    session_path = session_path.resolve()
+    if not session_path.is_dir():
+        raise RuntimeError(f'Session directory not found: {session_path}')
+
+    video_dir = session_path / 'video'
+    if not video_dir.is_dir():
+        raise RuntimeError(f'No video directory found at {video_dir}')
+
+    # prefer fps from session metadata if available
+    metadata_path = session_path / 'metadata.json'
+    if metadata_path.is_file():
+        try:
+            session = SessionFiles.from_file(session_path)
+            if session.metadata.camera_fps is not None:
+                fps = float(session.metadata.camera_fps)
+                log.info(f'Using fps from metadata for {session_path.name}: {fps}')
+        except Exception as e:
+            log.warning(
+                f'Could not load metadata for {session_path.name}: {e}. '
+                f'Using --fps={fps}.'
+            )
+
+    output_path = session_path / output_name
+    audio_path = session_path / 'audio.wav'
+    has_audio = include_audio and audio_path.is_file()
+
+    cmd = [
+        'ffmpeg',
+        '-y',  # overwrite output without asking
+        '-framerate',
+        str(fps),
+        '-i',
+        str(video_dir / 'frame_%06d.jpg'),
+    ]
+
+    if has_audio:
+        cmd += ['-i', str(audio_path)]
+
+    cmd += [
+        '-c:v',
+        'libx264',
+        '-pix_fmt',
+        'yuv420p',  # broadest playback compatibility
+    ]
+
+    if has_audio:
+        cmd += ['-c:a', 'aac']
+
+    cmd.append(str(output_path))
+
+    log.info(f'Encoding: {" ".join(cmd)}')
+    result = subprocess.run(cmd, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f'ffmpeg exited with code {result.returncode}')
+
+    log.info(f'Video written to {output_path}')
+
+
 @app.command()
 def fetch(
     host: str = typer.Option(DEFAULT_HOST, help='SSH hostname of the Pi.'),
@@ -155,7 +220,10 @@ def process_video(
     ),
     fps: float = typer.Option(
         10.0,
-        help='Framerate to use for the output video. Overridden by session metadata if present.',
+        help=(
+            'Framerate to use for the output video. '
+            'Overridden by session metadata if present.'
+        ),
     ),
     output_name: str = typer.Option(
         VIDEO_OUTPUT_NAME,
@@ -167,63 +235,107 @@ def process_video(
     ),
 ):
     """Encode JPEG frames (and optionally audio) in a session directory into an MP4."""
-    session_path = session_path.resolve()
-    if not session_path.is_dir():
-        log.error(f'Session directory not found: {session_path}')
+    try:
+        _encode_session_video(session_path, fps, output_name, include_audio)
+    except RuntimeError as e:
+        log.error(str(e))
         raise typer.Exit(1)
 
-    video_dir = session_path / 'video'
-    if not video_dir.is_dir():
-        log.error(f'No video directory found at {video_dir}')
+
+@app.command(name='process-all')
+def process_all(
+    recordings_dir: pathlib.Path = typer.Option(
+        DEFAULT_RECORDINGS_DIR,
+        help='Directory containing session_* folders.',
+    ),
+    fps: float = typer.Option(
+        10.0,
+        help=(
+            'Framerate to use for output videos. '
+            'Overridden by session metadata if present.'
+        ),
+    ),
+    output_name: str = typer.Option(
+        VIDEO_OUTPUT_NAME,
+        help='Output video filename to create in each session directory.',
+    ),
+    include_audio: bool = typer.Option(
+        True,
+        help='Mux audio.wav into each output if present.',
+    ),
+    force: bool = typer.Option(
+        False,
+        '--force',
+        help='Reprocess sessions even when the output video already exists.',
+    ),
+):
+    """Process all unprocessed sessions under recordings_dir."""
+    recordings_dir = recordings_dir.resolve()
+    if not recordings_dir.is_dir():
+        log.error(f'Recordings directory not found: {recordings_dir}')
         raise typer.Exit(1)
 
-    # prefer fps from session metadata if available
-    metadata_path = session_path / 'metadata.json'
-    if metadata_path.is_file():
+    session_dirs = sorted(
+        p
+        for p in recordings_dir.iterdir()
+        if p.is_dir() and p.name.startswith('session_')
+    )
+    if not session_dirs:
+        log.info(f'No session_* directories found in {recordings_dir}')
+        raise typer.Exit()
+
+    to_process: list[pathlib.Path] = []
+    already_processed: list[pathlib.Path] = []
+    missing_video: list[pathlib.Path] = []
+    for session_dir in session_dirs:
+        if (session_dir / output_name).is_file():
+            already_processed.append(session_dir)
+            if not force:
+                continue
+        if not (session_dir / 'video').is_dir():
+            missing_video.append(session_dir)
+            continue
+        to_process.append(session_dir)
+
+    if already_processed:
+        if force:
+            log.info(
+                f'Reprocessing {len(already_processed)} session(s) '
+                'with existing outputs due to --force.'
+            )
+        else:
+            log.info(
+                f'Skipping {len(already_processed)} already processed session(s).'
+            )
+    if missing_video:
+        log.warning(
+            f'Skipping {len(missing_video)} session(s) without a video directory.'
+        )
+
+    if not to_process:
+        log.info('No unprocessed sessions found.')
+        raise typer.Exit()
+
+    log.info(f'Found {len(to_process)} unprocessed session(s) in {recordings_dir}.')
+    if not Confirm.ask('Proceed?', default=True):
+        log.info('Aborted.')
+        raise typer.Exit()
+
+    failures: list[tuple[pathlib.Path, str]] = []
+    for i, session_dir in enumerate(to_process, 1):
+        log.info(f'[{i}/{len(to_process)}] Processing {session_dir.name}...')
         try:
-            session = SessionFiles.from_file(session_path)
-            if session.metadata.camera_fps is not None:
-                fps = float(session.metadata.camera_fps)
-                log.info(f'Using fps from metadata: {fps}')
-        except Exception as e:
-            log.warning(f'Could not load session metadata: {e}. Using --fps={fps}.')
+            _encode_session_video(session_dir, fps, output_name, include_audio)
+        except RuntimeError as e:
+            failures.append((session_dir, str(e)))
+            log.error(f'Failed {session_dir.name}: {e}')
 
-    output_path = session_path / output_name
-    audio_path = session_path / 'audio.wav'
-    has_audio = include_audio and audio_path.is_file()
-
-    # build ffmpeg command
-    cmd = [
-        'ffmpeg',
-        '-y',  # overwrite output without asking
-        '-framerate',
-        str(fps),
-        '-i',
-        str(video_dir / 'frame_%06d.jpg'),
-    ]
-
-    if has_audio:
-        cmd += ['-i', str(audio_path)]
-
-    cmd += [
-        '-c:v',
-        'libx264',
-        '-pix_fmt',
-        'yuv420p',  # broadest playback compatibility
-    ]
-
-    if has_audio:
-        cmd += ['-c:a', 'aac']
-
-    cmd.append(str(output_path))
-
-    log.info(f'Encoding: {" ".join(cmd)}')
-    result = subprocess.run(cmd, check=False)
-    if result.returncode != 0:
-        log.error(f'ffmpeg exited with code {result.returncode}')
-        raise typer.Exit(result.returncode)
-
-    log.info(f'Video written to {output_path}')
+    log.info(
+        f'Completed. Success: {len(to_process) - len(failures)}, '
+        f'Failed: {len(failures)}.'
+    )
+    if failures:
+        raise typer.Exit(1)
 
 
 if __name__ == '__main__':
