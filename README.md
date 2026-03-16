@@ -5,11 +5,18 @@ Author: Conor Hayes
 ## Setup
 
 ### PC setup
+ROS2 environment setup (for inference/streaming)
 ```bash
 cd ros2_ws
 rosdep install --from-paths src --ignore-src -r --rosdistro kilted
 colcon build
 source install/setup.bash
+```
+
+Postprocessing setup (for after recording on umi)
+```bash
+# at repo root
+uv sync --group dev
 ```
 
 ### RPi setup

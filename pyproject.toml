@@ -1,0 +1,11 @@
+[tool.uv.workspace]
+members = ["postprocess"]
+
+[tool.uv.sources]
+polyumi_pi = { path = "pi", editable = true }
+
+[dependency-groups]
+dev = [
+    "picamera2",
+    "pytest>=9.0.2",
+]

@@ -1,0 +1,11 @@
+[project]
+name = "polyumi_postprocess"
+version = "0.1.0"
+description = "Postprocessing scripts for PolyUMI data collection"
+requires-python = ">=3.13"
+dependencies = [
+    "polyumi_pi",
+]
+
+[tool.uv.sources]
+polyumi_pi = { path = "../pi", editable = true }
