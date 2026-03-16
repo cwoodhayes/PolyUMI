@@ -47,7 +47,9 @@ class SessionFiles(SessionDataABC):
 
     @classmethod
     def create(
-        cls, base_dir: pathlib.Path = DEFAULT_SESSION_BASE_DIR
+        cls,
+        base_dir: pathlib.Path = DEFAULT_SESSION_BASE_DIR,
+        add_latest_symlink: bool = True,
     ) -> SessionFiles:
         """Create a new session directory and its associated files."""
         # make a path based on the current ns timestamp
@@ -69,6 +71,13 @@ class SessionFiles(SessionDataABC):
 
         session = cls(path=path, metadata=metadata)
         session.metadata.to_file()
+
+        # for convenience
+        if add_latest_symlink:
+            latest_symlink = base_dir / 'latest'
+            if latest_symlink.is_symlink() or latest_symlink.exists():
+                latest_symlink.unlink()
+            latest_symlink.symlink_to(path)
         return session
 
     def init_audio(self, sample_rate: int, channels: int, sample_width: int):
