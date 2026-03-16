@@ -52,6 +52,66 @@ uv pip install -e .
 
 **Recommended for Development**: if using VS Code, add the `rsync` commands above to your `.vscode/tasks.json` as a build command.
 
+## Postprocess Workflow (Fetch -> Process)
+
+After recording sessions on the Pi, use the `postprocess` CLI on your PC to copy and convert data.
+
+From the repo root:
+
+```bash
+cd postprocess
+```
+
+### 0) Record data on the Pi
+
+On the Pi, from the `pi` directory:
+
+```bash
+python main.py record-episode
+```
+
+This writes a new `session_*` directory under `~/recordings` on the Pi.
+
+### 1) Fetch sessions from the Pi
+
+Fetch latest session only:
+
+```bash
+python main.py fetch --host [your hostname] --latest
+```
+
+Fetch all sessions not already present locally:
+
+```bash
+python main.py fetch --host [your hostname]
+```
+
+Notes:
+- Session discovery still uses `ssh + ls` first, so you get a count before copy starts.
+- Transfer uses tar-over-ssh (faster for many small frame files).
+- Use `--verbose-transfer` if you want detailed transfer output for debugging.
+
+### 2) Process video for one session
+
+```bash
+python main.py process-video recordings/session_YYYY-MM-DD_hh-mm-ss
+```
+
+This creates `finger.mp4` in that session directory, and includes `audio.wav` when available.
+
+### 3) Process all unprocessed sessions
+
+```bash
+python main.py process-all
+```
+
+This scans `recordings/session_*`, skips sessions that already have `finger.mp4`, and processes the rest.
+
+Useful options:
+- Re-encode everything: `python main.py process-all --force`
+- Change output name: `python main.py process-all --output-name custom.mp4`
+- Disable audio mux: `python main.py process-all --no-include-audio`
+
 ## Run Demos
 
 ### Streaming Demo
