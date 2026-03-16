@@ -1,5 +1,6 @@
 """Code for streaming audio data over zmq."""
 
+import contextlib
 import logging
 import queue
 import signal
@@ -9,6 +10,9 @@ import time
 import sounddevice as sd
 import zmq
 from polyumi_pi_msgs.audio_chunk_pb2 import AudioChunk
+
+from polyumi_pi.files.audio import AudioFile
+from polyumi_pi.files.session import SessionFiles
 
 log = logging.getLogger('pi_audio_streamer')
 
@@ -25,6 +29,7 @@ class AudioStreamer:
         zmq_context: zmq.Context,
         chunk_ms: int = 20,
         channels: int = 2,
+        session: SessionFiles | None = None,
     ):
         """Initialize the audio streamer."""
         self.port = port
@@ -32,6 +37,7 @@ class AudioStreamer:
         self.zmq_context = zmq_context
         self.channels = channels
         self.chunk_ms = chunk_ms
+        self.session = session
 
     @staticmethod
     def find_device_index(name: str) -> int:
@@ -112,6 +118,16 @@ class AudioStreamer:
                 except queue.Full:
                     callback_drops += 1
 
+            # write to the file if enabled
+            if (
+                wav_writer is not None
+                and self.session is not None
+                and self.session.audio is not None
+            ):
+                wav_writer.writeframes(pcm_bytes)
+                if self.session.metadata.audio_start_time_ns is None:
+                    self.session.metadata.audio_start_time_ns = ts
+
         device_index = self.find_device_index(self.DEVICE_NAME)
         log.info(
             f'Using device index {device_index}: '
@@ -152,22 +168,28 @@ class AudioStreamer:
         pub_thread = threading.Thread(target=publisher, daemon=True)
         pub_thread.start()
 
+        wav_writer = None
         # Start capture stream
-        with sd.RawInputStream(
-            device=device_index,
-            samplerate=self.sample_rate,
-            channels=self.channels,
-            dtype='int16',
-            blocksize=blocksize,
-            callback=callback,
-        ):
-            log.info('Streaming... Ctrl+C to stop.')
-            try:
-                while not stop_event.is_set():
-                    time.sleep(0.1)
-            except KeyboardInterrupt:
-                log.info('\nStopping.')
-                stop_event.set()
+        with contextlib.ExitStack() as stack:
+            if self.session is not None and self.session.audio is not None:
+                wav_writer = stack.enter_context(
+                    self.session.audio.recording()
+                )
+            with sd.RawInputStream(
+                device=device_index,
+                samplerate=self.sample_rate,
+                channels=self.channels,
+                dtype='int16',
+                blocksize=blocksize,
+                callback=callback,
+            ):
+                log.info('Streaming... Ctrl+C to stop.')
+                try:
+                    while not stop_event.is_set():
+                        time.sleep(0.1)
+                except KeyboardInterrupt:
+                    log.info('\nStopping.')
+                    stop_event.set()
 
         stop_event.set()
         pub_thread.join(timeout=2.0)

@@ -42,7 +42,9 @@ def _stop_child_process(process: multiprocessing.Process | None) -> None:
         process.join(timeout=2)
 
 
-def _run_video_streamer(port: int, fps: int):
+def _run_video_streamer(
+    port: int, fps: int, session: SessionFiles | None = None
+):
     context = zmq.Context()
     streamer = CameraStreamer(port=port, fps=fps, zmq_context=context)
     try:
@@ -56,6 +58,7 @@ def _run_audio_streamer(
     sample_rate: int,
     chunk_ms: int,
     channels: int,
+    session: SessionFiles | None = None,
 ):
     context = zmq.Context()
     streamer = AudioStreamer(
@@ -64,6 +67,7 @@ def _run_audio_streamer(
         zmq_context=context,
         chunk_ms=chunk_ms,
         channels=channels,
+        session=session,
     )
     try:
         streamer.start()
@@ -177,7 +181,11 @@ def record_episode(
 
     Intended for use on PolyUMI gripper during data recording.
     """
-    log.info('Record command not implemented yet.')
+    log.info(f'Log level: {logging.getLevelName(log.level)}')
+
+    # TODO remove--make it so we don't stream here.
+    video_port = 5555
+    audio_port = 5556
 
     # instantiate a session.
     session = SessionFiles.create()
@@ -185,12 +193,39 @@ def record_episode(
         f'Created session with ID {session.metadata.session_id} '
         f'at {session.path}'
     )
-    session.audio = AudioFile(
-        path=session.path / 'audio.wav',
-        sample_rate=sample_rate,
-        channels=channels,
-        sample_width=2,
+    session.init_audio(
+        sample_rate=sample_rate, channels=channels, sample_width=2
     )
+    led = LEDManager()
+    cam_process: multiprocessing.Process | None = None
+    audio_process: multiprocessing.Process | None = None
+
+    try:
+        # todo write LED brightness to metadata.
+        led.set_brightness(1.0)
+        log.info('Starting camera streamer...')
+        cam_process = multiprocessing.Process(
+            target=_run_video_streamer,
+            args=(video_port, fps, session),
+        )
+        cam_process.start()
+
+        log.info('Starting audio streamer...')
+        audio_process = multiprocessing.Process(
+            target=_run_audio_streamer,
+            args=(audio_port, sample_rate, chunk_ms, channels, session),
+        )
+        audio_process.start()
+
+        cam_process.join()
+        audio_process.join()
+    except KeyboardInterrupt:
+        log.info('Keyboard interrupt received, stopping child streamers...')
+    finally:
+        _stop_child_process(cam_process)
+        _stop_child_process(audio_process)
+        led.set_brightness(0.0)
+        session.metadata.to_file()
 
 
 if __name__ == '__main__':

@@ -1,12 +1,15 @@
 """Metadata file abstraction for PolyUMI data collection."""
 
 import json
+import logging
 import pathlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
 
 from polyumi_pi.files import base
+
+log = logging.getLogger('pi_metadata')
 
 
 def _get_git_hash() -> str:
@@ -38,6 +41,7 @@ class SessionMetadata(base.SessionDataABC):
     pi_hostname: str | None = None
     camera_fps: int | None = None
     camera_resolution: tuple[int, int] | None = None
+    audio_start_time_ns: int | None = None
     audio_sample_rate: int | None = None
     audio_channels: int | None = None
     audio_chunk_ms: int | None = None
@@ -77,6 +81,7 @@ class SessionMetadata(base.SessionDataABC):
                 if self.camera_resolution is not None
                 else None
             ),
+            'audio_start_time_ns': self.audio_start_time_ns,
             'audio_sample_rate': self.audio_sample_rate,
             'audio_channels': self.audio_channels,
             'audio_chunk_ms': self.audio_chunk_ms,
@@ -91,6 +96,7 @@ class SessionMetadata(base.SessionDataABC):
             'file_version': self.file_version,
         }
         self.path.write_text(json.dumps(data, indent=2))
+        log.info(f'Wrote metadata to {self.path}')
 
     @classmethod
     def from_file(cls, path: pathlib.Path) -> 'SessionMetadata':

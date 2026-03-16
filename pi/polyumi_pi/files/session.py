@@ -39,7 +39,9 @@ class SessionFiles(SessionDataABC):
         metadata = SessionMetadata.from_file(metadata_path)
 
         audio_path = path / 'audio.wav'
-        audio = AudioFile.from_file(audio_path) if audio_path.is_file() else None
+        audio = (
+            AudioFile.from_file(audio_path) if audio_path.is_file() else None
+        )
 
         return cls(path=path, metadata=metadata, audio=audio)
 
@@ -68,3 +70,16 @@ class SessionFiles(SessionDataABC):
         session = cls(path=path, metadata=metadata)
         session.metadata.to_file()
         return session
+
+    def init_audio(self, sample_rate: int, channels: int, sample_width: int):
+        """Create an audio file for this session."""
+        if self.audio is not None:
+            raise ValueError('Audio file already exists for this session.')
+
+        audio_path = self.path / 'audio.wav'
+        self.audio = AudioFile(
+            path=audio_path,
+            sample_rate=sample_rate,
+            channels=channels,
+            sample_width=sample_width,
+        )
