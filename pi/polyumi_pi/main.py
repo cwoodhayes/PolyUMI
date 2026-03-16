@@ -12,6 +12,7 @@ import logging
 import multiprocessing
 import os
 import shutil
+from multiprocessing.connection import Connection
 
 import typer
 import zmq
@@ -53,9 +54,45 @@ def _stop_child_process(process: multiprocessing.Process | None) -> None:
         process.join(timeout=2)
 
 
-def _run_video_streamer(port: int, fps: int, session: SessionFiles | None = None):
+def _recv_child_stats(
+    conn: Connection | None,
+    name: str,
+    timeout_s: float = 1.0,
+) -> dict:
+    """Receive one final stats payload from a child process."""
+    if conn is None:
+        return {}
+
+    try:
+        if not conn.poll(timeout_s):
+            log.warning(f'No {name} stats received before timeout.')
+            return {}
+        payload = conn.recv()
+        if not isinstance(payload, dict):
+            log.warning(f'Unexpected {name} stats payload type: {type(payload)}')
+            return {}
+        return payload
+    except (EOFError, OSError) as err:
+        log.warning(f'Failed to receive {name} stats: {err}')
+        return {}
+    finally:
+        conn.close()
+
+
+def _run_video_streamer(
+    port: int,
+    fps: int,
+    session: SessionFiles | None = None,
+    stats_conn: Connection | None = None,
+):
     context = zmq.Context()
-    streamer = CameraStreamer(port=port, fps=fps, zmq_context=context, session=session)
+    streamer = CameraStreamer(
+        port=port,
+        fps=fps,
+        zmq_context=context,
+        session=session,
+        stats_conn=stats_conn,
+    )
     try:
         streamer.start()
     finally:
@@ -68,6 +105,7 @@ def _run_audio_streamer(
     chunk_ms: int,
     channels: int,
     session: SessionFiles | None = None,
+    stats_conn: Connection | None = None,
 ):
     context = zmq.Context()
     streamer = AudioStreamer(
@@ -77,6 +115,7 @@ def _run_audio_streamer(
         chunk_ms=chunk_ms,
         channels=channels,
         session=session,
+        stats_conn=stats_conn,
     )
     try:
         streamer.start()
@@ -216,24 +255,30 @@ def record_episode(
     led = LEDManager()
     cam_process: multiprocessing.Process | None = None
     audio_process: multiprocessing.Process | None = None
+    video_parent_conn: Connection | None = None
+    audio_parent_conn: Connection | None = None
 
     try:
         led_brightness = 1.0
         session.metadata.led_brightness = led_brightness
         led.set_brightness(led_brightness)
         log.info('Starting camera streamer...')
+        video_parent_conn, video_child_conn = multiprocessing.Pipe(duplex=False)
         cam_process = multiprocessing.Process(
             target=_run_video_streamer,
-            args=(None, fps, session),
+            args=(None, fps, session, video_child_conn),
         )
         cam_process.start()
+        video_child_conn.close()
 
         log.info('Starting audio streamer...')
+        audio_parent_conn, audio_child_conn = multiprocessing.Pipe(duplex=False)
         audio_process = multiprocessing.Process(
             target=_run_audio_streamer,
-            args=(None, sample_rate, chunk_ms, channels, session),
+            args=(None, sample_rate, chunk_ms, channels, session, audio_child_conn),
         )
         audio_process.start()
+        audio_child_conn.close()
 
         cam_process.join()
         audio_process.join()
@@ -242,6 +287,25 @@ def record_episode(
     finally:
         _stop_child_process(cam_process)
         _stop_child_process(audio_process)
+
+        video_stats = _recv_child_stats(video_parent_conn, name='video')
+        audio_stats = _recv_child_stats(audio_parent_conn, name='audio')
+
+        if 'n_video_frames' in video_stats:
+            session.metadata.n_video_frames = int(video_stats['n_video_frames'])
+        if 'video_dropped_frames' in video_stats:
+            session.metadata.video_dropped_frames = int(
+                video_stats['video_dropped_frames']
+            )
+        if 'n_audio_chunks' in audio_stats:
+            session.metadata.n_audio_chunks = int(audio_stats['n_audio_chunks'])
+        if 'audio_dropped_chunks' in audio_stats:
+            session.metadata.audio_dropped_chunks = int(
+                audio_stats['audio_dropped_chunks']
+            )
+        if 'audio_start_time_ns' in audio_stats:
+            session.metadata.audio_start_time_ns = audio_stats['audio_start_time_ns']
+
         led.set_brightness(0.0)
         session.finalize()
         log.info(

@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import logging
+from multiprocessing.connection import Connection
 import signal
 import time
 
@@ -32,12 +33,14 @@ class CameraStreamer:
         fps: int,
         zmq_context: zmq.Context,
         session: SessionFiles | None = None,
+        stats_conn: Connection | None = None,
     ):
         """Initialize the camera streamer."""
         self.port = port
         self.fps = fps
         self.zmq_context = zmq_context
         self.session = session
+        self.stats_conn = stats_conn
         self.cam = Picamera2()
 
     @classmethod
@@ -78,6 +81,8 @@ class CameraStreamer:
         interval = 1.0 / self.fps
         first_frame_logged = False
         stop_requested = False
+        n_video_frames = 0
+        n_video_dropped_frames = 0
 
         def handle_shutdown(signum, _frame):
             nonlocal stop_requested
@@ -116,11 +121,11 @@ class CameraStreamer:
                             socket.send(msg.SerializeToString(), zmq.NOBLOCK)
                         except zmq.Again:
                             log.debug('Dropped frame: receiver not ready.')
+                            n_video_dropped_frames += 1
 
                     if video_recorder is not None:
                         video_recorder.write_frame(data.getvalue(), msg.timestamp_ns)
-                        if self.session is not None:
-                            self.session.metadata.n_video_frames += 1
+                        n_video_frames += 1
 
                     log.debug(
                         f'Captured frame at {msg.timestamp_ns} ns, '
@@ -140,6 +145,17 @@ class CameraStreamer:
                 self.cam.stop()
                 if socket is not None:
                     socket.close()
+
+        if self.stats_conn is not None:
+            try:
+                self.stats_conn.send(
+                    {
+                        'n_video_frames': n_video_frames,
+                        'video_dropped_frames': n_video_dropped_frames,
+                    }
+                )
+            finally:
+                self.stats_conn.close()
 
     def compute_scaler_crop(
         self,

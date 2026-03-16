@@ -6,6 +6,7 @@ import queue
 import signal
 import threading
 import time
+from multiprocessing.connection import Connection
 
 import sounddevice as sd
 import zmq
@@ -30,6 +31,7 @@ class AudioStreamer:
         chunk_ms: int = 20,
         channels: int = 2,
         session: SessionFiles | None = None,
+        stats_conn: Connection | None = None,
     ):
         """
         Initialize the audio streamer.
@@ -41,6 +43,7 @@ class AudioStreamer:
             chunk_ms: Audio callback chunk size in milliseconds.
             channels: Number of audio input channels to capture.
             session: Optional session object used for WAV recording metadata.
+            stats_conn: Optional child->parent IPC connection for final stats.
 
         """
         self.port = port
@@ -49,6 +52,7 @@ class AudioStreamer:
         self.channels = channels
         self.chunk_ms = chunk_ms
         self.session = session
+        self.stats_conn = stats_conn
 
     @staticmethod
     def find_device_index(name: str) -> int:
@@ -107,7 +111,10 @@ class AudioStreamer:
         # Small queue to decouple sounddevice callback from ZMQ publish
         audio_queue: queue.Queue = queue.Queue(maxsize=100)
         callback_drops = 0
+        total_callback_drops = 0
         sent_chunks = 0
+        n_audio_chunks = 0
+        audio_start_time_ns = None
         last_stats = time.monotonic()
         stop_event = threading.Event()
 
@@ -125,7 +132,8 @@ class AudioStreamer:
             time_info,
             status: sd.CallbackFlags,
         ):
-            nonlocal callback_drops
+            nonlocal callback_drops, total_callback_drops, n_audio_chunks
+            nonlocal audio_start_time_ns
             if status:
                 log.warning(f'[sounddevice] {status}')
             ts = time.time_ns()
@@ -135,6 +143,7 @@ class AudioStreamer:
                     audio_queue.put_nowait((pcm_bytes, ts))
                 except queue.Full:
                     callback_drops += 1
+                    total_callback_drops += 1
                     try:
                         audio_queue.get_nowait()
                     except queue.Empty:
@@ -143,6 +152,7 @@ class AudioStreamer:
                         audio_queue.put_nowait((pcm_bytes, ts))
                     except queue.Full:
                         callback_drops += 1
+                        total_callback_drops += 1
 
             # write to the file if enabled
             if (
@@ -151,9 +161,9 @@ class AudioStreamer:
                 and self.session.audio is not None
             ):
                 wav_writer.writeframes(pcm_bytes)
-                self.session.metadata.n_audio_chunks += 1
-                if self.session.metadata.audio_start_time_ns is None:
-                    self.session.metadata.audio_start_time_ns = ts
+                n_audio_chunks += 1
+                if audio_start_time_ns is None:
+                    audio_start_time_ns = ts
 
         device_index = self.find_device_index(self.DEVICE_NAME)
         log.info(
@@ -223,3 +233,15 @@ class AudioStreamer:
         signal.signal(signal.SIGTERM, prev_sigterm)
         if sock is not None:
             sock.close()
+
+        if self.stats_conn is not None:
+            try:
+                self.stats_conn.send(
+                    {
+                        'n_audio_chunks': n_audio_chunks,
+                        'audio_start_time_ns': audio_start_time_ns,
+                        'audio_dropped_chunks': total_callback_drops,
+                    }
+                )
+            finally:
+                self.stats_conn.close()

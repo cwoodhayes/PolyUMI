@@ -22,7 +22,7 @@ def make_jpeg(width: int = WIDTH, height: int = HEIGHT) -> bytes:
 
 @pytest.fixture
 def video_file(tmp_path):
-    """A VideoFile instance pointing at a temp directory."""
+    """Return a VideoFile instance pointing at a temp directory."""
     return VideoFile(
         path=tmp_path / 'video.avi',
         fps=FPS,
