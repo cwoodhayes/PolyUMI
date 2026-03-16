@@ -1,5 +1,6 @@
 """Code for streaming camera data."""
 
+import contextlib
 import io
 import json
 import logging
@@ -12,6 +13,8 @@ from libcamera import controls  # type: ignore
 from picamera2 import Picamera2
 from polyumi_pi_msgs import camera_frame_pb2
 
+from polyumi_pi.files.session import SessionFiles
+
 log = logging.getLogger('pi_cam_process')
 
 
@@ -20,12 +23,21 @@ class CameraStreamer:
 
     VIEW_WIDTH = 620
     VIEW_HEIGHT = 480
+    CAPTURE_WIDTH = 2304 // 2
+    CAPTURE_HEIGHT = 1296 // 2
 
-    def __init__(self, port: int, fps: int, zmq_context: zmq.Context):
+    def __init__(
+        self,
+        port: int,
+        fps: int,
+        zmq_context: zmq.Context,
+        session: SessionFiles | None = None,
+    ):
         """Initialize the camera streamer."""
         self.port = port
         self.fps = fps
         self.zmq_context = zmq_context
+        self.session = session
         self.cam = Picamera2()
 
     @classmethod
@@ -55,6 +67,9 @@ class CameraStreamer:
 
         log.info(f'Publishing to tcp://<pi_ip>:{self.port}')
 
+        if self.session is not None and self.session.video is not None:
+            log.info(f'Video will be recorded to {self.session.video.path}')
+
         interval = 1.0 / self.fps
         first_frame_logged = False
         stop_requested = False
@@ -67,46 +82,59 @@ class CameraStreamer:
         prev_sigint = signal.signal(signal.SIGINT, handle_shutdown)
         prev_sigterm = signal.signal(signal.SIGTERM, handle_shutdown)
 
-        try:
-            while not stop_requested:
-                t_start = time.monotonic()
-
-                # Capture and encode frame as JPEG
-                data = io.BytesIO()
-                self.cam.capture_file(data, format='jpeg')
-                metadata = self.cam.capture_metadata()
-                if not first_frame_logged:
-                    log.info(f'First-frame metadata: {metadata}')
-                    first_frame_logged = True
-                log.debug(metadata)
-
-                msg = camera_frame_pb2.CameraFrame()
-                msg.timestamp_ns = metadata['SensorTimestamp']
-                msg.jpeg_data = data.getvalue()
-                msg.width = self.VIEW_WIDTH
-                msg.height = self.VIEW_HEIGHT
-                try:
-                    socket.send(msg.SerializeToString(), zmq.NOBLOCK)
-                except zmq.Again:
-                    log.debug('Dropped frame: receiver not ready.')
-
-                log.debug(
-                    f'Captured frame at {msg.timestamp_ns} ns, '
-                    f'size={len(msg.jpeg_data)} bytes'
+        with contextlib.ExitStack() as stack:
+            if self.session is not None and self.session.video is not None:
+                video_recorder = stack.enter_context(
+                    self.session.video.recording()
                 )
+            else:
+                video_recorder = None
 
-                elapsed = time.monotonic() - t_start
-                sleep_time = interval - elapsed
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
+            try:
+                while not stop_requested:
+                    t_start = time.monotonic()
 
-        except KeyboardInterrupt:
-            log.info('Interrupted, shutting down.')
-        finally:
-            signal.signal(signal.SIGINT, prev_sigint)
-            signal.signal(signal.SIGTERM, prev_sigterm)
-            self.cam.stop()
-            socket.close()
+                    # Capture and encode frame as JPEG
+                    data = io.BytesIO()
+                    self.cam.capture_file(data, format='jpeg')
+                    metadata = self.cam.capture_metadata()
+                    if not first_frame_logged:
+                        log.info(f'First-frame metadata: {metadata}')
+                        first_frame_logged = True
+                    log.debug(metadata)
+
+                    msg = camera_frame_pb2.CameraFrame()
+                    msg.timestamp_ns = metadata['SensorTimestamp']
+                    msg.jpeg_data = data.getvalue()
+                    msg.width = self.VIEW_WIDTH
+                    msg.height = self.VIEW_HEIGHT
+                    try:
+                        socket.send(msg.SerializeToString(), zmq.NOBLOCK)
+                    except zmq.Again:
+                        log.debug('Dropped frame: receiver not ready.')
+
+                    if video_recorder is not None:
+                        video_recorder.write_frame(
+                            data.getvalue(), msg.timestamp_ns
+                        )
+
+                    log.debug(
+                        f'Captured frame at {msg.timestamp_ns} ns, '
+                        f'size={len(msg.jpeg_data)} bytes'
+                    )
+
+                    elapsed = time.monotonic() - t_start
+                    sleep_time = interval - elapsed
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+
+            except KeyboardInterrupt:
+                log.info('Interrupted, shutting down.')
+            finally:
+                signal.signal(signal.SIGINT, prev_sigint)
+                signal.signal(signal.SIGTERM, prev_sigterm)
+                self.cam.stop()
+                socket.close()
 
     def compute_scaler_crop(
         self,

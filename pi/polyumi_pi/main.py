@@ -17,13 +17,12 @@ import typer
 import zmq
 from audio_streamer import AudioStreamer
 from cam_streamer import CameraStreamer
-from rich.logging import RichHandler
 from led_manager import LEDManager
+from rich.logging import RichHandler
 from rich.prompt import Confirm
 
 from polyumi_pi.files.audio import AudioFile
-from polyumi_pi.files.session import DEFAULT_SESSION_BASE_DIR
-from polyumi_pi.files.session import SessionFiles
+from polyumi_pi.files.session import DEFAULT_SESSION_BASE_DIR, SessionFiles
 
 logging.basicConfig(
     level=os.environ.get('LOG_LEVEL', 'INFO').upper(),
@@ -54,11 +53,9 @@ def _stop_child_process(process: multiprocessing.Process | None) -> None:
         process.join(timeout=2)
 
 
-def _run_video_streamer(
-    port: int, fps: int, session: SessionFiles | None = None
-):
+def _run_video_streamer(port: int, fps: int, session: SessionFiles | None = None):
     context = zmq.Context()
-    streamer = CameraStreamer(port=port, fps=fps, zmq_context=context)
+    streamer = CameraStreamer(port=port, fps=fps, zmq_context=context, session=session)
     try:
         streamer.start()
     finally:
@@ -201,12 +198,12 @@ def record_episode(
 
     # instantiate a session.
     session = SessionFiles.create()
-    log.info(
-        f'Created session with ID {session.metadata.session_id} '
-        f'at {session.path}'
-    )
-    session.init_audio(
-        sample_rate=sample_rate, channels=channels, sample_width=2
+    log.info(f'Created session with ID {session.metadata.session_id} at {session.path}')
+    session.init_audio(sample_rate=sample_rate, channels=channels, sample_width=2)
+    session.init_video(
+        fps=fps,
+        width=CameraStreamer.CAPTURE_WIDTH,
+        height=CameraStreamer.CAPTURE_HEIGHT,
     )
     led = LEDManager()
     cam_process: multiprocessing.Process | None = None
