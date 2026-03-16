@@ -437,8 +437,8 @@ dependencies = [
     { name = "fastapi" },
     { name = "numpy" },
     { name = "protobuf" },
-    { name = "pytest" },
     { name = "pyzmq" },
+    { name = "rich" },
     { name = "rpi-hardware-pwm" },
     { name = "sounddevice" },
     { name = "typer" },
@@ -448,6 +448,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "picamera2" },
+    { name = "pytest" },
 ]
 
 [package.metadata]
@@ -455,8 +456,8 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.135.1" },
     { name = "numpy", specifier = ">=2.4.3" },
     { name = "protobuf", specifier = ">=7.34.0" },
-    { name = "pytest", specifier = ">=9.0.2" },
     { name = "pyzmq", specifier = ">=27.1.0" },
+    { name = "rich", specifier = ">=14.3.3" },
     { name = "rpi-hardware-pwm", specifier = ">=0.3.1" },
     { name = "sounddevice", specifier = ">=0.5.5" },
     { name = "typer", specifier = ">=0.24.1" },
@@ -464,7 +465,10 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "picamera2" }]
+dev = [
+    { name = "picamera2" },
+    { name = "pytest", specifier = ">=9.0.2" },
+]
 
 [[package]]
 name = "protobuf"

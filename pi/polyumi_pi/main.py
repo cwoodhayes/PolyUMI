@@ -11,17 +11,32 @@ Usage:
 import logging
 import multiprocessing
 import os
+import shutil
 
 import typer
 import zmq
 from audio_streamer import AudioStreamer
 from cam_streamer import CameraStreamer
+from rich.logging import RichHandler
 from led_manager import LEDManager
+from rich.prompt import Confirm
 
 from polyumi_pi.files.audio import AudioFile
+from polyumi_pi.files.session import DEFAULT_SESSION_BASE_DIR
 from polyumi_pi.files.session import SessionFiles
 
-logging.basicConfig(level=os.environ.get('LOG_LEVEL', 'INFO').upper())
+logging.basicConfig(
+    level=os.environ.get('LOG_LEVEL', 'INFO').upper(),
+    format='%(message)s',
+    handlers=[
+        RichHandler(
+            show_time=True,
+            show_level=True,
+            show_path=False,
+            rich_tracebacks=True,
+        )
+    ],
+)
 log = logging.getLogger('pi_streamer')
 
 app = typer.Typer()
@@ -223,6 +238,38 @@ def record_episode(
         _stop_child_process(audio_process)
         led.set_brightness(0.0)
         session.metadata.to_file()
+
+
+@app.command('clean-sessions')
+def clean_sessions():
+    """Delete all session recordings in the default session directory."""
+    base_dir = DEFAULT_SESSION_BASE_DIR
+    if not base_dir.exists():
+        log.info(f'No session directory found at {base_dir}')
+        return
+
+    targets = list(base_dir.glob('session_*'))
+    if not targets:
+        log.info(f'No session entries found in {base_dir}')
+        return
+
+    if not Confirm.ask(
+        f'Delete {len(targets)} session entries in {base_dir}?',
+        default=False,
+    ):
+        log.info('Aborted cleaning sessions.')
+        return
+
+    removed = 0
+    for path in targets:
+        if path.is_dir():
+            shutil.rmtree(path)
+            removed += 1
+        elif path.is_file():
+            path.unlink()
+            removed += 1
+
+    log.info(f'Removed {removed} session entries from {base_dir}')
 
 
 if __name__ == '__main__':

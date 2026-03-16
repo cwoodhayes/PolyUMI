@@ -9,6 +9,7 @@ dependencies = [
     "numpy>=2.4.3",
     "protobuf>=7.34.0",
     "pyzmq>=27.1.0",
+    "rich>=14.3.3",
     "rpi-hardware-pwm>=0.3.1",
     "sounddevice>=0.5.5",
     "typer>=0.24.1",
