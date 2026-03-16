@@ -3,6 +3,7 @@
 import json
 import logging
 import pathlib
+import socket
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -36,7 +37,7 @@ class SessionMetadata(base.SessionDataABC):
     session_id: str = field(default_factory=lambda: str(uuid4()))
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     duration_s: float | None = None
-    pi_hostname: str | None = None
+    pi_hostname: str = field(default_factory=lambda: socket.gethostname())
     camera_fps: int | None = None
     camera_resolution: tuple[int, int] | None = None
     audio_start_time_ns: int | None = None
