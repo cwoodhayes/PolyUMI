@@ -3,6 +3,7 @@ postprocess/recordings/
 
 # generated files
 pi/polyumi_pi/_version.py
+cohn_db.json
 
 # matt doesn't like ide config stuff :(
 .idea
