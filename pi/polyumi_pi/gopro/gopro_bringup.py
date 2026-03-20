@@ -1,102 +1,104 @@
-"""BLE bring-up test for connecting to a GoPro by name suffix."""
+# video.py/Open GoPro, Version 2.0 (C) Copyright 2021 GoPro, Inc. (http://gopro.com/OpenGoPro).
+# This copyright was auto-generated on Wed, Sep  1, 2021  5:05:46 PM
 
-from __future__ import annotations
+"""Entrypoint for taking a video demo."""
 
 import argparse
 import asyncio
-import logging
-import sys
-from typing import Optional
+from pathlib import Path
 
-from bleak import BleakScanner
-from bleak.backends.device import BLEDevice
-from open_gopro import GoPro
-from open_gopro.util import setup_logging
+from open_gopro import WiredGoPro, WirelessGoPro
+from open_gopro.models import constants, proto
+from open_gopro.util import add_cli_args_and_parse
+from open_gopro.util.logger import setup_logging
+from rich.console import Console
 
-logger = logging.getLogger(__name__)
-
-
-def parse_args() -> argparse.Namespace:
-    """Parse command-line args."""
-    parser = argparse.ArgumentParser(description='Connect to GoPro over BLE.')
-    parser.add_argument(
-        '--name-suffix',
-        type=str,
-        default='1112',
-        help='Target BLE device name suffix (default: 1112).',
-    )
-    parser.add_argument(
-        '--scan-timeout',
-        type=float,
-        default=6.0,
-        help='BLE scan timeout in seconds for each attempt.',
-    )
-    parser.add_argument(
-        '--scan-retries',
-        type=int,
-        default=4,
-        help='Number of BLE scan attempts before giving up.',
-    )
-    return parser.parse_args()
+console = Console()
 
 
-def discover_device(
-    name_suffix: str, timeout: float, retries: int
-) -> Optional[BLEDevice]:
-    """Discover BLE devices and return one whose name ends with name_suffix."""
-    target_suffix = name_suffix.upper()
-    for attempt in range(1, retries + 1):
-        logger.info('BLE scan attempt %s/%s (%.1fs)', attempt, retries, timeout)
-        devices = asyncio.run(BleakScanner.discover(timeout=timeout))
-
-        visible = [d for d in devices if d.name]
-        if visible:
-            logger.info('Visible BLE devices:')
-            for d in visible:
-                logger.info('  - %s (%s)', d.name, d.address)
-        else:
-            logger.info('No named BLE devices found in this scan.')
-
-        for d in visible:
-            if d.name.upper().endswith(target_suffix):
-                logger.info('Selected target device: %s (%s)', d.name, d.address)
-                return d
-
-    return None
-
-
-def main() -> int:
-    """Discover and connect to GoPro over BLE."""
-    args = parse_args()
-
-    global logger
-    logger = setup_logging(logger)
+async def main(args: argparse.Namespace) -> None:
+    logger = setup_logging(__name__, args.log)
+    gopro: WirelessGoPro | WiredGoPro | None = None
 
     try:
-        device = discover_device(
-            name_suffix=args.name_suffix,
-            timeout=args.scan_timeout,
-            retries=args.scan_retries,
-        )
-        if device is None:
-            logger.error(
-                'Could not find a BLE device ending with suffix "%s".',
-                args.name_suffix,
-            )
-            return 1
+        async with (
+            WiredGoPro(args.identifier)
+            if args.wired
+            else WirelessGoPro(args.identifier, host_wifi_interface=args.wifi_interface)
+        ) as gopro:
+            assert gopro
+            assert (
+                await gopro.http_command.load_preset_group(
+                    group=proto.EnumPresetGroup.PRESET_GROUP_ID_VIDEO
+                )
+            ).ok
 
-        # TURNS OUT. the gopro renaming used in the app doesn't change the BLE Name, so
-        # we can just look for the default name ie "GoPro XXXX"
-        with GoPro(device, enable_wifi=False) as gopro:
-            logger.info('CONNECTED over BLE to GoPro: %s', gopro.identifier)
-            return 0
-    except KeyboardInterrupt:
-        logger.warning('Interrupted by user.')
-        return 130
-    except Exception as exc:  # pragma: no cover - hardware-dependent
-        logger.exception('BLE bringup failed: %s', exc)
-        return 1
+            # Get the media set before
+            media_set_before = set(
+                (await gopro.http_command.get_media_list()).data.files
+            )
+            # Take a video
+            console.print('Capturing a video...')
+            assert (
+                await gopro.http_command.set_shutter(shutter=constants.Toggle.ENABLE)
+            ).ok
+            await asyncio.sleep(args.record_time)
+            assert (
+                await gopro.http_command.set_shutter(shutter=constants.Toggle.DISABLE)
+            ).ok
+
+            # Get the media set after
+            media_set_after = set(
+                (await gopro.http_command.get_media_list()).data.files
+            )
+            # The video (is most likely) the difference between the two sets
+            video = media_set_after.difference(media_set_before).pop()
+
+            # Download the video and GPMF
+            console.print(f'Downloading {video.filename}...')
+            await gopro.http_command.download_file(
+                camera_file=video.filename, local_file=args.output.with_suffix('.mp4')
+            )
+            await gopro.http_command.get_gpmf_data(
+                camera_file=video.filename, local_file=args.output.with_suffix('.gpmf')
+            )
+            console.print(
+                f'Success!! :smiley: File has been downloaded to {args.output}'
+            )
+    except Exception as e:  # pylint: disable = broad-except
+        logger.error(repr(e))
+
+    if gopro:
+        await gopro.close()
+    console.print('Exiting...')
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description='Connect to a GoPro camera, take a video, then download it.'
+    )
+    parser.add_argument(
+        '-r', '--record_time', type=float, help='How long to record for', default=2.0
+    )
+    parser.add_argument(
+        '-o',
+        '--output',
+        type=Path,
+        help="Where to write the video to (not including file type). If not set, write to 'video'",
+        default=Path('video'),
+    )
+    parser.add_argument(
+        '--wired',
+        action='store_true',
+        help='Set to use wired (USB) instead of wireless (BLE / WIFI) interface',
+    )
+    return add_cli_args_and_parse(parser)
+
+
+# Needed for poetry scripts defined in pyproject.toml
+def entrypoint() -> None:
+    asyncio.run(main(parse_arguments()))
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    entrypoint()
