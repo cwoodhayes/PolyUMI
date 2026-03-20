@@ -5,6 +5,7 @@
 
 import argparse
 import asyncio
+from datetime import datetime
 from pathlib import Path
 
 from open_gopro import WirelessGoPro
@@ -20,8 +21,11 @@ async def main() -> None:
     logger = setup_logging(__name__)
     gopro: WirelessGoPro | None = None
 
-    identifier = 'GoPro 1112'
-    record_time = 3
+    # arm gopro
+    # identifier = 'GoPro 1112'
+
+    # gripper gopro
+    identifier = 'GoPro 7444'
 
     try:
         async with WirelessGoPro(
@@ -37,12 +41,23 @@ async def main() -> None:
                 camera_control_status=proto.EnumCameraControlStatus.CAMERA_EXTERNAL_CONTROL
             )
 
+            now = datetime.now()
+            tz_offset = now.astimezone().utcoffset()
+            if tz_offset is not None:
+                int_offset = tz_offset.seconds // 3600
+            else:
+                int_offset = 0
+            dst = bool(now.astimezone().dst())
+            logger.info(
+                f'Setting GoPro date/time to {now} with tz offset {tz_offset} ({int_offset}) and dst {dst}'
+            )
+            await gopro.ble_command.set_date_time_tz_dst(
+                date_time=now, tz_offset=int_offset, is_dst=bool(dst)
+            )
+
             await gopro.ble_command.set_shutter(shutter=constants.Toggle.ENABLE)
             await asyncio.sleep(2)
             await gopro.ble_command.set_shutter(shutter=constants.Toggle.DISABLE)
-
-            video = await gopro.ble_command.get_last_captured_media()
-            logger.info(f'Video captured: {video}')
 
     except Exception as e:  # pylint: disable = broad-except
         logger.error(repr(e))
