@@ -1,3 +1,5 @@
+https://github.com/user-attachments/assets/2f902600-9682-4e67-a75c-fc8fa358cb92
+
 # PolyUMI: Visual + Auditory + Tactile Manipulation Platform for Imitation Learning
 
 **Project website:** https://cwoodhayes.github.io/projects/polyumi
