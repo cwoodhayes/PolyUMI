@@ -1,8 +1,23 @@
-# PolyUMI
+# PolyUMI: Visual + Auditory + Tactile Manipulation Platform for Imitation Learning
 
-A multimodal data collection and streaming platform for robot imitation learning. PolyUMI mounts a Raspberry Pi Zero 2W on a robot end-effector to capture synchronized camera, audio, and LED-illuminated tactile sensor data, which is streamed over ZMQ and published into ROS 2 for visualization and inference, or alternatively recorded locally and postprocessed for consumption by a training pipeline.
+PolyUMI is a real-time data collection & control platform for robotic imitation learning, which unifies the following sensor modalities in a single end-effector:
+- **touch** (via a custom optical tactile-sensing finger, based off of [PolyTouch](https://polytouch.alanz.info/)) - *10fps 540x480 MJPEG video (MP4)*
+- **mechanical vibration** (via a contact microphone fixed to the finger housing) - *16kHz PCM audio (WAV)*
+- **vision** (via GoPro camera on wrist + finger camera peripheral vision) - *60fps 1920x1080 MJPEG video (MP4) + 10fps 540x480 MJPEG video*
+- **proprioception** (via monocular inertial SLAM from GoPro + IMU in gripper, or robot joint encoders + FK in embodiments)
 
-Inference & training are not in scope for this repo; this is the data collection & streaming infrastructure.
+It combines the [Universal Manipulation Interface (UMI)](https://umi-gripper.github.io/) platform with a custom touch-sensing finger inspired by the [PolyTouch tactile + audio sensor](https://polytouch.alanz.info/), with hardware, firmware, and software built from scratch for a modern robotics stack (ROS2 Kilted + Python 3.13 + Foxglove visualizer).
+
+<div align="center" style="display: flex; flex-wrap: wrap; gap: 12px; justify-content: center;">
+  <div style="flex: 1 1 480px; min-width: 320px; max-width: 600px;">
+    <img src="docs/dataflow_overview.png" alt="Dataflow Overview" style="width: 100%;"/>
+    <p style="margin: 6px 0 0; font-size: 0.9em; color: #666;">Data flow through the PolyUMI system.</p>
+  </div>
+  <div style="flex: 1 1 480px; min-width: 320px; max-width: 600px;">
+    <img src="docs/polyumi sw components.png" alt="Software Components" style="width: 100%;"/>
+    <p style="margin: 6px 0 0; font-size: 0.9em; color: #666;">General summary of software components in this repo.</p>
+  </div>
+</div>
 
 ## Repo Structure
 
