@@ -1,5 +1,7 @@
 # PolyUMI: Visual + Auditory + Tactile Manipulation Platform for Imitation Learning
 
+**Project website:** https://cwoodhayes.github.io/projects/polyumi
+
 PolyUMI is a real-time data collection & control platform for robotic imitation learning, which unifies the following sensor modalities in a single end-effector:
 - **touch** (via a custom optical tactile-sensing finger, based off of [PolyTouch](https://polytouch.alanz.info/)) - *10fps 540x480 MJPEG video (MP4)*
 - **mechanical vibration** (via a contact microphone fixed to the finger housing) - *16kHz PCM audio (WAV)*
