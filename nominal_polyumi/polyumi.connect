@@ -1,0 +1,96 @@
+title: POLYUMI VIEWER
+window_title: null
+logo_path: null
+timeline:
+  show: false
+  display: relative
+  pixels_per_tick: 0.0
+  milestones: []
+streaming:
+  buffer_size: 5000
+  timeline: null
+  playback_speed: null
+  window: null
+  persistence: []
+python:
+  packages: []
+  wheelhouse: null
+on_load: null
+on_unload: null
+tiles:
+- layout: tabs
+  tabs:
+  - title: DATA STREAMS
+    allow_popout: true
+    tile:
+      layout: grid
+      rows:
+      - height: 1.2537618
+        columns:
+        - width: null
+          tile:
+            layout: pane
+            id: a023cfac-2ab7-4b89-8c81-914a160cea46
+            title: WRIST CAMERA
+            direction: vertical
+            should_fill: true
+            elements:
+            - display: video
+              mcap: null
+              frames: ''
+              height: null
+        - width: null
+          tile:
+            layout: pane
+            id: 7ab19964-1df0-4fe5-a56d-f60b1d96c02a
+            title: FINGER CAMERA
+            direction: vertical
+            should_fill: true
+            elements:
+            - display: video
+              mcap: null
+              frames: ''
+              height: null
+      - height: 0.4593784
+        columns:
+        - width: null
+          tile:
+            layout: pane
+            id: c94d5a8f-738c-4c15-be33-172f5eb05854
+            title: PMC AUDIO TRACE
+            direction: vertical
+            should_fill: true
+            elements:
+            - plot: line
+              stream_id: ''
+              colors: []
+              legend_placement: bottom_left
+              x_format: timestamp
+              x_time_display: Local
+              x_scale: linear
+              y_scale: linear
+      - height: 0.2868606
+        columns:
+        - width: null
+          tile:
+            layout: pane
+            id: 44aafd50-b55f-4376-8c6f-fe3bafa53d99
+            title: Script Controls
+            direction: vertical
+            should_fill: true
+            elements:
+            - controls: script_table
+              scripts:
+              - id: null
+                label: null
+                path: ''
+                args: []
+                max_log_lines: 10000
+              show_output_column: false
+left_panel: null
+right_panel: null
+bottom_panel: null
+scene: {}
+poster: null
+prompt_windows: []
+mcap_path: null
