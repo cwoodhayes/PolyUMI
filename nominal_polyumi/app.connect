@@ -1,0 +1,62 @@
+title: ROS2 Nominal Monitor
+
+python:
+  packages: requirements.txt
+
+streaming:
+  buffer_size: 5000
+
+left_panel:
+  width: 0.3
+  tabs:
+  - name: Topics
+    layout:
+    - direction: vertical
+      group_layout:
+      - id: websocket_url
+        input: text
+        default: "ws://localhost:8765"
+      - id: topic_list
+        input: multiline
+      - display: header
+        label: Video
+      - display: video
+        frames: frame_buffer
+        height: 300
+      - id: img_sub
+        input: dropdown
+        options: [""]
+
+right_panel:
+  width: 1.0
+  tabs:
+  - name: TimeSeries
+    layout:
+    - plot: line
+      stream_id: std_0_stream
+      x_label: Time
+      x_format: timestamp
+      height: 300
+    - id: std_0_sub
+      input: dropdown
+      options: [""]
+    - plot: line
+      stream_id: std_1_stream
+      x_label: Time
+      x_format: timestamp
+      height: 300
+    - id: std_1_sub
+      input: dropdown
+      options: [""]
+
+bottom_panel:
+  height: 0.15
+  layout:
+  - controls: script_table
+    scripts:
+    - label: Run Script
+      path: connect.py
+    - label: Start ROS2 Docker
+      path: docker/start.sh
+    - label: Build ROS2 Docker
+      path: docker/build.sh

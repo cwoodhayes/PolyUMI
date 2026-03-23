@@ -1,0 +1,5 @@
+foxglove-sdk
+numpy
+websockets==13.1
+mcap
+mcap-ros2-support
