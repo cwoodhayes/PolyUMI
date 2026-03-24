@@ -3,3 +3,5 @@ numpy
 websockets==13.1
 mcap
 mcap-ros2-support
+
+-e ../ros2_ws/src/polyumi_pi_msgs

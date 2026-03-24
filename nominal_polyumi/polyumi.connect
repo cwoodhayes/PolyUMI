@@ -13,7 +13,7 @@ streaming:
   window: null
   persistence: []
 python:
-  packages: []
+  packages: requirements.txt
   wheelhouse: null
 on_load: null
 on_unload: null
@@ -83,7 +83,7 @@ tiles:
               scripts:
               - id: null
                 label: null
-                path: ''
+                path: polyumi_connect.py
                 args: []
                 max_log_lines: 10000
               show_output_column: false

@@ -1,7 +1,18 @@
+[project]
+name = "polyumi-pi-msgs"
+version = "0.0.1"
+description = "Protobuf messages for communication with PolyTouch CE Finger"
+requires-python = ">=3.10"
+dependencies = [
+    "protobuf>=3.20",
+    "grpcio>=1.0",
+]
+
 [build-system]
 requires = [
     "setuptools>=68",
     "wheel",
     "grpcio-tools>=1.78.0",
+    "protobuf>=3.20",
 ]
 build-backend = "setuptools.build_meta"
