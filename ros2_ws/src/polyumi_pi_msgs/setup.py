@@ -38,6 +38,10 @@ setup(
     name=package_name,
     version='0.0.1',
     packages=find_packages(exclude=['test']),
+    include_package_data=True,
+    package_data={
+        package_name: ['*.proto', '*.pyi'],
+    },
     data_files=[
         (
             'share/ament_index/resource_index/packages',

@@ -1,3 +1,21 @@
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.ruff.lint]
+select = ["E", "F", "D", "W"]
+ignore = [
+    "D203",  # one-blank-line-before-class, conflicts with D211
+    "D212",  # multi-line-summary-second-line, conflicts with D212
+    "E203",  # whitespace before ':'
+    "E402",
+    "F401",  # unused import
+    "F403",  # from ... import * used; unable to detect undefined names
+    "D105",  # missing docstring in magic method
+]
+
 [tool.uv.workspace]
 members = ["postprocess"]
 
