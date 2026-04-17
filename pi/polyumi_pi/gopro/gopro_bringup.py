@@ -3,14 +3,15 @@
 
 """Entrypoint for taking a video demo."""
 
-import argparse
 import asyncio
+import os
 from datetime import datetime
-from pathlib import Path
+
+# Set locale to en_US for open_gopro WiFi driver compatibility
+os.environ['LANG'] = 'en_US.UTF-8'
 
 from open_gopro import WirelessGoPro
 from open_gopro.models import constants, proto
-from open_gopro.util import add_cli_args_and_parse
 from open_gopro.util.logger import setup_logging
 from rich.console import Console
 
@@ -18,6 +19,7 @@ console = Console()
 
 
 async def main() -> None:
+    """Bring-up function."""
     logger = setup_logging(__name__)
     gopro: WirelessGoPro | None = None
 
@@ -28,6 +30,7 @@ async def main() -> None:
     identifier = 'GoPro 7444'
 
     try:
+        logger.info(f'Connecting to {identifier}...')
         async with WirelessGoPro(
             identifier,
             interfaces={
@@ -60,7 +63,7 @@ async def main() -> None:
             await gopro.ble_command.set_shutter(shutter=constants.Toggle.DISABLE)
 
     except Exception as e:  # pylint: disable = broad-except
-        logger.error(repr(e))
+        logger.exception(e)
 
     if gopro:
         await gopro.close()
