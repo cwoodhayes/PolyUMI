@@ -15,6 +15,9 @@
 hostname: polyumi-pi
 manage_etc_hosts: true
 
+keyboard:
+  layout: us
+
 users:
   - name: pi
     groups: [adm, dialout, sudo, audio, video, plugdev, input, render, netdev, gpio, i2c, spi]
@@ -23,15 +26,21 @@ users:
     lock_passwd: false
     plain_text_passwd: 'polyumi!'
     ssh_authorized_keys:
-      - ssh-ed25519 AAAA...  # replace with your public key
+      - ssh-ed25519 AAAA...  # TODO replace with your public key
 
 # Disable password auth over SSH since we use keys; console login still works
 ssh_pwauth: false
+# Additional Raspberry Pi OS option (not available on generic cloud-init images)
+enable_ssh: true  # Enables the SSH server on first boot
+
+# TODO set the system timezone (set this to your local timezone for accurate timestamps in logs, etc.)
+timezone: America/Chicago
 
 # picamera2 must come from apt (not pip) — it links against libcamera system libs.
 # libportaudio2 is the backend required by sounddevice.
 # libcamera-apps-lite provides rpicam-still / rpicam-vid for camera debugging.
 packages:
+  - vim
   - git
   - rsync
   - curl

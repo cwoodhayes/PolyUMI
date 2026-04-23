@@ -7,9 +7,11 @@
 
 version: 2
 wifis:
+  renderer: NetworkManager     # required on Raspberry Pi OS (uses NM, not wpa_supplicant)
   wlan0:
     dhcp4: true
     optional: true
+    regulatory-domain: "US"    # ISO 3166 country code — change to match your location
     access-points:
       "YourSSID":
         password: "YourPassword"

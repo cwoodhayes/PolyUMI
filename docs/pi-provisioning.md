@@ -48,12 +48,14 @@ This is the only file you should need to edit before flashing.
 
 Download [RPi Imager](https://www.raspberrypi.com/software/), connect your SD card to your PC, run the imager, and navigate through the menus to apply the following settings:
 - Device: Raspberry Pi Zero 2W
-- OS: Raspberry Pi OS (other) -> Raspberry Pi OS (Legacy, 64-bit) Lite (Debian Bookworm port)
+- OS: Raspberry Pi OS (other) -> Raspberry Pi OS (Legacy, 64-bit) Lite (**Debian Bookworm port**)
 - Then on next section ("Customization" -- the first page at time of writing is "Enter your hostname"), hit "SKIP CUSTOMIZATION" in the bottom left corner. The cloud-init workflow handles all OS-level configuration.
 
 ### 3. Copy cloud-init files to the boot partition
 
-After flashing, the SD card's `bootfs` partition auto-mounts. On Linux it's typically at `/media/$USER/bootfs`; on macOS it's `/Volumes/bootfs`. (If it doesn't show up, mount the "bootfs" drive in Nautilus or Finder or the command line.)
+After flashing, the SD card's `bootfs` partition auto-mounts. On Linux it's typically at `/media/$USER/bootfs`; on macOS it's `/Volumes/bootfs`. (If it doesn't show up, unplug and plug back in the SD, then mount the "bootfs" drive in Nautilus or Finder or the command line.)
+
+**Before copying `user-data` below, you should change the system timezone to your local timezone for accurate timestamps in logs, etc.**
 
 Then copy the following files:
 
