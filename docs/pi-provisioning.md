@@ -51,7 +51,7 @@ Then edit both files in your IDE before copying to the SD card:
 
 Download [RPi Imager](https://www.raspberrypi.com/software/), connect your SD card to your PC, run the imager, and navigate through the menus to apply the following settings:
 - Device: Raspberry Pi Zero 2W
-- OS: Raspberry Pi OS (other) -> Raspberry Pi OS (Legacy, 64-bit) Lite (**Debian Bookworm port**)
+- OS: Raspberry Pi OS (other) -> Raspberry Pi OS Lite (**Debian Trixie port, 2025**)
 - Then on next section ("Customization" -- the first page at time of writing is "Enter your hostname"), hit "SKIP CUSTOMIZATION" in the bottom left corner. The cloud-init workflow handles all OS-level configuration.
 
 ### 3. Copy cloud-init files to the boot partition
