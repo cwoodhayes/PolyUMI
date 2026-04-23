@@ -77,9 +77,11 @@ uv venv --system-site-packages
 uv sync --no-dev
 uv pip install -e ~/polyumi_pi_msgs
 uv pip install -e .
+source .venv/bin/activate
 ```
 
 `picamera2` must be installed via `apt`, not pip — the `--system-site-packages` flag above pulls it in from the system.
+(this apt install & others is handled by the `cloud-init` [provisioning](docs/pi-provisioning.md) workflow).
 
 **Tip for development:** add the `deploy.sh` invocation to `.vscode/tasks.json` as a build task so it runs on every save.
 
