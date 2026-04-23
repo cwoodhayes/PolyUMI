@@ -1,7 +1,19 @@
-# video.py/Open GoPro, Version 2.0 (C) Copyright 2021 GoPro, Inc. (http://gopro.com/OpenGoPro).
-# This copyright was auto-generated on Wed, Sep  1, 2021  5:05:46 PM
+"""
+GoPro bring-up script.
 
-"""Entrypoint for taking a video demo."""
+Connects to a GoPro over BLE, syncs its clock, and fires a short recording.
+Originally written to exercise the GoPro integration during initial bring-up;
+kept around as a standalone debug tool for diagnosing connection issues without
+the rest of the PolyUMI stack running.
+
+The opengopro is a bit finicky & light on documentation, so this is a useful reference.
+
+Usage::
+
+    python gopro_bringup.py
+
+Set ``identifier`` to the last four digits of the target camera's serial number.
+"""
 
 import asyncio
 import os
