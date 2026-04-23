@@ -33,16 +33,19 @@ See [README.md](/README.md) for more on next steps.
 - Your SSH public key (`cat ~/.ssh/id_ed25519.pub`)
 - WiFi credentials for the network the Pi will join
 
-### 1. Fill in your SSH key
+### 1. Create your local config files
 
-Edit [`infra/cloud-init/user-data`](../infra/cloud-init/user-data) and replace the placeholder:
+Both `user-data` and `network-config` are gitignored (they contain personal details). Create them from the committed examples:
 
-```yaml
-ssh_authorized_keys:
-  - ssh-ed25519 AAAA...  # ← replace this line
+```bash
+cp infra/cloud-init/user-data.example infra/cloud-init/user-data
+cp infra/cloud-init/network-config.example infra/cloud-init/network-config
 ```
 
-This is the only file you should need to edit before flashing.
+Then edit both files in your IDE before copying to the SD card:
+
+- **`user-data`**: replace the SSH key placeholder with your public key (`cat ~/.ssh/id_ed25519.pub`)
+- **`network-config`**: fill in your WiFi SSID, password, and `regulatory-domain` country code
 
 ### 2. Flash Raspberry Pi OS
 
@@ -55,18 +58,13 @@ Download [RPi Imager](https://www.raspberrypi.com/software/), connect your SD ca
 
 After flashing, the SD card's `bootfs` partition auto-mounts. On Linux it's typically at `/media/$USER/bootfs`; on macOS it's `/Volumes/bootfs`. (If it doesn't show up, unplug and plug back in the SD, then mount the "bootfs" drive in Nautilus or Finder or the command line.)
 
-**Before copying `user-data` below, you should change the system timezone to your local timezone for accurate timestamps in logs, etc.**
-
-Then copy the following files:
+Copy your locally-configured files to the SD card:
 
 ```bash
 # from the repo root:
 cp infra/cloud-init/user-data /media/$USER/bootfs/
+cp infra/cloud-init/network-config /media/$USER/bootfs/
 touch /media/$USER/bootfs/meta-data        # required by cloud-init, can be empty
-
-# WiFi credentials (gitignored — do not commit with real values):
-cp infra/cloud-init/network-config.example /media/$USER/bootfs/network-config
-# edit /media/$USER/bootfs/network-config and fill in your SSID and password
 ```
 
 Safely eject the SD card.
@@ -96,22 +94,7 @@ lsmod | grep pwm
 
 ### 6. Deploy app code and install Python deps
 
-From your dev machine:
-
-```bash
-./deploy.sh polyumi-pi.local
-```
-
-Then on the Pi:
-
-```bash
-cd ~/pi
-uv venv --system-site-packages    # picks up system python3-picamera2
-uv sync --no-dev
-uv pip install -e ~/polyumi_pi_msgs
-```
-
-The Pi is ready. Run `python polyumi_pi/main.py stream` to verify.
+Return to the [README](/README.md#rpi) for the next steps of deploying code, installing Python dependencies, and running the app.
 
 ## Reference
 
