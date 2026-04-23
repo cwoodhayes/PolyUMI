@@ -15,36 +15,58 @@ Usage::
         await gopro.stop_recording()
 """
 
-import os
 from datetime import datetime
 from types import TracebackType
-
-# open_gopro's WiFi driver reads LANG at import time; BLE-only mode still
-# triggers the import, so set it before the first import of the package.
-os.environ.setdefault('LANG', 'en_US.UTF-8')
-
-from open_gopro import WirelessGoPro
-from open_gopro.models import constants, proto
+from typing import Any
 
 
 class GoProWrapper:
+    """Async context manager for BLE-only GoPro control."""
+
     def __init__(self, identifier: str) -> None:
+        """
+        Initialize GoProWrapper.
+
+        Args:
+            identifier: Last four digits of the GoPro's serial number.
+
+        """
+        from open_gopro import WirelessGoPro
+        from open_gopro.models import constants, proto
+
+        self._WirelessGoPro = WirelessGoPro
+        self._constants = constants
+        self._proto = proto
         self._identifier = identifier
-        self._gopro: WirelessGoPro | None = None
+        self._gopro: Any = None
 
     async def __aenter__(self) -> 'GoProWrapper':
-        self._gopro = WirelessGoPro(
-            self._identifier,
-            interfaces={WirelessGoPro.Interface.BLE},
-            # Suppresses a spurious sudo prompt from the WiFi adapter __init__,
-            # which runs even in BLE-only mode. Any non-empty string works on
-            # systems with passwordless sudo (as configured by cloud-init on the Pi).
-            host_sudo_password='unused',
-        )
+        import os
+
+        # open_gopro's WiFi adapter calls ensure_us_english() during __init__,
+        # even in BLE-only mode, and raises if LANG != en_US.*. Temporarily
+        # override just for the duration of WirelessGoPro construction so the
+        # rest of the process keeps its original locale.
+        _original_lang = os.environ.get('LANG')
+        try:
+            os.environ['LANG'] = 'en_US.UTF-8'
+            self._gopro = self._WirelessGoPro(
+                self._identifier,
+                interfaces={self._WirelessGoPro.Interface.BLE},
+                # Suppresses a spurious sudo prompt from the WiFi adapter __init__,
+                # which runs even in BLE-only mode. Any non-empty string works on
+                # systems with passwordless sudo (as configured by cloud-init on the Pi).
+                host_sudo_password='unused',
+            )
+        finally:
+            if _original_lang is None:
+                os.environ.pop('LANG', None)
+            else:
+                os.environ['LANG'] = _original_lang
         await self._gopro.__aenter__()
         await self._gopro.is_ready
         await self._gopro.ble_command.set_camera_control(
-            camera_control_status=proto.EnumCameraControlStatus.CAMERA_EXTERNAL_CONTROL
+            camera_control_status=self._proto.EnumCameraControlStatus.CAMERA_EXTERNAL_CONTROL
         )
         return self
 
@@ -58,7 +80,7 @@ class GoProWrapper:
             await self._gopro.__aexit__(exc_type, exc_val, exc_tb)
             self._gopro = None
 
-    def _require_connected(self) -> WirelessGoPro:
+    def _require_connected(self) -> Any:
         if self._gopro is None:
             raise RuntimeError('GoProWrapper must be used as an async context manager.')
         return self._gopro
@@ -79,9 +101,9 @@ class GoProWrapper:
     async def start_recording(self) -> None:
         """Start GoPro video recording."""
         gopro = self._require_connected()
-        await gopro.ble_command.set_shutter(shutter=constants.Toggle.ENABLE)
+        await gopro.ble_command.set_shutter(shutter=self._constants.Toggle.ENABLE)
 
     async def stop_recording(self) -> None:
         """Stop GoPro video recording."""
         gopro = self._require_connected()
-        await gopro.ble_command.set_shutter(shutter=constants.Toggle.DISABLE)
+        await gopro.ble_command.set_shutter(shutter=self._constants.Toggle.DISABLE)
