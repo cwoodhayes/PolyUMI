@@ -61,6 +61,8 @@ source install/setup.bash
 
 ### RPi
 
+> **First time setting up a new Pi?** See [docs/pi-provisioning.md](docs/pi-provisioning.md) for the automated cloud-init workflow that handles OS-level configuration (packages, audio HAT driver, PWM overlay, uv) before you run the steps below.
+
 Deploy code to the Pi (run from repo root on your PC). This also stamps the current git commit hash into the Pi package:
 
 ```bash
@@ -75,9 +77,11 @@ uv venv --system-site-packages
 uv sync --no-dev
 uv pip install -e ~/polyumi_pi_msgs
 uv pip install -e .
+source .venv/bin/activate
 ```
 
 `picamera2` must be installed via `apt`, not pip — the `--system-site-packages` flag above pulls it in from the system.
+(this apt install & others is handled by the `cloud-init` [provisioning](docs/pi-provisioning.md) workflow).
 
 **Tip for development:** add the `deploy.sh` invocation to `.vscode/tasks.json` as a build task so it runs on every save.
 

@@ -3,6 +3,7 @@ postprocess/recordings/
 
 # generated files
 pi/polyumi_pi/_version.py
+cohn_db.json
 
 # matt doesn't like ide config stuff :(
 .idea
@@ -221,3 +222,5 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+infra/cloud-init/network-config
+infra/cloud-init/user-data
