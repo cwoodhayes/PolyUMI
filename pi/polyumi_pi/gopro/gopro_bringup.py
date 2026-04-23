@@ -36,6 +36,11 @@ async def main() -> None:
             interfaces={
                 WirelessGoPro.Interface.BLE,
             },
+            # Suppresses a sudo prompt from the wifi adapter's __init__, which runs
+            # even in BLE-only mode. Any non-empty string works on systems with
+            # passwordless sudo (like our pi, as configured by cloud-init).
+            # the library's "validation" succeeds regardless.
+            host_sudo_password='unused',
         ) as gopro:
             await gopro.is_ready
             logger.info(f'Connected to GoPro: {gopro.identifier}')
