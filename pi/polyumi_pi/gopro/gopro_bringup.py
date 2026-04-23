@@ -24,10 +24,10 @@ async def main() -> None:
     gopro: WirelessGoPro | None = None
 
     # arm gopro
-    # identifier = 'GoPro 1112'
+    # identifier = '1112'
 
     # gripper gopro
-    identifier = 'GoPro 7444'
+    identifier = '7444'
 
     try:
         logger.info(f'Connecting to {identifier}...')
