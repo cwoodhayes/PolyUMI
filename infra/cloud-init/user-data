@@ -1,0 +1,73 @@
+#cloud-config
+#
+# PolyUMI Raspberry Pi — first-boot configuration.
+#
+# Usage:
+#   1. Flash Raspberry Pi OS Bookworm (64-bit, Lite) with RPi Imager (no customisations needed).
+#   2. Before first boot, copy this file and network-config to the bootfs partition:
+#        cp user-data /Volumes/bootfs/          # macOS
+#        touch /Volumes/bootfs/meta-data        # required (can be empty)
+#        cp network-config /Volumes/bootfs/     # WiFi credentials (not committed)
+#   3. Boot the Pi and wait for cloud-init to finish (~2-5 min).
+#   4. From your dev machine: ./deploy.sh polyumi-pi.local
+#   5. SSH in and run:  cd ~/pi && uv sync --system-site-packages
+
+hostname: polyumi-pi
+manage_etc_hosts: true
+
+users:
+  - name: pi
+    groups: [adm, dialout, sudo, audio, video, plugdev, input, render, netdev, gpio, i2c, spi]
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: false
+    plain_text_passwd: 'polyumi!'
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAA...  # replace with your public key
+
+# Disable password auth over SSH since we use keys; console login still works
+ssh_pwauth: false
+
+# picamera2 must come from apt (not pip) — it links against libcamera system libs.
+# libportaudio2 is the backend required by sounddevice.
+# libcamera-apps-lite provides rpicam-still / rpicam-vid for camera debugging.
+packages:
+  - git
+  - rsync
+  - curl
+  - dkms                  # required by WM8960 audio HAT installer
+  - python3-picamera2
+  - python3-libcamera
+  - libcamera-apps-lite
+  - libportaudio2
+
+package_update: true
+package_upgrade: true
+
+write_files:
+  # Hardware PWM — required by rpi-hardware-pwm (LED / gripper control).
+  # GPIO12 = PWM0, GPIO13 = PWM1. Pins 12/13 chosen to free GPIO18/19 for
+  # the WM8960 audio HAT, which uses those pins for I2S.
+  # Verify after boot with: lsmod | grep pwm  (expect pwm_bcm2835)
+  - path: /boot/firmware/config.txt
+    content: |
+      dtoverlay=pwm-2chan,pin=12,func=4,pin2=13,func2=4
+    append: true
+
+  # Load brcmfmac WiFi driver on boot — needed on some Pi hardware revisions
+  # where the driver isn't auto-loaded and WiFi doesn't appear on first scan.
+  - path: /etc/modules-load.d/brcmfmac.conf
+    content: |
+      brcmfmac
+
+runcmd:
+  # WM8960 audio HAT — kernel default driver doesn't work; use Waveshare DKMS driver.
+  # Validate after boot: arecord -D hw:wm8960soundcard -r 48000 -f S16_LE -c 2 -d 5 test.wav
+  - git clone https://github.com/waveshare/WM8960-Audio-HAT /tmp/WM8960-Audio-HAT
+  - bash /tmp/WM8960-Audio-HAT/install.sh
+  # Install uv for the pi user
+  - sudo -u pi bash -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+  # Create recordings directory
+  - sudo -u pi mkdir -p /home/pi/recordings
+
+final_message: "PolyUMI Pi cloud-init complete after $UPTIME seconds. See docs/pi-provisioning.md for next steps."

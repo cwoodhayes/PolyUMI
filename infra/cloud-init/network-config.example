@@ -1,0 +1,17 @@
+# network-config.example
+#
+# Copy to network-config (no extension) on the bootfs partition.
+# DO NOT commit network-config with real credentials — keep it local.
+#
+# Supports multiple APs; Pi will connect to whichever is in range.
+
+version: 2
+wifis:
+  wlan0:
+    dhcp4: true
+    optional: true
+    access-points:
+      "YourSSID":
+        password: "YourPassword"
+      "LabSSID":
+        password: "LabPassword"

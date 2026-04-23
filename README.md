@@ -61,6 +61,8 @@ source install/setup.bash
 
 ### RPi
 
+> **First time setting up a new Pi?** See [docs/pi-provisioning.md](docs/pi-provisioning.md) for the automated cloud-init workflow that handles OS-level configuration (packages, audio HAT driver, PWM overlay, uv) before you run the steps below.
+
 Deploy code to the Pi (run from repo root on your PC). This also stamps the current git commit hash into the Pi package:
 
 ```bash

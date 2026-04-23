@@ -51,12 +51,8 @@ async def main() -> None:
             else:
                 int_offset = 0
             dst = bool(now.astimezone().dst())
-            logger.info(
-                f'Setting GoPro date/time to {now} with tz offset {tz_offset} ({int_offset}) and dst {dst}'
-            )
-            await gopro.ble_command.set_date_time_tz_dst(
-                date_time=now, tz_offset=int_offset, is_dst=bool(dst)
-            )
+            logger.info(f'Setting GoPro date/time to {now} with tz offset {tz_offset} ({int_offset}) and dst {dst}')
+            await gopro.ble_command.set_date_time_tz_dst(date_time=now, tz_offset=int_offset, is_dst=bool(dst))
 
             await gopro.ble_command.set_shutter(shutter=constants.Toggle.ENABLE)
             await asyncio.sleep(2)
