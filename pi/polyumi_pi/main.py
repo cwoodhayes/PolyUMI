@@ -8,6 +8,7 @@ Usage:
     python pi_streamer.py stream --port 5555 --width 640 --height 480 --fps 10
 """
 
+import asyncio
 import logging
 import multiprocessing
 import os
@@ -22,8 +23,8 @@ from led_manager import LEDManager
 from rich.logging import RichHandler
 from rich.prompt import Confirm
 
-from polyumi_pi.files.audio import AudioFile
 from polyumi_pi.files.session import DEFAULT_SESSION_BASE_DIR, SessionFiles
+from polyumi_pi.gopro.gopro_wrapper import GoProWrapper
 
 logging.basicConfig(
     level=os.environ.get('LOG_LEVEL', 'INFO').upper(),
@@ -312,6 +313,35 @@ def record_episode(
             f'Session finalized (t={session.metadata.duration_s}). '
             f'Data saved to {session.path}'
         )
+
+
+@app.command()
+def record_gopro(
+    identifier: str = typer.Option(..., help='Last four digits of the GoPro serial number.'),
+    duration: float = typer.Option(..., help='Recording duration in seconds.'),
+    sync_clock: bool = typer.Option(True, help='Sync GoPro clock to system time before recording.'),
+):
+    """
+    Trigger a timed GoPro recording over BLE.
+
+    Connects to the GoPro, optionally syncs its clock, starts recording,
+    waits for *duration* seconds, then stops recording.
+    """
+    log.info(f'Log level: {logging.getLevelName(log.level)}')
+
+    async def _run() -> None:
+        async with GoProWrapper(identifier) as gopro:
+            log.info(f'Connected to GoPro {identifier}')
+            if sync_clock:
+                await gopro.set_timestamp()
+                log.info('GoPro clock synced to system time')
+            log.info(f'Starting GoPro recording for {duration}s...')
+            await gopro.start_recording()
+            await asyncio.sleep(duration)
+            await gopro.stop_recording()
+            log.info('GoPro recording stopped')
+
+    asyncio.run(_run())
 
 
 @app.command('clean-sessions')
