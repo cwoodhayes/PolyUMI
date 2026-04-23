@@ -1,11 +1,11 @@
 # Raspberry Pi Provisioning
 
-This project uses [cloud-init](https://cloudinit.readthedocs.io/) to automate first-boot Pi setup. The config lives at [`infra/cloud-init/user-data`](../infra/cloud-init/user-data) and is version-controlled alongside the code. Flashing a new Pi takes about 10 minutes of hands-off time.
+This project uses [cloud-init](https://cloudinit.readthedocs.io/) to automate first-boot Pi setup. The version-controlled template lives at [`infra/cloud-init/user-data.example`](../infra/cloud-init/user-data.example); you create your local [`infra/cloud-init/user-data`](../infra/cloud-init/user-data) from it before flashing. Flashing a new Pi takes about 5-10 minutes of mostly hands-off time.
 
 ## What cloud-init handles automatically
 
 - Hostname, user account, SSH authorized keys, passwordless sudo
-- Sets up password-based login + shell access using monitor and keyboard (but disables password login over ssh) -- password = "polyumi!
+- Sets up password-based login + shell access using monitor and keyboard (but disables password login over ssh) -- `password = "polyumi!"`
 - `apt` packages & upgrades
 - Hardware PWM setup
 - Audio HAT DKMS driver setup (Waveshare installer)
