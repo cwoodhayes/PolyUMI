@@ -15,6 +15,7 @@ import multiprocessing
 import os
 import shutil
 from multiprocessing.connection import Connection
+from uuid import uuid4
 
 import typer
 import zmq
@@ -520,16 +521,18 @@ def start_scene(
 
     async def _run() -> None:
         driver = RaspiDriver()
+        scene_id = str(uuid4())
         try:
             async with contextlib.AsyncExitStack() as stack:
                 if not no_gopro:
                     gopro = await stack.enter_async_context(
-                        GoProWrapper(gopro_identifier, mac_address=gopro_mac)
+                        GoProWrapper(gopro_identifier, mac_address=gopro_mac)  # pyright: ignore[reportArgumentType]
                     )
                     log.info('GoPro connected')
                 else:
                     gopro = None
 
+                log.info(f'Starting scene {scene_id}...')
                 session_count = 0
                 while True:
                     log.info('Press button to start recording...')
@@ -539,6 +542,7 @@ def start_scene(
                     session = SessionFiles.create()
                     session.metadata.robot = robot
                     session.metadata.task = task
+                    session.metadata.scene_id = scene_id
                     session.init_audio(
                         sample_rate=sample_rate,
                         channels=channels,
@@ -571,9 +575,9 @@ def start_scene(
                             f'Data saved to {session.path}'
                         )
         except (KeyboardInterrupt, asyncio.CancelledError):
-            log.info('Scene stopped.')
+            log.info(f'Scene {scene_id} stopped.')
         except Exception as e:
-            log.error(f'Unexpected error during scene: {e}', exc_info=True)
+            log.error(f'Unexpected error during scene {scene_id}: {e}', exc_info=True)
         finally:
             driver.close()
 
