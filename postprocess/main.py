@@ -108,6 +108,17 @@ def fetch(
 
     log.info(f'Done. Fetched {len(to_fetch)} session(s) to {output_dir}.')
 
+    log.info('Checking for GoPro SD card...')
+    try:
+        fetch_gopro(
+            recordings_dir=output_dir,
+            mount_point=None,
+            threshold_ms=DEFAULT_THRESHOLD_MS,
+            latest=False,
+        )
+    except typer.Exit:
+        pass
+
 
 @app.command()
 def process_video(
@@ -225,10 +236,6 @@ def fetch_gopro(
         None,
         help='GoPro SD card mount point. Auto-detected when omitted.',
     ),
-    output_name: str = typer.Option(
-        'gopro.mp4',
-        help='Filename to copy the GoPro video as inside each session directory.',
-    ),
     threshold_ms: float = typer.Option(
         DEFAULT_THRESHOLD_MS,
         help='Maximum allowed delta (ms) between gopro_sync_time and the inferred recording start.',
@@ -257,6 +264,7 @@ def fetch_gopro(
     skipped_existing: list[str] = []
     skipped_no_sync: list[str] = []
 
+    output_name = 'gopro.mp4'
     for session_dir in session_dirs:
         if (session_dir / output_name).exists():
             skipped_existing.append(session_dir.name)
