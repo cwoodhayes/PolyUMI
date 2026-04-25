@@ -46,12 +46,12 @@ def fetch(
     host: str = typer.Option(DEFAULT_HOST, help='SSH hostname of the Pi.'),
     output_dir: pathlib.Path = typer.Option(
         DEFAULT_RECORDINGS_DIR,
-        help='Local directory to write sessions into.',
+        help='Local directory to write scenes into.',
     ),
     latest: bool = typer.Option(
         False,
         '--latest',
-        help='Only fetch the latest session.',
+        help='Only fetch the latest scene.',
     ),
     verbose_transfer: bool = typer.Option(
         False,
