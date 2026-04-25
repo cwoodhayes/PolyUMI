@@ -17,9 +17,9 @@ from multiprocessing.connection import Connection
 
 import typer
 import zmq
-from audio_streamer import AudioStreamer
-from cam_streamer import CameraStreamer
-from led_manager import LEDManager
+from polyumi_pi.audio_streamer import AudioStreamer
+from polyumi_pi.cam_streamer import CameraStreamer
+from polyumi_pi.led_manager import LEDManager
 from rich.logging import RichHandler
 from rich.prompt import Confirm
 

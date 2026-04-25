@@ -69,7 +69,7 @@ Deploy code to the Pi (run from repo root on your PC). This also stamps the curr
 ./deploy.sh <pi_ssh_hostname>
 ```
 
-Then on the Pi, install the Python environment:
+Then on the Pi, install the Python environment and the `polyumi-pi` script:
 
 ```bash
 cd ~/pi
@@ -90,7 +90,7 @@ source .venv/bin/activate
 On the Pi, from the `~/pi` directory:
 
 ```bash
-python polyumi_pi/main.py record-episode
+polyumi-pi record-episode
 ```
 
 This writes a timestamped `session_YYYY-MM-DD_HH-MM-SS/` directory to `~/recordings/` containing:
@@ -145,7 +145,7 @@ Streams camera, audio, and GoPro wrist camera into Foxglove.
 On the Pi:
 
 ```bash
-python polyumi_pi/main.py stream
+polyumi-pi stream
 ```
 
 On the PC:
