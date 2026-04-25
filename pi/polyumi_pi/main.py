@@ -93,7 +93,7 @@ async def _record_session_async(
     chunk_ms: int,
     channels: int,
     led: LEDManager,
-    stop_coro=None,  # awaitable; if None, runs until process exit / Ctrl+C
+    stop_fn=None,  # zero-arg async callable; invoked only once processes are running
 ) -> None:
     """
     Drive one recording session: start processes, wait for the stop signal, then clean up.
@@ -136,8 +136,8 @@ async def _record_session_async(
         audio_process.start()
         audio_child_conn.close()
 
-        if stop_coro is not None:
-            await stop_coro
+        if stop_fn is not None:
+            await stop_fn()
         else:
             # Use to_thread so the event loop stays alive for BLE keepalives.
             await asyncio.gather(
@@ -566,7 +566,7 @@ def start_scene(
                             chunk_ms=chunk_ms,
                             channels=channels,
                             led=led,
-                            stop_coro=driver.wait_for_press(),
+                            stop_fn=driver.wait_for_press,
                         )
                     finally:
                         session.finalize()
@@ -610,7 +610,10 @@ def clean_sessions():
 
     removed = 0
     for path in targets:
-        if path.is_dir():
+        if path.is_symlink():
+            path.unlink()
+            removed += 1
+        elif path.is_dir():
             shutil.rmtree(path)
             removed += 1
         elif path.is_file():

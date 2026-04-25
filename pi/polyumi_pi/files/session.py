@@ -66,7 +66,7 @@ class SessionFiles(SessionDataABC):
         # using local tz for folder names since this is a human readable
         # helpful name.
         folder_name = metadata.created_at.astimezone().strftime(
-            r'session_%Y-%m-%d_%H-%M-%S'
+            r'session_%Y-%m-%d_%H-%M-%S_' + metadata.session_id[:4]
         )
         path = base_dir / folder_name
         if not path.is_dir():

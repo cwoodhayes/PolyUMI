@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import pathlib
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -9,6 +10,8 @@ from uuid import uuid4
 
 from polyumi_pi.files.base import SessionDataABC
 from polyumi_pi.files.session import DEFAULT_RECORDINGS_DIR, SessionFiles
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -66,7 +69,9 @@ class SceneFiles(SessionDataABC):
                     sessions.append(session)
                     if not scene_id:
                         scene_id = session.metadata.scene_id
-                except Exception:
+                except Exception as err:
+                    log.error(f'Error loading session from {child}: {err}')
+                    log.exception(err)
                     pass
 
         return cls(path=path, scene_id=scene_id, sessions=sessions)
