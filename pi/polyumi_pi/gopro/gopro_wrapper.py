@@ -104,6 +104,10 @@ class GoProWrapper:
                 fast_cls = _get_fast_ble_controller()
                 fast_cls._target_mac = self._mac_address  # type: ignore[attr-defined]
                 kwargs['ble_adapter'] = fast_cls
+            elif _fast_ble_controller_cls is not None:
+                # Clear any stale MAC left by a previous connection so a later
+                # mac_address=None call doesn't silently take the fast path.
+                _fast_ble_controller_cls._target_mac = None  # type: ignore[attr-defined]
 
             self._gopro = self._WirelessGoPro(self._identifier, **kwargs)
         finally:
@@ -125,6 +129,8 @@ class GoProWrapper:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
+        if _fast_ble_controller_cls is not None:
+            _fast_ble_controller_cls._target_mac = None  # type: ignore[attr-defined]
         if self._gopro is not None:
             await self._gopro.__aexit__(exc_type, exc_val, exc_tb)
             self._gopro = None
