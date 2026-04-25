@@ -10,12 +10,15 @@ Usage:
 import logging
 import os
 import pathlib
+import shutil
 import subprocess
 
 import typer
 from polyumi_pi.files.session import SessionFiles
 from rich.logging import RichHandler
 from rich.prompt import Confirm
+
+from gopro_fetch import DEFAULT_THRESHOLD_MS, find_gopro_video
 
 logging.basicConfig(
     level=os.environ.get('LOG_LEVEL', 'INFO').upper(),
@@ -94,11 +97,7 @@ def _list_remote_sessions(host: str) -> list[str]:
         text=True,
         check=True,
     )
-    return [
-        s
-        for name in result.stdout.splitlines()
-        if (s := name.strip()).startswith('session_')
-    ]
+    return [s for name in result.stdout.splitlines() if (s := name.strip()).startswith('session_')]
 
 
 def _encode_session_video(
@@ -123,10 +122,7 @@ def _encode_session_video(
             fps = float(session.metadata.camera_fps)
             log.info(f'Using fps from metadata for {session_path.name}: {fps}')
     except Exception as e:
-        log.warning(
-            f'Could not load metadata for {session_path.name}: {e}. '
-            f'Using --fps={fps}.'
-        )
+        log.warning(f'Could not load metadata for {session_path.name}: {e}. Using --fps={fps}.')
 
     output_path = session_path / output_name
     audio_path = session_path / 'audio.wav'
@@ -252,10 +248,7 @@ def process_video(
     ),
     fps: float = typer.Option(
         10.0,
-        help=(
-            'Framerate to use for the output video. '
-            'Overridden by session metadata if present.'
-        ),
+        help=('Framerate to use for the output video. Overridden by session metadata if present.'),
     ),
     output_name: str = typer.Option(
         VIDEO_OUTPUT_NAME,
@@ -282,10 +275,7 @@ def process_all(
     ),
     fps: float = typer.Option(
         10.0,
-        help=(
-            'Framerate to use for output videos. '
-            'Overridden by session metadata if present.'
-        ),
+        help=('Framerate to use for output videos. Overridden by session metadata if present.'),
     ),
     output_name: str = typer.Option(
         VIDEO_OUTPUT_NAME,
@@ -307,11 +297,7 @@ def process_all(
         log.error(f'Recordings directory not found: {recordings_dir}')
         raise typer.Exit(1)
 
-    session_dirs = sorted(
-        p
-        for p in recordings_dir.iterdir()
-        if p.is_dir() and p.name.startswith('session_')
-    )
+    session_dirs = sorted(p for p in recordings_dir.iterdir() if p.is_dir() and p.name.startswith('session_'))
     if not session_dirs:
         log.info(f'No session_* directories found in {recordings_dir}')
         raise typer.Exit()
@@ -331,16 +317,11 @@ def process_all(
 
     if already_processed:
         if force:
-            log.info(
-                f'Reprocessing {len(already_processed)} session(s) '
-                'with existing outputs due to --force.'
-            )
+            log.info(f'Reprocessing {len(already_processed)} session(s) with existing outputs due to --force.')
         else:
             log.info(f'Skipping {len(already_processed)} already processed session(s).')
     if missing_video:
-        log.warning(
-            f'Skipping {len(missing_video)} session(s) without a video directory.'
-        )
+        log.warning(f'Skipping {len(missing_video)} session(s) without a video directory.')
 
     if not to_process:
         log.info('No unprocessed sessions found.')
@@ -360,10 +341,100 @@ def process_all(
             failures.append((session_dir, str(e)))
             log.error(f'Failed {session_dir.name}: {e}')
 
-    log.info(
-        f'Completed. Success: {len(to_process) - len(failures)}, '
-        f'Failed: {len(failures)}.'
-    )
+    log.info(f'Completed. Success: {len(to_process) - len(failures)}, Failed: {len(failures)}.')
+    if failures:
+        raise typer.Exit(1)
+
+
+@app.command(name='fetch-gopro')
+def fetch_gopro(
+    recordings_dir: pathlib.Path = typer.Option(
+        DEFAULT_RECORDINGS_DIR,
+        help='Directory containing session_* folders.',
+    ),
+    mount_point: pathlib.Path | None = typer.Option(
+        None,
+        help='GoPro SD card mount point. Auto-detected when omitted.',
+    ),
+    output_name: str = typer.Option(
+        'gopro.mp4',
+        help='Filename to copy the GoPro video as inside each session directory.',
+    ),
+    threshold_ms: float = typer.Option(
+        DEFAULT_THRESHOLD_MS,
+        help='Maximum allowed delta (ms) between gopro_sync_time and the inferred recording start.',
+    ),
+    latest: bool = typer.Option(
+        False,
+        '--latest',
+        help='Only process the most recent session.',
+    ),
+):
+    """Copy GoPro SD card footage into session directories that don't already have it."""
+    recordings_dir = recordings_dir.resolve()
+    if not recordings_dir.is_dir():
+        log.error(f'Recordings directory not found: {recordings_dir}')
+        raise typer.Exit(1)
+
+    session_dirs = sorted(p for p in recordings_dir.iterdir() if p.is_dir() and p.name.startswith('session_'))
+    if not session_dirs:
+        log.info(f'No session_* directories found in {recordings_dir}')
+        raise typer.Exit()
+
+    if latest:
+        session_dirs = [session_dirs[-1]]
+
+    to_process: list[pathlib.Path] = []
+    skipped_existing: list[str] = []
+    skipped_no_sync: list[str] = []
+
+    for session_dir in session_dirs:
+        if (session_dir / output_name).exists():
+            skipped_existing.append(session_dir.name)
+            continue
+        try:
+            session = SessionFiles.from_file(session_dir)
+        except Exception as exc:
+            log.warning(f'Could not load metadata for {session_dir.name}: {exc}')
+            continue
+        if session.metadata.gopro_sync_time is None:
+            skipped_no_sync.append(session_dir.name)
+            continue
+        to_process.append(session_dir)
+
+    if skipped_existing:
+        log.info(f'Skipping {len(skipped_existing)} session(s) that already have {output_name}.')
+    if skipped_no_sync:
+        log.info(f'Skipping {len(skipped_no_sync)} session(s) with no gopro_sync_time: ' + ', '.join(skipped_no_sync))
+
+    if not to_process:
+        log.info('Nothing to do.')
+        raise typer.Exit()
+
+    log.info(f'{len(to_process)} session(s) to process.')
+
+    failures: list[tuple[str, str]] = []
+    for i, session_dir in enumerate(to_process, 1):
+        session = SessionFiles.from_file(session_dir)
+        sync_time = session.metadata.gopro_sync_time
+        assert sync_time is not None  # filtered above
+        log.info(f'[{i}/{len(to_process)}] {session_dir.name} (sync_time={sync_time.isoformat()})')
+        try:
+            src = find_gopro_video(
+                start_time=sync_time,
+                mount_point=mount_point,
+                threshold_ms=threshold_ms,
+            )
+        except (FileNotFoundError, RuntimeError) as exc:
+            log.error(f'  Failed: {exc}')
+            failures.append((session_dir.name, str(exc)))
+            continue
+
+        dst = session_dir / output_name
+        shutil.copy2(src, dst)
+        log.info(f'  -> {dst}')
+
+    log.info(f'Done. Success: {len(to_process) - len(failures)}, Failed: {len(failures)}.')
     if failures:
         raise typer.Exit(1)
 
