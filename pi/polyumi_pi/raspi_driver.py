@@ -23,10 +23,10 @@ class RaspiDriver:
 
     def __init__(self, bounce_time_ms: int = 50) -> None:
         """Initialize GPIO button on pin 23 and indicator LED on pin 25."""
-        from gpiozero import LED, Button
+        from gpiozero import PWMLED, Button
 
         self._button = Button(self.BUTTON_PIN, bounce_time=bounce_time_ms / 1000)
-        self._indicator = LED(self.INDICATOR_PIN)
+        self._indicator = PWMLED(self.INDICATOR_PIN)
 
     async def wait_for_press(self) -> None:
         """Wait asynchronously for a single button press."""
@@ -45,7 +45,7 @@ class RaspiDriver:
         elif state is IndicatorState.READY:
             self._indicator.on()
         elif state is IndicatorState.RECORDING:
-            self._indicator.blink(on_time=0.8, off_time=0.2)
+            self._indicator.pulse()
 
     def close(self) -> None:
         """Release GPIO resources."""
