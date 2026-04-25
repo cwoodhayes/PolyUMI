@@ -9,6 +9,7 @@ description = "Raspberry Pi streaming client for the PolyUMI multimodal learning
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.135.1",
+    "gpiozero>=2.0",
     "numpy>=2.4.3",
     "open-gopro",
     "opencv-python-headless>=4.12.0.88",
