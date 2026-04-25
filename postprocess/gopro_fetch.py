@@ -31,15 +31,22 @@ def _find_gopro_mount() -> pathlib.Path | None:
     for root in _MOUNT_ROOTS:
         if not root.is_dir():
             continue
-        for child in root.iterdir():
-            if not child.is_dir():
+        try:
+            children = list(root.iterdir())
+        except (PermissionError, OSError):
+            continue
+        for child in children:
+            try:
+                if not child.is_dir():
+                    continue
+                # Direct mount (e.g. /mnt/gopro) or one level deeper (/media/<user>/<label>)
+                if (child / GOPRO_VIDEO_SUBDIR).is_dir():
+                    return child
+                for grandchild in child.iterdir():
+                    if grandchild.is_dir() and (grandchild / GOPRO_VIDEO_SUBDIR).is_dir():
+                        return grandchild
+            except (PermissionError, OSError):
                 continue
-            # Direct mount (e.g. /mnt/gopro) or one level deeper (/media/<user>/<label>)
-            if (child / GOPRO_VIDEO_SUBDIR).is_dir():
-                return child
-            for grandchild in child.iterdir():
-                if grandchild.is_dir() and (grandchild / GOPRO_VIDEO_SUBDIR).is_dir():
-                    return grandchild
     return None
 
 
@@ -100,7 +107,9 @@ def find_gopro_video(
         mount_point = _find_gopro_mount()
         if mount_point is None:
             raise FileNotFoundError(
-                'No GoPro SD card found under common mount roots. Mount the SD card or pass mount_point explicitly.'
+                'No GoPro SD card found under /media, /run/media, or /mnt.\n'
+                'Are you sure you\'ve both inserted AND mounted the SD card? '
+                'You can also pass --mount-point explicitly if it is mounted elsewhere.'
             )
         log.info(f'Auto-detected GoPro SD card at {mount_point}')
 
