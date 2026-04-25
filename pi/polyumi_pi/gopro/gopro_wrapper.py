@@ -85,18 +85,25 @@ class GoProWrapper:
             raise RuntimeError('GoProWrapper must be used as an async context manager.')
         return self._gopro
 
-    async def set_timestamp(self, dt: datetime | None = None) -> None:
-        """Sync the GoPro clock. Uses the current system time when *dt* is None."""
+    async def set_timestamp(self, dt: datetime | None = None) -> datetime:
+        """
+        Sync the GoPro clock. Uses the current system time when *dt* is None.
+
+        Returns:
+            The datetime that was sent to the GoPro.
+
+        """
         gopro = self._require_connected()
-        dt = dt or datetime.now()
-        tz_offset = dt.astimezone().utcoffset()
-        int_offset = int(tz_offset.total_seconds() // 3600) if tz_offset is not None else 0
-        is_dst = bool(dt.astimezone().dst())
+        dt = (dt or datetime.now()).astimezone()
+        tz_offset = dt.utcoffset()
+        int_offset = int(tz_offset.total_seconds() // 60) if tz_offset is not None else 0
+        is_dst = bool(dt.dst())
         await gopro.ble_command.set_date_time_tz_dst(
             date_time=dt,
             tz_offset=int_offset,
             is_dst=is_dst,
         )
+        return dt
 
     async def start_recording(self) -> None:
         """Start GoPro video recording."""

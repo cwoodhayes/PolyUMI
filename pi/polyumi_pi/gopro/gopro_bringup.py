@@ -36,10 +36,10 @@ async def main() -> None:
     gopro: WirelessGoPro | None = None
 
     # arm gopro
-    # identifier = '1112'
+    identifier = '1112'
 
     # gripper gopro
-    identifier = '7444'
+    # identifier = '7444'
 
     try:
         logger.info(f'Connecting to {identifier}...')
@@ -61,10 +61,10 @@ async def main() -> None:
                 camera_control_status=proto.EnumCameraControlStatus.CAMERA_EXTERNAL_CONTROL
             )
 
-            now = datetime.now()
-            tz_offset = now.astimezone().utcoffset()
-            int_offset = int(tz_offset.total_seconds() // 3600) if tz_offset is not None else 0
-            dst = bool(now.astimezone().dst())
+            now = datetime.now().astimezone()
+            tz_offset = now.utcoffset()
+            int_offset = int(tz_offset.total_seconds() // 60) if tz_offset is not None else 0
+            dst = bool(now.dst())
             logger.info(f'Setting GoPro date/time to {now} with tz offset {tz_offset} ({int_offset}) and dst {dst}')
             await gopro.ble_command.set_date_time_tz_dst(date_time=now, tz_offset=int_offset, is_dst=bool(dst))
 
