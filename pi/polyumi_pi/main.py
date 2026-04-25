@@ -24,6 +24,7 @@ from rich.logging import RichHandler
 from rich.prompt import Confirm
 
 from polyumi_pi.files.session import DEFAULT_SESSION_BASE_DIR, SessionFiles
+from polyumi_pi.gopro.gopro_config import GoProConfig, load_gopro_config, save_gopro_config
 from polyumi_pi.gopro.gopro_wrapper import GoProWrapper
 
 logging.basicConfig(
@@ -130,6 +131,52 @@ def info():
     log.info(CameraStreamer.info())
 
 
+@app.command('scan-gopro')
+def scan_gopro():
+    """Scan for nearby GoPro devices and save connection info for faster future connections."""
+    import asyncio as _asyncio
+
+    import bleak
+    from rich.prompt import Prompt
+
+    async def _run() -> None:
+        log.info('Scanning for BLE devices (5s)...')
+        discovered = await bleak.BleakScanner.discover(timeout=5, return_adv=True)
+        gopros = []
+        for _, (device, adv) in discovered.items():
+            name = adv.local_name or device.name or ''
+            if name.startswith('GoPro'):
+                gopros.append((device, name))
+
+        if not gopros:
+            log.error('No GoPro devices found. Make sure the GoPro is powered on.')
+            raise typer.Exit(1)
+
+        if len(gopros) == 1:
+            device, name = gopros[0]
+            log.info(f'Found: {name} ({device.address})')
+        else:
+            for i, (device, name) in enumerate(gopros):
+                typer.echo(f'  [{i}] {name}  {device.address}')
+            raw = Prompt.ask('Select GoPro', default='0')
+            try:
+                idx = int(raw)
+                device, name = gopros[idx]
+            except (ValueError, IndexError):
+                log.error(f'Invalid selection: {raw!r}')
+                raise typer.Exit(1)
+
+        # Extract the 4-digit identifier from the device name ("GoPro 7444" → "7444")
+        parts = name.split()
+        identifier = parts[-1] if len(parts) >= 2 else ''
+
+        config = GoProConfig(name=name, mac_address=device.address, identifier=identifier)
+        save_gopro_config(config)
+        log.info(f'Saved: {name}  MAC={device.address}  id={identifier}')
+
+    _asyncio.run(_run())
+
+
 @app.command()
 def stream_video(
     port: int = typer.Option(5555, help='ZMQ PUSH port to bind on.'),
@@ -228,8 +275,9 @@ def record_episode(
         'polyumi_gripper', help='Name of the robot being recorded.'
     ),
     task: str = typer.Option('unspecified', help='Name of the task being recorded.'),
-    gopro_identifier: str = typer.Option(
-        ..., help='Last four digits of the GoPro serial number.'
+    gopro_identifier: str | None = typer.Option(
+        None,
+        help='Last four digits of the GoPro serial number. Defaults to saved scan-gopro config.',
     ),
 ):
     """
@@ -238,6 +286,16 @@ def record_episode(
     Intended for use on PolyUMI gripper during data recording.
     """
     log.info(f'Log level: {logging.getLevelName(log.level)}')
+
+    gopro_mac: str | None = None
+    if gopro_identifier is None:
+        config = load_gopro_config()
+        if config is None:
+            log.error('No --gopro-identifier provided and no saved GoPro config found. Run scan-gopro first.')
+            raise typer.Exit(1)
+        gopro_identifier = config.identifier
+        gopro_mac = config.mac_address
+        log.info(f'Using saved GoPro config: {config.name} ({config.mac_address})')
 
     session = SessionFiles.create()
     session.metadata.robot = robot
@@ -264,7 +322,7 @@ def record_episode(
         audio_parent_conn: Connection | None = None
 
         try:
-            async with GoProWrapper(gopro_identifier) as gopro:
+            async with GoProWrapper(gopro_identifier, mac_address=gopro_mac) as gopro:
                 log.info('GoPro connected')
                 sync_time = await gopro.set_timestamp()
                 session.set_gopro_sync_time(sync_time)
@@ -351,7 +409,10 @@ def record_episode(
 
 @app.command()
 def record_gopro(
-    identifier: str = typer.Option(..., help='Last four digits of the GoPro serial number.'),
+    identifier: str | None = typer.Option(
+        None,
+        help='Last four digits of the GoPro serial number. Defaults to saved scan-gopro config.',
+    ),
     duration: float = typer.Option(..., help='Recording duration in seconds.'),
     sync_clock: bool = typer.Option(True, help='Sync GoPro clock to system time before recording.'),
 ):
@@ -363,8 +424,18 @@ def record_gopro(
     """
     log.info(f'Log level: {logging.getLevelName(log.level)}')
 
+    gopro_mac: str | None = None
+    if identifier is None:
+        config = load_gopro_config()
+        if config is None:
+            log.error('No --identifier provided and no saved GoPro config found. Run scan-gopro first.')
+            raise typer.Exit(1)
+        identifier = config.identifier
+        gopro_mac = config.mac_address
+        log.info(f'Using saved GoPro config: {config.name} ({config.mac_address})')
+
     async def _run() -> None:
-        async with GoProWrapper(identifier) as gopro:
+        async with GoProWrapper(identifier, mac_address=gopro_mac) as gopro:
             log.info(f'Connected to GoPro {identifier}')
             if sync_clock:
                 await gopro.set_timestamp()

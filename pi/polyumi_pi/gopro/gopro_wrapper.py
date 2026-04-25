@@ -13,22 +13,62 @@ Usage::
         await gopro.start_recording()
         ...
         await gopro.stop_recording()
+
+Pass *mac_address* to skip BLE scanning and connect directly by MAC address,
+which is significantly faster when the target device is already known::
+
+    async with GoProWrapper('7444', mac_address='XX:XX:XX:XX:XX:XX') as gopro:
+        ...
 """
 
 from datetime import datetime
 from types import TracebackType
 from typing import Any
 
+# Lazily populated the first time GoProWrapper is opened with a mac_address.
+_fast_ble_controller_cls: type | None = None
+
+
+def _get_fast_ble_controller() -> type:
+    """Return (lazily) a BleakWrapperController subclass whose scan() uses find_device_by_address()."""
+    global _fast_ble_controller_cls
+    if _fast_ble_controller_cls is not None:
+        return _fast_ble_controller_cls
+
+    from open_gopro.network.ble import FailedToFindDevice
+    from open_gopro.network.ble.adapters.bleak_wrapper import BleakWrapperController
+
+    class _FastBleController(BleakWrapperController):
+        # Set to a MAC address string before __aenter__ to skip scanning.
+        _target_mac: str | None = None
+
+        async def scan(self, token: Any, timeout: int = 5, service_uuids: Any = None) -> Any:
+            if type(self)._target_mac is not None:
+                import bleak
+
+                device = await bleak.BleakScanner.find_device_by_address(
+                    type(self)._target_mac, timeout=timeout  # type: ignore
+                )
+                if device is not None:
+                    return device
+                raise FailedToFindDevice
+            return await super().scan(token, timeout, service_uuids)
+
+    _fast_ble_controller_cls = _FastBleController
+    return _fast_ble_controller_cls
+
 
 class GoProWrapper:
     """Async context manager for BLE-only GoPro control."""
 
-    def __init__(self, identifier: str) -> None:
+    def __init__(self, identifier: str, mac_address: str | None = None) -> None:
         """
         Initialize GoProWrapper.
 
         Args:
             identifier: Last four digits of the GoPro's serial number.
+            mac_address: BLE MAC address. When provided, BLE scanning is skipped
+                and the device is located directly, saving several seconds.
 
         """
         from open_gopro import WirelessGoPro
@@ -38,6 +78,7 @@ class GoProWrapper:
         self._constants = constants
         self._proto = proto
         self._identifier = identifier
+        self._mac_address = mac_address
         self._gopro: Any = None
 
     async def __aenter__(self) -> 'GoProWrapper':
@@ -50,19 +91,27 @@ class GoProWrapper:
         _original_lang = os.environ.get('LANG')
         try:
             os.environ['LANG'] = 'en_US.UTF-8'
-            self._gopro = self._WirelessGoPro(
-                self._identifier,
-                interfaces={self._WirelessGoPro.Interface.BLE},
+
+            kwargs: dict[str, Any] = {
+                'interfaces': {self._WirelessGoPro.Interface.BLE},
                 # Suppresses a spurious sudo prompt from the WiFi adapter __init__,
                 # which runs even in BLE-only mode. Any non-empty string works on
                 # systems with passwordless sudo (as configured by cloud-init on the Pi).
-                host_sudo_password='unused',
-            )
+                'host_sudo_password': 'unused',
+            }
+
+            if self._mac_address:
+                fast_cls = _get_fast_ble_controller()
+                fast_cls._target_mac = self._mac_address  # type: ignore[attr-defined]
+                kwargs['ble_adapter'] = fast_cls
+
+            self._gopro = self._WirelessGoPro(self._identifier, **kwargs)
         finally:
             if _original_lang is None:
                 os.environ.pop('LANG', None)
             else:
                 os.environ['LANG'] = _original_lang
+
         await self._gopro.__aenter__()
         await self._gopro.is_ready
         await self._gopro.ble_command.set_camera_control(
