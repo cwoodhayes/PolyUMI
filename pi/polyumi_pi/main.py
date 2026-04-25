@@ -15,7 +15,6 @@ import multiprocessing
 import os
 import shutil
 from multiprocessing.connection import Connection
-from uuid import uuid4
 
 import typer
 import zmq
@@ -24,7 +23,8 @@ from rich.prompt import Confirm
 
 from polyumi_pi.audio_streamer import AudioStreamer
 from polyumi_pi.cam_streamer import CameraStreamer
-from polyumi_pi.files.session import DEFAULT_SESSION_BASE_DIR, SessionFiles
+from polyumi_pi.files.scene import SceneFiles
+from polyumi_pi.files.session import DEFAULT_RECORDINGS_DIR, SessionFiles
 from polyumi_pi.gopro.gopro_config import GoProConfig, load_gopro_config, save_gopro_config
 from polyumi_pi.gopro.gopro_wrapper import GoProWrapper
 from polyumi_pi.led_manager import LEDManager
@@ -390,10 +390,12 @@ def record_episode(
         gopro_mac = config.mac_address
         log.info(f'Using saved GoPro config: {config.name} ({config.mac_address})')
 
-    session = SessionFiles.create()
+    scene = SceneFiles.create()
+    session = scene.create_session()
     session.metadata.robot = robot
     session.metadata.task = task
 
+    log.info(f'Created scene at {scene.path}')
     log.info(f'Created session with ID {session.metadata.session_id} at {session.path}')
     session.init_audio(
         sample_rate=sample_rate,
@@ -517,11 +519,12 @@ def start_scene(
             gopro_mac = config.mac_address
             log.info(f'Using saved GoPro config: {config.name} ({config.mac_address})')
 
+    scene = SceneFiles.create()
+    log.info(f'Created scene at {scene.path}')
     led = LEDManager()
 
     async def _run() -> None:
         driver = RaspiDriver()
-        scene_id = str(uuid4())
         try:
             async with contextlib.AsyncExitStack() as stack:
                 if not no_gopro:
@@ -532,17 +535,15 @@ def start_scene(
                 else:
                     gopro = None
 
-                log.info(f'Starting scene {scene_id}...')
                 session_count = 0
                 while True:
                     log.info('Press button to start recording...')
                     await driver.wait_for_press()
                     session_count += 1
 
-                    session = SessionFiles.create()
+                    session = scene.create_session()
                     session.metadata.robot = robot
                     session.metadata.task = task
-                    session.metadata.scene_id = scene_id
                     session.init_audio(
                         sample_rate=sample_rate,
                         channels=channels,
@@ -575,30 +576,33 @@ def start_scene(
                             f'Data saved to {session.path}'
                         )
         except (KeyboardInterrupt, asyncio.CancelledError):
-            log.info(f'Scene {scene_id} stopped.')
+            log.info(f'Scene {scene.scene_id} stopped.')
         except Exception as e:
-            log.error(f'Unexpected error during scene {scene_id}: {e}', exc_info=True)
+            log.error(f'Unexpected error during scene {scene.scene_id}: {e}', exc_info=True)
         finally:
             driver.close()
 
     asyncio.run(_run())
 
 
-@app.command('clean-sessions')
+@app.command('clean')
 def clean_sessions():
-    """Delete all session recordings in the default session directory."""
-    base_dir = DEFAULT_SESSION_BASE_DIR
+    """Delete all scene recordings in the default recordings directory."""
+    base_dir = DEFAULT_RECORDINGS_DIR
     if not base_dir.exists():
-        log.info(f'No session directory found at {base_dir}')
+        log.info(f'No recordings directory found at {base_dir}')
         return
 
-    targets = list(base_dir.glob('session_*'))
+    targets = list(base_dir.glob('scene_*'))
+    latest = base_dir / 'latest'
+    if latest.is_symlink() or latest.exists():
+        targets.append(latest)
     if not targets:
-        log.info(f'No session entries found in {base_dir}')
+        log.info(f'No scene entries found in {base_dir}')
         return
 
     if not Confirm.ask(
-        f'Delete {len(targets)} session entries in {base_dir}?',
+        f'Delete {len(targets)} scene entries in {base_dir}?',
         default=False,
     ):
         log.info('Aborted cleaning sessions.')
@@ -613,7 +617,7 @@ def clean_sessions():
             path.unlink()
             removed += 1
 
-    log.info(f'Removed {removed} session entries from {base_dir}')
+    log.info(f'Removed {removed} scene entries from {base_dir}')
 
 
 if __name__ == '__main__':
