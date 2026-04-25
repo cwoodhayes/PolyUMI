@@ -1,8 +1,11 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "polyumi_pi"
 version = "0.1.0"
 description = "Raspberry Pi streaming client for the PolyUMI multimodal learning platform"
-readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.135.1",
@@ -17,6 +20,9 @@ dependencies = [
     "typer>=0.24.1",
     "uvicorn>=0.41.0",
 ]
+
+[project.scripts]
+polyumi-pi = "polyumi_pi.main:app"
 
 [dependency-groups]
 # this should be installed using apt on the Pi, not pip

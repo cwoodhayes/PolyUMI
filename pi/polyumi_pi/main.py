@@ -8,6 +8,7 @@ Usage:
     python pi_streamer.py stream --port 5555 --width 640 --height 480 --fps 10
 """
 
+import asyncio
 import logging
 import multiprocessing
 import os
@@ -16,14 +17,15 @@ from multiprocessing.connection import Connection
 
 import typer
 import zmq
-from audio_streamer import AudioStreamer
-from cam_streamer import CameraStreamer
-from led_manager import LEDManager
+from polyumi_pi.audio_streamer import AudioStreamer
+from polyumi_pi.cam_streamer import CameraStreamer
+from polyumi_pi.led_manager import LEDManager
 from rich.logging import RichHandler
 from rich.prompt import Confirm
 
-from polyumi_pi.files.audio import AudioFile
 from polyumi_pi.files.session import DEFAULT_SESSION_BASE_DIR, SessionFiles
+from polyumi_pi.gopro.gopro_config import GoProConfig, load_gopro_config, save_gopro_config
+from polyumi_pi.gopro.gopro_wrapper import GoProWrapper
 
 logging.basicConfig(
     level=os.environ.get('LOG_LEVEL', 'INFO').upper(),
@@ -129,6 +131,52 @@ def info():
     log.info(CameraStreamer.info())
 
 
+@app.command('scan-gopro')
+def scan_gopro():
+    """Scan for nearby GoPro devices and save connection info for faster future connections."""
+    import asyncio as _asyncio
+
+    import bleak
+    from rich.prompt import Prompt
+
+    async def _run() -> None:
+        log.info('Scanning for BLE devices (5s)...')
+        discovered = await bleak.BleakScanner.discover(timeout=5, return_adv=True)
+        gopros = []
+        for _, (device, adv) in discovered.items():
+            name = adv.local_name or device.name or ''
+            if name.startswith('GoPro'):
+                gopros.append((device, name))
+
+        if not gopros:
+            log.error('No GoPro devices found. Make sure the GoPro is powered on.')
+            raise typer.Exit(1)
+
+        if len(gopros) == 1:
+            device, name = gopros[0]
+            log.info(f'Found: {name} ({device.address})')
+        else:
+            for i, (device, name) in enumerate(gopros):
+                typer.echo(f'  [{i}] {name}  {device.address}')
+            raw = Prompt.ask('Select GoPro', default='0')
+            try:
+                idx = int(raw)
+                device, name = gopros[idx]
+            except (ValueError, IndexError):
+                log.error(f'Invalid selection: {raw!r}')
+                raise typer.Exit(1)
+
+        # Extract the 4-digit identifier from the device name ("GoPro 7444" → "7444")
+        parts = name.split()
+        identifier = parts[-1] if len(parts) >= 2 else ''
+
+        config = GoProConfig(name=name, mac_address=device.address, identifier=identifier)
+        save_gopro_config(config)
+        log.info(f'Saved: {name}  MAC={device.address}  id={identifier}')
+
+    _asyncio.run(_run())
+
+
 @app.command()
 def stream_video(
     port: int = typer.Option(5555, help='ZMQ PUSH port to bind on.'),
@@ -227,6 +275,10 @@ def record_episode(
         'polyumi_gripper', help='Name of the robot being recorded.'
     ),
     task: str = typer.Option('unspecified', help='Name of the task being recorded.'),
+    gopro_identifier: str | None = typer.Option(
+        None,
+        help='Last four digits of the GoPro serial number. Defaults to saved scan-gopro config.',
+    ),
 ):
     """
     Record an episode; video and audio data is routed to local files.
@@ -235,7 +287,16 @@ def record_episode(
     """
     log.info(f'Log level: {logging.getLevelName(log.level)}')
 
-    # instantiate a session.
+    gopro_mac: str | None = None
+    if gopro_identifier is None:
+        config = load_gopro_config()
+        if config is None:
+            log.error('No --gopro-identifier provided and no saved GoPro config found. Run scan-gopro first.')
+            raise typer.Exit(1)
+        gopro_identifier = config.identifier
+        gopro_mac = config.mac_address
+        log.info(f'Using saved GoPro config: {config.name} ({config.mac_address})')
+
     session = SessionFiles.create()
     session.metadata.robot = robot
     session.metadata.task = task
@@ -253,65 +314,139 @@ def record_episode(
         height=CameraStreamer.CAPTURE_HEIGHT,
     )
     led = LEDManager()
-    cam_process: multiprocessing.Process | None = None
-    audio_process: multiprocessing.Process | None = None
-    video_parent_conn: Connection | None = None
-    audio_parent_conn: Connection | None = None
 
-    try:
-        led_brightness = 1.0
-        session.metadata.led_brightness = led_brightness
-        led.set_brightness(led_brightness)
-        log.info('Starting camera streamer...')
-        video_parent_conn, video_child_conn = multiprocessing.Pipe(duplex=False)
-        cam_process = multiprocessing.Process(
-            target=_run_video_streamer,
-            args=(None, fps, session, video_child_conn),
-        )
-        cam_process.start()
-        video_child_conn.close()
+    async def _run() -> None:
+        cam_process: multiprocessing.Process | None = None
+        audio_process: multiprocessing.Process | None = None
+        video_parent_conn: Connection | None = None
+        audio_parent_conn: Connection | None = None
 
-        log.info('Starting audio streamer...')
-        audio_parent_conn, audio_child_conn = multiprocessing.Pipe(duplex=False)
-        audio_process = multiprocessing.Process(
-            target=_run_audio_streamer,
-            args=(None, sample_rate, chunk_ms, channels, session, audio_child_conn),
-        )
-        audio_process.start()
-        audio_child_conn.close()
+        try:
+            async with GoProWrapper(gopro_identifier, mac_address=gopro_mac) as gopro:
+                log.info('GoPro connected')
+                sync_time = await gopro.set_timestamp()
+                session.set_gopro_sync_time(sync_time)
+                log.info(f'GoPro clock synced to {sync_time.isoformat()}')
 
-        cam_process.join()
-        audio_process.join()
-    except KeyboardInterrupt:
-        log.info('Keyboard interrupt received, stopping child streamers...')
-    finally:
-        _stop_child_process(cam_process)
-        _stop_child_process(audio_process)
+                log.info('Starting GoPro recording...')
+                await gopro.start_recording()
 
-        video_stats = _recv_child_stats(video_parent_conn, name='video')
-        audio_stats = _recv_child_stats(audio_parent_conn, name='audio')
+                try:
+                    led_brightness = 1.0
+                    session.metadata.led_brightness = led_brightness
+                    led.set_brightness(led_brightness)
 
-        if 'n_video_frames' in video_stats:
-            session.metadata.n_video_frames = int(video_stats['n_video_frames'])
-        if 'video_dropped_frames' in video_stats:
-            session.metadata.video_dropped_frames = int(
-                video_stats['video_dropped_frames']
+                    log.info('Starting camera streamer...')
+                    video_parent_conn, video_child_conn = multiprocessing.Pipe(duplex=False)
+                    cam_process = multiprocessing.Process(
+                        target=_run_video_streamer,
+                        args=(None, fps, session, video_child_conn),
+                    )
+                    cam_process.start()
+                    video_child_conn.close()
+
+                    log.info('Starting audio streamer...')
+                    audio_parent_conn, audio_child_conn = multiprocessing.Pipe(duplex=False)
+                    audio_process = multiprocessing.Process(
+                        target=_run_audio_streamer,
+                        args=(None, sample_rate, chunk_ms, channels, session, audio_child_conn),
+                    )
+                    audio_process.start()
+                    audio_child_conn.close()
+
+                    # Use to_thread so the event loop stays alive for BLE keepalives.
+                    await asyncio.gather(
+                        asyncio.to_thread(cam_process.join),
+                        asyncio.to_thread(audio_process.join),
+                    )
+
+                    session.metadata.to_file()
+                except (KeyboardInterrupt, asyncio.CancelledError):
+                    log.info('Keyboard interrupt received, stopping child streamers...')
+                finally:
+                    _stop_child_process(cam_process)
+                    _stop_child_process(audio_process)
+
+                    try:
+                        await gopro.stop_recording()
+                        log.info('GoPro recording stopped')
+                    except BaseException as e:
+                        log.warning(f'Failed to stop GoPro recording: {e}')
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            log.info('Recording interrupted before streamers started.')
+        except Exception as e:
+            log.error(f'Unexpected error during recording: {e}', exc_info=True)
+        finally:
+            video_stats = _recv_child_stats(video_parent_conn, name='video')
+            audio_stats = _recv_child_stats(audio_parent_conn, name='audio')
+
+            if 'n_video_frames' in video_stats:
+                session.metadata.n_video_frames = int(video_stats['n_video_frames'])
+            if 'video_dropped_frames' in video_stats:
+                session.metadata.video_dropped_frames = int(
+                    video_stats['video_dropped_frames']
+                )
+            if video_stats.get('first_frame_metadata') is not None:
+                session.metadata.first_frame_metadata = video_stats['first_frame_metadata']
+            if 'n_audio_chunks' in audio_stats:
+                session.metadata.n_audio_chunks = int(audio_stats['n_audio_chunks'])
+            if 'audio_dropped_chunks' in audio_stats:
+                session.metadata.audio_dropped_chunks = int(
+                    audio_stats['audio_dropped_chunks']
+                )
+            if 'audio_start_time_ns' in audio_stats:
+                session.metadata.audio_start_time_ns = audio_stats['audio_start_time_ns']
+
+            led.set_brightness(0.0)
+            session.finalize()
+            log.info(
+                f'Session finalized (t={session.metadata.duration_s}). '
+                f'Data saved to {session.path}'
             )
-        if 'n_audio_chunks' in audio_stats:
-            session.metadata.n_audio_chunks = int(audio_stats['n_audio_chunks'])
-        if 'audio_dropped_chunks' in audio_stats:
-            session.metadata.audio_dropped_chunks = int(
-                audio_stats['audio_dropped_chunks']
-            )
-        if 'audio_start_time_ns' in audio_stats:
-            session.metadata.audio_start_time_ns = audio_stats['audio_start_time_ns']
 
-        led.set_brightness(0.0)
-        session.finalize()
-        log.info(
-            f'Session finalized (t={session.metadata.duration_s}). '
-            f'Data saved to {session.path}'
-        )
+    asyncio.run(_run())
+
+
+@app.command()
+def record_gopro(
+    identifier: str | None = typer.Option(
+        None,
+        help='Last four digits of the GoPro serial number. Defaults to saved scan-gopro config.',
+    ),
+    duration: float = typer.Option(..., help='Recording duration in seconds.'),
+    sync_clock: bool = typer.Option(True, help='Sync GoPro clock to system time before recording.'),
+):
+    """
+    Trigger a timed GoPro recording over BLE.
+
+    Connects to the GoPro, optionally syncs its clock, starts recording,
+    waits for *duration* seconds, then stops recording.
+    """
+    log.info(f'Log level: {logging.getLevelName(log.level)}')
+
+    gopro_mac: str | None = None
+    if identifier is None:
+        config = load_gopro_config()
+        if config is None:
+            log.error('No --identifier provided and no saved GoPro config found. Run scan-gopro first.')
+            raise typer.Exit(1)
+        identifier = config.identifier
+        gopro_mac = config.mac_address
+        log.info(f'Using saved GoPro config: {config.name} ({config.mac_address})')
+
+    async def _run() -> None:
+        async with GoProWrapper(identifier, mac_address=gopro_mac) as gopro:
+            log.info(f'Connected to GoPro {identifier}')
+            if sync_clock:
+                await gopro.set_timestamp()
+                log.info('GoPro clock synced to system time')
+            log.info(f'Starting GoPro recording for {duration}s...')
+            await gopro.start_recording()
+            await asyncio.sleep(duration)
+            await gopro.stop_recording()
+            log.info('GoPro recording stopped')
+
+    asyncio.run(_run())
 
 
 @app.command('clean-sessions')

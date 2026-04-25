@@ -125,6 +125,10 @@ class SessionFiles(SessionDataABC):
         self.metadata.camera_resolution = (width, height)
         self.metadata.n_video_frames = 0
 
+    def set_gopro_sync_time(self, dt: datetime) -> None:
+        """Record the datetime used to sync the GoPro clock into session metadata."""
+        self.metadata.gopro_sync_time = dt
+
     def finalize(self):
         """Finalize the session by writing metadata to file."""
         if self.metadata.duration_s is None:

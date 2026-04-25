@@ -49,6 +49,8 @@ class SessionMetadata(base.SessionDataABC):
     video_dropped_frames: int | None = None
     audio_dropped_chunks: int | None = None
     led_brightness: float | None = None
+    gopro_sync_time: datetime | None = None
+    first_frame_metadata: dict | None = None
     notes: str | None = None
     task: str | None = None
     robot: str | None = None
@@ -86,6 +88,10 @@ class SessionMetadata(base.SessionDataABC):
             'video_dropped_frames': self.video_dropped_frames,
             'audio_dropped_chunks': self.audio_dropped_chunks,
             'led_brightness': self.led_brightness,
+            'gopro_sync_time': (
+                self.gopro_sync_time.isoformat() if self.gopro_sync_time is not None else None
+            ),
+            'first_frame_metadata': self.first_frame_metadata,
             'notes': self.notes,
             'task': self.task,
             'robot': self.robot,
@@ -103,4 +109,6 @@ class SessionMetadata(base.SessionDataABC):
         data['created_at'] = datetime.fromisoformat(data['created_at'])
         if data['camera_resolution'] is not None:
             data['camera_resolution'] = tuple(data['camera_resolution'])
+        if data.get('gopro_sync_time') is not None:
+            data['gopro_sync_time'] = datetime.fromisoformat(data['gopro_sync_time'])
         return cls(**data)
