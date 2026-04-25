@@ -12,13 +12,9 @@ import os
 import pathlib
 import subprocess
 
-import cv2
-import numpy as np
 import typer
 from polyumi_pi.files.session import SessionFiles
-from polyumi_pi.files.video import _FRAME_GLOB
 from rich.logging import RichHandler
-from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn
 from rich.prompt import Confirm
 
 logging.basicConfig(
@@ -99,9 +95,9 @@ def _list_remote_sessions(host: str) -> list[str]:
         check=True,
     )
     return [
-        name.strip()
+        s
         for name in result.stdout.splitlines()
-        if name.strip().startswith('session_')
+        if (s := name.strip()).startswith('session_')
     ]
 
 
@@ -121,18 +117,16 @@ def _encode_session_video(
         raise RuntimeError(f'No video directory found at {video_dir}')
 
     # prefer fps from session metadata if available
-    metadata_path = session_path / 'metadata.json'
-    if metadata_path.is_file():
-        try:
-            session = SessionFiles.from_file(session_path)
-            if session.metadata.camera_fps is not None:
-                fps = float(session.metadata.camera_fps)
-                log.info(f'Using fps from metadata for {session_path.name}: {fps}')
-        except Exception as e:
-            log.warning(
-                f'Could not load metadata for {session_path.name}: {e}. '
-                f'Using --fps={fps}.'
-            )
+    try:
+        session = SessionFiles.from_file(session_path)
+        if session.metadata.camera_fps is not None:
+            fps = float(session.metadata.camera_fps)
+            log.info(f'Using fps from metadata for {session_path.name}: {fps}')
+    except Exception as e:
+        log.warning(
+            f'Could not load metadata for {session_path.name}: {e}. '
+            f'Using --fps={fps}.'
+        )
 
     output_path = session_path / output_name
     audio_path = session_path / 'audio.wav'
@@ -140,7 +134,7 @@ def _encode_session_video(
 
     cmd = [
         'ffmpeg',
-        '-y',  # overwrite output without asking
+        '-y',
         '-framerate',
         str(fps),
         '-i',
