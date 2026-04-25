@@ -79,7 +79,7 @@ class CameraStreamer:
             log.info(f'Video will be recorded to {self.session.video.path}')
 
         interval = 1.0 / self.fps
-        first_frame_logged = False
+        first_frame_metadata: dict | None = None
         stop_requested = False
         n_video_frames = 0
         n_video_dropped_frames = 0
@@ -106,9 +106,9 @@ class CameraStreamer:
                     data = io.BytesIO()
                     self.cam.capture_file(data, format='jpeg')
                     metadata = self.cam.capture_metadata()
-                    if not first_frame_logged:
-                        log.info(f'First-frame metadata: {metadata}')
-                        first_frame_logged = True
+                    if first_frame_metadata is None:
+                        first_frame_metadata = dict(metadata)
+                        log.info(f'First-frame metadata: {first_frame_metadata}')
                     log.debug(metadata)
 
                     msg = camera_frame_pb2.CameraFrame()
@@ -152,6 +152,7 @@ class CameraStreamer:
                     {
                         'n_video_frames': n_video_frames,
                         'video_dropped_frames': n_video_dropped_frames,
+                        'first_frame_metadata': first_frame_metadata,
                     }
                 )
             finally:

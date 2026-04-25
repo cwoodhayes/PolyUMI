@@ -328,6 +328,8 @@ def record_episode(
                 session.metadata.video_dropped_frames = int(
                     video_stats['video_dropped_frames']
                 )
+            if video_stats.get('first_frame_metadata') is not None:
+                session.metadata.first_frame_metadata = video_stats['first_frame_metadata']
             if 'n_audio_chunks' in audio_stats:
                 session.metadata.n_audio_chunks = int(audio_stats['n_audio_chunks'])
             if 'audio_dropped_chunks' in audio_stats:

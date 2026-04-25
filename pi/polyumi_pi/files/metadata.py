@@ -50,6 +50,7 @@ class SessionMetadata(base.SessionDataABC):
     audio_dropped_chunks: int | None = None
     led_brightness: float | None = None
     gopro_sync_time: datetime | None = None
+    first_frame_metadata: dict | None = None
     notes: str | None = None
     task: str | None = None
     robot: str | None = None
@@ -90,6 +91,7 @@ class SessionMetadata(base.SessionDataABC):
             'gopro_sync_time': (
                 self.gopro_sync_time.isoformat() if self.gopro_sync_time is not None else None
             ),
+            'first_frame_metadata': self.first_frame_metadata,
             'notes': self.notes,
             'task': self.task,
             'robot': self.robot,
