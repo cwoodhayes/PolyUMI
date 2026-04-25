@@ -263,73 +263,86 @@ def record_episode(
         video_parent_conn: Connection | None = None
         audio_parent_conn: Connection | None = None
 
-        async with GoProWrapper(gopro_identifier) as gopro:
-            log.info('GoPro connected')
-            sync_time = await gopro.set_timestamp()
-            session.set_gopro_sync_time(sync_time)
-            log.info(f'GoPro clock synced to {sync_time.isoformat()}')
+        try:
+            async with GoProWrapper(gopro_identifier) as gopro:
+                log.info('GoPro connected')
+                sync_time = await gopro.set_timestamp()
+                session.set_gopro_sync_time(sync_time)
+                log.info(f'GoPro clock synced to {sync_time.isoformat()}')
 
-            log.info('Starting GoPro recording...')
-            await gopro.start_recording()
+                log.info('Starting GoPro recording...')
+                await gopro.start_recording()
 
-            try:
-                led_brightness = 1.0
-                session.metadata.led_brightness = led_brightness
-                led.set_brightness(led_brightness)
+                try:
+                    led_brightness = 1.0
+                    session.metadata.led_brightness = led_brightness
+                    led.set_brightness(led_brightness)
 
-                log.info('Starting camera streamer...')
-                video_parent_conn, video_child_conn = multiprocessing.Pipe(duplex=False)
-                cam_process = multiprocessing.Process(
-                    target=_run_video_streamer,
-                    args=(None, fps, session, video_child_conn),
-                )
-                cam_process.start()
-                video_child_conn.close()
-
-                log.info('Starting audio streamer...')
-                audio_parent_conn, audio_child_conn = multiprocessing.Pipe(duplex=False)
-                audio_process = multiprocessing.Process(
-                    target=_run_audio_streamer,
-                    args=(None, sample_rate, chunk_ms, channels, session, audio_child_conn),
-                )
-                audio_process.start()
-                audio_child_conn.close()
-
-                cam_process.join()
-                audio_process.join()
-            except KeyboardInterrupt:
-                log.info('Keyboard interrupt received, stopping child streamers...')
-            finally:
-                _stop_child_process(cam_process)
-                _stop_child_process(audio_process)
-
-                await gopro.stop_recording()
-                log.info('GoPro recording stopped')
-
-                video_stats = _recv_child_stats(video_parent_conn, name='video')
-                audio_stats = _recv_child_stats(audio_parent_conn, name='audio')
-
-                if 'n_video_frames' in video_stats:
-                    session.metadata.n_video_frames = int(video_stats['n_video_frames'])
-                if 'video_dropped_frames' in video_stats:
-                    session.metadata.video_dropped_frames = int(
-                        video_stats['video_dropped_frames']
+                    log.info('Starting camera streamer...')
+                    video_parent_conn, video_child_conn = multiprocessing.Pipe(duplex=False)
+                    cam_process = multiprocessing.Process(
+                        target=_run_video_streamer,
+                        args=(None, fps, session, video_child_conn),
                     )
-                if 'n_audio_chunks' in audio_stats:
-                    session.metadata.n_audio_chunks = int(audio_stats['n_audio_chunks'])
-                if 'audio_dropped_chunks' in audio_stats:
-                    session.metadata.audio_dropped_chunks = int(
-                        audio_stats['audio_dropped_chunks']
-                    )
-                if 'audio_start_time_ns' in audio_stats:
-                    session.metadata.audio_start_time_ns = audio_stats['audio_start_time_ns']
+                    cam_process.start()
+                    video_child_conn.close()
 
-                led.set_brightness(0.0)
-                session.finalize()
-                log.info(
-                    f'Session finalized (t={session.metadata.duration_s}). '
-                    f'Data saved to {session.path}'
+                    log.info('Starting audio streamer...')
+                    audio_parent_conn, audio_child_conn = multiprocessing.Pipe(duplex=False)
+                    audio_process = multiprocessing.Process(
+                        target=_run_audio_streamer,
+                        args=(None, sample_rate, chunk_ms, channels, session, audio_child_conn),
+                    )
+                    audio_process.start()
+                    audio_child_conn.close()
+
+                    # Use to_thread so the event loop stays alive for BLE keepalives.
+                    await asyncio.gather(
+                        asyncio.to_thread(cam_process.join),
+                        asyncio.to_thread(audio_process.join),
+                    )
+
+                    session.metadata.to_file()
+                except (KeyboardInterrupt, asyncio.CancelledError):
+                    log.info('Keyboard interrupt received, stopping child streamers...')
+                finally:
+                    _stop_child_process(cam_process)
+                    _stop_child_process(audio_process)
+
+                    try:
+                        await gopro.stop_recording()
+                        log.info('GoPro recording stopped')
+                    except BaseException as e:
+                        log.warning(f'Failed to stop GoPro recording: {e}')
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            log.info('Recording interrupted before streamers started.')
+        except Exception as e:
+            log.error(f'Unexpected error during recording: {e}', exc_info=True)
+        finally:
+            video_stats = _recv_child_stats(video_parent_conn, name='video')
+            audio_stats = _recv_child_stats(audio_parent_conn, name='audio')
+
+            if 'n_video_frames' in video_stats:
+                session.metadata.n_video_frames = int(video_stats['n_video_frames'])
+            if 'video_dropped_frames' in video_stats:
+                session.metadata.video_dropped_frames = int(
+                    video_stats['video_dropped_frames']
                 )
+            if 'n_audio_chunks' in audio_stats:
+                session.metadata.n_audio_chunks = int(audio_stats['n_audio_chunks'])
+            if 'audio_dropped_chunks' in audio_stats:
+                session.metadata.audio_dropped_chunks = int(
+                    audio_stats['audio_dropped_chunks']
+                )
+            if 'audio_start_time_ns' in audio_stats:
+                session.metadata.audio_start_time_ns = audio_stats['audio_start_time_ns']
+
+            led.set_brightness(0.0)
+            session.finalize()
+            log.info(
+                f'Session finalized (t={session.metadata.duration_s}). '
+                f'Data saved to {session.path}'
+            )
 
     asyncio.run(_run())
 
