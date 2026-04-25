@@ -46,12 +46,12 @@ def fetch(
     host: str = typer.Option(DEFAULT_HOST, help='SSH hostname of the Pi.'),
     output_dir: pathlib.Path = typer.Option(
         DEFAULT_RECORDINGS_DIR,
-        help='Local directory to write sessions into.',
+        help='Local directory to write scenes into.',
     ),
     latest: bool = typer.Option(
         False,
         '--latest',
-        help='Only fetch the latest session.',
+        help='Only fetch the latest scene.',
     ),
     verbose_transfer: bool = typer.Option(
         False,
@@ -64,22 +64,22 @@ def fetch(
     pi = PiFetch(host)
 
     if latest:
-        session_name = pi.resolve_latest_session()
-        sessions_to_fetch = [session_name]
-        log.info(f'Latest session: {session_name}')
+        scene_name = pi.resolve_latest_scene()
+        scenes_to_fetch = [scene_name]
+        log.info(f'Latest scene: {scene_name}')
     else:
-        log.info(f'Listing sessions on {host}...')
-        sessions_to_fetch = pi.list_remote_sessions()
-        log.info(f'Found {len(sessions_to_fetch)} session(s) on {host}.')
+        log.info(f'Listing scenes on {host}...')
+        scenes_to_fetch = pi.list_remote_scenes()
+        log.info(f'Found {len(scenes_to_fetch)} scene(s) on {host}.')
 
-    if not sessions_to_fetch:
-        log.info('No sessions to fetch.')
+    if not scenes_to_fetch:
+        log.info('No scenes to fetch.')
         raise typer.Exit()
 
-    # filter out already-fetched sessions
+    # filter out already-fetched scenes
     to_fetch = []
     skipped = []
-    for name in sessions_to_fetch:
+    for name in scenes_to_fetch:
         local_path = output_dir / name
         if local_path.exists():
             skipped.append(name)
@@ -87,26 +87,26 @@ def fetch(
             to_fetch.append(name)
 
     if skipped:
-        log.info(f'Skipping {len(skipped)} already-fetched session(s).')
+        log.info(f'Skipping {len(skipped)} already-fetched scene(s).')
 
     if not to_fetch:
         log.info('Nothing new to fetch.')
         raise typer.Exit()
 
-    log.info(f'{len(to_fetch)} session(s) to fetch into {output_dir}.')
+    log.info(f'{len(to_fetch)} scene(s) to fetch into {output_dir}.')
     if not Confirm.ask('Proceed?', default=True):
         log.info('Aborted.')
         raise typer.Exit()
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for i, session_name in enumerate(to_fetch, 1):
-        local_path = output_dir / session_name
-        log.info(f'[{i}/{len(to_fetch)}] Fetching {session_name}...')
-        pi.copy_session(session_name, local_path, verbose=verbose_transfer)
+    for i, scene_name in enumerate(to_fetch, 1):
+        local_path = output_dir / scene_name
+        log.info(f'[{i}/{len(to_fetch)}] Fetching {scene_name}...')
+        pi.copy_scene(scene_name, local_path, verbose=verbose_transfer)
         log.info(f'  -> {local_path}')
 
-    log.info(f'Done. Fetched {len(to_fetch)} session(s) to {output_dir}.')
+    log.info(f'Done. Fetched {len(to_fetch)} scene(s) to {output_dir}.')
 
     log.info('Checking for GoPro SD card...')
     try:
@@ -177,9 +177,15 @@ def process_all(
         log.error(f'Recordings directory not found: {recordings_dir}')
         raise typer.Exit(1)
 
-    session_dirs = sorted(p for p in recordings_dir.iterdir() if p.is_dir() and p.name.startswith('session_'))
+    session_dirs = sorted(
+        p
+        for scene_dir in sorted(recordings_dir.iterdir())
+        if scene_dir.is_dir() and scene_dir.name.startswith('scene_')
+        for p in scene_dir.iterdir()
+        if p.is_dir() and p.name.startswith('session_')
+    )
     if not session_dirs:
-        log.info(f'No session_* directories found in {recordings_dir}')
+        log.info(f'No scene_*/session_* directories found in {recordings_dir}')
         raise typer.Exit()
 
     to_process: list[pathlib.Path] = []
@@ -252,9 +258,15 @@ def fetch_gopro(
         log.error(f'Recordings directory not found: {recordings_dir}')
         raise typer.Exit(1)
 
-    session_dirs = sorted(p for p in recordings_dir.iterdir() if p.is_dir() and p.name.startswith('session_'))
+    session_dirs = sorted(
+        p
+        for scene_dir in sorted(recordings_dir.iterdir())
+        if scene_dir.is_dir() and scene_dir.name.startswith('scene_')
+        for p in scene_dir.iterdir()
+        if p.is_dir() and p.name.startswith('session_')
+    )
     if not session_dirs:
-        log.info(f'No session_* directories found in {recordings_dir}')
+        log.info(f'No scene_*/session_* directories found in {recordings_dir}')
         raise typer.Exit()
 
     if latest:

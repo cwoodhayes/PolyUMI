@@ -11,7 +11,7 @@ from polyumi_pi.files.base import SessionDataABC
 from polyumi_pi.files.metadata import SessionMetadata
 from polyumi_pi.files.video import VideoFile
 
-DEFAULT_SESSION_BASE_DIR = pathlib.Path('~/recordings/').expanduser()
+DEFAULT_RECORDINGS_DIR = pathlib.Path('~/recordings/').expanduser()
 
 
 @dataclass
@@ -52,8 +52,9 @@ class SessionFiles(SessionDataABC):
     @classmethod
     def create(
         cls,
-        base_dir: pathlib.Path = DEFAULT_SESSION_BASE_DIR,
+        base_dir: pathlib.Path = DEFAULT_RECORDINGS_DIR,
         add_latest_symlink: bool = True,
+        scene_id: str | None = None,
     ) -> SessionFiles:
         """Create a new session directory and its associated files."""
         # make a path based on the current ns timestamp
@@ -65,13 +66,15 @@ class SessionFiles(SessionDataABC):
         # using local tz for folder names since this is a human readable
         # helpful name.
         folder_name = metadata.created_at.astimezone().strftime(
-            r'session_%Y-%m-%d_%H-%M-%S'
+            r'session_%Y-%m-%d_%H-%M-%S_' + metadata.session_id[:4]
         )
         path = base_dir / folder_name
         if not path.is_dir():
             path.mkdir(parents=True, exist_ok=True)
 
         metadata.path = path / 'metadata.json'
+        if scene_id is not None:
+            metadata.scene_id = scene_id
 
         session = cls(path=path, metadata=metadata)
         session.metadata.to_file()

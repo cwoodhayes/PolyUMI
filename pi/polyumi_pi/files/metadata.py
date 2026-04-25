@@ -35,6 +35,7 @@ class SessionMetadata(base.SessionDataABC):
     """Abstraction for the metadata file recorded during data collection."""
 
     session_id: str = field(default_factory=lambda: str(uuid4()))
+    scene_id: str = field(default_factory=lambda: str(uuid4()))
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     duration_s: float | None = None
     pi_hostname: str = field(default_factory=lambda: socket.gethostname())
@@ -70,6 +71,7 @@ class SessionMetadata(base.SessionDataABC):
         """Write this metadata to self.path as JSON."""
         data = {
             'session_id': self.session_id,
+            'scene_id': self.scene_id,
             'created_at': self.created_at.isoformat(),
             'duration_s': self.duration_s,
             'pi_hostname': self.pi_hostname,
