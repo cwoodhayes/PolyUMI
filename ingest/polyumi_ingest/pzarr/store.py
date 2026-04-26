@@ -17,6 +17,8 @@ from numcodecs import Blosc
 
 from polyumi_pi.files.session import SessionFiles
 
+from polyumi_ingest.pzarr.scene_files import SceneFiles
+
 numcodecs.register_codec(Jpegxl)
 
 log = logging.getLogger('pzarr')
@@ -143,24 +145,12 @@ def build_scene_zarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> path
 
     Returns the path to the created zarr store.
     """
-    scene_path = scene_path.resolve()
-
-    session_dirs = sorted(p for p in scene_path.iterdir() if p.is_dir() and p.name.startswith('session_'))
-    if not session_dirs:
-        raise RuntimeError(f'No session_* directories found in {scene_path}')
-
-    sessions: list[SessionFiles] = []
-    for d in session_dirs:
-        try:
-            sessions.append(SessionFiles.from_file(d))
-        except Exception as e:
-            log.warning(f'Skipping {d.name}: {e}')
+    scene = SceneFiles.from_path(scene_path)
+    sessions = sorted(scene.sessions, key=lambda s: s.metadata.created_at)
     if not sessions:
-        raise RuntimeError('No valid sessions found.')
-    sessions.sort(key=lambda s: s.metadata.created_at)
+        raise RuntimeError(f'No valid sessions found in {scene_path}')
 
-    zarr_path = scene_path / 'scene.zarr'
-    root = zarr.open_group(str(zarr_path), mode='w', zarr_format=2)
+    root = zarr.open_group(str(scene.zarr_path), mode='w', zarr_format=2)
 
     first_meta = sessions[0].metadata
     root.attrs.update({
@@ -179,7 +169,7 @@ def build_scene_zarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> path
         ep_grp = root.require_group(f'episode_{i}')
         _write_episode(ep_grp, session, skip_gopro)
 
-    return zarr_path
+    return scene.zarr_path
 
 
 @dataclasses.dataclass
@@ -209,8 +199,7 @@ class SceneZarrInfo:
 
 def inspect_scene_zarr(scene_path: pathlib.Path) -> SceneZarrInfo:
     """Open scene.zarr inside scene_path and extract summary info."""
-    scene_path = scene_path.resolve()
-    zarr_path = scene_path / 'scene.zarr' if (scene_path / 'scene.zarr').exists() else scene_path
+    zarr_path = SceneFiles.resolve_zarr_path(scene_path)
     if not zarr_path.exists():
         raise FileNotFoundError(f'No scene.zarr found at {scene_path}')
 
@@ -236,8 +225,14 @@ def inspect_scene_zarr(scene_path: pathlib.Path) -> SceneZarrInfo:
             ts = _arr(ep, 'timestamps/audio')[:]  # type: ignore[assignment]
             audio_ts_range = (float(ts[0]), float(ts[-1]))
 
-        ep_start = float(_arr(ep, 'annotations/episode_start')[()]) if 'annotations/episode_start' in ep else None  # type: ignore[arg-type]
-        ep_end = float(_arr(ep, 'annotations/episode_end')[()]) if 'annotations/episode_end' in ep else None  # type: ignore[arg-type]
+        ep_start = (  # type: ignore[arg-type]
+            float(_arr(ep, 'annotations/episode_start')[()])
+            if 'annotations/episode_start' in ep else None
+        )
+        ep_end = (  # type: ignore[arg-type]
+            float(_arr(ep, 'annotations/episode_end')[()])
+            if 'annotations/episode_end' in ep else None
+        )
         episodes.append(EpisodeInfo(
             index=i,
             finger_shape=_arr(ep, 'finger/frames').shape if 'finger/frames' in ep else None,
@@ -260,7 +255,6 @@ def inspect_scene_zarr(scene_path: pathlib.Path) -> SceneZarrInfo:
 
 def read_frame(scene_path: pathlib.Path, episode: int = 0, frame: int = 0) -> np.ndarray:
     """Read a single frame from scene.zarr; returns (H, W, 3) uint8 RGB array."""
-    scene_path = scene_path.resolve()
-    zarr_path = scene_path / 'scene.zarr' if (scene_path / 'scene.zarr').exists() else scene_path
+    zarr_path = SceneFiles.resolve_zarr_path(scene_path)
     root = zarr.open_group(str(zarr_path), mode='r')
     return _arr(root, f'episode_{episode}/finger/frames')[frame]  # type: ignore[return-value]

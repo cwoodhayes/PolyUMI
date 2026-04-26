@@ -19,6 +19,7 @@ from rich.prompt import Confirm
 
 from polyumi_ingest.gopro_fetch import DEFAULT_THRESHOLD_MS, find_gopro_video
 from polyumi_ingest.pi_fetch import PiFetch
+from polyumi_ingest.pzarr import FINGER_MP4, GOPRO_MP4
 from polyumi_ingest.video_helpers import encode_session_video
 
 logging.basicConfig(
@@ -41,7 +42,6 @@ DEFAULT_HOST = 'pi@polyumi-pi.local'
 
 # put this in the root of the repo
 DEFAULT_RECORDINGS_DIR = pathlib.Path(__file__).parent.parent.parent / 'recordings'
-VIDEO_OUTPUT_NAME = 'finger.mp4'
 
 
 @app.command()
@@ -134,7 +134,7 @@ def process_video(
         help=('Framerate to use for the output video. Overridden by session metadata if present.'),
     ),
     output_name: str = typer.Option(
-        VIDEO_OUTPUT_NAME,
+        FINGER_MP4,
         help='Output video filename (placed in the session directory).',
     ),
     include_audio: bool = typer.Option(
@@ -161,7 +161,7 @@ def process_all(
         help=('Framerate to use for output videos. Overridden by session metadata if present.'),
     ),
     output_name: str = typer.Option(
-        VIDEO_OUTPUT_NAME,
+        FINGER_MP4,
         help='Output video filename to create in each session directory.',
     ),
     include_audio: bool = typer.Option(
@@ -279,7 +279,7 @@ def fetch_gopro(
     skipped_existing: list[str] = []
     skipped_no_sync: list[str] = []
 
-    output_name = 'gopro.mp4'
+    output_name = GOPRO_MP4
     for session_dir in session_dirs:
         if (session_dir / output_name).exists():
             skipped_existing.append(session_dir.name)
