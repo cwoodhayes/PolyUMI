@@ -173,3 +173,7 @@ source .venv/bin/activate
 **Tip for development:** add the `deploy.sh` invocation to `.vscode/tasks.json` as a build task so it runs with Ctrl+Shift+B.
 
 Run `polyumi-pi --help` for a full list of commands.
+
+### Custom OpenGoPro SDK
+
+This repo depends on this custom fork of the `OpenGoPro` library: https://github.com/cwoodhayes/OpenGoPro
