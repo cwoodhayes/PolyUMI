@@ -27,7 +27,7 @@ It combines the [Universal Manipulation Interface (UMI)](https://umi-gripper.git
 
 ```
 pi/               # RPi client: camera, audio, LED streaming + episode recording
-postprocess/      # PC-side CLI: fetch sessions from Pi, encode video
+ingest/           # PC-side CLI: fetch sessions from Pi, encode video
 ros2_ws/
   src/
     polyumi_pi_msgs/   # Protobuf message definitions (camera frame, audio chunk)
@@ -44,7 +44,7 @@ ros2_ws/
 
 ### PC
 
-Install postprocessing dependencies (includes the `polyumi_pi` package for shared data types):
+Install ingest dependencies (includes the `polyumi_pi` package for shared data types):
 
 ```bash
 uv sync --group dev
@@ -73,16 +73,16 @@ After the setup instructions for the gripper above, the `polyumi-pi` systemd ser
 4. Wait until the red indicator LED on the audio HAT lights up red, indicating PolyUMI is ready to record. This may take 30-40 seconds after startup; the pi takes a while to boot.
 5. Press the button on the audio HAT to start recording an episode; the LED will pulse and the GoPro will start recording; press the button again to stop recording. **Do not press the GoPro's shutter button or otherwise interact with the GoPro after powering it on; the pi will handle starting/stopping the GoPro's recording for synchronization.**
 
-## Postprocessing
+## Ingest
 
 From the repo root:
 
 ```bash
-cd postprocess
+cd ingest
 ```
 
 ```bash
-# Show all postprocessing commands:
+# Show all ingest commands:
 python main.py --help
 # Fetch only the latest session from the Pi:
 python main.py fetch --host <pi_ssh_hostname> --latest

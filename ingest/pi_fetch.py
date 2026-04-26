@@ -1,5 +1,5 @@
 """
-postprocess/pi_fetch.py - Fetch recorded scenes from a Raspberry Pi over SSH.
+ingest/pi_fetch.py - Fetch recorded scenes from a Raspberry Pi over SSH.
 
 Scenes are transferred as tar streams to avoid needing rsync on the Pi.
 """

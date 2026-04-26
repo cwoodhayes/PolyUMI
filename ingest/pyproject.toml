@@ -1,7 +1,7 @@
 [project]
-name = "polyumi_postprocess"
+name = "polyumi_ingest"
 version = "0.1.0"
-description = "Postprocessing scripts for PolyUMI data collection"
+description = "Ingest scripts for PolyUMI data collection"
 requires-python = ">=3.13"
 dependencies = [
     "polyumi_pi",

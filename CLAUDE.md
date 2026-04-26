@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PolyUMI is a multimodal data collection system for robot imitation learning. A Raspberry Pi captures synchronized video (PiCamera2) and audio (sounddevice), either streaming live over ZMQ or recording episodes to disk. A host PC receives the stream via ROS2 nodes and visualizes in Foxglove Studio, or postprocesses recorded sessions into MP4s.
+PolyUMI is a multimodal data collection system for robot imitation learning. A Raspberry Pi captures synchronized video (PiCamera2) and audio (sounddevice), either streaming live over ZMQ or recording episodes to disk. A host PC receives the stream via ROS2 nodes and visualizes in Foxglove Studio, or ingests recorded sessions into MP4s.
 
 ## Common Commands
 
@@ -44,9 +44,9 @@ colcon build && source install/setup.bash
 ros2 launch polyumi_ros2 stream_demo.launch.xml
 ```
 
-### Postprocessing (host PC)
+### Ingest (host PC)
 ```bash
-cd postprocess
+cd ingest
 python main.py fetch --host <hostname> --latest
 python main.py process-video recordings/session_YYYY-MM-DD_hh-mm-ss
 python main.py process-all --force
@@ -84,7 +84,7 @@ No streaming. Pi writes its camera and audio to local files. GoPro writes video 
 - **`pi/polyumi_pi/gopro/`** — GoPro integration via open-gopro SDK
 - **`ros2_ws/src/polyumi_pi_msgs/`** — Protobuf definitions (`CameraFrame`, `AudioChunk`) with nanosecond timestamps; generated `*_pb2.py` files live alongside `.proto` sources
 - **`ros2_ws/src/polyumi_ros2/`** — ROS2 package; `pi_receiver_node.py` bridges ZMQ → ROS2 topics
-- **`postprocess/main.py`** — fetches sessions from Pi via tar-over-SSH, then encodes JPEG frames + WAV → MP4 via ffmpeg
+- **`ingest/main.py`** — fetches sessions from Pi via tar-over-SSH, then encodes JPEG frames + WAV → MP4 via ffmpeg
 
 ### Session Data Layout
 ```
@@ -97,8 +97,8 @@ No streaming. Pi writes its camera and audio to local files. GoPro writes video 
 ### Dependencies
 - **Pi**: `pyzmq`, `protobuf`, `picamera2`, `sounddevice`, `open-gopro`, `opencv-python-headless`, `rpi-hardware-pwm`, `typer`, `numpy`
 - **ROS2**: `rclpy`, `foxglove_bridge`, `sensor_msgs`, `foxglove_msgs`
-- **Postprocess**: same as Pi + external `ffmpeg` binary
+- **Ingest**: same as Pi + external `ffmpeg` binary
 - **Dev**: `pytest`, `ruff`
 
 ### Package Management
-This is a `uv` workspace. Root `pyproject.toml` declares workspaces `pi/` and `postprocess/`. Run `uv sync` at the root for PC-side dev dependencies. The `pi/` package requires `--system-site-packages` on the Pi for `picamera2`/`sounddevice`.
+This is a `uv` workspace. Root `pyproject.toml` declares workspaces `pi/` and `ingest/`. Run `uv sync` at the root for PC-side dev dependencies. The `pi/` package requires `--system-site-packages` on the Pi for `picamera2`/`sounddevice`.

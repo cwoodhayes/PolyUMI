@@ -4,7 +4,7 @@ requires-python = ">=3.13"
 
 [manifest]
 members = [
-    "polyumi-postprocess",
+    "polyumi-ingest",
 ]
 
 [manifest.dependency-groups]
@@ -242,6 +242,18 @@ wheels = [
 ]
 
 [[package]]
+name = "colorzero"
+version = "2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "setuptools" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b3/ca/688824a06e8c4d04c7d2fd2af2d8da27bed51af20ee5f094154e1d680334/colorzero-2.0.tar.gz", hash = "sha256:e7d5a5c26cd0dc37b164ebefc609f388de24f8593b659191e12d85f8f9d5eb58", size = 25382, upload-time = "2021-03-15T23:42:23.261Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7e/a6/ddd0f130e44a7593ac6c55aa93f6e256d2270fd88e9d1b64ab7f22ab8fde/colorzero-2.0-py2.py3-none-any.whl", hash = "sha256:0e60d743a6b8071498a56465f7719c96a5e92928f858bab1be2a0d606c9aa0f8", size = 26573, upload-time = "2021-03-15T23:42:21.757Z" },
+]
+
+[[package]]
 name = "construct"
 version = "2.10.70"
 source = { registry = "https://pypi.org/simple" }
@@ -285,6 +297,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e7/7b/f8e0211e9380f7195ba3f3d40c292594fd81ba8ec4629e3854c353aaca45/fastapi-0.135.1.tar.gz", hash = "sha256:d04115b508d936d254cea545b7312ecaa58a7b3a0f84952535b4c9afae7668cd", size = 394962, upload-time = "2026-03-01T18:18:29.369Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e4/72/42e900510195b23a56bde950d26a51f8b723846bfcaa0286e90287f0422b/fastapi-0.135.1-py3-none-any.whl", hash = "sha256:46e2fc5745924b7c840f71ddd277382af29ce1cdb7d5eab5bf697e3fb9999c9e", size = 116999, upload-time = "2026-03-01T18:18:30.831Z" },
+]
+
+[[package]]
+name = "gpiozero"
+version = "2.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorzero" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e4/47/334b8db8a981eca9a0fb1e7e48e1997a5eaa8f40bb31c504299dcca0e6ff/gpiozero-2.0.1.tar.gz", hash = "sha256:d4ea1952689ec7e331f9d4ebc9adb15f1d01c2c9dcfabb72e752c9869ab7e97e", size = 136176, upload-time = "2024-02-15T11:07:02.919Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/02/eb/6518a1b00488d48995034226846653c382d676cf5f04be62b3c3fae2c6a1/gpiozero-2.0.1-py3-none-any.whl", hash = "sha256:8f621de357171d574c0b7ea0e358cb66e560818a47b0eeedf41ce1cdbd20c70b", size = 150818, upload-time = "2024-02-15T11:07:00.451Z" },
 ]
 
 [[package]]
@@ -663,14 +687,27 @@ wheels = [
 ]
 
 [[package]]
+name = "polyumi-ingest"
+version = "0.1.0"
+source = { virtual = "ingest" }
+dependencies = [
+    { name = "polyumi-pi" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "polyumi-pi", editable = "pi" }]
+
+[[package]]
 name = "polyumi-pi"
 version = "0.1.0"
 source = { editable = "pi" }
 dependencies = [
     { name = "fastapi" },
+    { name = "gpiozero" },
     { name = "numpy" },
     { name = "open-gopro" },
     { name = "opencv-python-headless" },
+    { name = "polyumi-pi-msgs" },
     { name = "protobuf" },
     { name = "pyzmq" },
     { name = "rich" },
@@ -683,9 +720,11 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.135.1" },
+    { name = "gpiozero", specifier = ">=2.0" },
     { name = "numpy", specifier = ">=2.4.3" },
     { name = "open-gopro", git = "https://github.com/cwoodhayes/OpenGoPro?subdirectory=demos%2Fpython%2Fsdk_wireless_camera_control&branch=pi-trixie-fix" },
     { name = "opencv-python-headless", specifier = ">=4.12.0.88" },
+    { name = "polyumi-pi-msgs", editable = "ros2_ws/src/polyumi_pi_msgs" },
     { name = "protobuf", specifier = ">=6,<7" },
     { name = "pyzmq", specifier = ">=27.1.0" },
     { name = "rich", specifier = ">=14.3.3" },
@@ -702,15 +741,19 @@ dev = [
 ]
 
 [[package]]
-name = "polyumi-postprocess"
-version = "0.1.0"
-source = { virtual = "postprocess" }
+name = "polyumi-pi-msgs"
+version = "0.0.1"
+source = { editable = "ros2_ws/src/polyumi_pi_msgs" }
 dependencies = [
-    { name = "polyumi-pi" },
+    { name = "setuptools" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "polyumi-pi", editable = "pi" }]
+requires-dist = [
+    { name = "pytest", marker = "extra == 'test'" },
+    { name = "setuptools" },
+]
+provides-extras = ["test"]
 
 [[package]]
 name = "protobuf"
@@ -1081,6 +1124,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/43/32/ecd3e230a806c7894a13780a1c7d614f0d316d85cde7a2256626e2af2c45/rpi_hardware_pwm-0.3.1.tar.gz", hash = "sha256:dcb2627ab1248a9c532c86e013914416c55f11bd70976dd6ec6ecfd1109b0fe8", size = 5261, upload-time = "2026-02-09T17:10:41.757Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b2/17/c8d4d2efa5bb1af38644a6202c26e4d990d30cf6124ace32f33e7c488e9e/rpi_hardware_pwm-0.3.1-py3-none-any.whl", hash = "sha256:ad0f7f3e8ec83dd76a552cff92ea1dbb1bf773210316519ea66e3e85d3ac9ae0", size = 5112, upload-time = "2026-02-09T17:10:41.003Z" },
+]
+
+[[package]]
+name = "setuptools"
+version = "82.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/4f/db/cfac1baf10650ab4d1c111714410d2fbb77ac5a616db26775db562c8fab2/setuptools-82.0.1.tar.gz", hash = "sha256:7d872682c5d01cfde07da7bccc7b65469d3dca203318515ada1de5eda35efbf9", size = 1152316, upload-time = "2026-03-09T12:47:17.221Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9d/76/f789f7a86709c6b087c5a2f52f911838cad707cc613162401badc665acfe/setuptools-82.0.1-py3-none-any.whl", hash = "sha256:a59e362652f08dcd477c78bb6e7bd9d80a7995bc73ce773050228a348ce2e5bb", size = 1006223, upload-time = "2026-03-09T12:47:15.026Z" },
 ]
 
 [[package]]

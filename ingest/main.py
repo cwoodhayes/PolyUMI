@@ -1,5 +1,5 @@
 """
-postprocess/main.py - PolyUMI postprocessing scripts.
+ingest/main.py - PolyUMI ingest scripts.
 
 Usage:
     python main.py fetch --host conorpi
@@ -32,7 +32,7 @@ logging.basicConfig(
         )
     ],
 )
-log = logging.getLogger('postprocess')
+log = logging.getLogger('ingest')
 
 app = typer.Typer()
 

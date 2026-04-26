@@ -17,7 +17,7 @@ ignore = [
 ]
 
 [tool.uv.workspace]
-members = ["postprocess"]
+members = ["ingest"]
 
 [tool.uv.sources]
 polyumi_pi = { path = "pi", editable = true }
