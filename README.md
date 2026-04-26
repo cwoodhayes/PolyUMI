@@ -38,7 +38,7 @@ ros2_ws/
 
 **PC:** Python 3.13, [uv](https://github.com/astral-sh/uv), ROS 2 Kilted, `ffmpeg`, `protobuf-compiler`
 
-**RPi:** Raspberry Pi Zero 2W flashed with Raspberry Pi OS. See [Hardware Notes](#hardware-notes) for HAT-specific config.
+**RPi:** Raspberry Pi Zero 2W flashed with Raspberry Pi OS. See [docs/pi-provisioning.md](docs/pi-provisioning.md) for detailed setup instructions for the pi.
 
 ## Installation
 
@@ -61,7 +61,7 @@ source install/setup.bash
 
 ### RPi
 
-> **First time setting up a new Pi?** See [docs/pi-provisioning.md](docs/pi-provisioning.md) for the automated cloud-init workflow that handles OS-level configuration (packages, audio HAT driver, PWM overlay, uv) before you run the steps below.
+Follow the instructions in [docs/pi-provisioning.md](docs/pi-provisioning.md) to set up the pi for both gripper and end-effector.
 
 After the setup instructions for the gripper above, the `polyumi-pi` systemd service will run every time the Pi boots, enabling you to record right away by pressing the button on the audio HAT.
 
