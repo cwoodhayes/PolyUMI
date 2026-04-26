@@ -15,7 +15,7 @@ This project uses [cloud-init](https://cloudinit.readthedocs.io/) to automate fi
 ## What you do manually afterwards
 
 - Run `./deploy.sh` from repo root to push your local working-tree code (cloud-init bootstraps from `main`; `deploy.sh` overlays uncommitted changes)
-- Pair the GoPro with `polyumi_pi.main scan-gopro`
+- Pair the GoPro with `polyumi_pi scan-gopro`
 - `sudo systemctl enable polyumi-pi` and reboot to start the autostart service
 
 See [README.md](/README.md) for more on next steps.
@@ -104,7 +104,10 @@ sudo systemctl enable polyumi-pi
 sudo reboot
 ```
 
-After the reboot the service comes up automatically. **Confirm it's ready to record by checking that the red LED on the audio HAT is lit solid** — that's the indicator wired to GPIO25, and it means `start-scene` is running and waiting for a button press. If the LED is off, check `journalctl -u polyumi-pi` or `/var/log/polyumi-pi.log`.
+After the reboot the service comes up automatically. **Confirm it's ready to record by checking that the red LED on the audio HAT is lit solid** — that's the indicator wired to GPIO25, and it means `start-scene` is running and waiting for a button press. If the LED is off:
+
+- `tail -f /var/log/polyumi-pi.log` — application output (Python logging goes here, since the unit redirects stdout/stderr to this file)
+- `journalctl -u polyumi-pi` — systemd lifecycle events only (start, crash, restart counts)
 
 ## Reference
 

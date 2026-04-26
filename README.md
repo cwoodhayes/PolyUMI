@@ -65,7 +65,6 @@ source install/setup.bash
 
 After the setup instructions for the gripper above, the `polyumi-pi` systemd service will run every time the Pi boots, enabling you to record right away by pressing the button on the audio HAT.
 
-Deploy code to the Pi (run from repo root on your PC). This also stamps the current git commit hash into the Pi package:
 
 ## Recording on the Gripper
 1. Turn on the GoPro attached to the UMI (until it's turned on, the Pi will not let you record)
@@ -126,8 +125,8 @@ The launch file accepts two arguments: `pi_host` (default `10.106.10.62`) and `v
 Battery status is accessible at `http://<pi_ip>:8421` or via I2C:
 
 ```bash
-i2cdetect -y 1
-i2cget -y 0x57 0x2a   # battery percentage
+sudo i2cdetect -y 1
+sudo i2cget -y 0x57 0x2a   # battery percentage; 100% = 0x64, 50% = 0x32, etc.
 ```
 
 ## Troubleshooting

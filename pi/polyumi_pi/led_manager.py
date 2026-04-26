@@ -19,7 +19,7 @@ class LEDManager:
 
     def __init__(self) -> None:
         """Initialize the LED manager."""
-        self.pwm: rpi_hardware_pwm.HardwarePWM | None = rpi_hardware_pwm.HardwarePWM(
+        self.pwm: rpi_hardware_pwm.HardwarePWM = rpi_hardware_pwm.HardwarePWM(
             self.PWM_CHANNEL, hz=1000, chip=0
         )
         self.pwm.start(0)
@@ -43,4 +43,7 @@ class LEDManager:
         """Stop the PWM channel. Idempotent."""
         if self.pwm is not None:
             self.pwm.stop()
-            self.pwm = None
+
+    def __del__(self) -> None:
+        """Ensure resources are cleaned up on deletion."""
+        self.close()

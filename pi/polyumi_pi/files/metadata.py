@@ -4,6 +4,7 @@ import json
 import logging
 import pathlib
 import socket
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -20,11 +21,13 @@ def _get_git_hash() -> str:
 
         return COMMIT_HASH
     except ImportError as err:
-        print(
-            'Missing required _version.py file. Please run deploy.sh '
-            'on host PC to generate it.'
-        )
-        raise err
+        try:
+            # fall back to this if using the git repo without a deployment (i.e. first boot).
+            return subprocess.check_output(
+                ['git', 'rev-parse', 'HEAD'], text=True
+            ).strip()
+        except Exception:
+            raise err
 
 
 _GIT_HASH = _get_git_hash()
