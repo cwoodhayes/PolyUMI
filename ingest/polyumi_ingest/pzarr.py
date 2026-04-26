@@ -33,6 +33,11 @@ def _git_sha() -> str:
         return 'unknown'
 
 
+def _arr(grp: zarr.Group, path: str) -> zarr.Array:
+    """Return a typed zarr.Array from a group by path; consolidates zarr's untyped __getitem__."""
+    return grp[path]  # type: ignore[return-value]
+
+
 def _finger_timestamps(video_dir: pathlib.Path, first_wall_ns: int) -> np.ndarray:
     """
     Return UTC-seconds float64 timestamps for each finger camera frame.
@@ -100,6 +105,9 @@ def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) 
     for j, fp in enumerate(frames):
         raw = np.frombuffer(fp.read_bytes(), dtype=np.uint8)
         bgr = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+        if bgr is None:
+            log.warning(f'  Failed to decode {fp.name}, skipping')
+            continue
         frames_arr[j] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
     if meta.first_frame_metadata is None:
@@ -109,6 +117,8 @@ def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) 
     ts_grp.create_array('finger', data=finger_ts, compressor=_BLOSC)
 
     # --- Audio ---
+    if meta.audio_start_time_ns is None:
+        raise RuntimeError(f'audio_start_time_ns missing in {session.path / "metadata.json"}')
     audio_data, sr = _read_wav(audio_path)
     audio_grp = ep_grp.require_group('audio')
     audio_grp.create_array('data', data=audio_data, compressor=_BLOSC)
@@ -177,8 +187,8 @@ class EpisodeInfo:
     """Summary of one episode's arrays and timestamps extracted from scene.zarr."""
 
     index: int
-    finger_shape: tuple | None
-    audio_shape: tuple | None
+    finger_shape: tuple | None  # type: ignore[type-arg]
+    audio_shape: tuple | None  # type: ignore[type-arg]
     finger_ts_range: tuple[float, float] | None
     finger_ts_mean_delta_ms: float | None
     audio_ts_range: tuple[float, float] | None
@@ -193,7 +203,7 @@ class SceneZarrInfo:
     zarr_path: pathlib.Path
     zarr_format: int
     tree: str
-    attrs: dict
+    attrs: dict  # type: ignore[type-arg]
     episodes: list[EpisodeInfo]
 
 
@@ -204,35 +214,39 @@ def inspect_scene_zarr(scene_path: pathlib.Path) -> SceneZarrInfo:
     if not zarr_path.exists():
         raise FileNotFoundError(f'No scene.zarr found at {scene_path}')
 
-    root = zarr.open(str(zarr_path), mode='r')
+    root = zarr.open_group(str(zarr_path), mode='r')
+    n_episodes = int(root.attrs.get('n_episodes', 0))  # type: ignore[arg-type]
 
     episodes = []
-    for i in range(root.attrs.get('n_episodes', 0)):
+    for i in range(n_episodes):
         ep_key = f'episode_{i}'
         if ep_key not in root:
             continue
-        ep = root[ep_key]
+        ep = zarr.open_group(str(zarr_path / ep_key), mode='r')
 
-        finger_ts_range = finger_mean_delta = None
+        finger_ts_range: tuple[float, float] | None = None
+        finger_mean_delta: float | None = None
         if 'timestamps/finger' in ep:
-            ts = ep['timestamps/finger'][:]
+            ts: np.ndarray = _arr(ep, 'timestamps/finger')[:]  # type: ignore[assignment]
             finger_ts_range = (float(ts[0]), float(ts[-1]))
             finger_mean_delta = float(np.diff(ts).mean() * 1000) if len(ts) > 1 else None
 
-        audio_ts_range = None
+        audio_ts_range: tuple[float, float] | None = None
         if 'timestamps/audio' in ep:
-            ts = ep['timestamps/audio'][:]
+            ts = _arr(ep, 'timestamps/audio')[:]  # type: ignore[assignment]
             audio_ts_range = (float(ts[0]), float(ts[-1]))
 
+        ep_start = float(_arr(ep, 'annotations/episode_start')[()]) if 'annotations/episode_start' in ep else None  # type: ignore[arg-type]
+        ep_end = float(_arr(ep, 'annotations/episode_end')[()]) if 'annotations/episode_end' in ep else None  # type: ignore[arg-type]
         episodes.append(EpisodeInfo(
             index=i,
-            finger_shape=ep['finger/frames'].shape if 'finger/frames' in ep else None,
-            audio_shape=ep['audio/data'].shape if 'audio/data' in ep else None,
+            finger_shape=_arr(ep, 'finger/frames').shape if 'finger/frames' in ep else None,
+            audio_shape=_arr(ep, 'audio/data').shape if 'audio/data' in ep else None,
             finger_ts_range=finger_ts_range,
             finger_ts_mean_delta_ms=finger_mean_delta,
             audio_ts_range=audio_ts_range,
-            episode_start=float(ep['annotations/episode_start'][()]) if 'annotations/episode_start' in ep else None,
-            episode_end=float(ep['annotations/episode_end'][()]) if 'annotations/episode_end' in ep else None,
+            episode_start=ep_start,
+            episode_end=ep_end,
         ))
 
     return SceneZarrInfo(
@@ -248,5 +262,5 @@ def read_frame(scene_path: pathlib.Path, episode: int = 0, frame: int = 0) -> np
     """Read a single frame from scene.zarr; returns (H, W, 3) uint8 RGB array."""
     scene_path = scene_path.resolve()
     zarr_path = scene_path / 'scene.zarr' if (scene_path / 'scene.zarr').exists() else scene_path
-    root = zarr.open(str(zarr_path), mode='r')
-    return root[f'episode_{episode}/finger/frames'][frame]
+    root = zarr.open_group(str(zarr_path), mode='r')
+    return _arr(root, f'episode_{episode}/finger/frames')[frame]  # type: ignore[return-value]
