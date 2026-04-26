@@ -595,6 +595,7 @@ def start_scene(
             log.info(f'Scene {scene.scene_id} stopped.')
         except Exception as e:
             log.error(f'Unexpected error during scene {scene.scene_id}: {e}', exc_info=True)
+            raise
         finally:
             hat.close()
 

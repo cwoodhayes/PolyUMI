@@ -67,6 +67,11 @@ After the setup instructions for the gripper above, the `polyumi-pi` systemd ser
 
 Deploy code to the Pi (run from repo root on your PC). This also stamps the current git commit hash into the Pi package:
 
+## Recording on the Gripper
+1. Turn on the GoPro attached to the UMI (until it's turned on, the Pi will not let you record)
+2. Turn on the Pi using the small button on the side of the PiSugar battery unit (short press, then long hold until all 4 LEDs light up, then release)
+3. Wait until the red indicator LED on the audio HAT lights up red, indicating PolyUMI is ready to record. This may take 30-40 seconds after startup; the pi takes a while to boot.
+4. Press the button on the audio HAT to start recording an episode; the LED will pulse and the GoPro will start recording; press the button again to stop recording. **Do not press the GoPro's shutter button or otherwise interact with the GoPro after powering it on; the pi will handle starting/stopping the GoPro's recording for synchronization.**
 
 ## Postprocessing
 
