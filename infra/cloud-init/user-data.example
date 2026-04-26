@@ -32,6 +32,13 @@ enable_ssh: true  # Enables the SSH server on first boot
 # TODO set the system timezone (set this to your local timezone for accurate timestamps in logs, etc.)
 timezone: America/Chicago
 
+rpi:
+    spi: true               # Enable SPI interface
+    i2c: true               # Enable I2C interface
+    serial: true            # Enable serial console and UART interface
+    onewire: true           # Enable 1-Wire interface
+    enable_usb_gadget: true # Enable USB gadget mode
+
 # picamera2 must come from apt (not pip) — it links against libcamera system libs.
 # libportaudio2 is the backend required by sounddevice.
 # libcamera-apps-lite provides rpicam-still / rpicam-vid for camera debugging.
