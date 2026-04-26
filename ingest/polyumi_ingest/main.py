@@ -345,6 +345,7 @@ def inspect_zarr(
     """Print the structure and metadata of a scene.zarr store."""
     from rich.console import Console
     from rich.table import Table
+    from rich.text import Text
 
     from polyumi_ingest.pzarr import SceneZarrInfo, inspect_scene_zarr, read_frame
 
@@ -358,7 +359,7 @@ def inspect_zarr(
     console.print(f'\n[bold]Store:[/bold] {info.zarr_path}')
     console.print(f'[bold]Format:[/bold] zarr v{info.zarr_format}\n')
     console.print('[bold]Tree:[/bold]')
-    console.print(info.tree)
+    console.print(Text.from_ansi(str(info.tree)))
     console.print('\n[bold]Scene metadata:[/bold]')
     for k, v in sorted(info.attrs.items()):
         console.print(f'  {k}: {v}')

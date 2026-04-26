@@ -192,7 +192,7 @@ class SceneZarrInfo:
 
     zarr_path: pathlib.Path
     zarr_format: int
-    tree: str
+    tree: object
     attrs: dict  # type: ignore[type-arg]
     episodes: list[EpisodeInfo]
 
@@ -247,7 +247,7 @@ def inspect_scene_zarr(scene_path: pathlib.Path) -> SceneZarrInfo:
     return SceneZarrInfo(
         zarr_path=zarr_path,
         zarr_format=root.metadata.zarr_format,
-        tree=str(root.tree()),
+        tree=root.tree(),
         attrs=dict(root.attrs),
         episodes=episodes,
     )
