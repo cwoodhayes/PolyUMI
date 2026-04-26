@@ -66,6 +66,31 @@ write_files:
     content: |
       brcmfmac
 
+  # Autostart service — runs `polyumi-pi start-scene` as pi user on boot.
+  # Bring up/down manually with: sudo systemctl start|stop polyumi-pi
+  # View logs: tail -f /var/log/polyumi-pi.log  or  journalctl -u polyumi-pi
+  - path: /etc/systemd/system/polyumi-pi.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=PolyUMI Pi
+      After=network.target
+
+      [Service]
+      User=pi
+      WorkingDirectory=/home/pi
+      Environment=GPIOZERO_PIN_FACTORY=lgpio
+      Environment=LG_WD=/home/pi
+      ExecStart=/home/pi/PolyUMI/pi/.venv/bin/python -m polyumi_pi.main start-scene
+      Restart=on-failure
+      RestartSec=5
+      StandardOutput=append:/var/log/polyumi-pi.log
+      StandardError=append:/var/log/polyumi-pi.log
+
+      [Install]
+      WantedBy=multi-user.target
+
 runcmd:
   # WM8960 audio HAT — kernel default driver doesn't work; use Waveshare DKMS driver.
   # Validate after boot: arecord -D hw:wm8960soundcard -r 48000 -f S16_LE -c 2 -d 5 test.wav
@@ -81,5 +106,12 @@ runcmd:
   - sudo -u pi bash -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
   # Create recordings directory
   - sudo -u pi mkdir -p /home/pi/recordings
+  # Clone repo and install Pi package into its venv
+  - sudo -u pi git clone git@github.com:cwoodhayes/PolyUMI.git /home/pi/PolyUMI
+  - sudo -u pi bash -c '/home/pi/.local/bin/uv venv --system-site-packages /home/pi/PolyUMI/pi/.venv'
+  - sudo -u pi bash -c '/home/pi/.local/bin/uv pip install --python /home/pi/PolyUMI/pi/.venv /home/pi/PolyUMI/ros2_ws/src/polyumi_pi_msgs /home/pi/PolyUMI/pi'
+  # NOTE: polyumi-pi.service is installed but NOT enabled here. After cloud-init
+  # finishes, SSH in, pair the GoPro (scan-gopro), then `systemctl enable polyumi-pi`
+  # and reboot. See docs/pi-provisioning.md.
 
 final_message: "PolyUMI Pi cloud-init complete after $UPTIME seconds. See docs/pi-provisioning.md for next steps."

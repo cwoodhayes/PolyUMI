@@ -16,15 +16,18 @@ COMMIT_HASH=$(git rev-parse HEAD)
 echo "COMMIT_HASH = '${COMMIT_HASH}'" > pi/polyumi_pi/_version.py
 
 echo "==> Deploying pi/ to ${PI_HOST}..."
-rsync -av --delete \
+rsync -av --delete --mkpath \
     --exclude='.venv/' \
     --exclude='*.pyc' \
     --exclude='__pycache__/' \
-    pi "${PI_HOST}":~
+    pi "${PI_HOST}":~/PolyUMI/
 
 echo "==> Deploying polyumi_pi_msgs to ${PI_HOST}..."
-rsync -av --delete \
+rsync -av --delete --mkpath \
     --exclude='.venv/' \
-    ros2_ws/src/polyumi_pi_msgs "${PI_HOST}":~
+    ros2_ws/src/polyumi_pi_msgs "${PI_HOST}":~/PolyUMI/ros2_ws/src/
 
 echo "==> Done. Deployed commit ${COMMIT_HASH} to ${PI_HOST}."
+echo "    On the Pi, re-install deps and restart the service if needed:"
+echo "      uv pip install --python ~/PolyUMI/pi/.venv ~/PolyUMI/pi"
+echo "      sudo systemctl restart polyumi-pi"

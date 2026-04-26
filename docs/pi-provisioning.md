@@ -14,14 +14,9 @@ This project uses [cloud-init](https://cloudinit.readthedocs.io/) to automate fi
 
 ## What you do manually afterwards
 
-- Run `./deploy.sh` from repo root to push app code
-- Run the following to install Python deps (can't happen before code is deployed)
-
-```bash
-    cd ~/pi && uv venv --system-site-packages && uv sync --no-dev
-    uv pip install -e ~/polyumi_pi_msgs
-    python polyumi_pi/main.py stream
-```
+- Run `./deploy.sh` from repo root to push your local working-tree code (cloud-init bootstraps from `main`; `deploy.sh` overlays uncommitted changes)
+- Pair the GoPro with `polyumi_pi.main scan-gopro`
+- `sudo systemctl enable polyumi-pi` and reboot to start the autostart service
 
 See [README.md](/README.md) for more on next steps.
 
@@ -95,6 +90,21 @@ lsmod | grep pwm
 ### 6. Deploy app code and install Python deps
 
 Return to the [README](/README.md#rpi) for the next steps of deploying code, installing Python dependencies, and running the app.
+
+### 7. Pair the GoPro and enable the autostart service
+
+Cloud-init installs `polyumi-pi.service` but leaves it disabled, because `start-scene` needs a saved GoPro pairing to launch. From the Pi:
+
+```bash
+ssh pi@polyumi-pi.local
+cd ~/PolyUMI/pi
+.venv/bin/python -m polyumi_pi.main scan-gopro   # follow prompts to pick your GoPro
+
+sudo systemctl enable polyumi-pi
+sudo reboot
+```
+
+After the reboot the service comes up automatically. **Confirm it's ready to record by checking that the red LED on the audio HAT is lit solid** — that's the indicator wired to GPIO25, and it means `start-scene` is running and waiting for a button press. If the LED is off, check `journalctl -u polyumi-pi` or `/var/log/polyumi-pi.log`.
 
 ## Reference
 
