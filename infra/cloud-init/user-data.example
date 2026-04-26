@@ -107,7 +107,7 @@ runcmd:
   # Create recordings directory
   - sudo -u pi mkdir -p /home/pi/recordings
   # Clone repo and install Pi package into its venv
-  - sudo -u pi git clone git@github.com:cwoodhayes/PolyUMI.git /home/pi/PolyUMI
+  - sudo -u pi git clone https://github.com/cwoodhayes/PolyUMI.git /home/pi/PolyUMI
   - sudo -u pi bash -c '/home/pi/.local/bin/uv venv --system-site-packages /home/pi/PolyUMI/pi/.venv'
   - sudo -u pi bash -c '/home/pi/.local/bin/uv pip install --python /home/pi/PolyUMI/pi/.venv /home/pi/PolyUMI/ros2_ws/src/polyumi_pi_msgs /home/pi/PolyUMI/pi'
   # NOTE: polyumi-pi.service is installed but NOT enabled here. After cloud-init

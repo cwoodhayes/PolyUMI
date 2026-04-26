@@ -87,13 +87,13 @@ arecord -D hw:wm8960soundcard -r 48000 -f S16_LE -c 2 -d 5 test.wav
 lsmod | grep pwm
 ```
 
-### 6. Deploy app code and install Python deps
+### 7. (GRIPPER ONLY) Pair the GoPro and enable the autostart service
 
-Return to the [README](/README.md#rpi) for the next steps of deploying code, installing Python dependencies, and running the app.
+**DO NOT PERFORM THIS STEP IF THIS PI IS FOR THE END-EFFECTOR.** We don't need a startup service there since we don't record, we only stream.
 
-### 7. Pair the GoPro and enable the autostart service
+Cloud-init installs `polyumi-pi.service` but leaves it disabled, because `start-scene` needs a saved GoPro pairing to launch. 
 
-Cloud-init installs `polyumi-pi.service` but leaves it disabled, because `start-scene` needs a saved GoPro pairing to launch. From the Pi:
+First, turn on the GoPro attached to the UMI, and then run the pairing command from the pi:
 
 ```bash
 ssh pi@polyumi-pi.local
