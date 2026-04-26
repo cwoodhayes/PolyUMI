@@ -9,6 +9,9 @@ description = "Ingest scripts for PolyUMI data collection"
 requires-python = ">=3.13"
 dependencies = [
     "polyumi_pi",
+    "zarr>=3.0",
+    "numcodecs",
+    "imagecodecs",
 ]
 
 [tool.uv.sources]

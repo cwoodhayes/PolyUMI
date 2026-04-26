@@ -43,6 +43,7 @@ DEFAULT_HOST = 'pi@polyumi-pi.local'
 DEFAULT_RECORDINGS_DIR = pathlib.Path(__file__).parent.parent.parent / 'recordings'
 VIDEO_OUTPUT_NAME = 'finger.mp4'
 
+
 @app.command()
 def fetch(
     host: str = typer.Option(DEFAULT_HOST, help='SSH hostname of the Pi.'),
@@ -327,6 +328,93 @@ def fetch_gopro(
 
     log.info(f'Done. Success: {len(to_process) - len(failures)}, Failed: {len(failures)}.')
     if failures:
+        raise typer.Exit(1)
+
+
+@app.command(name='inspect-zarr')
+def inspect_zarr(
+    scene_path: pathlib.Path = typer.Argument(
+        ...,
+        help='Scene directory containing scene.zarr, or a scene.zarr path directly.',
+    ),
+    save_frame: pathlib.Path | None = typer.Option(
+        None,
+        help='Save the first frame of episode_0 as a PNG to this path.',
+    ),
+):
+    """Print the structure and metadata of a scene.zarr store."""
+    from rich.console import Console
+    from rich.table import Table
+
+    from polyumi_ingest.pzarr import SceneZarrInfo, inspect_scene_zarr, read_frame
+
+    try:
+        info: SceneZarrInfo = inspect_scene_zarr(scene_path)
+    except FileNotFoundError as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+
+    console = Console()
+    console.print(f'\n[bold]Store:[/bold] {info.zarr_path}')
+    console.print(f'[bold]Format:[/bold] zarr v{info.zarr_format}\n')
+    console.print('[bold]Tree:[/bold]')
+    console.print(info.tree)
+    console.print('\n[bold]Scene metadata:[/bold]')
+    for k, v in sorted(info.attrs.items()):
+        console.print(f'  {k}: {v}')
+
+    for ep in info.episodes:
+        console.print(f'\n[bold]Episode {ep.index}:[/bold]')
+        table = Table(show_header=True, header_style='bold cyan')
+        table.add_column('Array')
+        table.add_column('Shape')
+        table.add_column('Info')
+        if ep.finger_shape is not None:
+            ts_info = ''
+            if ep.finger_ts_range is not None:
+                ts_info = f'{ep.finger_ts_range[0]:.3f} → {ep.finger_ts_range[1]:.3f} s'
+                if ep.finger_ts_mean_delta_ms is not None:
+                    ts_info += f'  (Δ={ep.finger_ts_mean_delta_ms:.1f} ms avg)'
+            table.add_row('finger/frames', str(ep.finger_shape), ts_info)
+        if ep.audio_shape is not None:
+            ts_info = ''
+            if ep.audio_ts_range is not None:
+                ts_info = f'{ep.audio_ts_range[0]:.3f} → {ep.audio_ts_range[1]:.3f} s'
+            table.add_row('audio/data', str(ep.audio_shape), ts_info)
+        if ep.episode_start is not None:
+            table.add_row('episode_start / end', '', f'{ep.episode_start:.3f} → {ep.episode_end:.3f} s')
+        console.print(table)
+
+    if save_frame is not None:
+        from PIL import Image
+        frame = read_frame(scene_path)
+        Image.fromarray(frame).save(save_frame)
+        console.print(f'\nSaved episode_0 frame 0 → {save_frame}')
+
+
+@app.command(name='build-zarr')
+def build_zarr(
+    scene_path: pathlib.Path = typer.Argument(
+        ...,
+        help='Path to a processed scene directory containing session_* subdirectories.',
+    ),
+    skip_gopro: bool = typer.Option(
+        False,
+        '--skip-gopro',
+        help='Skip GoPro frame ingestion (required until GoPro ingest is implemented).',
+    ),
+):
+    """Build a pzarr working-format zarr store from a processed scene directory."""
+    from polyumi_ingest.pzarr import build_scene_zarr
+
+    try:
+        zarr_path = build_scene_zarr(scene_path, skip_gopro=skip_gopro)
+        log.info(f'Done. Zarr store written to {zarr_path}')
+    except NotImplementedError as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+    except RuntimeError as e:
+        log.error(str(e))
         raise typer.Exit(1)
 
 
