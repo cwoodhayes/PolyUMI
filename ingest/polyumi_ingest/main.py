@@ -35,6 +35,17 @@ log = logging.getLogger('ingest')
 
 app = typer.Typer()
 
+
+def _human_size(n_bytes: int) -> str:
+    size = float(n_bytes)
+    unit = 'B'
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if size < 1024 or unit == 'TB':
+            break
+        size /= 1024
+    return f'{size:.1f} {unit}'
+
+
 DEFAULT_HOST = 'pi@polyumi-pi.local'
 
 # put this in the root of the repo
@@ -379,6 +390,13 @@ def inspect_zarr(
                 if ep.finger_ts_mean_delta_ms is not None:
                     ts_info += f'  (Δ={ep.finger_ts_mean_delta_ms:.1f} ms avg)'
             table.add_row('finger/frames', str(ep.finger_shape), ts_info)
+        if ep.gopro_shape is not None:
+            ts_info = ''
+            if ep.gopro_ts_range is not None:
+                ts_info = f'{ep.gopro_ts_range[0]:.3f} → {ep.gopro_ts_range[1]:.3f} s'
+                if ep.gopro_ts_mean_delta_ms is not None:
+                    ts_info += f'  (Δ={ep.gopro_ts_mean_delta_ms:.1f} ms avg)'
+            table.add_row('gopro/frames', str(ep.gopro_shape), ts_info)
         if ep.audio_shape is not None:
             ts_info = ''
             if ep.audio_ts_range is not None:
@@ -388,6 +406,9 @@ def inspect_zarr(
             ep_info = f'{ep.episode_start:.3f} → {ep.episode_end:.3f} s  ({duration:.2f} s)'
             table.add_row('episode_start / end', '', ep_info)
         console.print(table)
+
+    total_bytes = sum(f.stat().st_size for f in info.zarr_path.rglob('*') if f.is_file())
+    console.print(f'\n[bold]Total size:[/bold] {_human_size(total_bytes)}')
 
     if save_frame is not None:
         from PIL import Image

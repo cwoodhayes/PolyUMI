@@ -16,7 +16,8 @@ from imagecodecs.numcodecs import Jpegxl
 from numcodecs import Blosc
 from polyumi_pi.files.session import SessionFiles
 
-from polyumi_ingest.pzarr.scene_files import SceneFiles
+from polyumi_ingest.gopro_fetch import _recording_start_time
+from polyumi_ingest.pzarr.scene_files import GOPRO_MP4, SceneFiles
 from polyumi_ingest.pzarr.version import PZARR_VERSION
 
 numcodecs.register_codec(Jpegxl)
@@ -75,6 +76,52 @@ def _read_wav(audio_path: pathlib.Path) -> tuple[np.ndarray, int]:
     return audio.astype(np.float32) / peak, sr
 
 
+def _write_gopro_frames(ep_grp: zarr.Group, gopro_path: pathlib.Path) -> None:
+    """Decode gopro.mp4 and write frames + timestamps into ep_grp."""
+    cap = cv2.VideoCapture(str(gopro_path))
+    if not cap.isOpened():
+        raise RuntimeError(f'Could not open GoPro video: {gopro_path}')
+    try:
+        n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = float(cap.get(cv2.CAP_PROP_FPS))
+        if n_frames <= 0 or W <= 0 or H <= 0 or fps <= 0:
+            raise RuntimeError(f'Could not read video properties from {gopro_path}')
+
+        recording_start_s = _recording_start_time(gopro_path).timestamp()
+
+        gopro_grp = ep_grp.require_group('gopro')
+        frames_arr = gopro_grp.zeros(
+            name='frames',
+            shape=(n_frames, H, W, 3),
+            dtype='uint8',
+            chunks=(1, H, W, 3),
+            compressor=_JPEGXL,
+            zarr_format=2,
+        )
+
+        log.info(f'  Writing {n_frames} GoPro frames ({W}x{H}, {fps:.1f} fps)...')
+        n_written = 0
+        for j in range(n_frames):
+            ok, bgr = cap.read()
+            if not ok:
+                log.warning(f'  GoPro read stopped at frame {j} of {n_frames}')
+                break
+            frames_arr[j] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            n_written += 1
+
+        if n_written < n_frames:
+            frames_arr.resize((n_written, H, W, 3))
+            n_frames = n_written
+
+        gopro_ts = recording_start_s + np.arange(n_frames, dtype=np.float64) / fps
+        ts_grp = ep_grp.require_group('timestamps')
+        ts_grp.create_array('gopro', data=gopro_ts, compressor=_BLOSC)
+    finally:
+        cap.release()
+
+
 def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) -> None:
     meta = session.metadata
     video_dir = session.path / 'video'
@@ -128,9 +175,14 @@ def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) 
     ts_grp.create_array('audio', data=audio_ts, compressor=_BLOSC)
 
     # --- GoPro ---
-    if not skip_gopro:
-        raise NotImplementedError('GoPro frame ingestion is not yet implemented. Use --skip-gopro to skip.')
-    log.info('  Skipping GoPro frames (--skip-gopro).')
+    if skip_gopro:
+        log.info('  Skipping GoPro frames (--skip-gopro).')
+    else:
+        gopro_path = session.path / GOPRO_MP4
+        if not gopro_path.exists():
+            log.warning(f'  No gopro.mp4 found at {gopro_path}, skipping GoPro frames.')
+        else:
+            _write_gopro_frames(ep_grp, gopro_path)
 
     # --- Annotations ---
     ann_grp.create_array('episode_start', data=np.array(finger_ts[0], dtype='float64'))
@@ -180,9 +232,12 @@ class EpisodeInfo:
     index: int
     finger_shape: tuple | None  # type: ignore[type-arg]
     audio_shape: tuple | None  # type: ignore[type-arg]
+    gopro_shape: tuple | None  # type: ignore[type-arg]
     finger_ts_range: tuple[float, float] | None
     finger_ts_mean_delta_ms: float | None
     audio_ts_range: tuple[float, float] | None
+    gopro_ts_range: tuple[float, float] | None
+    gopro_ts_mean_delta_ms: float | None
     episode_start: float | None
     episode_end: float | None
 
@@ -226,6 +281,13 @@ def inspect_scene_zarr(scene_path: pathlib.Path) -> SceneZarrInfo:
             ts = _arr(ep, 'timestamps/audio')[:]  # type: ignore[assignment]
             audio_ts_range = (float(ts[0]), float(ts[-1]))
 
+        gopro_ts_range: tuple[float, float] | None = None
+        gopro_mean_delta: float | None = None
+        if 'timestamps/gopro' in ep:
+            ts = _arr(ep, 'timestamps/gopro')[:]  # type: ignore[assignment]
+            gopro_ts_range = (float(ts[0]), float(ts[-1]))
+            gopro_mean_delta = float(np.diff(ts).mean() * 1000) if len(ts) > 1 else None
+
         ep_start = (
             float(_arr(ep, 'annotations/episode_start')[()])  # type: ignore[arg-type]
             if 'annotations/episode_start' in ep
@@ -241,9 +303,12 @@ def inspect_scene_zarr(scene_path: pathlib.Path) -> SceneZarrInfo:
                 index=i,
                 finger_shape=_arr(ep, 'finger/frames').shape if 'finger/frames' in ep else None,
                 audio_shape=_arr(ep, 'audio/data').shape if 'audio/data' in ep else None,
+                gopro_shape=_arr(ep, 'gopro/frames').shape if 'gopro/frames' in ep else None,
                 finger_ts_range=finger_ts_range,
                 finger_ts_mean_delta_ms=finger_mean_delta,
                 audio_ts_range=audio_ts_range,
+                gopro_ts_range=gopro_ts_range,
+                gopro_ts_mean_delta_ms=gopro_mean_delta,
                 episode_start=ep_start,
                 episode_end=ep_end,
             )
