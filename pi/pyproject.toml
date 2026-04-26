@@ -13,6 +13,7 @@ dependencies = [
     "numpy>=2.4.3",
     "open-gopro",
     "opencv-python-headless>=4.12.0.88",
+    "polyumi_pi_msgs",
     "protobuf>=6,<7",
     "pyzmq>=27.1.0",
     "rich>=14.3.3",
@@ -36,3 +37,4 @@ dev = [
 
 [tool.uv.sources]
 open-gopro = { git = "https://github.com/cwoodhayes/OpenGoPro", branch = "pi-trixie-fix", subdirectory = "demos/python/sdk_wireless_camera_control" }
+polyumi_pi_msgs = { path = "../ros2_ws/src/polyumi_pi_msgs", editable = true }

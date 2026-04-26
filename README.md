@@ -63,42 +63,14 @@ source install/setup.bash
 
 > **First time setting up a new Pi?** See [docs/pi-provisioning.md](docs/pi-provisioning.md) for the automated cloud-init workflow that handles OS-level configuration (packages, audio HAT driver, PWM overlay, uv) before you run the steps below.
 
-Deploy code to the Pi (run from repo root on your PC). This also stamps the current git commit hash into the Pi package:
+After the setup instructions for the gripper above, the `polyumi-pi` systemd service will run every time the Pi boots, enabling you to record right away by pressing the button on the audio HAT.
 
-```bash
-./deploy.sh <pi_ssh_hostname>
-```
 
-Then on the Pi, install the Python environment and the `polyumi-pi` script:
-
-```bash
-cd ~/pi
-uv venv --system-site-packages
-uv sync --no-dev
-uv pip install -e ~/polyumi_pi_msgs
-uv pip install -e .
-source .venv/bin/activate
-```
-
-`picamera2` must be installed via `apt`, not pip — the `--system-site-packages` flag above pulls it in from the system.
-(this apt install & others is handled by the `cloud-init` [provisioning](docs/pi-provisioning.md) workflow).
-
-**Tip for development:** add the `deploy.sh` invocation to `.vscode/tasks.json` as a build task so it runs on every save.
-
-## Recording Data
-
-On the Pi, from the `~/pi` directory:
-
-```bash
-polyumi-pi record-episode
-```
-
-This writes a timestamped `session_YYYY-MM-DD_HH-MM-SS/` directory to `~/recordings/` containing:
-- `video/` — JPEG frames with a `video_timestamps.csv` sidecar
-- `audio.wav` — 16-bit PCM
-- `metadata.json` — session config, frame counts, drop stats, git version
-
-Stop recording with `Ctrl+C`. Metadata is finalized on exit.
+## Recording on the Gripper
+1. Turn on the GoPro attached to the UMI (until it's turned on, the Pi will not let you record)
+2. Turn on the Pi using the small button on the side of the PiSugar battery unit (short press, then long hold until all 4 LEDs light up, then release)
+3. Wait until the red indicator LED on the audio HAT lights up red, indicating PolyUMI is ready to record. This may take 30-40 seconds after startup; the pi takes a while to boot.
+4. Press the button on the audio HAT to start recording an episode; the LED will pulse and the GoPro will start recording; press the button again to stop recording. **Do not press the GoPro's shutter button or otherwise interact with the GoPro after powering it on; the pi will handle starting/stopping the GoPro's recording for synchronization.**
 
 ## Postprocessing
 
@@ -108,33 +80,21 @@ From the repo root:
 cd postprocess
 ```
 
-**Fetch the latest session from the Pi:**
-
 ```bash
+# Show all postprocessing commands:
+python main.py --help
+# Fetch only the latest session from the Pi:
 python main.py fetch --host <pi_ssh_hostname> --latest
-```
-
-**Fetch all new sessions:**
-
-```bash
+# Fetch all new sessions:
 python main.py fetch --host <pi_ssh_hostname>
+# Plug in the GoPro's SD card before running the fetch commands above to automatically fetch the GoPro's footage for each session
+# OR download gopro footage from the SD later for all sessions you've fetched:
+python main.py fetch-gopro --host <pi_ssh_hostname>
+
+# PROCESSING SESSIONS ON DISK
+# encode finger video+audio:
+python main.py process-all 
 ```
-
-Transfer uses tar-over-ssh (faster than rsync for many small JPEG files). Add `--verbose-transfer` to debug transfer issues.
-
-**Encode a single session to MP4** (audio is muxed in automatically if present):
-
-```bash
-python main.py process-video recordings/session_YYYY-MM-DD_HH-MM-SS
-```
-
-**Encode all unprocessed sessions:**
-
-```bash
-python main.py process-all
-```
-
-Options: `--force` to re-encode existing outputs, `--no-include-audio` to skip audio mux, `--output-name custom.mp4` to change the output filename.
 
 ## Streaming / Demos
 
@@ -158,54 +118,15 @@ Open [Foxglove](https://app.foxglove.dev), connect to `ws://localhost:8765`, and
 
 The launch file accepts two arguments: `pi_host` (default `10.106.10.62`) and `video_device` (default `/dev/video2`) for the GoPro capture device.
 
-### Franka Demo
-
-Same as above but also launches MoveIt with a Franka arm URDF visualization.
-
-On the PC:
-
-```bash
-ros2 launch polyumi_ros2 franka_demo.launch.xml
-```
-
-Use the `franka_demo.json` Foxglove layout. Requires `franka_fer_moveit_config` — see that repo for setup.
-
 ## Hardware Notes
-
-### Audio HAT (Waveshare WM8960)
-
-The default RaspiAudio driver conflicts with the hardware PWM used for the LED. Instead, use the Waveshare DKMS driver:
-
-```bash
-git clone https://github.com/waveshare/WM8960-Audio-HAT
-cd WM8960-Audio-HAT
-sudo ./install.sh
-sudo reboot
-```
-
-In `/boot/firmware/config.txt`, move PWM away from GPIO18/19 (which are used by I2S) to GPIO12/13:
-
-```
-dtoverlay=pwm-2chan,pin=12,func=4,pin2=13,func2=4
-```
-
-Validate audio capture works before proceeding:
-
-```bash
-arecord -D hw:wm8960soundcard -r 48000 -f S16_LE -c 2 -d 5 test.wav
-```
-
-### LED Circuit
-
-The LED strip is driven by an AO3400A N-channel MOSFET via hardware PWM channel 0 on GPIO12 (header pin 32). The PWM overlay above is required for this to work alongside the audio HAT. See [my portfolio post](https://cwoodhayes.github.io/projects/polyumi) for more details until I can write up hardware docs here.
 
 ### PiSugar Battery
 
 Battery status is accessible at `http://<pi_ip>:8421` or via I2C:
 
 ```bash
-i2cdetect -y 1
-i2cget -y 0x57 0x2a   # battery percentage
+sudo i2cdetect -y 1
+sudo i2cget -y 0x57 0x2a   # battery percentage; 100% = 0x64, 50% = 0x32, etc.
 ```
 
 ## Troubleshooting
@@ -219,3 +140,35 @@ i2cget -y 0x57 0x2a   # battery percentage
 **ZMQ frames dropping** — check the `cb_drops` counter in the Pi logs. The audio streamer uses a 100-frame queue with drop-and-replace on overflow; the video streamer uses `NOBLOCK` sends with a high-watermark of 2. Persistent drops indicate the network link is the bottleneck.
 
 **`protoc` not found during `polyumi_pi_msgs` install** — install `protobuf-compiler` (`sudo apt install protobuf-compiler` on the Pi, or via your system package manager on the PC).
+
+**Audio issues:** Validate audio capture works on the pi with
+
+```bash
+arecord -D hw:wm8960soundcard -r 48000 -f S16_LE -c 2 -d 5 test.wav
+```
+
+## Development
+### Developing the polyumi-pi app
+
+To deploy the latest code to the Pi, run from the PC:
+
+```bash
+./deploy.sh <pi_ssh_hostname>
+```
+
+Then on the Pi, install the Python environment and the `polyumi-pi` script:
+
+```bash
+cd ~/PolyUMI/pi
+# venv should have already been created by cloud-init, but run this if you need to recreate it for any reason (e.g. to pull in new system packages like picamera2):
+# uv venv --system-site-packages
+uv sync --no-dev
+source .venv/bin/activate
+```
+
+`picamera2` must be installed via `apt`, not pip — the `--system-site-packages` flag above pulls it in from the system.
+(this apt install & others is handled by the `cloud-init` [provisioning](docs/pi-provisioning.md) workflow).
+
+**Tip for development:** add the `deploy.sh` invocation to `.vscode/tasks.json` as a build task so it runs with Ctrl+Shift+B.
+
+Run `polyumi-pi --help` for a full list of commands.

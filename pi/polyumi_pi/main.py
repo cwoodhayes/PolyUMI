@@ -14,6 +14,7 @@ import logging
 import multiprocessing
 import os
 import shutil
+import signal
 from multiprocessing.connection import Connection
 
 import typer
@@ -527,12 +528,19 @@ def start_scene(
 
     scene = SceneFiles.create()
     log.info(f'Created scene at {scene.path}')
-    led = LEDManager()
 
     async def _run() -> None:
+        # need to handle SIGTERM for `systemctl stop` to work correctly.
+        loop = asyncio.get_running_loop()
+        main_task = asyncio.current_task()
+        assert main_task is not None
+        loop.add_signal_handler(signal.SIGTERM, main_task.cancel)
+
         hat = RaspiDriver()
         try:
             async with contextlib.AsyncExitStack() as stack:
+                led = LEDManager()
+                stack.callback(led.close)
                 if not no_gopro:
                     gopro = await stack.enter_async_context(
                         GoProWrapper(gopro_identifier, mac_address=gopro_mac)  # pyright: ignore[reportArgumentType]
@@ -587,6 +595,7 @@ def start_scene(
             log.info(f'Scene {scene.scene_id} stopped.')
         except Exception as e:
             log.error(f'Unexpected error during scene {scene.scene_id}: {e}', exc_info=True)
+            raise
         finally:
             hat.close()
 
