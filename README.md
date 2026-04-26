@@ -75,26 +75,28 @@ After the setup instructions for the gripper above, the `polyumi-pi` systemd ser
 
 ## Ingest
 
+Data ingestion scripts that fetch recorded sessions from the Pi and pre-process them for use in training.
 From the repo root:
 
 ```bash
-cd ingest
+uv sync --group dev
+uv tool install --editable ingest
 ```
 
 ```bash
 # Show all ingest commands:
-python main.py --help
+pingest --help
 # Fetch only the latest session from the Pi:
-python main.py fetch --host <pi_ssh_hostname> --latest
+pingest fetch --host <pi_ssh_hostname> --latest
 # Fetch all new sessions:
-python main.py fetch --host <pi_ssh_hostname>
+pingest fetch --host <pi_ssh_hostname>
 # Plug in the GoPro's SD card before running the fetch commands above to automatically fetch the GoPro's footage for each session
 # OR download gopro footage from the SD later for all sessions you've fetched:
-python main.py fetch-gopro --host <pi_ssh_hostname>
+pingest fetch-gopro --host <pi_ssh_hostname>
 
 # PROCESSING SESSIONS ON DISK
 # encode finger video+audio:
-python main.py process-all 
+pingest process-all 
 ```
 
 ## Streaming / Demos
