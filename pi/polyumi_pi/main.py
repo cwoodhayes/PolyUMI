@@ -28,7 +28,7 @@ from polyumi_pi.files.session import DEFAULT_RECORDINGS_DIR, SessionFiles
 from polyumi_pi.gopro.gopro_config import GoProConfig, load_gopro_config, save_gopro_config
 from polyumi_pi.gopro.gopro_wrapper import GoProWrapper
 from polyumi_pi.led_manager import LEDManager
-from polyumi_pi.raspi_driver import RaspiDriver
+from polyumi_pi.raspi_driver import IndicatorState, RaspiDriver
 
 logging.basicConfig(
     level=os.environ.get('LOG_LEVEL', 'INFO').upper(),
@@ -93,6 +93,7 @@ async def _record_session_async(
     chunk_ms: int,
     channels: int,
     led: LEDManager,
+    hat: RaspiDriver | None = None,
     stop_fn=None,  # zero-arg async callable; invoked only once processes are running
 ) -> None:
     """
@@ -136,6 +137,9 @@ async def _record_session_async(
         audio_process.start()
         audio_child_conn.close()
 
+        if hat is not None:
+            hat.set_indicator(IndicatorState.RECORDING)
+
         if stop_fn is not None:
             await stop_fn()
         else:
@@ -145,6 +149,8 @@ async def _record_session_async(
                 asyncio.to_thread(audio_process.join),
             )
     finally:
+        if hat is not None:
+            hat.set_indicator(IndicatorState.INACTIVE)
         _stop_child_process(cam_process)
         _stop_child_process(audio_process)
 
@@ -524,7 +530,7 @@ def start_scene(
     led = LEDManager()
 
     async def _run() -> None:
-        driver = RaspiDriver()
+        hat = RaspiDriver()
         try:
             async with contextlib.AsyncExitStack() as stack:
                 if not no_gopro:
@@ -538,7 +544,8 @@ def start_scene(
                 session_count = 0
                 while True:
                     log.info('Press button to start recording...')
-                    await driver.wait_for_press()
+                    hat.set_indicator(IndicatorState.READY)
+                    await hat.wait_for_press()
                     session_count += 1
 
                     session = scene.create_session()
@@ -566,7 +573,8 @@ def start_scene(
                             chunk_ms=chunk_ms,
                             channels=channels,
                             led=led,
-                            stop_fn=driver.wait_for_press,
+                            hat=hat,
+                            stop_fn=hat.wait_for_press,
                         )
                     finally:
                         session.finalize()
@@ -580,7 +588,7 @@ def start_scene(
         except Exception as e:
             log.error(f'Unexpected error during scene {scene.scene_id}: {e}', exc_info=True)
         finally:
-            driver.close()
+            hat.close()
 
     asyncio.run(_run())
 
