@@ -40,12 +40,15 @@ class RaspiDriver:
 
     def set_indicator(self, state: IndicatorState) -> None:
         """Set the indicator LED state."""
-        if state is IndicatorState.INACTIVE:
-            self._indicator.off()
-        elif state is IndicatorState.READY:
-            self._indicator.on()
-        elif state is IndicatorState.RECORDING:
-            self._indicator.pulse()
+        match state:
+            case IndicatorState.INACTIVE:
+                self._indicator.off()
+            case IndicatorState.READY:
+                self._indicator.on()
+            case IndicatorState.RECORDING:
+                self._indicator.pulse()
+            case _:
+                raise ValueError(f'Invalid IndicatorState: {state}')
 
     def close(self) -> None:
         """Release GPIO resources."""
