@@ -27,7 +27,7 @@ It combines the [Universal Manipulation Interface (UMI)](https://umi-gripper.git
 
 ```
 pi/               # RPi client: camera, audio, LED streaming + episode recording
-postprocess/      # PC-side CLI: fetch sessions from Pi, encode video
+ingest/           # PC-side CLI: fetch sessions from Pi, encode video
 ros2_ws/
   src/
     polyumi_pi_msgs/   # Protobuf message definitions (camera frame, audio chunk)
@@ -38,13 +38,13 @@ ros2_ws/
 
 **PC:** Python 3.13, [uv](https://github.com/astral-sh/uv), ROS 2 Kilted, `ffmpeg`, `protobuf-compiler`
 
-**RPi:** Raspberry Pi Zero 2W flashed with Raspberry Pi OS. See [Hardware Notes](#hardware-notes) for HAT-specific config.
+**RPi:** Raspberry Pi Zero 2W flashed with Raspberry Pi OS. See [docs/pi-provisioning.md](docs/pi-provisioning.md) for detailed setup instructions for the pi.
 
 ## Installation
 
 ### PC
 
-Install postprocessing dependencies (includes the `polyumi_pi` package for shared data types):
+Install ingest dependencies (includes the `polyumi_pi` package for shared data types):
 
 ```bash
 uv sync --group dev
@@ -61,7 +61,7 @@ source install/setup.bash
 
 ### RPi
 
-> **First time setting up a new Pi?** See [docs/pi-provisioning.md](docs/pi-provisioning.md) for the automated cloud-init workflow that handles OS-level configuration (packages, audio HAT driver, PWM overlay, uv) before you run the steps below.
+Follow the instructions in [docs/pi-provisioning.md](docs/pi-provisioning.md) to set up the pi for both gripper and end-effector.
 
 After the setup instructions for the gripper above, the `polyumi-pi` systemd service will run every time the Pi boots, enabling you to record right away by pressing the button on the audio HAT.
 
@@ -73,28 +73,30 @@ After the setup instructions for the gripper above, the `polyumi-pi` systemd ser
 4. Wait until the red indicator LED on the audio HAT lights up red, indicating PolyUMI is ready to record. This may take 30-40 seconds after startup; the pi takes a while to boot.
 5. Press the button on the audio HAT to start recording an episode; the LED will pulse and the GoPro will start recording; press the button again to stop recording. **Do not press the GoPro's shutter button or otherwise interact with the GoPro after powering it on; the pi will handle starting/stopping the GoPro's recording for synchronization.**
 
-## Postprocessing
+## Ingest
 
+Data ingestion scripts that fetch recorded sessions from the Pi and pre-process them for use in training.
 From the repo root:
 
 ```bash
-cd postprocess
+uv sync --group dev
+uv tool install --editable ingest
 ```
 
 ```bash
-# Show all postprocessing commands:
-python main.py --help
+# Show all ingest commands:
+pingest --help
 # Fetch only the latest session from the Pi:
-python main.py fetch --host <pi_ssh_hostname> --latest
+pingest fetch --host <pi_ssh_hostname> --latest
 # Fetch all new sessions:
-python main.py fetch --host <pi_ssh_hostname>
+pingest fetch --host <pi_ssh_hostname>
 # Plug in the GoPro's SD card before running the fetch commands above to automatically fetch the GoPro's footage for each session
 # OR download gopro footage from the SD later for all sessions you've fetched:
-python main.py fetch-gopro --host <pi_ssh_hostname>
+pingest fetch-gopro --host <pi_ssh_hostname>
 
 # PROCESSING SESSIONS ON DISK
 # encode finger video+audio:
-python main.py process-all 
+pingest process-all 
 ```
 
 ## Streaming / Demos

@@ -1,5 +1,5 @@
 """
-postprocess/main.py - PolyUMI postprocessing scripts.
+ingest/main.py - PolyUMI ingest scripts.
 
 Usage:
     python main.py fetch --host conorpi
@@ -13,12 +13,13 @@ import pathlib
 import shutil
 
 import typer
-from gopro_fetch import DEFAULT_THRESHOLD_MS, find_gopro_video
-from pi_fetch import PiFetch
 from polyumi_pi.files.session import SessionFiles
 from rich.logging import RichHandler
 from rich.prompt import Confirm
-from video_helpers import encode_session_video
+
+from polyumi_ingest.gopro_fetch import DEFAULT_THRESHOLD_MS, find_gopro_video
+from polyumi_ingest.pi_fetch import PiFetch
+from polyumi_ingest.video_helpers import encode_session_video
 
 logging.basicConfig(
     level=os.environ.get('LOG_LEVEL', 'INFO').upper(),
@@ -32,14 +33,15 @@ logging.basicConfig(
         )
     ],
 )
-log = logging.getLogger('postprocess')
+log = logging.getLogger('ingest')
 
 app = typer.Typer()
 
 DEFAULT_HOST = 'pi@polyumi-pi.local'
-DEFAULT_RECORDINGS_DIR = pathlib.Path('recordings')
-VIDEO_OUTPUT_NAME = 'finger.mp4'
 
+# put this in the root of the repo
+DEFAULT_RECORDINGS_DIR = pathlib.Path(__file__).parent.parent.parent / 'recordings'
+VIDEO_OUTPUT_NAME = 'finger.mp4'
 
 @app.command()
 def fetch(

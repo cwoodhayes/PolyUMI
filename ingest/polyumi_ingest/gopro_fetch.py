@@ -1,5 +1,5 @@
 """
-postprocess/gopro_fetch.py - Find GoPro MP4 files on SD card matching a session timestamp.
+ingest/gopro_fetch.py - Find GoPro MP4 files on SD card matching a session timestamp.
 
 GoPro cameras embed a UTC creation_time tag in the MP4 container that records the exact
 moment the shutter was pressed. We prefer this over filesystem mtime, which is stored in

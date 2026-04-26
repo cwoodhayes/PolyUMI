@@ -1,4 +1,4 @@
-postprocess/recordings/
+**/recordings/
 *.tmp
 
 # generated files

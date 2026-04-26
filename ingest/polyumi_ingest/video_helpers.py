@@ -1,4 +1,4 @@
-"""postprocess/video_helpers.py - Encode PolyUMI session data into MP4 files via ffmpeg."""
+"""ingest/video_helpers.py - Encode PolyUMI session data into MP4 files via ffmpeg."""
 
 import logging
 import pathlib

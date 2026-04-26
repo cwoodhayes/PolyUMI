@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "polyumi_ingest"
+version = "0.1.0"
+description = "Ingest scripts for PolyUMI data collection"
+requires-python = ">=3.13"
+dependencies = [
+    "polyumi_pi",
+]
+
+[tool.uv.sources]
+polyumi_pi = { path = "../pi", editable = true }
+
+[project.scripts]
+pingest = "polyumi_ingest.main:app"
