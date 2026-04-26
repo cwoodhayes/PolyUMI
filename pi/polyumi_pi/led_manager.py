@@ -19,7 +19,7 @@ class LEDManager:
 
     def __init__(self) -> None:
         """Initialize the LED manager."""
-        self.pwm = rpi_hardware_pwm.HardwarePWM(
+        self.pwm: rpi_hardware_pwm.HardwarePWM | None = rpi_hardware_pwm.HardwarePWM(
             self.PWM_CHANNEL, hz=1000, chip=0
         )
         self.pwm.start(0)
@@ -39,8 +39,8 @@ class LEDManager:
             f'(duty cycle: {duty_cycle}%)'
         )
 
-    def __del__(self) -> None:
-        """Clean up the PWM on deletion."""
-        # is ok if this doesn't happen, which is why I'm not using
-        # a context manager
-        self.pwm.stop()
+    def close(self) -> None:
+        """Stop the PWM channel. Idempotent."""
+        if self.pwm is not None:
+            self.pwm.stop()
+            self.pwm = None
