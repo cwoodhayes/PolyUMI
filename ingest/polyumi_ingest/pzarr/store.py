@@ -17,6 +17,7 @@ from numcodecs import Blosc
 from polyumi_pi.files.session import SessionFiles
 
 from polyumi_ingest.pzarr.scene_files import SceneFiles
+from polyumi_ingest.pzarr.version import PZARR_VERSION
 
 numcodecs.register_codec(Jpegxl)
 
@@ -160,6 +161,7 @@ def build_scene_zarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> path
             'git_sha': _git_sha(),
             'created_at': dt.datetime.now(dt.timezone.utc).isoformat(),
             'alignment_refs': [],
+            'pzarr_version': PZARR_VERSION,
         }
     )
 
