@@ -12,7 +12,7 @@ Compared to downstream data formats like LeRobot Dataset or Diffusion Policy's z
 
 1. Allows efficient incremental writes from multiple pipeline steps (e.g. SLAM, gripper width extraction) without needing to rewrite the whole episode or scene on each step
 2. Preserves the original multi-rate timestamps from each stream, rather than resampling to a common time grid
-3. Stores full-fidelity decoded video audio and video, rather than pre-encoding into a training codec (like WebM for video) or a heavily downsampled format
+3. Stores full-fidelity decoded audio and video, rather than pre-encoding into a training codec (like WebM for video) or a heavily downsampled format
 
 `pzarr` is implemented as a zarr `DirectoryStore` with a specific schema. The schema is designed to be flexible and extensible, but the above principles should guide any additions or modifications.
 
