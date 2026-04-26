@@ -364,7 +364,12 @@ def inspect_zarr(
         console.print(f'  {k}: {v}')
 
     for ep in info.episodes:
-        console.print(f'\n[bold]Episode {ep.index}:[/bold]')
+        duration = None
+        if ep.episode_start is not None and ep.episode_end is not None:
+            duration = ep.episode_end - ep.episode_start
+            console.print(f'\n[bold]Episode {ep.index}[/bold] ({duration:.0f}s):')
+        else:
+            console.print(f'\n[bold]Episode {ep.index}:[/bold]')
         table = Table(show_header=True, header_style='bold cyan')
         table.add_column('Array')
         table.add_column('Shape')
@@ -381,8 +386,9 @@ def inspect_zarr(
             if ep.audio_ts_range is not None:
                 ts_info = f'{ep.audio_ts_range[0]:.3f} → {ep.audio_ts_range[1]:.3f} s'
             table.add_row('audio/data', str(ep.audio_shape), ts_info)
-        if ep.episode_start is not None:
-            table.add_row('episode_start / end', '', f'{ep.episode_start:.3f} → {ep.episode_end:.3f} s')
+        if duration is not None:
+            ep_info = f'{ep.episode_start:.3f} → {ep.episode_end:.3f} s  ({duration:.2f} s)'
+            table.add_row('episode_start / end', '', ep_info)
         console.print(table)
 
     if save_frame is not None:
