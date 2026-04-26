@@ -1,4 +1,4 @@
-# pzarr - PolyUMI's Working Data Format
+# `pzarr` - PolyUMI's Working Data Format
 
 ![pzarr data schema diagram](/docs/polyumi_working_format_schema.svg)
 
@@ -6,7 +6,7 @@
 
 `pzarr` is the *working data format* for the PolyUMI preprocessing pipeline. It sits between raw ingest (mp4s, audio files, metadata json) and the training-ready exports (Northwestern CRB's diffusion policy zarr, LeRobot, MCAP). Pipeline steps modify it in place; once the pipeline is complete for a scene, you can archive the result.
 
-Each `pzarr` corresponds to a single recorded scene.
+Each `pzarr` corresponds to a single recorded scene, composed of one or many episodes (referred to as "sessions" in the pi app).
 
 Compared to downstream data formats like LeRobot Dataset or Diffusion Policy's zarr, which are optimized for feeding directly into a training pipeline, `pzarr` is intended as a single source of truth for all scene data that doesn't discard any information. This means that unlike these downstream formats, it:
 
@@ -29,7 +29,7 @@ Read the version from store metadata in your code rather than hardcoding it, so 
 
 - **IMU, proprioception, scalar arrays**: `numcodecs.Blosc(cname='zstd', shuffle=Blosc.SHUFFLE)`. Blosc bundles a byte-level shuffle filter (which exposes structure across the bytes of float32 values) with zstd, which is Pareto-optimal for compression ratio vs speed. For float arrays of smoothly-varying signals like IMU readings, this routinely gets 4–8× compression and decodes faster than the data loader can consume. Optionally chain a `numcodecs.Delta` filter ahead of Blosc for IMU specifically — it stores sample-to-sample differences instead of raw values, giving another ~1.5× ratio with no correctness risk.
 
-- **Audio**: same Blosc-zstd as a default. This is suboptimal — a real audio codec like FLAC would compress 2–3× better — but the array ergonomics are worth it for the working format. If audio storage becomes a noticeable fraction of dataset size, add a separate FLAC sidecar at archive time.
+- **Audio**: same Blosc-zstd as a default. This is suboptimal — a real audio codec like FLAC would compress 2–3× better — but the array ergonomics are worth it for `pzarr`. If audio storage becomes a noticeable fraction of dataset size, add a separate FLAC sidecar at archive time.
 
 ## Timestamps and shared time
 
@@ -39,7 +39,7 @@ GoPro's GPMF telemetry contains multiple substreams (accel, gyro, GPS, gravity, 
 
 ## SLAM is a swappable step
 
-SLAM is well-isolated: input is GoPro frames + IMU + timestamps from the working zarr, output is `episode/annotations/slam_poses` (N, 7) with its own timestamp array. The choice of SLAM tool (ORB-SLAM3 fork, DROID-SLAM, MASt3R-SLAM, fiducial+EKF, etc.) is opaque to the working format — it's just a step that fills in `slam_poses`.
+SLAM is well-isolated: input is GoPro frames + IMU + timestamps from `pzarr`, output is `episode/annotations/slam_poses` (N, 7) with its own timestamp array. The choice of SLAM tool (ORB-SLAM3 fork, DROID-SLAM, MASt3R-SLAM, fiducial+EKF, etc.) is opaque to the working format — it's just a step that fills in `slam_poses`.
 
 If using ORB-SLAM3 specifically, its persistent atlas (keyframes + map points + bag-of-words db) is saved as a binary `.osa` sidecar file alongside the zarr — not inside it. This is only useful if you want to add new episodes to an existing scene later, or run downstream analysis that benefits from the keyframe database. Other SLAM tools don't generally produce a comparable persistent map artifact, so the sidecar is ORB-SLAM3-specific.
 
@@ -77,7 +77,7 @@ Zarr v2's `DirectoryStore` is safe for concurrent chunk writes, but group-level 
 
 ## Forge integration
 
-Forge's zarr reader expects the flat diffusion-policy layout (`data/*` arrays + `meta/episode_ends`), not our scene/episode subgroup structure. Run the export-to-DP-zarr step first to produce a forge-compatible flat zarr, then `forge convert` to LeRobot, RLDS, or RoboDM as needed.
+[Forge](https://github.com/arpitg1304/forge)'s zarr reader expects the flat diffusion-policy layout (`data/*` arrays + `meta/episode_ends`), not our scene/episode subgroup structure. Run the export-to-DP-zarr step first to produce a forge-compatible flat zarr, then `forge convert` to LeRobot, RLDS, or RoboDM as needed.
 
 ## At-rest archive
 
@@ -85,6 +85,6 @@ Once the pipeline is complete for a scene, copy the `DirectoryStore` to a `ZipSt
 
 ## Why not LeRobotDataset v3? (etc)
 
-LeRobotDataset v3 is now the de facto OSS standard for sharing robot learning data, and it's a great fit for that use case — but it's a training/sharing format, not a working format. Its tabular Parquet layout assumes a single time grid per episode, the format is designed to be complete at write time rather than incrementally mutated by pipeline steps, and intermediate artifacts like SLAM atlases have no natural home. We treat it the same as CRB's diffusion policy zarr: an export target downstream of the working zarr, not a replacement for it.
+LeRobotDataset v3 is now the de facto OSS standard for sharing robot learning data, and it's a great fit for that use case — but it's a training/sharing format, not a working format. Its tabular Parquet layout assumes a single time grid per episode, the format is designed to be complete at write time rather than incrementally mutated by pipeline steps, and intermediate artifacts like SLAM atlases have no natural home. We treat it the same as CRB's diffusion policy zarr: an export target downstream of `pzarr`, not a replacement for it.
 
 It is also deliberately *not* the same as CRB's diffusion policy format (`gen_dataset_hitl.py`). That format is downsampled, preprocessed, and single-rate; this one preserves full-rate multi-stream data with per-stream timestamps so SLAM and other steps have everything they need.
