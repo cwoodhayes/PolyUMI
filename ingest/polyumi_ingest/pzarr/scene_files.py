@@ -24,13 +24,13 @@ class SceneFiles:
 
     Layout::
 
-        scene_TASK_DATE/
+        scene_TASKDATE_UUID/
         ├── scene.zarr/
         ├── session_YYYY-MM-DD_hh-mm-ss/
         │   ├── finger.mp4
         │   ├── gopro.mp4
         │   └── ...
-        └── scene_TASK_DATE.atlas.osa   (ORB-SLAM3 only)
+        └── scene_TASKDATE_UUID.atlas.osa   (ORB-SLAM3 only)
     """
 
     path: pathlib.Path

@@ -1,10 +1,7 @@
 """
-ingest/main.py - PolyUMI ingest scripts.
+ingest/main.py - PolyUMI ingest scripts to deal with pi's file & build pzarr stores.
 
-Usage:
-    python main.py fetch --host conorpi
-    python main.py fetch --host conorpi --latest
-    python main.py process-video recordings/session_2024-01-01_12-00-00
+See docs/data-format.md for an overview of the pzarr format.
 """
 
 import logging

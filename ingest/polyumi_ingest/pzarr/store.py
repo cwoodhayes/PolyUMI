@@ -14,7 +14,6 @@ import numpy as np
 import zarr
 from imagecodecs.numcodecs import Jpegxl
 from numcodecs import Blosc
-
 from polyumi_pi.files.session import SessionFiles
 
 from polyumi_ingest.pzarr.scene_files import SceneFiles
@@ -129,9 +128,7 @@ def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) 
 
     # --- GoPro ---
     if not skip_gopro:
-        raise NotImplementedError(
-            'GoPro frame ingestion is not yet implemented. Use --skip-gopro to skip.'
-        )
+        raise NotImplementedError('GoPro frame ingestion is not yet implemented. Use --skip-gopro to skip.')
     log.info('  Skipping GoPro frames (--skip-gopro).')
 
     # --- Annotations ---
@@ -153,16 +150,18 @@ def build_scene_zarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> path
     root = zarr.open_group(str(scene.zarr_path), mode='w', zarr_format=2)
 
     first_meta = sessions[0].metadata
-    root.attrs.update({
-        'task': first_meta.task,
-        'date': first_meta.created_at.date().isoformat(),
-        'n_episodes': len(sessions),
-        'location': None,
-        'pipeline_version': importlib.metadata.version('polyumi_ingest'),
-        'git_sha': _git_sha(),
-        'created_at': dt.datetime.now(dt.timezone.utc).isoformat(),
-        'alignment_refs': [],
-    })
+    root.attrs.update(
+        {
+            'task': first_meta.task,
+            'date': first_meta.created_at.date().isoformat(),
+            'n_episodes': len(sessions),
+            'location': None,
+            'pipeline_version': importlib.metadata.version('polyumi_ingest'),
+            'git_sha': _git_sha(),
+            'created_at': dt.datetime.now(dt.timezone.utc).isoformat(),
+            'alignment_refs': [],
+        }
+    )
 
     for i, session in enumerate(sessions):
         log.info(f'[{i + 1}/{len(sessions)}] Episode {i}: {session.path.name}')
@@ -225,24 +224,28 @@ def inspect_scene_zarr(scene_path: pathlib.Path) -> SceneZarrInfo:
             ts = _arr(ep, 'timestamps/audio')[:]  # type: ignore[assignment]
             audio_ts_range = (float(ts[0]), float(ts[-1]))
 
-        ep_start = (  # type: ignore[arg-type]
-            float(_arr(ep, 'annotations/episode_start')[()])
-            if 'annotations/episode_start' in ep else None
+        ep_start = (
+            float(_arr(ep, 'annotations/episode_start')[()])  # type: ignore[arg-type]
+            if 'annotations/episode_start' in ep
+            else None
         )
-        ep_end = (  # type: ignore[arg-type]
-            float(_arr(ep, 'annotations/episode_end')[()])
-            if 'annotations/episode_end' in ep else None
+        ep_end = (
+            float(_arr(ep, 'annotations/episode_end')[()])  # type: ignore[arg-type]
+            if 'annotations/episode_end' in ep
+            else None
         )
-        episodes.append(EpisodeInfo(
-            index=i,
-            finger_shape=_arr(ep, 'finger/frames').shape if 'finger/frames' in ep else None,
-            audio_shape=_arr(ep, 'audio/data').shape if 'audio/data' in ep else None,
-            finger_ts_range=finger_ts_range,
-            finger_ts_mean_delta_ms=finger_mean_delta,
-            audio_ts_range=audio_ts_range,
-            episode_start=ep_start,
-            episode_end=ep_end,
-        ))
+        episodes.append(
+            EpisodeInfo(
+                index=i,
+                finger_shape=_arr(ep, 'finger/frames').shape if 'finger/frames' in ep else None,
+                audio_shape=_arr(ep, 'audio/data').shape if 'audio/data' in ep else None,
+                finger_ts_range=finger_ts_range,
+                finger_ts_mean_delta_ms=finger_mean_delta,
+                audio_ts_range=audio_ts_range,
+                episode_start=ep_start,
+                episode_end=ep_end,
+            )
+        )
 
     return SceneZarrInfo(
         zarr_path=zarr_path,
