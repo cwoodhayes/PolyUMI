@@ -213,23 +213,16 @@ class CameraStreamer:
                 'output_size': mode['size'],
                 'bit_depth': mode['bit_depth'],
             },
-            # controls={
-            #     'AeEnable': False,
-            #     # run the actual camera hardware at 10fps rather than 30, so we can up the exposure time
-            #     # this helps when we're in a darker environment.
-            #     'FrameDurationLimits': (100000, 100000),
-            #     'ExposureTime': 40000,
-            #     'AnalogueGain': 2.0,
-            #     'AfMode': controls.AfModeEnum.Manual,
-            #     'LensPosition': 1.0 / dist_to_sensor,
-            #     'ColourGains': (1.0, 1.0),
-            # },
             controls={
                 'AeEnable': True,
                 'AeConstraintMode': controls.AeConstraintModeEnum.Highlight,
                 'ExposureValue': -0.4,
+                # run the actual camera hardware at 10fps rather than 30, so we can up the exposure time
+                # this helps when we're in a darker environment.
                 'FrameDurationLimits': (100000, 100000),
                 'AwbEnable': True,
+                # trial-and-error shows this works better than auto, which will blow out
+                # the blue LED in low lighting.
                 'AwbMode': controls.AwbModeEnum.Indoor,
                 'AfMode': controls.AfModeEnum.Manual,
                 'LensPosition': 1.0 / dist_to_sensor,
