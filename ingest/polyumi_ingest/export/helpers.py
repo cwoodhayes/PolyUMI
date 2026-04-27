@@ -15,12 +15,11 @@ def jpegxl_to_jpeg(frame: np.ndarray, quality: int) -> bytes:
     return buf.tobytes()
 
 
-def encode_frames_to_jpeg(frames: np.ndarray, quality: int) -> list[bytes]:
+def encode_frames_to_jpeg(frames: np.ndarray, quality: int, executor: ThreadPoolExecutor) -> list[bytes]:
     """
     Parallel JPEG re-encoding for a batch of RGB frames decoded from pzarr JpegXL storage.
 
     frames: (N, H, W, 3) uint8 RGB.
     Returns N JPEG byte strings in frame order.
     """
-    with ThreadPoolExecutor() as pool:
-        return list(pool.map(lambda f: jpegxl_to_jpeg(f, quality), frames))
+    return list(executor.map(lambda f: jpegxl_to_jpeg(f, quality), frames))

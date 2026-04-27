@@ -518,6 +518,7 @@ def export_mcap(
     ),
     audio_chunk_size: int = typer.Option(
         4096,
+        min=1,
         help='Number of audio samples per RawAudio message.',
     ),
 ):
