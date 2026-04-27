@@ -69,8 +69,8 @@ class CameraStreamer:
             log.info('ZMQ video streaming disabled (port is None).')
 
         self.configure_camera()
-        self.cam.start()
         self.set_initial_controls()
+        self.cam.start()
 
         log.info(f'Publishing to tcp://<pi_ip>:{self.port}')
 
@@ -205,11 +205,22 @@ class CameraStreamer:
         """Configure the camera for our specific use-case."""
         # we want the 2nd mode for full FOV.
         mode = self.cam.sensor_modes[1]
+        # empirically determined in m
+        dist_to_sensor = 0.2
         config = self.cam.create_video_configuration(
             main={'size': (2304 // 2, 1296 // 2), 'format': 'YUV420'},
             sensor={
                 'output_size': mode['size'],
                 'bit_depth': mode['bit_depth'],
+            },
+            controls={
+                'AeEnable': False,
+                'FrameDurationLimits': (100000, 100000),
+                'ExposureTime': 40000,
+                'AnalogueGain': 2.0,
+                'AfMode': controls.AfModeEnum.Manual,
+                'LensPosition': 1.0 / dist_to_sensor,
+                'ColourGains': (1.0, 1.0),
             },
         )
         self.cam.configure(config)
@@ -219,19 +230,7 @@ class CameraStreamer:
         scaler_crop = self.compute_scaler_crop(
             width=self.VIEW_WIDTH, height=self.VIEW_HEIGHT
         )
-        # empirically determined in m
-        dist_to_sensor = 0.2
-        self.cam.set_controls(
-            {
-                'ScalerCrop': scaler_crop,
-                'AfMode': controls.AfModeEnum.Manual,
-                'LensPosition': 1.0 / dist_to_sensor,
-                'AeEnable': False,
-                'ExposureTime': 32680,  # µs — 180-degree rule at 10fps is 50000; ~33000 is what AE settled on
-                'AnalogueGain': 2.0,    # minimum gain; reduces LED hot-spot amplification
-                'ColourGains': (1.0, 1.0),  # disable white balance gain
-            }
-        )
+        self.cam.set_controls({'ScalerCrop': scaler_crop})
         log.info(
             f'Requested ScalerCrop={scaler_crop}, '
             f'sensor={self.cam.sensor_resolution}, '
