@@ -412,6 +412,7 @@ def inspect_zarr(
 
     if save_frame is not None:
         from PIL import Image
+
         frame = read_frame(scene_path)
         Image.fromarray(frame).save(save_frame)
         console.print(f'\nSaved episode_0 frame 0 → {save_frame}')
@@ -441,6 +442,73 @@ def build_zarr(
     except RuntimeError as e:
         log.error(str(e))
         raise typer.Exit(1)
+
+
+@app.command(name='archive-scene')
+def archive_scene(
+    scene_path: pathlib.Path = typer.Argument(
+        ...,
+        help='Scene directory containing scene.zarr, or a scene.zarr path directly.',
+    ),
+    output: pathlib.Path | None = typer.Option(
+        None,
+        help='Output path for the archive. Defaults to scene.zarr.zip inside the scene directory.',
+    ),
+    delete_zarr: bool = typer.Option(
+        False,
+        '--delete-zarr',
+        help='Delete source scene.zarr after successful archiving.',
+    ),
+    force: bool = typer.Option(
+        False,
+        '--force',
+        help='Overwrite an existing archive.',
+    ),
+):
+    """
+    Archive scene.zarr to a zip for at-rest storage or memory-mapped training.
+
+    Note that this won't actually compress the data since the chunks are already compressed
+    (e.g. JpegXl for video frames, Blosc for sensor data), but it will package everything into a
+    single file and preserve the directory structure expected by a zarr DirectoryStore.
+    """
+    import zipfile
+
+    from polyumi_ingest.pzarr.scene_files import SceneFiles
+
+    scene_path = scene_path.resolve()
+    zarr_path = SceneFiles.resolve_zarr_path(scene_path)
+
+    if not zarr_path.exists():
+        log.error(f'No scene.zarr found at {scene_path}')
+        raise typer.Exit(1)
+
+    zip_path = output.resolve() if output else zarr_path.parent / (zarr_path.name + '.zip')
+
+    if zip_path.exists():
+        if not force:
+            log.error(f'Archive already exists: {zip_path}. Use --force to overwrite.')
+            raise typer.Exit(1)
+        zip_path.unlink()
+
+    files = sorted(f for f in zarr_path.rglob('*') if f.is_file())
+    src_size = sum(f.stat().st_size for f in files)
+    log.info(f'Archiving {zarr_path} ({_human_size(src_size)}) → {zip_path}')
+
+    # ZIP_STORED: chunks are already compressed (JpegXl/Blosc), so don't re-compress.
+    # Paths are stored relative to zarr_path so the zip root matches a zarr DirectoryStore.
+    with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_STORED) as zf:
+        for file_path in files:
+            zf.write(file_path, file_path.relative_to(zarr_path))
+
+    zip_size = zip_path.stat().st_size
+    log.info(f'Done. Archive: {_human_size(zip_size)} (source: {_human_size(src_size)})')
+
+    if delete_zarr:
+        if not Confirm.ask(f'Delete {zarr_path}?', default=False):
+            raise typer.Exit()
+        shutil.rmtree(zarr_path)
+        log.info(f'Deleted {zarr_path}')
 
 
 if __name__ == '__main__':
