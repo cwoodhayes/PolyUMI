@@ -96,10 +96,14 @@ def write_frames_to_zarr(
     n_written = len(futures)
     _, H, W, _ = frames_arr.shape
     uncompressed_mb = n_written * H * W * 3 / 1e6
-    log.info(
-        f'  {n_written} frames in {elapsed:.1f}s'
-        f' ({n_written / elapsed:.1f} fps, {uncompressed_mb / elapsed:.0f} MB/s uncompressed)'
-    )
+
+    if n_written > 0 and elapsed > 0:
+        log.info(
+            f'  {n_written} frames in {elapsed:.1f}s'
+            f' ({n_written / elapsed:.1f} fps, {uncompressed_mb / elapsed:.0f} MB/s uncompressed)'
+        )
+    else:
+        log.warning(f'  No frames written from {source_desc}.')
 
     return n_written
 

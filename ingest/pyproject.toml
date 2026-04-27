@@ -12,6 +12,7 @@ dependencies = [
     "zarr>=3.0",
     "numcodecs",
     "imagecodecs",
+    "pillow",
 ]
 
 [tool.uv.sources]

@@ -52,6 +52,7 @@ def _finger_timestamps(video_dir: pathlib.Path, first_wall_ns: int) -> np.ndarra
     """
     csv_path = video_dir / 'video_timestamps.csv'
     rows = np.loadtxt(csv_path, delimiter=',', dtype=np.int64)
+    rows = np.atleast_2d(rows)
     sensor_ts = rows[:, 1]
     wall_ns = first_wall_ns + (sensor_ts - sensor_ts[0])
     return wall_ns.astype(np.float64) / 1e9
@@ -70,12 +71,17 @@ def _read_wav(audio_path: pathlib.Path) -> tuple[np.ndarray, int]:
         n_ch = wf.getnchannels()
         sw = wf.getsampwidth()
         raw = wf.readframes(wf.getnframes())
-    dtype = {1: np.int8, 2: np.int16, 4: np.int32}[sw]
-    audio = np.frombuffer(raw, dtype=dtype)
+    if sw == 1:
+        # 8-bit WAV PCM is unsigned (0–255, silence at 128)
+        audio = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    elif sw in (2, 4):
+        dtype = np.int16 if sw == 2 else np.int32
+        audio = np.frombuffer(raw, dtype=dtype).astype(np.float32) / float(-np.iinfo(dtype).min)
+    else:
+        raise ValueError(f'Unsupported WAV sample width {sw} bytes in {audio_path.name}')
     if n_ch > 1:
         audio = audio.reshape(-1, n_ch)
-    peak = max(abs(np.iinfo(dtype).min), np.iinfo(dtype).max)
-    return audio.astype(np.float32) / peak, sr
+    return audio, sr
 
 
 def _write_gopro_imu(

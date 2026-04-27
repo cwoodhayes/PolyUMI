@@ -407,7 +407,7 @@ def build_zarr(
     skip_gopro: bool = typer.Option(
         False,
         '--skip-gopro',
-        help='Skip GoPro frame ingestion (required until GoPro ingest is implemented).',
+        help='Skip GoPro frame ingestion.',
     ),
 ):
     """Build a pzarr working-format zarr store from a processed scene directory."""
