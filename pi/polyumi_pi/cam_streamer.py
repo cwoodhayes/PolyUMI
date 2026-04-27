@@ -226,6 +226,10 @@ class CameraStreamer:
                 'ScalerCrop': scaler_crop,
                 'AfMode': controls.AfModeEnum.Manual,
                 'LensPosition': 1.0 / dist_to_sensor,
+                'AeEnable': False,
+                'ExposureTime': 32680,  # µs — 180-degree rule at 10fps is 50000; ~33000 is what AE settled on
+                'AnalogueGain': 2.0,    # minimum gain; reduces LED hot-spot amplification
+                'ColourGains': (1.0, 1.0),  # disable white balance gain
             }
         )
         log.info(
@@ -233,3 +237,4 @@ class CameraStreamer:
             f'sensor={self.cam.sensor_resolution}, '
             f'control_bounds={self.cam.camera_controls.get("ScalerCrop")}'
         )
+        log.info(f'Initial controls set: {self.cam.camera_controls}')
