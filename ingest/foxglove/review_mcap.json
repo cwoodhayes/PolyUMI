@@ -1,0 +1,186 @@
+{
+  "configById": {
+    "Image!3zkla5f": {
+      "cameraState": {
+        "distance": 20,
+        "perspective": true,
+        "phi": 60,
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "thetaOffset": 60,
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followMode": "follow-pose",
+      "scene": {},
+      "transforms": {},
+      "topics": {},
+      "layers": {},
+      "publish": {
+        "type": "point",
+        "poseTopic": "/move_base_simple/goal",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "synchronize": false,
+      "imageMode": {
+        "imageTopic": "/finger/image"
+      }
+    },
+    "Image!2r5557g": {
+      "cameraState": {
+        "distance": 20,
+        "perspective": true,
+        "phi": 60,
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "thetaOffset": 60,
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followMode": "follow-pose",
+      "scene": {},
+      "transforms": {},
+      "topics": {},
+      "layers": {},
+      "publish": {
+        "type": "point",
+        "poseTopic": "/move_base_simple/goal",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "synchronize": false,
+      "imageMode": {
+        "imageTopic": "/gopro/image"
+      }
+    },
+    "Plot!3ahq65t": {
+      "xAxisLabel": "",
+      "foxglovePanelTitle": "Linear Accel",
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gopro/accel.linear_acceleration.x",
+          "enabled": true,
+          "color": "#4e98e2",
+          "id": "06c76180-5e97-4141-9891-a39f0b7c4457",
+          "label": "a_x"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gopro/accel.linear_acceleration.y",
+          "enabled": true,
+          "color": "#f5774d",
+          "id": "00912f57-58af-4d8c-837b-234209c744a4",
+          "label": "a_y"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gopro/accel.linear_acceleration.z",
+          "enabled": true,
+          "color": "#2cff00",
+          "id": "68fd08fe-7862-40dd-a2b9-e0731a3f6f75",
+          "label": "a_z"
+        }
+      ],
+      "yAxisLabel": "m/s^2"
+    },
+    "Audio!1v0aezy": {
+      "volume": 0.8731,
+      "slidingViewWidth": 10,
+      "topic": "/audio"
+    },
+    "Plot!35segx7": {
+      "foxglovePanelTitle": "Gyro",
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gopro/gyro.angular_velocity.x",
+          "enabled": true,
+          "color": "#4e98e2",
+          "id": "2301c2b4-5e13-4885-88b0-35e034923f5b",
+          "label": "w_x"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gopro/gyro.angular_velocity.y",
+          "enabled": true,
+          "color": "#f5774d",
+          "id": "30bc5f80-395d-4ee8-a0aa-1f863a9d3e0f",
+          "label": "w_y"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gopro/gyro.angular_velocity.z",
+          "enabled": true,
+          "color": "#2cff00",
+          "id": "1fc81e24-484c-4edd-a0fe-878e3ce2c66f",
+          "label": "w_z"
+        }
+      ]
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": {
+    "speed": 1
+  },
+  "drawerConfig": {
+    "tracks": []
+  },
+  "layout": {
+    "first": {
+      "first": "Image!3zkla5f",
+      "second": "Image!2r5557g",
+      "direction": "row"
+    },
+    "second": {
+      "first": {
+        "first": "Plot!3ahq65t",
+        "second": "Plot!35segx7",
+        "direction": "row"
+      },
+      "second": "Audio!1v0aezy",
+      "direction": "column",
+      "splitPercentage": 62.12871287128712
+    },
+    "direction": "column",
+    "splitPercentage": 56.229685807150595
+  }
+}
