@@ -770,6 +770,7 @@ source = { editable = "ingest" }
 dependencies = [
     { name = "imagecodecs" },
     { name = "numcodecs" },
+    { name = "pillow" },
     { name = "polyumi-pi" },
     { name = "zarr" },
 ]
@@ -778,6 +779,7 @@ dependencies = [
 requires-dist = [
     { name = "imagecodecs" },
     { name = "numcodecs" },
+    { name = "pillow" },
     { name = "polyumi-pi", editable = "pi" },
     { name = "zarr", specifier = ">=3.0" },
 ]

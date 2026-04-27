@@ -204,7 +204,7 @@ def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) 
     if meta.first_frame_metadata is None:
         raise RuntimeError(f'first_frame_metadata missing in {session.path / "metadata.json"}')
     first_wall_ns = meta.first_frame_metadata['FrameWallClock']
-    finger_ts = _finger_timestamps(video_dir, first_wall_ns)
+    finger_ts = _finger_timestamps(video_dir, first_wall_ns)[:n_written]
     ts_grp.create_array('finger', data=finger_ts, compressor=_BLOSC)
 
     # --- Audio ---
