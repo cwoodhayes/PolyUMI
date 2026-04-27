@@ -95,9 +95,12 @@ pingest fetch --host <pi_ssh_hostname>
 pingest fetch-gopro --host <pi_ssh_hostname>
 
 # PROCESSING SESSIONS ON DISK
-# encode finger video+audio:
-pingest process-all 
+# process all new scenes on disk into their pzarr form, skipping already-processed scenes:
+pingest process-all
 ```
+
+The at-rest data format used during the preprocessing stage managed by `pingest` is a custom
+zarr format stored in `scene.zarr` in each scene directory, referred to in these docs as `pzarr`. See [docs/data-format.md](docs/data-format.md) for details on the format & the rationale behind it.
 
 ## Streaming / Demos
 
