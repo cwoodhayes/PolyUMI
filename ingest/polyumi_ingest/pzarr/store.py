@@ -163,6 +163,9 @@ def _write_gopro_audio(
 
     sr = int(audio_info.get('sample_rate', 48000))
     n_ch = int(audio_info.get('channels', 2))
+    duration_s = float(audio_info.get('duration', 0) or 0)
+    expected_mb = duration_s * sr * n_ch * 4 / 1e6
+    log.info(f'  GoPro audio: {sr} Hz {n_ch}ch ~{duration_s:.1f}s → ~{expected_mb:.0f} MB RAM')
 
     try:
         result = subprocess.run(
@@ -341,6 +344,7 @@ class EpisodeInfo:
     gyro_shape: tuple | None  # type: ignore[type-arg]
     gps_shape: tuple | None  # type: ignore[type-arg]
     gopro_audio_shape: tuple | None  # type: ignore[type-arg]
+    gopro_audio_ts_range: tuple[float, float] | None
     finger_ts_range: tuple[float, float] | None
     finger_ts_mean_delta_ms: float | None
     finger_audio_ts_range: tuple[float, float] | None
@@ -389,6 +393,11 @@ def inspect_pzarr(scene_path: pathlib.Path) -> PZarrInfo:
             ts = _arr(ep, 'timestamps/finger_audio')[:]  # type: ignore[assignment]
             finger_audio_ts_range = (float(ts[0]), float(ts[-1]))
 
+        gopro_audio_ts_range: tuple[float, float] | None = None
+        if 'timestamps/gopro_audio' in ep:
+            ts = _arr(ep, 'timestamps/gopro_audio')[:]  # type: ignore[assignment]
+            gopro_audio_ts_range = (float(ts[0]), float(ts[-1]))
+
         gopro_ts_range: tuple[float, float] | None = None
         gopro_mean_delta: float | None = None
         if 'timestamps/gopro' in ep:
@@ -416,6 +425,7 @@ def inspect_pzarr(scene_path: pathlib.Path) -> PZarrInfo:
                 gyro_shape=_arr(ep, 'gopro/gyro').shape if 'gopro/gyro' in ep else None,
                 gps_shape=_arr(ep, 'gopro/gps').shape if 'gopro/gps' in ep else None,
                 gopro_audio_shape=_arr(ep, 'gopro/audio').shape if 'gopro/audio' in ep else None,
+                gopro_audio_ts_range=gopro_audio_ts_range,
                 finger_ts_range=finger_ts_range,
                 finger_ts_mean_delta_ms=finger_mean_delta,
                 finger_audio_ts_range=finger_audio_ts_range,

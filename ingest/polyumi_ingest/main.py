@@ -383,7 +383,10 @@ def inspect_zarr(
                 ts_info = f'{ep.finger_audio_ts_range[0]:.3f} → {ep.finger_audio_ts_range[1]:.3f} s'
             table.add_row('finger/audio', str(ep.finger_audio_shape), ts_info)
         if ep.gopro_audio_shape is not None:
-            table.add_row('gopro/audio', str(ep.gopro_audio_shape), '')
+            ts_info = ''
+            if ep.gopro_audio_ts_range is not None:
+                ts_info = f'{ep.gopro_audio_ts_range[0]:.3f} → {ep.gopro_audio_ts_range[1]:.3f} s'
+            table.add_row('gopro/audio', str(ep.gopro_audio_shape), ts_info)
         if duration is not None:
             ep_info = f'{ep.episode_start:.3f} → {ep.episode_end:.3f} s  ({duration:.2f} s)'
             table.add_row('episode_start / end', '', ep_info)

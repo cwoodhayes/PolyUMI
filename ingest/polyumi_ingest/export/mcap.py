@@ -111,7 +111,7 @@ _SCHEMA_LOCATION_FIX = json.dumps(
 
 def _ts_ns(t_s: float) -> int:
     """Convert UTC seconds to integer nanoseconds."""
-    return int(t_s * 1e9)
+    return round(t_s * 1e9)
 
 
 def _foxglove_time(t_s: float) -> dict:  # type: ignore[type-arg]
