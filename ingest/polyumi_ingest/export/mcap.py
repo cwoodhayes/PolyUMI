@@ -149,6 +149,7 @@ def _register_channels(
     has_accel: bool,
     has_gyro: bool,
     has_gps: bool,
+    has_gopro_audio: bool,
 ) -> dict[str, int]:
     """Register all schemas and channels; return {topic: channel_id}."""
     img_sid = writer.register_schema('foxglove.CompressedImage', 'jsonschema', _SCHEMA_COMPRESSED_IMAGE)
@@ -161,10 +162,12 @@ def _register_channels(
 
     channels: dict[str, int] = {
         '/finger/image': ch('/finger/image', img_sid),
-        '/audio': ch('/audio', aud_sid),
+        '/finger/audio': ch('/finger/audio', aud_sid),
     }
     if has_gopro:
         channels['/gopro/image'] = ch('/gopro/image', img_sid)
+    if has_gopro_audio:
+        channels['/gopro/audio'] = ch('/gopro/audio', aud_sid)
     if has_accel:
         channels['/gopro/accel'] = ch('/gopro/accel', imu_sid)
     if has_gyro:
@@ -306,6 +309,7 @@ def export_episode_to_mcap(
 ) -> None:
     """Write one pzarr episode group to an MCAP file at output_path."""
     has_gopro = 'gopro/frames' in ep_grp
+    has_gopro_audio = 'gopro/audio' in ep_grp
     has_accel = 'gopro/accl' in ep_grp
     has_gyro = 'gopro/gyro' in ep_grp
     has_gps = 'gopro/gps' in ep_grp
@@ -318,6 +322,7 @@ def export_episode_to_mcap(
             ch = _register_channels(
                 writer,
                 has_gopro=has_gopro,
+                has_gopro_audio=has_gopro_audio,
                 has_accel=has_accel,
                 has_gyro=has_gyro,
                 has_gps=has_gps,
@@ -333,12 +338,12 @@ def export_episode_to_mcap(
                 quality=jpeg_quality,
             )
 
-            log.info('  audio...')
+            log.info('  finger audio...')
             _write_audio(
                 writer,
-                ch['/audio'],
-                ep_grp['audio/data'][:],  # type: ignore[index]
-                ep_grp['timestamps/audio'][:],  # type: ignore[index]
+                ch['/finger/audio'],
+                ep_grp['finger/audio'][:],  # type: ignore[index]
+                ep_grp['timestamps/finger_audio'][:],  # type: ignore[index]
                 chunk_size=audio_chunk_size,
             )
 
@@ -351,6 +356,16 @@ def export_episode_to_mcap(
                     ep_grp['timestamps/gopro'][:],  # type: ignore[index]
                     frame_id='gopro',
                     quality=jpeg_quality,
+                )
+
+            if has_gopro_audio:
+                log.info('  gopro audio...')
+                _write_audio(
+                    writer,
+                    ch['/gopro/audio'],
+                    ep_grp['gopro/audio'][:],  # type: ignore[index]
+                    ep_grp['timestamps/gopro_audio'][:],  # type: ignore[index]
+                    chunk_size=audio_chunk_size,
                 )
 
             if has_accel:

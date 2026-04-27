@@ -377,11 +377,13 @@ def inspect_zarr(
                 if ep.gopro_ts_mean_delta_ms is not None:
                     ts_info += f'  (Δ={ep.gopro_ts_mean_delta_ms:.1f} ms avg)'
             table.add_row('gopro/frames', str(ep.gopro_shape), ts_info)
-        if ep.audio_shape is not None:
+        if ep.finger_audio_shape is not None:
             ts_info = ''
-            if ep.audio_ts_range is not None:
-                ts_info = f'{ep.audio_ts_range[0]:.3f} → {ep.audio_ts_range[1]:.3f} s'
-            table.add_row('audio/data', str(ep.audio_shape), ts_info)
+            if ep.finger_audio_ts_range is not None:
+                ts_info = f'{ep.finger_audio_ts_range[0]:.3f} → {ep.finger_audio_ts_range[1]:.3f} s'
+            table.add_row('finger/audio', str(ep.finger_audio_shape), ts_info)
+        if ep.gopro_audio_shape is not None:
+            table.add_row('gopro/audio', str(ep.gopro_audio_shape), '')
         if duration is not None:
             ep_info = f'{ep.episode_start:.3f} → {ep.episode_end:.3f} s  ({duration:.2f} s)'
             table.add_row('episode_start / end', '', ep_info)
@@ -415,7 +417,9 @@ def build_zarr(
 
     try:
         zarr_path = build_pzarr(scene_path, skip_gopro=skip_gopro)
-        log.info(f'Done. Zarr store written to {zarr_path}')
+        files = [f for f in zarr_path.rglob('*') if f.is_file()]
+        src_size = sum(f.stat().st_size for f in files)
+        log.info(f'Done. Zarr store written to {zarr_path} (total size: {_human_size(src_size)}).')
     except NotImplementedError as e:
         log.error(str(e))
         raise typer.Exit(1)
@@ -471,7 +475,7 @@ def archive_scene(
             raise typer.Exit(1)
         zip_path.unlink()
 
-    files = sorted(f for f in zarr_path.rglob('*') if f.is_file())
+    files = [f for f in zarr_path.rglob('*') if f.is_file()]
     src_size = sum(f.stat().st_size for f in files)
     log.info(f'Archiving {zarr_path} ({_human_size(src_size)}) → {zip_path}')
 

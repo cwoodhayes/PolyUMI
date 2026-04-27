@@ -45,7 +45,7 @@
         "imageTopic": "/finger/image"
       }
     },
-    "Image!2r5557g": {
+    "Image!24wk5v": {
       "cameraState": {
         "distance": 20,
         "perspective": true,
@@ -121,11 +121,6 @@
       ],
       "yAxisLabel": "m/s^2"
     },
-    "Audio!1v0aezy": {
-      "volume": 0.8731,
-      "slidingViewWidth": 10,
-      "topic": "/audio"
-    },
     "Plot!35segx7": {
       "foxglovePanelTitle": "Gyro",
       "paths": [
@@ -154,6 +149,18 @@
           "label": "w_z"
         }
       ]
+    },
+    "Audio!3nxj4f9": {
+      "volume": 1,
+      "slidingViewWidth": 10,
+      "topic": "/gopro/audio",
+      "muted": true
+    },
+    "Audio!1v0aezy": {
+      "volume": 0.8731,
+      "slidingViewWidth": 10,
+      "topic": "/finger/audio",
+      "muted": false
     }
   },
   "globalVariables": {},
@@ -167,7 +174,7 @@
   "layout": {
     "first": {
       "first": "Image!3zkla5f",
-      "second": "Image!2r5557g",
+      "second": "Image!24wk5v",
       "direction": "row"
     },
     "second": {
@@ -176,11 +183,15 @@
         "second": "Plot!35segx7",
         "direction": "row"
       },
-      "second": "Audio!1v0aezy",
+      "second": {
+        "first": "Audio!3nxj4f9",
+        "second": "Audio!1v0aezy",
+        "direction": "column"
+      },
       "direction": "column",
-      "splitPercentage": 62.12871287128712
+      "splitPercentage": 45.663662052045886
     },
     "direction": "column",
-    "splitPercentage": 56.229685807150595
+    "splitPercentage": 51.65929203539823
   }
 }

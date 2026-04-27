@@ -3,6 +3,7 @@
 import dataclasses
 import datetime as dt
 import importlib.metadata
+import json
 import logging
 import pathlib
 import subprocess
@@ -128,6 +129,67 @@ def _write_gopro_imu(
         log.info(f'  GoPro GPS:  {n} samples (~{n / duration_s:.0f} Hz)')
 
 
+def _write_gopro_audio(
+    ep_grp: zarr.Group,
+    gopro_path: pathlib.Path,
+    recording_start_s: float,
+) -> None:
+    """
+    Extract audio from gopro.mp4 and write into ep_grp.
+
+    Writes to gopro/audio and timestamps/gopro_audio. Uses ffprobe to get the
+    native sample rate and channel count, then ffmpeg to extract raw float32 PCM.
+    """
+    try:
+        probe = subprocess.run(
+            ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', str(gopro_path)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        log.warning(f'ffprobe failed on {gopro_path.name}: {exc}')
+        return
+
+    audio_info = None
+    for s in json.loads(probe.stdout).get('streams', []):
+        if s.get('codec_type') == 'audio':
+            audio_info = s
+            break
+
+    if audio_info is None:
+        log.info(f'  No audio stream in {gopro_path.name}')
+        return
+
+    sr = int(audio_info.get('sample_rate', 48000))
+    n_ch = int(audio_info.get('channels', 2))
+
+    try:
+        result = subprocess.run(
+            ['ffmpeg', '-i', str(gopro_path), '-vn', '-f', 'f32le', '-ar', str(sr), '-ac', str(n_ch), 'pipe:1'],
+            capture_output=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        log.warning(f'ffmpeg audio extraction failed on {gopro_path.name}: {exc}')
+        return
+
+    audio = np.frombuffer(result.stdout, dtype=np.float32)
+    if n_ch > 1:
+        audio = audio.reshape(-1, n_ch)
+    n_samples = audio.shape[0]
+
+    gopro_grp = ep_grp.require_group('gopro')
+    ts_grp = ep_grp.require_group('timestamps')
+    gopro_grp.create_array('audio', data=audio, compressor=_BLOSC)
+    ts_grp.create_array(
+        'gopro_audio',
+        data=recording_start_s + np.arange(n_samples, dtype=np.float64) / sr,
+        compressor=_BLOSC,
+    )
+    log.info(f'  GoPro audio: {n_samples} samples, {n_ch}ch @ {sr} Hz ({n_samples / sr:.1f}s)')
+
+
 def _write_gopro_frames(ep_grp: zarr.Group, gopro_path: pathlib.Path) -> None:
     """Decode gopro.mp4 and write frames, timestamps, and IMU into ep_grp."""
     cap = cv2.VideoCapture(str(gopro_path))
@@ -167,6 +229,7 @@ def _write_gopro_frames(ep_grp: zarr.Group, gopro_path: pathlib.Path) -> None:
         cap.release()
 
     _write_gopro_imu(ep_grp, gopro_path, recording_start_s, n_frames / fps)
+    _write_gopro_audio(ep_grp, gopro_path, recording_start_s)
 
 
 def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) -> None:
@@ -207,14 +270,13 @@ def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) 
     finger_ts = _finger_timestamps(video_dir, first_wall_ns)[:n_written]
     ts_grp.create_array('finger', data=finger_ts, compressor=_BLOSC)
 
-    # --- Audio ---
+    # --- Finger audio (contact microphone) ---
     if meta.audio_start_time_ns is None:
         raise RuntimeError(f'audio_start_time_ns missing in {session.path / "metadata.json"}')
     audio_data, sr = _read_wav(audio_path)
-    audio_grp = ep_grp.require_group('audio')
-    audio_grp.create_array('data', data=audio_data, compressor=_BLOSC)
+    finger_grp.create_array('audio', data=audio_data, compressor=_BLOSC)
     audio_ts = _audio_timestamps(meta.audio_start_time_ns, len(audio_data), sr)
-    ts_grp.create_array('audio', data=audio_ts, compressor=_BLOSC)
+    ts_grp.create_array('finger_audio', data=audio_ts, compressor=_BLOSC)
 
     # --- GoPro ---
     if skip_gopro:
@@ -273,14 +335,15 @@ class EpisodeInfo:
 
     index: int
     finger_shape: tuple | None  # type: ignore[type-arg]
-    audio_shape: tuple | None  # type: ignore[type-arg]
+    finger_audio_shape: tuple | None  # type: ignore[type-arg]
     gopro_shape: tuple | None  # type: ignore[type-arg]
     accl_shape: tuple | None  # type: ignore[type-arg]
     gyro_shape: tuple | None  # type: ignore[type-arg]
     gps_shape: tuple | None  # type: ignore[type-arg]
+    gopro_audio_shape: tuple | None  # type: ignore[type-arg]
     finger_ts_range: tuple[float, float] | None
     finger_ts_mean_delta_ms: float | None
-    audio_ts_range: tuple[float, float] | None
+    finger_audio_ts_range: tuple[float, float] | None
     gopro_ts_range: tuple[float, float] | None
     gopro_ts_mean_delta_ms: float | None
     episode_start: float | None
@@ -321,10 +384,10 @@ def inspect_pzarr(scene_path: pathlib.Path) -> PZarrInfo:
             finger_ts_range = (float(ts[0]), float(ts[-1]))
             finger_mean_delta = float(np.diff(ts).mean() * 1000) if len(ts) > 1 else None
 
-        audio_ts_range: tuple[float, float] | None = None
-        if 'timestamps/audio' in ep:
-            ts = _arr(ep, 'timestamps/audio')[:]  # type: ignore[assignment]
-            audio_ts_range = (float(ts[0]), float(ts[-1]))
+        finger_audio_ts_range: tuple[float, float] | None = None
+        if 'timestamps/finger_audio' in ep:
+            ts = _arr(ep, 'timestamps/finger_audio')[:]  # type: ignore[assignment]
+            finger_audio_ts_range = (float(ts[0]), float(ts[-1]))
 
         gopro_ts_range: tuple[float, float] | None = None
         gopro_mean_delta: float | None = None
@@ -347,14 +410,15 @@ def inspect_pzarr(scene_path: pathlib.Path) -> PZarrInfo:
             EpisodeInfo(
                 index=i,
                 finger_shape=_arr(ep, 'finger/frames').shape if 'finger/frames' in ep else None,
-                audio_shape=_arr(ep, 'audio/data').shape if 'audio/data' in ep else None,
+                finger_audio_shape=_arr(ep, 'finger/audio').shape if 'finger/audio' in ep else None,
                 gopro_shape=_arr(ep, 'gopro/frames').shape if 'gopro/frames' in ep else None,
                 accl_shape=_arr(ep, 'gopro/accl').shape if 'gopro/accl' in ep else None,
                 gyro_shape=_arr(ep, 'gopro/gyro').shape if 'gopro/gyro' in ep else None,
                 gps_shape=_arr(ep, 'gopro/gps').shape if 'gopro/gps' in ep else None,
+                gopro_audio_shape=_arr(ep, 'gopro/audio').shape if 'gopro/audio' in ep else None,
                 finger_ts_range=finger_ts_range,
                 finger_ts_mean_delta_ms=finger_mean_delta,
-                audio_ts_range=audio_ts_range,
+                finger_audio_ts_range=finger_audio_ts_range,
                 gopro_ts_range=gopro_ts_range,
                 gopro_ts_mean_delta_ms=gopro_mean_delta,
                 episode_start=ep_start,
