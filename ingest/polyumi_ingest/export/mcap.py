@@ -121,8 +121,14 @@ def _foxglove_time(t_s: float) -> dict:  # type: ignore[type-arg]
 
 
 def _encode_jpeg(frame: np.ndarray, quality: int) -> bytes:
-    """Encode a (H, W, 3) uint8 BGR array to JPEG bytes."""
-    ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    """
+    Encode a (H, W, 3) uint8 RGB array to JPEG bytes.
+
+    pzarr stores RGB (write_frames_to_zarr converts BGR→RGB on ingest), but
+    cv2.imencode expects BGR — convert back so JPEG colors come out correct.
+    """
+    bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+    ok, buf = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, quality])
     if not ok:
         raise RuntimeError('cv2.imencode failed')
     return buf.tobytes()
@@ -208,8 +214,9 @@ def _write_audio(
     """
     Chunk audio into fixed-size blocks and write as RawAudio messages.
 
-    pzarr stores float32 audio; this converts to pcm-s16le for Foxglove compatibility,
-    matching the format sent by the streaming node.
+    pzarr stores float32 audio; this converts to int16 PCM with format 'pcm-s16',
+    matching the format string used by the streaming node and recognized by
+    Foxglove's audio panel.
     """
     n_samples = audio_data.shape[0]
     n_channels = 1 if audio_data.ndim == 1 else audio_data.shape[1]
@@ -224,7 +231,7 @@ def _write_audio(
         msg = json.dumps(
             {
                 'timestamp': _foxglove_time(t_s),
-                'format': 'pcm-s16le',
+                'format': 'pcm-s16',
                 'sample_rate': sr,
                 'number_of_channels': n_channels,
                 'data': _b64(pcm.tobytes()),

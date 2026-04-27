@@ -21,3 +21,4 @@ polyumi_pi = { path = "../pi", editable = true }
 
 [project.scripts]
 pingest = "polyumi_ingest.main:app"
+
