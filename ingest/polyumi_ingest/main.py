@@ -377,11 +377,16 @@ def inspect_zarr(
                 if ep.gopro_ts_mean_delta_ms is not None:
                     ts_info += f'  (Δ={ep.gopro_ts_mean_delta_ms:.1f} ms avg)'
             table.add_row('gopro/frames', str(ep.gopro_shape), ts_info)
-        if ep.audio_shape is not None:
+        if ep.finger_audio_shape is not None:
             ts_info = ''
-            if ep.audio_ts_range is not None:
-                ts_info = f'{ep.audio_ts_range[0]:.3f} → {ep.audio_ts_range[1]:.3f} s'
-            table.add_row('audio/data', str(ep.audio_shape), ts_info)
+            if ep.finger_audio_ts_range is not None:
+                ts_info = f'{ep.finger_audio_ts_range[0]:.3f} → {ep.finger_audio_ts_range[1]:.3f} s'
+            table.add_row('finger/audio', str(ep.finger_audio_shape), ts_info)
+        if ep.gopro_audio_shape is not None:
+            ts_info = ''
+            if ep.gopro_audio_ts_range is not None:
+                ts_info = f'{ep.gopro_audio_ts_range[0]:.3f} → {ep.gopro_audio_ts_range[1]:.3f} s'
+            table.add_row('gopro/audio', str(ep.gopro_audio_shape), ts_info)
         if duration is not None:
             ep_info = f'{ep.episode_start:.3f} → {ep.episode_end:.3f} s  ({duration:.2f} s)'
             table.add_row('episode_start / end', '', ep_info)
@@ -415,7 +420,9 @@ def build_zarr(
 
     try:
         zarr_path = build_pzarr(scene_path, skip_gopro=skip_gopro)
-        log.info(f'Done. Zarr store written to {zarr_path}')
+        files = [f for f in zarr_path.rglob('*') if f.is_file()]
+        src_size = sum(f.stat().st_size for f in files)
+        log.info(f'Done. Zarr store written to {zarr_path} (total size: {_human_size(src_size)}).')
     except NotImplementedError as e:
         log.error(str(e))
         raise typer.Exit(1)
@@ -471,7 +478,7 @@ def archive_scene(
             raise typer.Exit(1)
         zip_path.unlink()
 
-    files = sorted(f for f in zarr_path.rglob('*') if f.is_file())
+    files = [f for f in zarr_path.rglob('*') if f.is_file()]
     src_size = sum(f.stat().st_size for f in files)
     log.info(f'Archiving {zarr_path} ({_human_size(src_size)}) → {zip_path}')
 
@@ -489,6 +496,50 @@ def archive_scene(
             raise typer.Exit()
         shutil.rmtree(zarr_path)
         log.info(f'Deleted {zarr_path}')
+
+
+@app.command(name='export-mcap')
+def export_mcap(
+    scene_path: pathlib.Path = typer.Argument(
+        ...,
+        help='Scene directory containing scene.zarr, or a scene.zarr path directly.',
+    ),
+    output_dir: pathlib.Path | None = typer.Option(
+        None,
+        help='Directory to write .mcap files. Defaults to the scene directory.',
+    ),
+    episode: int | None = typer.Option(
+        None,
+        help='Export only this episode index. Omit to export all episodes.',
+    ),
+    jpeg_quality: int = typer.Option(
+        85,
+        help='JPEG re-encode quality for video frames (1–100).',
+    ),
+    audio_chunk_size: int = typer.Option(
+        4096,
+        min=1,
+        help='Number of audio samples per RawAudio message.',
+    ),
+):
+    """Export a pzarr scene to MCAP files for visualization in Foxglove."""
+    from polyumi_ingest.export.mcap import export_scene_to_mcap
+
+    try:
+        written = export_scene_to_mcap(
+            scene_path=scene_path,
+            output_dir=output_dir,
+            episode=episode,
+            jpeg_quality=jpeg_quality,
+            audio_chunk_size=audio_chunk_size,
+        )
+    except FileNotFoundError as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+
+    log.info(f'Exported {len(written)} episode(s):')
+    for path in written:
+        log.info(f'  {path}')
 
 
 if __name__ == '__main__':

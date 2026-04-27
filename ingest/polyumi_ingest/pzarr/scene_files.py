@@ -57,8 +57,9 @@ class SceneFiles:
     def resolve_zarr_path(path: pathlib.Path) -> pathlib.Path:
         """Accept either a scene directory or a direct zarr path; return the zarr path."""
         path = path.resolve()
-        candidate = path / 'scene.zarr'
-        return candidate if candidate.exists() else path
+        if path.suffix == '.zarr':
+            return path
+        return path / 'scene.zarr'
 
     # --- zarr store ---
 

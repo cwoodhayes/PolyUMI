@@ -13,6 +13,7 @@ dependencies = [
     "numcodecs",
     "imagecodecs",
     "pillow",
+    "mcap>=1.1",
 ]
 
 [tool.uv.sources]
@@ -20,3 +21,4 @@ polyumi_pi = { path = "../pi", editable = true }
 
 [project.scripts]
 pingest = "polyumi_ingest.main:app"
+
