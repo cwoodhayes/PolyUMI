@@ -491,5 +491,48 @@ def archive_scene(
         log.info(f'Deleted {zarr_path}')
 
 
+@app.command(name='export-mcap')
+def export_mcap(
+    scene_path: pathlib.Path = typer.Argument(
+        ...,
+        help='Scene directory containing scene.zarr, or a scene.zarr path directly.',
+    ),
+    output_dir: pathlib.Path | None = typer.Option(
+        None,
+        help='Directory to write .mcap files. Defaults to the scene directory.',
+    ),
+    episode: int | None = typer.Option(
+        None,
+        help='Export only this episode index. Omit to export all episodes.',
+    ),
+    jpeg_quality: int = typer.Option(
+        85,
+        help='JPEG re-encode quality for video frames (1–100).',
+    ),
+    audio_chunk_size: int = typer.Option(
+        4096,
+        help='Number of audio samples per RawAudio message.',
+    ),
+):
+    """Export a pzarr scene to MCAP files for visualization in Foxglove."""
+    from polyumi_ingest.export.mcap import export_scene_to_mcap
+
+    try:
+        written = export_scene_to_mcap(
+            scene_path=scene_path,
+            output_dir=output_dir,
+            episode=episode,
+            jpeg_quality=jpeg_quality,
+            audio_chunk_size=audio_chunk_size,
+        )
+    except FileNotFoundError as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+
+    log.info(f'Exported {len(written)} episode(s):')
+    for path in written:
+        log.info(f'  {path}')
+
+
 if __name__ == '__main__':
     app()
