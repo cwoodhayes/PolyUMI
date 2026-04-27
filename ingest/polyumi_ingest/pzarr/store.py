@@ -17,6 +17,7 @@ from numcodecs import Blosc
 from polyumi_pi.files.session import SessionFiles
 
 from polyumi_ingest.gopro_fetch import _recording_start_time
+from polyumi_ingest.gpmf_parse import extract_gpmf_binary, parse_imu
 from polyumi_ingest.pzarr.scene_files import GOPRO_MP4, SceneFiles
 from polyumi_ingest.video_helpers import write_frames_to_zarr
 from polyumi_ingest.pzarr.version import PZARR_VERSION
@@ -77,8 +78,52 @@ def _read_wav(audio_path: pathlib.Path) -> tuple[np.ndarray, int]:
     return audio.astype(np.float32) / peak, sr
 
 
+def _write_gopro_imu(
+    ep_grp: zarr.Group,
+    gopro_path: pathlib.Path,
+    recording_start_s: float,
+    duration_s: float,
+) -> None:
+    """
+    Extract GPMF IMU/GPS from gopro.mp4 and write into ep_grp.
+
+    Writes to gopro/{accl,gyro,gps} and timestamps/gopro_{accl,gyro,gps}.
+    Timestamps are uniformly spaced across the recording: GoPro samples each
+    IMU sensor at a constant hardware rate, so this matches reality within the
+    ~1 ms jitter of the GPMF container boundaries.
+    """
+    gpmf_data = extract_gpmf_binary(gopro_path)
+    if gpmf_data is None:
+        return
+
+    imu = parse_imu(gpmf_data)
+    gopro_grp = ep_grp.require_group('gopro')
+    ts_grp = ep_grp.require_group('timestamps')
+
+    def _uniform_ts(n: int) -> np.ndarray:
+        return recording_start_s + np.arange(n, dtype=np.float64) / (n / duration_s)
+
+    if imu.accl is not None:
+        n = len(imu.accl)
+        gopro_grp.create_array('accl', data=imu.accl, compressor=_BLOSC)
+        ts_grp.create_array('gopro_accl', data=_uniform_ts(n), compressor=_BLOSC)
+        log.info(f'  GoPro ACCL: {n} samples (~{n / duration_s:.0f} Hz)')
+
+    if imu.gyro is not None:
+        n = len(imu.gyro)
+        gopro_grp.create_array('gyro', data=imu.gyro, compressor=_BLOSC)
+        ts_grp.create_array('gopro_gyro', data=_uniform_ts(n), compressor=_BLOSC)
+        log.info(f'  GoPro GYRO: {n} samples (~{n / duration_s:.0f} Hz)')
+
+    if imu.gps is not None:
+        n = len(imu.gps)
+        gopro_grp.create_array('gps', data=imu.gps, compressor=_BLOSC)
+        ts_grp.create_array('gopro_gps', data=_uniform_ts(n), compressor=_BLOSC)
+        log.info(f'  GoPro GPS:  {n} samples (~{n / duration_s:.0f} Hz)')
+
+
 def _write_gopro_frames(ep_grp: zarr.Group, gopro_path: pathlib.Path) -> None:
-    """Decode gopro.mp4 and write frames + timestamps into ep_grp."""
+    """Decode gopro.mp4 and write frames, timestamps, and IMU into ep_grp."""
     cap = cv2.VideoCapture(str(gopro_path))
     if not cap.isOpened():
         raise RuntimeError(f'Could not open GoPro video: {gopro_path}')
@@ -114,6 +159,8 @@ def _write_gopro_frames(ep_grp: zarr.Group, gopro_path: pathlib.Path) -> None:
         ts_grp.create_array('gopro', data=gopro_ts, compressor=_BLOSC)
     finally:
         cap.release()
+
+    _write_gopro_imu(ep_grp, gopro_path, recording_start_s, n_frames / fps)
 
 
 def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) -> None:
@@ -222,6 +269,9 @@ class EpisodeInfo:
     finger_shape: tuple | None  # type: ignore[type-arg]
     audio_shape: tuple | None  # type: ignore[type-arg]
     gopro_shape: tuple | None  # type: ignore[type-arg]
+    accl_shape: tuple | None  # type: ignore[type-arg]
+    gyro_shape: tuple | None  # type: ignore[type-arg]
+    gps_shape: tuple | None  # type: ignore[type-arg]
     finger_ts_range: tuple[float, float] | None
     finger_ts_mean_delta_ms: float | None
     audio_ts_range: tuple[float, float] | None
@@ -293,6 +343,9 @@ def inspect_scene_zarr(scene_path: pathlib.Path) -> SceneZarrInfo:
                 finger_shape=_arr(ep, 'finger/frames').shape if 'finger/frames' in ep else None,
                 audio_shape=_arr(ep, 'audio/data').shape if 'audio/data' in ep else None,
                 gopro_shape=_arr(ep, 'gopro/frames').shape if 'gopro/frames' in ep else None,
+                accl_shape=_arr(ep, 'gopro/accl').shape if 'gopro/accl' in ep else None,
+                gyro_shape=_arr(ep, 'gopro/gyro').shape if 'gopro/gyro' in ep else None,
+                gps_shape=_arr(ep, 'gopro/gps').shape if 'gopro/gps' in ep else None,
                 finger_ts_range=finger_ts_range,
                 finger_ts_mean_delta_ms=finger_mean_delta,
                 audio_ts_range=audio_ts_range,
