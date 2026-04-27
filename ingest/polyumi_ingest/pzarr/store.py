@@ -18,7 +18,7 @@ from polyumi_pi.files.session import SessionFiles
 
 from polyumi_ingest.gopro_fetch import _recording_start_time
 from polyumi_ingest.pzarr.scene_files import GOPRO_MP4, SceneFiles
-from polyumi_ingest.video_helpers import write_video_frames_to_zarr
+from polyumi_ingest.video_helpers import write_frames_to_zarr
 from polyumi_ingest.pzarr.version import PZARR_VERSION
 
 numcodecs.register_codec(Jpegxl)
@@ -103,7 +103,7 @@ def _write_gopro_frames(ep_grp: zarr.Group, gopro_path: pathlib.Path) -> None:
         )
 
         log.info(f'  Writing {n_frames} GoPro frames ({W}x{H}, {fps:.1f} fps)...')
-        n_written = write_video_frames_to_zarr(gopro_path, frames_arr)
+        n_written = write_frames_to_zarr(gopro_path, frames_arr)
 
         if n_written < n_frames:
             frames_arr.resize((n_written, H, W, 3))
@@ -144,14 +144,9 @@ def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) 
         compressor=_JPEGXL,
         zarr_format=2,
     )
-    log.info(f'  Writing {N} finger frames ({H}x{W})...')
-    for j, fp in enumerate(frames):
-        raw = np.frombuffer(fp.read_bytes(), dtype=np.uint8)
-        bgr = cv2.imdecode(raw, cv2.IMREAD_COLOR)
-        if bgr is None:
-            log.warning(f'  Failed to decode {fp.name}, skipping')
-            continue
-        frames_arr[j] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    n_written = write_frames_to_zarr(frames, frames_arr)
+    if n_written < N:
+        frames_arr.resize((n_written, H, W, 3))
 
     if meta.first_frame_metadata is None:
         raise RuntimeError(f'first_frame_metadata missing in {session.path / "metadata.json"}')

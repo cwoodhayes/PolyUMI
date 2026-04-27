@@ -6,6 +6,7 @@ import pathlib
 import subprocess
 import threading
 import time
+from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 
 import cv2
@@ -16,14 +17,34 @@ from polyumi_pi.files.session import SessionFiles
 log = logging.getLogger(__name__)
 
 
-def write_video_frames_to_zarr(
-    video_path: pathlib.Path,
+def _video_frames(cap: cv2.VideoCapture) -> Iterator[np.ndarray]:
+    while True:
+        ok, bgr = cap.read()
+        if not ok:
+            break
+        yield cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+
+def _image_frames(paths: list[pathlib.Path]) -> Iterator[np.ndarray]:
+    for fp in paths:
+        raw = np.frombuffer(fp.read_bytes(), dtype=np.uint8)
+        bgr = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+        if bgr is None:
+            raise RuntimeError(f'Failed to decode frame: {fp}')
+        yield cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+
+def write_frames_to_zarr(
+    source: pathlib.Path | list[pathlib.Path],
     frames_arr: zarr.Array,
     *,
     num_workers: int | None = None,
 ) -> int:
     """
-    Decode video_path and write each frame into the pre-created frames_arr.
+    Decode source and write each frame into the pre-created frames_arr.
+
+    source may be a video file path (decoded with cv2.VideoCapture) or a list
+    of image file paths (decoded individually with cv2.imdecode).
 
     Producer-consumer: the calling thread decodes frames sequentially
     (VideoCapture is not thread-safe); a pool of workers compresses and writes
@@ -37,22 +58,23 @@ def write_video_frames_to_zarr(
     # each decoded 4K frame ≈ 25 MB; cap in-flight to avoid unbounded buffering
     in_flight = threading.Semaphore(n_workers * 2)
 
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f'Could not open video: {video_path}')
+    cap = None
+    if isinstance(source, list):
+        source_desc = f'{len(source)} image files'
+        frame_iter = _image_frames(source)
+    else:
+        source_desc = source.name
+        cap = cv2.VideoCapture(str(source))
+        if not cap.isOpened():
+            raise RuntimeError(f'Could not open video: {source}')
+        frame_iter = _video_frames(cap)
 
     futures: list[Future[None]] = []
-
-    log.info(f'  Decoding {video_path.name} with {n_workers} workers...')
+    log.info(f'  Decoding {source_desc} with {n_workers} workers...')
     t0 = time.perf_counter()
     try:
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
-            j = 0
-            while True:
-                ok, bgr = cap.read()
-                if not ok:
-                    break
-                frame: np.ndarray = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            for j, frame in enumerate(frame_iter):
                 in_flight.acquire()
 
                 def _write(idx: int = j, f: np.ndarray = frame) -> None:
@@ -62,23 +84,24 @@ def write_video_frames_to_zarr(
                         in_flight.release()
 
                 futures.append(pool.submit(_write))
-                j += 1
         # ThreadPoolExecutor.__exit__ waits for all submitted tasks to finish
     finally:
-        cap.release()
+        if cap is not None:
+            cap.release()
 
     for fut in futures:
         fut.result()  # re-raise any worker exceptions
 
     elapsed = time.perf_counter() - t0
+    n_written = len(futures)
     _, H, W, _ = frames_arr.shape
-    uncompressed_mb = j * H * W * 3 / 1e6
+    uncompressed_mb = n_written * H * W * 3 / 1e6
     log.info(
-        f'  {j} frames in {elapsed:.1f}s'
-        f' ({j / elapsed:.1f} fps, {uncompressed_mb / elapsed:.0f} MB/s uncompressed)'
+        f'  {n_written} frames in {elapsed:.1f}s'
+        f' ({n_written / elapsed:.1f} fps, {uncompressed_mb / elapsed:.0f} MB/s uncompressed)'
     )
 
-    return j
+    return n_written
 
 
 def encode_session_video(
