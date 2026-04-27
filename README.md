@@ -147,7 +147,7 @@ sudo i2cget -y 0x57 0x2a   # battery percentage; 100% = 0x64, 50% = 0x32, etc.
 
 **`protoc` not found during `polyumi_pi_msgs` install** — install `protobuf-compiler` (`sudo apt install protobuf-compiler` on the Pi, or via your system package manager on the PC).
 
-**Audio issues:** Validate audio capture works on the pi with
+**PiSugar 3 battery board won't turn off** - the `pisugar-server` service has probably crashed. SSH into the Pi and run `sudo systemctl restart pisugar-server` to fix it. You can also interactively communicate with the service with `nc -U /tmp/pisugar-server.sock`; then send `help` to show commands. This has worked for me in all my cases; if this doesn't work for you, check the PiSugar documentation for more ideas.
 
 ```bash
 arecord -D hw:wm8960soundcard -r 48000 -f S16_LE -c 2 -d 5 test.wav
