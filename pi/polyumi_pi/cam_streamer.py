@@ -4,11 +4,10 @@ import contextlib
 import io
 import json
 import logging
-from multiprocessing.connection import Connection
 import signal
 import time
+from multiprocessing.connection import Connection
 
-import numpy as np
 import zmq
 from libcamera import controls  # type: ignore
 from picamera2 import Picamera2
