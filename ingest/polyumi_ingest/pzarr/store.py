@@ -19,8 +19,8 @@ from polyumi_pi.files.session import SessionFiles
 from polyumi_ingest.gopro_fetch import _recording_start_time
 from polyumi_ingest.gpmf_parse import extract_gpmf_binary, parse_imu
 from polyumi_ingest.pzarr.scene_files import GOPRO_MP4, SceneFiles
-from polyumi_ingest.video_helpers import write_frames_to_zarr
 from polyumi_ingest.pzarr.version import PZARR_VERSION
+from polyumi_ingest.video_helpers import write_frames_to_zarr
 
 numcodecs.register_codec(Jpegxl)
 
@@ -225,7 +225,7 @@ def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) 
     ann_grp.create_array('episode_end', data=np.array(finger_ts[-1], dtype='float64'))
 
 
-def build_scene_zarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.Path:
+def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.Path:
     """
     Build scene.zarr inside scene_path from processed session directories.
 
@@ -282,8 +282,8 @@ class EpisodeInfo:
 
 
 @dataclasses.dataclass
-class SceneZarrInfo:
-    """Top-level summary of a scene.zarr store returned by inspect_scene_zarr."""
+class PZarrInfo:
+    """Top-level summary of a scene.zarr store returned by inspect_pzarr."""
 
     zarr_path: pathlib.Path
     zarr_format: int
@@ -292,7 +292,7 @@ class SceneZarrInfo:
     episodes: list[EpisodeInfo]
 
 
-def inspect_scene_zarr(scene_path: pathlib.Path) -> SceneZarrInfo:
+def inspect_pzarr(scene_path: pathlib.Path) -> PZarrInfo:
     """Open scene.zarr inside scene_path and extract summary info."""
     zarr_path = SceneFiles.resolve_zarr_path(scene_path)
     if not zarr_path.exists():
@@ -356,7 +356,7 @@ def inspect_scene_zarr(scene_path: pathlib.Path) -> SceneZarrInfo:
             )
         )
 
-    return SceneZarrInfo(
+    return PZarrInfo(
         zarr_path=zarr_path,
         zarr_format=root.metadata.zarr_format,
         tree=root.tree(),

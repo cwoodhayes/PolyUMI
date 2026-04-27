@@ -355,10 +355,10 @@ def inspect_zarr(
     from rich.table import Table
     from rich.text import Text
 
-    from polyumi_ingest.pzarr import SceneZarrInfo, inspect_scene_zarr, read_frame
+    from polyumi_ingest.pzarr import PZarrInfo, inspect_pzarr, read_frame
 
     try:
-        info: SceneZarrInfo = inspect_scene_zarr(scene_path)
+        info: PZarrInfo = inspect_pzarr(scene_path)
     except FileNotFoundError as e:
         log.error(str(e))
         raise typer.Exit(1)
@@ -430,10 +430,10 @@ def build_zarr(
     ),
 ):
     """Build a pzarr working-format zarr store from a processed scene directory."""
-    from polyumi_ingest.pzarr import build_scene_zarr
+    from polyumi_ingest.pzarr import build_pzarr
 
     try:
-        zarr_path = build_scene_zarr(scene_path, skip_gopro=skip_gopro)
+        zarr_path = build_pzarr(scene_path, skip_gopro=skip_gopro)
         log.info(f'Done. Zarr store written to {zarr_path}')
     except NotImplementedError as e:
         log.error(str(e))

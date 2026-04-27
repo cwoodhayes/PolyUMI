@@ -3,9 +3,9 @@
 from polyumi_ingest.pzarr.scene_files import FINGER_MP4, GOPRO_MP4, SceneFiles
 from polyumi_ingest.pzarr.store import (
     EpisodeInfo,
-    SceneZarrInfo,
-    build_scene_zarr,
-    inspect_scene_zarr,
+    PZarrInfo,
+    build_pzarr,
+    inspect_pzarr,
     read_frame,
 )
 from polyumi_ingest.pzarr.version import PZARR_VERSION
@@ -16,8 +16,8 @@ __all__ = [
     'GOPRO_MP4',
     'SceneFiles',
     'EpisodeInfo',
-    'SceneZarrInfo',
-    'build_scene_zarr',
-    'inspect_scene_zarr',
+    'PZarrInfo',
+    'build_pzarr',
+    'inspect_pzarr',
     'read_frame',
 ]
