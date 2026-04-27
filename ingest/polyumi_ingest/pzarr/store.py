@@ -18,6 +18,7 @@ from polyumi_pi.files.session import SessionFiles
 
 from polyumi_ingest.gopro_fetch import _recording_start_time
 from polyumi_ingest.pzarr.scene_files import GOPRO_MP4, SceneFiles
+from polyumi_ingest.video_helpers import write_video_frames_to_zarr
 from polyumi_ingest.pzarr.version import PZARR_VERSION
 
 numcodecs.register_codec(Jpegxl)
@@ -102,14 +103,7 @@ def _write_gopro_frames(ep_grp: zarr.Group, gopro_path: pathlib.Path) -> None:
         )
 
         log.info(f'  Writing {n_frames} GoPro frames ({W}x{H}, {fps:.1f} fps)...')
-        n_written = 0
-        for j in range(n_frames):
-            ok, bgr = cap.read()
-            if not ok:
-                log.warning(f'  GoPro read stopped at frame {j} of {n_frames}')
-                break
-            frames_arr[j] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            n_written += 1
+        n_written = write_video_frames_to_zarr(gopro_path, frames_arr)
 
         if n_written < n_frames:
             frames_arr.resize((n_written, H, W, 3))
