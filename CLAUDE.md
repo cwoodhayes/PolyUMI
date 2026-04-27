@@ -59,7 +59,7 @@ pingest process-all --force
 - **`pi/polyumi_pi/gopro/`** — GoPro integration via open-gopro SDK
 - **`ros2_ws/src/polyumi_pi_msgs/`** — Protobuf definitions (`CameraFrame`, `AudioChunk`) with nanosecond timestamps; generated `*_pb2.py` files live alongside `.proto` sources
 - **`ros2_ws/src/polyumi_ros2/`** — ROS2 package; `pi_receiver_node.py` bridges ZMQ → ROS2 topics
-- **`ingest/polyumi_ingest/main.py`** — `pingest` CLI; fetches sessions from Pi via tar-over-SSH, encodes JPEG frames + WAV → MP4 via ffmpeg
+- **`ingest/polyumi_ingest/main.py`** — `pingest` CLI; fetches sessions from Pi via tar-over-SSH, builds pzarr working-format stores, and archives scenes to zip
 
 ## Session Data Layout
 ```
@@ -72,4 +72,51 @@ pingest process-all --force
 ```
 
 ## Package Management
-This is a `uv` workspace. Root `pyproject.toml` declares workspaces `pi/` and `ingest/`. Run `uv sync` at the root for PC-side dev dependencies. The `pi/` package requires `--system-site-packages` on the Pi for `picamera2`/`sounddevice`.
+This is a `uv` workspace. `ingest/` is the only workspace member. `pi/` is referenced as an editable path source (`tool.uv.sources`) so `polyumi_pi` is importable in the workspace venv, but it is not a member — it has its own `pi/.venv` managed separately for the Pi. Run `uv sync` at the root for PC-side dev dependencies. The `pi/` package requires `--system-site-packages` on the Pi for `picamera2`/`sounddevice`.
+
+## Running Commands in the Right Environment
+
+Always prefix Python and tool invocations with `uv run` from the repo root — never use bare `python`, `pip`, or `ruff`:
+
+```bash
+uv run ruff check .
+uv run ruff format .
+uv run python -c "import polyumi_ingest"   # ingest package
+uv run pytest ...
+```
+
+`uv` selects the correct workspace venv automatically. Bare `python` / `pip` will pick up the wrong venv (e.g. `pi/.venv`) and produce "module not found" errors or install into the wrong place.
+
+## Docstring Formatting
+
+This project enforces pydocstyle via ruff. The rules that come up most often:
+
+- **D205** — multi-line docstrings require a blank line between the summary and the body:
+  ```python
+  # wrong
+  """Summary line.
+  More detail here.
+  """
+  # correct
+  """Summary line.
+
+  More detail here.
+  """
+  ```
+- **D213** — the summary line of a multi-line docstring must start on the *second* line (after the opening `"""`):
+  ```python
+  # wrong
+  """Summary line.
+
+  Body.
+  """
+  # correct
+  """
+  Summary line.
+
+  Body.
+  """
+  ```
+- **D101/D102/D103** — public classes, methods, and functions need docstrings. One-line docstrings are fine for simple cases.
+
+Run `uv run ruff check --fix .` to auto-fix the fixable ones, then address D205/D101 manually.
