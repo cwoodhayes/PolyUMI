@@ -379,6 +379,9 @@ def record_episode(
         None,
         help='Last four digits of the GoPro serial number. Defaults to saved scan-gopro config.',
     ),
+    no_gopro: bool = typer.Option(
+        False, '--no-gopro', help='Skip GoPro connection (for debugging).'
+    ),
 ):
     """
     Record an episode; video and audio data is routed to local files.
@@ -388,14 +391,18 @@ def record_episode(
     log.info(f'Log level: {logging.getLevelName(log.level)}')
 
     gopro_mac: str | None = None
-    if gopro_identifier is None:
-        config = load_gopro_config()
-        if config is None:
-            log.error('No --gopro-identifier provided and no saved GoPro config found. Run scan-gopro first.')
-            raise typer.Exit(1)
-        gopro_identifier = config.identifier
-        gopro_mac = config.mac_address
-        log.info(f'Using saved GoPro config: {config.name} ({config.mac_address})')
+    if not no_gopro:
+        if gopro_identifier is None:
+            config = load_gopro_config()
+            if config is None:
+                log.error(
+                    'No --gopro-identifier provided and no saved GoPro config found. '
+                    'Run scan-gopro first, or use --no-gopro.'
+                )
+                raise typer.Exit(1)
+            gopro_identifier = config.identifier
+            gopro_mac = config.mac_address
+            log.info(f'Using saved GoPro config: {config.name} ({config.mac_address})')
 
     scene = SceneFiles.create()
     session = scene.create_session()
@@ -419,8 +426,14 @@ def record_episode(
     async def _run() -> None:
         led = LEDManager()
         try:
-            async with GoProWrapper(gopro_identifier, mac_address=gopro_mac) as gopro:
-                log.info('GoPro connected')
+            async with contextlib.AsyncExitStack() as stack:
+                if not no_gopro:
+                    gopro = await stack.enter_async_context(
+                        GoProWrapper(gopro_identifier, mac_address=gopro_mac)  # pyright: ignore[reportArgumentType]
+                    )
+                    log.info('GoPro connected')
+                else:
+                    gopro = None
                 await _record_session_async(
                     session=session,
                     gopro=gopro,
