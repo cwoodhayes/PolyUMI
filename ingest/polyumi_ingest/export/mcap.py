@@ -5,11 +5,11 @@ import json
 import logging
 import pathlib
 
-import cv2
 import numpy as np
 import zarr
 from mcap.writer import Writer
 
+from polyumi_ingest.export.helpers import encode_frames_to_jpeg
 from polyumi_ingest.pzarr.scene_files import SceneFiles
 
 log = logging.getLogger('export.mcap')
@@ -120,20 +120,6 @@ def _foxglove_time(t_s: float) -> dict:  # type: ignore[type-arg]
     return {'sec': ns // 1_000_000_000, 'nsec': ns % 1_000_000_000}
 
 
-def _encode_jpeg(frame: np.ndarray, quality: int) -> bytes:
-    """
-    Encode a (H, W, 3) uint8 RGB array to JPEG bytes.
-
-    pzarr stores RGB (write_frames_to_zarr converts BGR→RGB on ingest), but
-    cv2.imencode expects BGR — convert back so JPEG colors come out correct.
-    """
-    bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-    ok, buf = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, quality])
-    if not ok:
-        raise RuntimeError('cv2.imencode failed')
-    return buf.tobytes()
-
-
 def _b64(data: bytes) -> str:
     """Base64-encode bytes to an ASCII string for JSON embedding."""
     return base64.b64encode(data).decode('ascii')
@@ -180,6 +166,9 @@ def _register_channels(
 # ── Per-stream writers ────────────────────────────────────────────────────────
 
 
+_ENCODE_BATCH = 64
+
+
 def _write_video(
     writer: Writer,
     channel_id: int,
@@ -190,21 +179,24 @@ def _write_video(
 ) -> None:
     """Write video frames as CompressedImage messages, re-encoding JpegXL → JPEG."""
     n = len(ts)
-    log_every = max(1, n // 10)
-    for i in range(n):
-        if i % log_every == 0:
-            log.info(f'    {frame_id}: frame {i}/{n}')
-        jpeg = _encode_jpeg(frames_arr[i], quality)
-        t_s = float(ts[i])
-        msg = json.dumps(
-            {
-                'timestamp': _foxglove_time(t_s),
-                'frame_id': frame_id,
-                'data': _b64(jpeg),
-                'format': 'jpeg',
-            }
-        ).encode()
-        writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
+    n_batches = (n + _ENCODE_BATCH - 1) // _ENCODE_BATCH
+    log_every_batch = max(1, n_batches // 10)
+    for b, batch_start in enumerate(range(0, n, _ENCODE_BATCH)):
+        if b % log_every_batch == 0:
+            log.info(f'    {frame_id}: frame {batch_start}/{n}')
+        batch_end = min(batch_start + _ENCODE_BATCH, n)
+        jpegs = encode_frames_to_jpeg(frames_arr[batch_start:batch_end], quality)
+        for j, jpeg in enumerate(jpegs):
+            t_s = float(ts[batch_start + j])
+            msg = json.dumps(
+                {
+                    'timestamp': _foxglove_time(t_s),
+                    'frame_id': frame_id,
+                    'data': _b64(jpeg),
+                    'format': 'jpeg',
+                }
+            ).encode()
+            writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
 
 
 def _write_audio(
