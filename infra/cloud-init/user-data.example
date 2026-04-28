@@ -47,6 +47,7 @@ packages:
   - git
   - rsync
   - curl
+  - wget
   - dkms                  # required by WM8960 audio HAT installer
   - python3-picamera2
   - python3-libcamera
@@ -102,13 +103,16 @@ runcmd:
   # WM8960 audio HAT — kernel default driver doesn't work; use Waveshare DKMS driver.
   # Validate after boot: arecord -D hw:wm8960soundcard -r 48000 -f S16_LE -c 2 -d 5 test.wav
   - git clone https://github.com/waveshare/WM8960-Audio-HAT /tmp/WM8960-Audio-HAT
-  - bash /tmp/WM8960-Audio-HAT/install.sh
+  - DEBIAN_FRONTEND=noninteractive bash /tmp/WM8960-Audio-HAT/install.sh
   # Bluetooth — on fresh Trixie the adapter is rfkill-soft-blocked and bluetoothd
   # leaves it unpowered. Unblock now + enable auto-power on future boots so BLE
   # clients (open-gopro, etc.) find a ready adapter without manual steps.
   - rfkill unblock bluetooth
   - sed -i -E 's/^[[:space:]]*#[[:space:]]*(AutoEnable[[:space:]]*=).*/\1true/' /etc/bluetooth/main.conf
   - systemctl restart bluetooth
+  # PiSugar power manager daemon (battery management / RTC)
+  - wget https://cdn.pisugar.com/release/pisugar-power-manager.sh -P /tmp
+  - DEBIAN_FRONTEND=noninteractive bash /tmp/pisugar-power-manager.sh -c release
   # Install uv for the pi user
   - sudo -u pi bash -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
   # Create recordings directory
