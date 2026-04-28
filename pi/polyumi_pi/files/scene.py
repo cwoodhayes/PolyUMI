@@ -37,17 +37,19 @@ class SceneFiles(SessionDataABC):
         scene_id = str(uuid4())
         folder_name = datetime.now().astimezone().strftime(r'scene_%Y-%m-%d_%H-%M-%S') + f'_{scene_id[:4]}'
         path = base_dir / folder_name
-        path.mkdir(parents=True, exist_ok=True)
-
-        latest_symlink = base_dir / 'latest'
-        if latest_symlink.is_symlink() or latest_symlink.exists():
-            latest_symlink.unlink()
-        latest_symlink.symlink_to(path)
-
         return cls(path=path, scene_id=scene_id)
 
     def create_session(self) -> SessionFiles:
         """Create a new session directory inside this scene."""
+        # we create the scene directory here lazily so we don't
+        # end up with scenes with no sessions clogging up the recordings directory.
+        self.path.mkdir(parents=True, exist_ok=True)
+
+        latest_symlink = self.path.parent / 'latest'
+        if latest_symlink.is_symlink() or latest_symlink.exists():
+            latest_symlink.unlink()
+        latest_symlink.symlink_to(self.path)
+
         return SessionFiles.create(
             base_dir=self.path,
             add_latest_symlink=False,
