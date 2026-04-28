@@ -118,7 +118,7 @@ runcmd:
   # note that we have no way of pinning the release here as best as I can tell;
   # the version i've tested this on is currently 2.3.2, which is visible at the top of the file.
   # so we make do with failing loudly if they update the version by checking the hash.
-  - wget https://cdn.pisugar.com/release/pisugar-power-manager.sh -P /tmp
+  - wget --https-only https://cdn.pisugar.com/release/pisugar-power-manager.sh -P /tmp
   - echo "9b235a34b1f94940396476535d12323b4cf30448f985f9575584fa3a87d9c7e8  /tmp/pisugar-power-manager.sh" | sha256sum --check
   - DEBIAN_FRONTEND=noninteractive bash /tmp/pisugar-power-manager.sh -c release
   # NOTE: code deployment and ALSA preset are handled by deploy.sh, not cloud-init.

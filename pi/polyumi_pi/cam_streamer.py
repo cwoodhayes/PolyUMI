@@ -242,4 +242,3 @@ class CameraStreamer:
             f'sensor={self.cam.sensor_resolution}, '
             f'control_bounds={self.cam.camera_controls.get("ScalerCrop")}'
         )
-        log.info(f'Initial controls set: {self.cam.camera_controls}')

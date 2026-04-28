@@ -422,8 +422,10 @@ def record_episode(
         try:
             async with contextlib.AsyncExitStack() as stack:
                 if not no_gopro:
+                    if gopro_identifier is None:
+                        raise RuntimeError('GoPro identifier was not resolved despite --no-gopro not being set.')
                     gopro = await stack.enter_async_context(
-                        GoProWrapper(gopro_identifier, mac_address=gopro_mac)  # pyright: ignore[reportArgumentType]
+                        GoProWrapper(gopro_identifier, mac_address=gopro_mac)
                     )
                     log.info('GoPro connected')
                 else:
@@ -547,8 +549,10 @@ def start_scene(
                 led = LEDManager()
                 stack.callback(led.close)
                 if not no_gopro:
+                    if gopro_identifier is None:
+                        raise RuntimeError('GoPro identifier was not resolved despite --no-gopro not being set.')
                     gopro = await stack.enter_async_context(
-                        GoProWrapper(gopro_identifier, mac_address=gopro_mac)  # pyright: ignore[reportArgumentType]
+                        GoProWrapper(gopro_identifier, mac_address=gopro_mac)
                     )
                     log.info('GoPro connected')
                 else:

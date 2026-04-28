@@ -127,7 +127,9 @@ def fetch(
             threshold_ms=DEFAULT_THRESHOLD_MS,
             latest=False,
         )
-    except typer.Exit:
+    except typer.Exit as exc:
+        if exc.exit_code not in (None, 0):
+            raise
         log.info('GoPro footage not copied — mount the SD card and run "pingest fetch-gopro" to add it.')
 
 

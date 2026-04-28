@@ -29,9 +29,9 @@ rsync -av --delete --mkpath \
 
 echo "==> Syncing Pi venv..."
 ssh "${PI_HOST}" '
-    set -e
+    set -euo pipefail
     [ -d ~/PolyUMI/pi/.venv ] || ~/.local/bin/uv venv --system-site-packages ~/PolyUMI/pi/.venv
-    cd ~/PolyUMI/pi && ~/.local/bin/uv sync --no-dev
+    cd ~/PolyUMI/pi && ~/.local/bin/uv sync --no-dev --frozen
 '
 
 echo "==> Applying ALSA preset (UCM warnings about 'use case configuration' are harmless)..."
