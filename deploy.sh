@@ -27,6 +27,9 @@ rsync -av --delete --mkpath \
     --exclude='.venv/' \
     ros2_ws/src/polyumi_pi_msgs "${PI_HOST}":~/PolyUMI/ros2_ws/src/
 
+echo "==> Applying ALSA preset..."
+ssh "${PI_HOST}" "sudo alsactl restore -f ~/PolyUMI/pi/alsa_preset"
+
 echo "==> Done. Deployed commit ${COMMIT_HASH} to ${PI_HOST}."
 echo "    On the Pi, re-install deps and restart the service if needed:"
 echo "      uv pip install --python ~/PolyUMI/pi/.venv ~/PolyUMI/pi"

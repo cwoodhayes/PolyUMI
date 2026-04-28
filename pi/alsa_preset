@@ -2,8 +2,8 @@ state.wm8960soundcard {
 	control.1 {
 		iface MIXER
 		name 'Capture Volume'
-		value.0 39
-		value.1 39
+		value.0 15
+		value.1 15
 		comment {
 			access 'read write'
 			type INTEGER
@@ -40,7 +40,7 @@ state.wm8960soundcard {
 	control.4 {
 		iface MIXER
 		name 'Left Input Boost Mixer LINPUT3 Volume'
-		value 0
+		value 1
 		comment {
 			access 'read write'
 			type INTEGER
@@ -68,7 +68,7 @@ state.wm8960soundcard {
 	control.6 {
 		iface MIXER
 		name 'Right Input Boost Mixer RINPUT3 Volume'
-		value 0
+		value 1
 		comment {
 			access 'read write'
 			type INTEGER
@@ -96,7 +96,7 @@ state.wm8960soundcard {
 	control.8 {
 		iface MIXER
 		name 'Right Input Boost Mixer RINPUT1 Volume'
-		value 3
+		value 0
 		comment {
 			access 'read write'
 			type INTEGER
@@ -110,7 +110,7 @@ state.wm8960soundcard {
 	control.9 {
 		iface MIXER
 		name 'Left Input Boost Mixer LINPUT1 Volume'
-		value 3
+		value 0
 		comment {
 			access 'read write'
 			type INTEGER
@@ -240,7 +240,7 @@ state.wm8960soundcard {
 	control.19 {
 		iface MIXER
 		name 'ADC High Pass Filter Switch'
-		value false
+		value true
 		comment {
 			access 'read write'
 			type BOOLEAN
@@ -504,7 +504,7 @@ state.wm8960soundcard {
 	control.41 {
 		iface MIXER
 		name 'ADC Data Output Select'
-		value 'Left Data = Left ADC;  Right Data = Right ADC'
+		value 'Left Data = Left ADC;  Right Data = Left ADC'
 		comment {
 			access 'read write'
 			type ENUMERATED
@@ -540,7 +540,7 @@ state.wm8960soundcard {
 	control.44 {
 		iface MIXER
 		name 'Left Boost Mixer LINPUT3 Switch'
-		value false
+		value true
 		comment {
 			access 'read write'
 			type BOOLEAN
@@ -550,7 +550,7 @@ state.wm8960soundcard {
 	control.45 {
 		iface MIXER
 		name 'Left Boost Mixer LINPUT1 Switch'
-		value true
+		value false
 		comment {
 			access 'read write'
 			type BOOLEAN
@@ -570,7 +570,7 @@ state.wm8960soundcard {
 	control.47 {
 		iface MIXER
 		name 'Right Boost Mixer RINPUT3 Switch'
-		value false
+		value true
 		comment {
 			access 'read write'
 			type BOOLEAN
@@ -580,7 +580,7 @@ state.wm8960soundcard {
 	control.48 {
 		iface MIXER
 		name 'Right Boost Mixer RINPUT1 Switch'
-		value true
+		value false
 		comment {
 			access 'read write'
 			type BOOLEAN
