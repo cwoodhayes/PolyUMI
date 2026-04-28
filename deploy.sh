@@ -29,6 +29,7 @@ rsync -av --delete --mkpath \
 
 echo "==> Syncing Pi venv..."
 ssh "${PI_HOST}" '
+    set -e
     [ -d ~/PolyUMI/pi/.venv ] || ~/.local/bin/uv venv --system-site-packages ~/PolyUMI/pi/.venv
     cd ~/PolyUMI/pi && ~/.local/bin/uv sync --no-dev
 '

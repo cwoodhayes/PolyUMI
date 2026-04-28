@@ -25,18 +25,19 @@ class CameraStreamer:
     VIEW_HEIGHT = 480
     CAPTURE_WIDTH = 2304 // 2
     CAPTURE_HEIGHT = 1296 // 2
+    # Hardware frame rate — locked to improve exposure in dim lighting (vs 30fps default).
+    # FrameDurationLimits in configure_camera is derived from this.
+    FPS = 10
 
     def __init__(
         self,
         port: int | None,
-        fps: int,
         zmq_context: zmq.Context,
         session: SessionFiles | None = None,
         stats_conn: Connection | None = None,
     ):
         """Initialize the camera streamer."""
         self.port = port
-        self.fps = fps
         self.zmq_context = zmq_context
         self.session = session
         self.stats_conn = stats_conn
@@ -77,7 +78,7 @@ class CameraStreamer:
         if self.session is not None and self.session.video is not None:
             log.info(f'Video will be recorded to {self.session.video.path}')
 
-        interval = 1.0 / self.fps
+        interval = 1.0 / self.FPS
         first_frame_metadata: dict | None = None
         stop_requested = False
         n_video_frames = 0
@@ -207,6 +208,7 @@ class CameraStreamer:
         mode = self.cam.sensor_modes[1]
         # empirically determined in m
         dist_to_sensor = 0.2
+        frame_duration = int(1e6 / self.FPS)
         config = self.cam.create_video_configuration(
             main={'size': (2304 // 2, 1296 // 2), 'format': 'YUV420'},
             sensor={
@@ -217,9 +219,8 @@ class CameraStreamer:
                 'AeEnable': True,
                 'AeConstraintMode': controls.AeConstraintModeEnum.Highlight,
                 'ExposureValue': -0.4,
-                # run the actual camera hardware at 10fps rather than 30, so we can up the exposure time
-                # this helps when we're in a darker environment.
-                'FrameDurationLimits': (100000, 100000),
+                # Matches FPS constant; longer frame window vs 30fps default improves low-light exposure.
+                'FrameDurationLimits': (frame_duration, frame_duration),
                 'AwbEnable': True,
                 # trial-and-error shows this works better than auto, which will blow out
                 # the blue LED in low lighting.
@@ -227,7 +228,6 @@ class CameraStreamer:
                 'AfMode': controls.AfModeEnum.Manual,
                 'LensPosition': 1.0 / dist_to_sensor,
             },
-
         )
         self.cam.configure(config)
 

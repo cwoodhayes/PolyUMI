@@ -5,7 +5,7 @@ Streams MJPEG frames over ZMQ to pi_receiver_node on the host PC.
 
 Usage:
     python pi_streamer.py stream
-    python pi_streamer.py stream --port 5555 --width 640 --height 480 --fps 10
+    python pi_streamer.py stream --port 5555 --width 640 --height 480
 """
 
 import asyncio
@@ -89,7 +89,6 @@ async def _record_session_async(
     *,
     session: SessionFiles,
     gopro: GoProWrapper | None,
-    fps: int,
     sample_rate: int,
     chunk_ms: int,
     channels: int,
@@ -124,7 +123,7 @@ async def _record_session_async(
         video_parent_conn, video_child_conn = multiprocessing.Pipe(duplex=False)
         cam_process = multiprocessing.Process(
             target=_run_video_streamer,
-            args=(None, fps, session, video_child_conn),
+            args=(None, session, video_child_conn),
         )
         cam_process.start()
         video_child_conn.close()
@@ -183,14 +182,12 @@ async def _record_session_async(
 
 def _run_video_streamer(
     port: int,
-    fps: int,
     session: SessionFiles | None = None,
     stats_conn: Connection | None = None,
 ):
     context = zmq.Context()
     streamer = CameraStreamer(
         port=port,
-        fps=fps,
         zmq_context=context,
         session=session,
         stats_conn=stats_conn,
@@ -280,12 +277,11 @@ def scan_gopro():
 @app.command()
 def stream_video(
     port: int = typer.Option(5555, help='ZMQ PUSH port to bind on.'),
-    fps: int = typer.Option(10, min=1, help='Target capture framerate (Hz).'),
 ):
     """Stream MJPEG frames over ZMQ."""
     log.info(f'Log level: {logging.getLevelName(log.level)}')
     context = zmq.Context()
-    streamer = CameraStreamer(port=port, fps=fps, zmq_context=context)
+    streamer = CameraStreamer(port=port, zmq_context=context)
     led = LEDManager()
 
     try:
@@ -324,7 +320,6 @@ def stream_audio(
 def stream(
     video_port: int = typer.Option(5555, help='ZMQ PUSH port for video.'),
     audio_port: int = typer.Option(5556, help='ZMQ PUSH port for audio.'),
-    fps: int = typer.Option(10, min=1, help='Target capture framerate (Hz).'),
     sample_rate: int = typer.Option(16000, help='Audio sample rate (Hz).'),
     chunk_ms: int = typer.Option(20, help='Audio chunk size (ms).'),
     channels: int = typer.Option(1, help='Number of audio channels.'),
@@ -344,7 +339,7 @@ def stream(
         log.info('Starting camera streamer...')
         cam_process = multiprocessing.Process(
             target=_run_video_streamer,
-            args=(video_port, fps),
+            args=(video_port,),
         )
         cam_process.start()
 
@@ -367,7 +362,6 @@ def stream(
 
 @app.command()
 def record_episode(
-    fps: int = typer.Option(10, min=1, help='Target capture framerate (Hz).'),
     sample_rate: int = typer.Option(16000, help='Audio sample rate (Hz).'),
     chunk_ms: int = typer.Option(20, help='Audio chunk size (ms).'),
     channels: int = typer.Option(1, help='Number of audio channels.'),
@@ -418,7 +412,7 @@ def record_episode(
         chunk_ms=chunk_ms,
     )
     session.init_video(
-        fps=fps,
+        fps=CameraStreamer.FPS,
         width=CameraStreamer.CAPTURE_WIDTH,
         height=CameraStreamer.CAPTURE_HEIGHT,
     )
@@ -437,7 +431,6 @@ def record_episode(
                 await _record_session_async(
                     session=session,
                     gopro=gopro,
-                    fps=fps,
                     sample_rate=sample_rate,
                     chunk_ms=chunk_ms,
                     channels=channels,
@@ -501,7 +494,6 @@ def record_gopro(
 
 @app.command('start-scene')
 def start_scene(
-    fps: int = typer.Option(10, min=1, help='Target capture framerate (Hz).'),
     sample_rate: int = typer.Option(16000, help='Audio sample rate (Hz).'),
     chunk_ms: int = typer.Option(20, help='Audio chunk size (ms).'),
     channels: int = typer.Option(1, help='Number of audio channels.'),
@@ -579,7 +571,7 @@ def start_scene(
                         chunk_ms=chunk_ms,
                     )
                     session.init_video(
-                        fps=fps,
+                        fps=CameraStreamer.FPS,
                         width=CameraStreamer.CAPTURE_WIDTH,
                         height=CameraStreamer.CAPTURE_HEIGHT,
                     )
@@ -589,7 +581,6 @@ def start_scene(
                         await _record_session_async(
                             session=session,
                             gopro=gopro,
-                            fps=fps,
                             sample_rate=sample_rate,
                             chunk_ms=chunk_ms,
                             channels=channels,

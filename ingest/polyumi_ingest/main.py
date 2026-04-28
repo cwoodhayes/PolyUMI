@@ -128,9 +128,7 @@ def fetch(
             latest=False,
         )
     except typer.Exit:
-        log.info(f'Pi fetch completed successfully. Fetched {len(to_fetch)} scene(s) to {output_dir}.')
-        log.info('GoPro fetch skipped or failed. Mount the SD card and run "fetch-gopro" separately to try again.')
-        pass
+        log.info('GoPro footage not copied — mount the SD card and run "pingest fetch-gopro" to add it.')
 
 
 @app.command()
@@ -544,6 +542,19 @@ def export_mcap(
         log.info(f'  {path}')
 
 
+def _build_pzarr(scene_dir: pathlib.Path, skip_gopro: bool) -> None:
+    """Build pzarr for scene_dir, raising typer.Exit(1) on failure."""
+    from polyumi_ingest.pzarr import build_pzarr
+
+    zarr_path = scene_dir / 'scene.zarr'
+    try:
+        build_pzarr(scene_dir, skip_gopro=skip_gopro)
+        log.info(f'  -> {zarr_path}')
+    except (RuntimeError, NotImplementedError) as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+
+
 @app.command(name='debug-latest')
 def debug_latest(
     host: str = typer.Option(DEFAULT_HOST, help='SSH hostname of the Pi.'),
@@ -560,7 +571,7 @@ def debug_latest(
         False,
         '--yes',
         '-y',
-        help='Skip confirmation prompts when rebuilding existing data.',
+        help='Non-interactive: skip prompts and keep existing artifacts as-is.',
     ),
     jpeg_quality: int = typer.Option(85, help='JPEG re-encode quality for MCAP export (1–100).'),
     audio_chunk_size: int = typer.Option(4096, min=1, help='Audio samples per RawAudio message.'),
@@ -571,7 +582,6 @@ def debug_latest(
     Useful for polyumi-pi development & testing the ingest pipeline quickly.
     """
     from polyumi_ingest.export.mcap import export_scene_to_mcap
-    from polyumi_ingest.pzarr import build_pzarr
 
     recordings_dir = recordings_dir.resolve()
     recordings_dir.mkdir(parents=True, exist_ok=True)
@@ -607,28 +617,23 @@ def debug_latest(
     # Step 2: build pzarr
     zarr_path = scene_dir / 'scene.zarr'
     if zarr_path.exists():
-        if not yes and not Confirm.ask(f'scene.zarr already exists for {scene_name}. Rebuild?', default=False):
+        if yes:
+            log.info(f'scene.zarr already exists for {scene_name}, skipping rebuild.')
+        elif not Confirm.ask(f'scene.zarr already exists for {scene_name}. Rebuild?', default=False):
             log.info('Skipping pzarr rebuild.')
         else:
-            try:
-                build_pzarr(scene_dir, skip_gopro=skip_gopro)
-                log.info(f'  -> {zarr_path}')
-            except (RuntimeError, NotImplementedError) as e:
-                log.error(str(e))
-                raise typer.Exit(1)
+            _build_pzarr(scene_dir, skip_gopro)
     else:
         log.info(f'Building pzarr for {scene_name}...')
-        try:
-            build_pzarr(scene_dir, skip_gopro=skip_gopro)
-            log.info(f'  -> {zarr_path}')
-        except (RuntimeError, NotImplementedError) as e:
-            log.error(str(e))
-            raise typer.Exit(1)
+        _build_pzarr(scene_dir, skip_gopro)
 
     # Step 3: export episode 0 to MCAP
     mcap_path = scene_dir / 'episode_0.mcap'
     if mcap_path.exists():
-        if not yes and not Confirm.ask('episode_0.mcap already exists. Re-export?', default=False):
+        if yes:
+            log.info('episode_0.mcap already exists, skipping re-export.')
+            raise typer.Exit()
+        if not Confirm.ask('episode_0.mcap already exists. Re-export?', default=False):
             log.info('Skipping MCAP export.')
             raise typer.Exit()
         mcap_path.unlink()
@@ -637,7 +642,7 @@ def debug_latest(
     try:
         written = export_scene_to_mcap(
             scene_path=scene_dir,
-            output_dir=None,
+            output_dir=scene_dir,
             episode=0,
             jpeg_quality=jpeg_quality,
             audio_chunk_size=audio_chunk_size,
