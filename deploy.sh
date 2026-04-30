@@ -35,7 +35,10 @@ ssh "${PI_HOST}" '
 '
 
 echo "==> Applying ALSA preset (UCM warnings about 'use case configuration' are harmless)..."
-ssh "${PI_HOST}" "sudo alsactl restore -f ~/PolyUMI/pi/alsa_preset"
+ssh "${PI_HOST}" "sudo alsactl restore -f ~/PolyUMI/pi/alsa_preset || true"
+
+echo "==> Updating WM8960 ALSA state file..."
+ssh "${PI_HOST}" "sudo cp ~/PolyUMI/pi/alsa_preset /etc/wm8960-soundcard/wm8960_asound.state"
 
 echo "==> Done. Deployed commit ${COMMIT_HASH} to ${PI_HOST}."
 echo "    Restart the service to pick up code changes:"

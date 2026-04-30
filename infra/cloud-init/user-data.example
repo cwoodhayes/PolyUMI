@@ -104,6 +104,8 @@ runcmd:
   # Validate after boot: arecord -D hw:wm8960soundcard -r 48000 -f S16_LE -c 2 -d 5 test.wav
   - git clone https://github.com/waveshare/WM8960-Audio-HAT /tmp/WM8960-Audio-HAT
   - DEBIAN_FRONTEND=noninteractive bash /tmp/WM8960-Audio-HAT/install.sh
+  # Back up the original ALSA state file before any custom overrides
+  - cp /etc/wm8960-soundcard/wm8960_asound.state /etc/wm8960-soundcard/wm8960_asound.state.bak
   # Bluetooth — on fresh Trixie the adapter is rfkill-soft-blocked and bluetoothd
   # leaves it unpowered. Unblock now + enable auto-power on future boots so BLE
   # clients (open-gopro, etc.) find a ready adapter without manual steps.
