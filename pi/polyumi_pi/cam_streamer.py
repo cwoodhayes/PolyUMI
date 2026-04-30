@@ -4,11 +4,10 @@ import contextlib
 import io
 import json
 import logging
-from multiprocessing.connection import Connection
 import signal
 import time
+from multiprocessing.connection import Connection
 
-import numpy as np
 import zmq
 from libcamera import controls  # type: ignore
 from picamera2 import Picamera2
@@ -26,18 +25,19 @@ class CameraStreamer:
     VIEW_HEIGHT = 480
     CAPTURE_WIDTH = 2304 // 2
     CAPTURE_HEIGHT = 1296 // 2
+    # Hardware frame rate — locked to improve exposure in dim lighting (vs 30fps default).
+    # FrameDurationLimits in configure_camera is derived from this.
+    FPS = 10
 
     def __init__(
         self,
         port: int | None,
-        fps: int,
         zmq_context: zmq.Context,
         session: SessionFiles | None = None,
         stats_conn: Connection | None = None,
     ):
         """Initialize the camera streamer."""
         self.port = port
-        self.fps = fps
         self.zmq_context = zmq_context
         self.session = session
         self.stats_conn = stats_conn
@@ -70,15 +70,15 @@ class CameraStreamer:
             log.info('ZMQ video streaming disabled (port is None).')
 
         self.configure_camera()
-        self.cam.start()
         self.set_initial_controls()
+        self.cam.start()
 
         log.info(f'Publishing to tcp://<pi_ip>:{self.port}')
 
         if self.session is not None and self.session.video is not None:
             log.info(f'Video will be recorded to {self.session.video.path}')
 
-        interval = 1.0 / self.fps
+        interval = 1.0 / self.FPS
         first_frame_metadata: dict | None = None
         stop_requested = False
         n_video_frames = 0
@@ -206,11 +206,27 @@ class CameraStreamer:
         """Configure the camera for our specific use-case."""
         # we want the 2nd mode for full FOV.
         mode = self.cam.sensor_modes[1]
+        # empirically determined in m
+        dist_to_sensor = 0.2
+        frame_duration = int(1e6 / self.FPS)
         config = self.cam.create_video_configuration(
             main={'size': (2304 // 2, 1296 // 2), 'format': 'YUV420'},
             sensor={
                 'output_size': mode['size'],
                 'bit_depth': mode['bit_depth'],
+            },
+            controls={
+                'AeEnable': True,
+                'AeConstraintMode': controls.AeConstraintModeEnum.Highlight,
+                'ExposureValue': -0.4,
+                # Matches FPS constant; longer frame window vs 30fps default improves low-light exposure.
+                'FrameDurationLimits': (frame_duration, frame_duration),
+                'AwbEnable': True,
+                # trial-and-error shows this works better than auto, which will blow out
+                # the blue LED in low lighting.
+                'AwbMode': controls.AwbModeEnum.Indoor,
+                'AfMode': controls.AfModeEnum.Manual,
+                'LensPosition': 1.0 / dist_to_sensor,
             },
         )
         self.cam.configure(config)
@@ -220,15 +236,7 @@ class CameraStreamer:
         scaler_crop = self.compute_scaler_crop(
             width=self.VIEW_WIDTH, height=self.VIEW_HEIGHT
         )
-        # empirically determined in m
-        dist_to_sensor = 0.2
-        self.cam.set_controls(
-            {
-                'ScalerCrop': scaler_crop,
-                'AfMode': controls.AfModeEnum.Manual,
-                'LensPosition': 1.0 / dist_to_sensor,
-            }
-        )
+        self.cam.set_controls({'ScalerCrop': scaler_crop})
         log.info(
             f'Requested ScalerCrop={scaler_crop}, '
             f'sensor={self.cam.sensor_resolution}, '

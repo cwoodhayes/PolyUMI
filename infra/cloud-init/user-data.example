@@ -47,6 +47,7 @@ packages:
   - git
   - rsync
   - curl
+  - wget
   - dkms                  # required by WM8960 audio HAT installer
   - python3-picamera2
   - python3-libcamera
@@ -102,7 +103,9 @@ runcmd:
   # WM8960 audio HAT — kernel default driver doesn't work; use Waveshare DKMS driver.
   # Validate after boot: arecord -D hw:wm8960soundcard -r 48000 -f S16_LE -c 2 -d 5 test.wav
   - git clone https://github.com/waveshare/WM8960-Audio-HAT /tmp/WM8960-Audio-HAT
-  - bash /tmp/WM8960-Audio-HAT/install.sh
+  - DEBIAN_FRONTEND=noninteractive bash /tmp/WM8960-Audio-HAT/install.sh
+  # Back up the original ALSA state file before any custom overrides
+  - cp /etc/wm8960-soundcard/wm8960_asound.state /etc/wm8960-soundcard/wm8960_asound.state.bak
   # Bluetooth — on fresh Trixie the adapter is rfkill-soft-blocked and bluetoothd
   # leaves it unpowered. Unblock now + enable auto-power on future boots so BLE
   # clients (open-gopro, etc.) find a ready adapter without manual steps.
@@ -113,10 +116,15 @@ runcmd:
   - sudo -u pi bash -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
   # Create recordings directory
   - sudo -u pi mkdir -p /home/pi/recordings
-  # Clone repo and install Pi package into its venv
-  - sudo -u pi git clone https://github.com/cwoodhayes/PolyUMI.git /home/pi/PolyUMI
-  - sudo -u pi bash -c '/home/pi/.local/bin/uv venv --system-site-packages /home/pi/PolyUMI/pi/.venv'
-  - sudo -u pi bash -c '/home/pi/.local/bin/uv pip install --python /home/pi/PolyUMI/pi/.venv /home/pi/PolyUMI/ros2_ws/src/polyumi_pi_msgs /home/pi/PolyUMI/pi'
+  # PiSugar power manager daemon (battery management / RTC)
+  # note that we have no way of pinning the release here as best as I can tell;
+  # the version i've tested this on is currently 2.3.2, which is visible at the top of the file.
+  # so we make do with failing loudly if they update the version by checking the hash.
+  - wget --https-only https://cdn.pisugar.com/release/pisugar-power-manager.sh -P /tmp
+  - echo "9b235a34b1f94940396476535d12323b4cf30448f985f9575584fa3a87d9c7e8  /tmp/pisugar-power-manager.sh" | sha256sum --check
+  - DEBIAN_FRONTEND=noninteractive bash /tmp/pisugar-power-manager.sh -c release
+  # NOTE: code deployment and ALSA preset are handled by deploy.sh, not cloud-init.
+  # Run ./deploy.sh <hostname> from your PC after cloud-init finishes.
   # NOTE: polyumi-pi.service is installed but NOT enabled here. After cloud-init
   # finishes, SSH in, pair the GoPro (scan-gopro), then `systemctl enable polyumi-pi`
   # and reboot. See docs/pi-provisioning.md.

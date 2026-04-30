@@ -14,7 +14,7 @@ This project uses [cloud-init](https://cloudinit.readthedocs.io/) to automate fi
 
 ## What you do manually afterwards
 
-- Run `./deploy.sh` from repo root to push your local working-tree code (cloud-init bootstraps from `main`; `deploy.sh` overlays uncommitted changes)
+- Run `./deploy.sh <hostname>` from repo root — deploys code, creates the Pi venv, and applies the ALSA preset
 - Pair the GoPro with `polyumi_pi scan-gopro`
 - `sudo systemctl enable polyumi-pi` and reboot to start the autostart service
 
@@ -77,7 +77,17 @@ cloud-init status --wait    # blocks until done, exits 0 on success
 
 Full logs are at `/var/log/cloud-init-output.log` if anything goes wrong.
 
-### 5. Validate audio and PWM
+### 5. Deploy code and ALSA preset
+
+From your PC, run deploy.sh once the Pi is reachable over SSH:
+
+```bash
+./deploy.sh pi@polyumi-pi.local
+```
+
+This rsyncs the Pi code, sets up the `.venv`, installs Python packages, and applies the ALSA mixer preset for the contact mic.
+
+### 6. Validate audio and PWM
 
 ```bash
 # Audio HAT — expect a 5-second recording with no errors:

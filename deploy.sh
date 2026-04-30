@@ -27,7 +27,19 @@ rsync -av --delete --mkpath \
     --exclude='.venv/' \
     ros2_ws/src/polyumi_pi_msgs "${PI_HOST}":~/PolyUMI/ros2_ws/src/
 
+echo "==> Syncing Pi venv..."
+ssh "${PI_HOST}" '
+    set -euo pipefail
+    [ -d ~/PolyUMI/pi/.venv ] || ~/.local/bin/uv venv --system-site-packages ~/PolyUMI/pi/.venv
+    cd ~/PolyUMI/pi && ~/.local/bin/uv sync --no-dev --frozen
+'
+
+echo "==> Applying ALSA preset (UCM warnings about 'use case configuration' are harmless)..."
+ssh "${PI_HOST}" "sudo alsactl restore -f ~/PolyUMI/pi/alsa_preset || true"
+
+echo "==> Updating WM8960 ALSA state file..."
+ssh "${PI_HOST}" "sudo cp ~/PolyUMI/pi/alsa_preset /etc/wm8960-soundcard/wm8960_asound.state"
+
 echo "==> Done. Deployed commit ${COMMIT_HASH} to ${PI_HOST}."
-echo "    On the Pi, re-install deps and restart the service if needed:"
-echo "      uv pip install --python ~/PolyUMI/pi/.venv ~/PolyUMI/pi"
+echo "    Restart the service to pick up code changes:"
 echo "      sudo systemctl restart polyumi-pi"
