@@ -379,11 +379,16 @@ def inspect_zarr(
                 if ep.gopro_ts_mean_delta_ms is not None:
                     ts_info += f'  (Δ={ep.gopro_ts_mean_delta_ms:.1f} ms avg)'
             table.add_row('gopro/frames', str(ep.gopro_shape), ts_info)
-        if ep.finger_audio_shape is not None:
+        if ep.finger_piezo_shape is not None:
             ts_info = ''
-            if ep.finger_audio_ts_range is not None:
-                ts_info = f'{ep.finger_audio_ts_range[0]:.3f} → {ep.finger_audio_ts_range[1]:.3f} s'
-            table.add_row('finger/audio', str(ep.finger_audio_shape), ts_info)
+            if ep.finger_piezo_ts_range is not None:
+                ts_info = f'{ep.finger_piezo_ts_range[0]:.3f} → {ep.finger_piezo_ts_range[1]:.3f} s'
+            table.add_row('finger/finger_piezo', str(ep.finger_piezo_shape), ts_info)
+        if ep.finger_air_shape is not None:
+            ts_info = ''
+            if ep.finger_air_ts_range is not None:
+                ts_info = f'{ep.finger_air_ts_range[0]:.3f} → {ep.finger_air_ts_range[1]:.3f} s'
+            table.add_row('finger/finger_air', str(ep.finger_air_shape), ts_info)
         if ep.gopro_audio_shape is not None:
             ts_info = ''
             if ep.gopro_audio_ts_range is not None:

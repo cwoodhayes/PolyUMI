@@ -149,7 +149,8 @@ def _register_channels(
 
     channels: dict[str, int] = {
         '/finger/image': ch('/finger/image', img_sid),
-        '/finger/audio': ch('/finger/audio', aud_sid),
+        '/finger/piezo': ch('/finger/piezo', aud_sid),
+        '/finger/air': ch('/finger/air', aud_sid),
     }
     if has_gopro:
         channels['/gopro/image'] = ch('/gopro/image', img_sid)
@@ -332,12 +333,21 @@ def export_episode_to_mcap(
                 quality=jpeg_quality,
             )
 
-            log.info('  finger audio...')
+            log.info('  finger piezo audio...')
             _write_audio(
                 writer,
-                ch['/finger/audio'],
-                ep_grp['finger/audio'][:],  # type: ignore[index]
-                ep_grp['timestamps/finger_audio'][:],  # type: ignore[index]
+                ch['/finger/piezo'],
+                ep_grp['finger/finger_piezo'][:],  # type: ignore[index]
+                ep_grp['timestamps/finger_piezo'][:],  # type: ignore[index]
+                chunk_size=audio_chunk_size,
+            )
+
+            log.info('  finger air audio...')
+            _write_audio(
+                writer,
+                ch['/finger/air'],
+                ep_grp['finger/finger_air'][:],  # type: ignore[index]
+                ep_grp['timestamps/finger_air'][:],  # type: ignore[index]
                 chunk_size=audio_chunk_size,
             )
 

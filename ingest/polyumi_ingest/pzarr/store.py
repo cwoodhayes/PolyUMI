@@ -273,13 +273,22 @@ def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) 
     finger_ts = _finger_timestamps(video_dir, first_wall_ns)[:n_written]
     ts_grp.create_array('finger', data=finger_ts, compressor=_BLOSC)
 
-    # --- Finger audio (contact microphone) ---
+    # --- Finger audio (L=piezo, R=air mic) ---
     if meta.audio_start_time_ns is None:
         raise RuntimeError(f'audio_start_time_ns missing in {session.path / "metadata.json"}')
     audio_data, sr = _read_wav(audio_path)
-    finger_grp.create_array('audio', data=audio_data, compressor=_BLOSC)
-    audio_ts = _audio_timestamps(meta.audio_start_time_ns, len(audio_data), sr)
-    ts_grp.create_array('finger_audio', data=audio_ts, compressor=_BLOSC)
+    if audio_data.ndim != 2 or audio_data.shape[1] < 2:
+        raise RuntimeError(
+            f'Finger audio must be stereo (L=piezo, R=air); got shape {audio_data.shape} in {audio_path}'
+        )
+
+    finger_piezo = audio_data[:, 0]
+    finger_air = audio_data[:, 1]
+    finger_grp.create_array('finger_piezo', data=finger_piezo, compressor=_BLOSC)
+    finger_grp.create_array('finger_air', data=finger_air, compressor=_BLOSC)
+    audio_ts = _audio_timestamps(meta.audio_start_time_ns, len(finger_piezo), sr)
+    ts_grp.create_array('finger_piezo', data=audio_ts, compressor=_BLOSC)
+    ts_grp.create_array('finger_air', data=audio_ts, compressor=_BLOSC)
 
     # --- GoPro ---
     if skip_gopro:
@@ -338,7 +347,8 @@ class EpisodeInfo:
 
     index: int
     finger_shape: tuple | None  # type: ignore[type-arg]
-    finger_audio_shape: tuple | None  # type: ignore[type-arg]
+    finger_piezo_shape: tuple | None  # type: ignore[type-arg]
+    finger_air_shape: tuple | None  # type: ignore[type-arg]
     gopro_shape: tuple | None  # type: ignore[type-arg]
     accl_shape: tuple | None  # type: ignore[type-arg]
     gyro_shape: tuple | None  # type: ignore[type-arg]
@@ -347,7 +357,8 @@ class EpisodeInfo:
     gopro_audio_ts_range: tuple[float, float] | None
     finger_ts_range: tuple[float, float] | None
     finger_ts_mean_delta_ms: float | None
-    finger_audio_ts_range: tuple[float, float] | None
+    finger_piezo_ts_range: tuple[float, float] | None
+    finger_air_ts_range: tuple[float, float] | None
     gopro_ts_range: tuple[float, float] | None
     gopro_ts_mean_delta_ms: float | None
     episode_start: float | None
@@ -388,10 +399,15 @@ def inspect_pzarr(scene_path: pathlib.Path) -> PZarrInfo:
             finger_ts_range = (float(ts[0]), float(ts[-1]))
             finger_mean_delta = float(np.diff(ts).mean() * 1000) if len(ts) > 1 else None
 
-        finger_audio_ts_range: tuple[float, float] | None = None
-        if 'timestamps/finger_audio' in ep:
-            ts = _arr(ep, 'timestamps/finger_audio')[:]  # type: ignore[assignment]
-            finger_audio_ts_range = (float(ts[0]), float(ts[-1]))
+        finger_piezo_ts_range: tuple[float, float] | None = None
+        if 'timestamps/finger_piezo' in ep:
+            ts = _arr(ep, 'timestamps/finger_piezo')[:]  # type: ignore[assignment]
+            finger_piezo_ts_range = (float(ts[0]), float(ts[-1]))
+
+        finger_air_ts_range: tuple[float, float] | None = None
+        if 'timestamps/finger_air' in ep:
+            ts = _arr(ep, 'timestamps/finger_air')[:]  # type: ignore[assignment]
+            finger_air_ts_range = (float(ts[0]), float(ts[-1]))
 
         gopro_audio_ts_range: tuple[float, float] | None = None
         if 'timestamps/gopro_audio' in ep:
@@ -419,7 +435,8 @@ def inspect_pzarr(scene_path: pathlib.Path) -> PZarrInfo:
             EpisodeInfo(
                 index=i,
                 finger_shape=_arr(ep, 'finger/frames').shape if 'finger/frames' in ep else None,
-                finger_audio_shape=_arr(ep, 'finger/audio').shape if 'finger/audio' in ep else None,
+                finger_piezo_shape=_arr(ep, 'finger/finger_piezo').shape if 'finger/finger_piezo' in ep else None,
+                finger_air_shape=_arr(ep, 'finger/finger_air').shape if 'finger/finger_air' in ep else None,
                 gopro_shape=_arr(ep, 'gopro/frames').shape if 'gopro/frames' in ep else None,
                 accl_shape=_arr(ep, 'gopro/accl').shape if 'gopro/accl' in ep else None,
                 gyro_shape=_arr(ep, 'gopro/gyro').shape if 'gopro/gyro' in ep else None,
@@ -428,7 +445,8 @@ def inspect_pzarr(scene_path: pathlib.Path) -> PZarrInfo:
                 gopro_audio_ts_range=gopro_audio_ts_range,
                 finger_ts_range=finger_ts_range,
                 finger_ts_mean_delta_ms=finger_mean_delta,
-                finger_audio_ts_range=finger_audio_ts_range,
+                finger_piezo_ts_range=finger_piezo_ts_range,
+                finger_air_ts_range=finger_air_ts_range,
                 gopro_ts_range=gopro_ts_range,
                 gopro_ts_mean_delta_ms=gopro_mean_delta,
                 episode_start=ep_start,

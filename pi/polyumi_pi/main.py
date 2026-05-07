@@ -364,7 +364,7 @@ def stream(
 def record_episode(
     sample_rate: int = typer.Option(16000, help='Audio sample rate (Hz).'),
     chunk_ms: int = typer.Option(20, help='Audio chunk size (ms).'),
-    channels: int = typer.Option(1, help='Number of audio channels.'),
+    channels: int = typer.Option(2, help='Number of audio channels.'),
     robot: str = typer.Option(
         'polyumi_gripper', help='Name of the robot being recorded.'
     ),
@@ -498,7 +498,6 @@ def record_gopro(
 def start_scene(
     sample_rate: int = typer.Option(16000, help='Audio sample rate (Hz).'),
     chunk_ms: int = typer.Option(20, help='Audio chunk size (ms).'),
-    channels: int = typer.Option(1, help='Number of audio channels.'),
     robot: str = typer.Option(
         'polyumi_gripper', help='Name of the robot being recorded.'
     ),
@@ -536,6 +535,8 @@ def start_scene(
     scene = SceneFiles.create()
     log.info(f'Created scene at {scene.path}')
 
+    CHANNELS = 2 # L: contact mic, R: air mic (built into the audio HAT)
+
     async def _run() -> None:
         # need to handle SIGTERM for `systemctl stop` to work correctly.
         loop = asyncio.get_running_loop()
@@ -570,7 +571,7 @@ def start_scene(
                     session.metadata.task = task
                     session.init_audio(
                         sample_rate=sample_rate,
-                        channels=channels,
+                        channels=CHANNELS,
                         sample_width=2,
                         chunk_ms=chunk_ms,
                     )
@@ -587,7 +588,7 @@ def start_scene(
                             gopro=gopro,
                             sample_rate=sample_rate,
                             chunk_ms=chunk_ms,
-                            channels=channels,
+                            channels=CHANNELS,
                             led=led,
                             hat=hat,
                             stop_fn=hat.wait_for_press,

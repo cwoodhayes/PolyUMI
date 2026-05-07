@@ -156,11 +156,16 @@
       "topic": "/gopro/audio",
       "muted": true
     },
+    "Audio!2w9y83j": {
+      "volume": 1,
+      "slidingViewWidth": 10,
+      "topic": "/finger/piezo"
+    },
     "Audio!1v0aezy": {
       "volume": 0.8731,
       "slidingViewWidth": 10,
-      "topic": "/finger/audio",
-      "muted": false
+      "topic": "/finger/air",
+      "muted": true
     }
   },
   "globalVariables": {},
@@ -184,14 +189,19 @@
         "direction": "row"
       },
       "second": {
-        "first": "Audio!3nxj4f9",
+        "first": {
+          "first": "Audio!3nxj4f9",
+          "second": "Audio!2w9y83j",
+          "direction": "column"
+        },
         "second": "Audio!1v0aezy",
-        "direction": "column"
+        "direction": "column",
+        "splitPercentage": 69.96619345713718
       },
       "direction": "column",
-      "splitPercentage": 45.663662052045886
+      "splitPercentage": 33.79404020668456
     },
     "direction": "column",
-    "splitPercentage": 51.65929203539823
+    "splitPercentage": 42.63565891472868
   }
 }
