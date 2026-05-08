@@ -87,7 +87,8 @@ def main() -> None:
         print(f'error: no scene.zarr found at {args.scene}', file=sys.stderr)
         sys.exit(1)
 
-    step = TimeSyncStep(aligner=GCCPHATAligner(alpha=0.0))
+    # step = TimeSyncStep(aligner=GCCPHATAligner(alpha=0.0))
+    step = TimeSyncStep()
     scene_zarr = step.run(args.scene, copy=True, force=True)
     root = zarr.open_group(str(scene_zarr), mode='r')
     episodes = sorted(k for k in root.keys() if k.startswith('episode_'))

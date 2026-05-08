@@ -84,6 +84,7 @@ class GCCPHATAligner(AudioAligner):
         """Estimate lag using Generalised Cross-Correlation with configurable weighting."""
         sig = np.asarray(sig, dtype=np.float64)
         refsig = np.asarray(refsig, dtype=np.float64)
+        n_sig = len(sig)
 
         sig = sig - sig.mean()
         refsig = refsig - refsig.mean()
@@ -109,4 +110,4 @@ class GCCPHATAligner(AudioAligner):
             shifts = shifts[mask]
 
         best_index = int(np.argmax(cc))
-        return int(shifts[best_index]), float(cc[best_index])
+        return int(shifts[best_index]), float(cc[best_index]) / n_sig
