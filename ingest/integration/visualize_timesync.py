@@ -6,6 +6,8 @@ Usage:
 """
 
 import argparse
+import logging
+import os
 import pathlib
 import sys
 
@@ -13,7 +15,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import zarr
 from matplotlib.axes import Axes
+from polyumi_ingest.preproc import run_preprocessing
 from polyumi_ingest.pzarr.scene_files import SceneFiles
+from rich.logging import RichHandler
 
 
 def _load(grp: zarr.Group, path: str) -> np.ndarray:
@@ -65,6 +69,14 @@ def _plot_episode(ep: zarr.Group, episode_key: str, axes: list[Axes]) -> None:
 
 def main() -> None:
     """Entry point."""
+    logging.basicConfig(
+        level=os.environ.get('LOG_LEVEL', 'INFO').upper(),
+        format='%(message)s',
+        handlers=[RichHandler(show_time=True, show_level=True, show_path=False, rich_tracebacks=True)],
+    )
+    import signal
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('scene', type=pathlib.Path, help='Scene directory or scene.zarr path.')
     args = parser.parse_args()
@@ -74,6 +86,7 @@ def main() -> None:
         print(f'error: no scene.zarr found at {args.scene}', file=sys.stderr)
         sys.exit(1)
 
+    scene_zarr = run_preprocessing(args.scene, step_number=1, copy=True, force=True)
     root = zarr.open_group(str(scene_zarr), mode='r')
     episodes = sorted(k for k in root.keys() if k.startswith('episode_'))
     if not episodes:
@@ -91,7 +104,10 @@ def main() -> None:
         _plot_episode(ep, episode_key, list(axes))  # type: ignore[arg-type]
         fig.tight_layout(rect=(0, 0, 1, 0.97))
 
-    plt.show()
+    try:
+        plt.show()
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == '__main__':
