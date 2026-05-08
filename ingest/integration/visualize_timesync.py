@@ -15,7 +15,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import zarr
 from matplotlib.axes import Axes
-from polyumi_ingest.preproc import run_preprocessing
+from polyumi_ingest.preproc.audio_align import GCCPHATAligner
+from polyumi_ingest.preproc.time_sync import TimeSyncStep
 from polyumi_ingest.pzarr.scene_files import SceneFiles
 from rich.logging import RichHandler
 
@@ -86,7 +87,8 @@ def main() -> None:
         print(f'error: no scene.zarr found at {args.scene}', file=sys.stderr)
         sys.exit(1)
 
-    scene_zarr = run_preprocessing(args.scene, step_number=1, copy=True, force=True)
+    step = TimeSyncStep(aligner=GCCPHATAligner(alpha=0.0))
+    scene_zarr = step.run(args.scene, copy=True, force=True)
     root = zarr.open_group(str(scene_zarr), mode='r')
     episodes = sorted(k for k in root.keys() if k.startswith('episode_'))
     if not episodes:

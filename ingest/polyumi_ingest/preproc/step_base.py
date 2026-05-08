@@ -6,6 +6,9 @@ import logging
 import pathlib
 import shutil
 from abc import ABC, abstractmethod
+from typing import TypeVar
+
+_PS = TypeVar('_PS', bound='PreprocessingStep')
 
 import numpy as np
 import zarr
@@ -20,7 +23,7 @@ PREPROCESSING_STEPS: dict[int, type[PreprocessingStep]] = {}
 def register_preprocessing_step(step_number: int, step_name: str):
     """Register a preprocessing step class with explicit metadata."""
 
-    def decorator(cls: type[PreprocessingStep]) -> type[PreprocessingStep]:
+    def decorator(cls: type[_PS]) -> type[_PS]:
         if step_number in PREPROCESSING_STEPS:
             raise ValueError(f'Duplicate preprocessing step: {step_number}')
         cls.step_number = step_number  # type: ignore[attr-defined]

@@ -40,11 +40,38 @@ class AudioAligner(ABC):
         (lag_samples, confidence)
             lag_samples: positive means sig leads refsig.
             confidence: algorithm-specific scalar; higher is better.
+
         """
 
 
 class GCCPHATAligner(AudioAligner):
-    """GCC-PHAT cross-correlation aligner."""
+    """
+    GCC-PHAT cross-correlation aligner with tunable spectral weighting.
+
+    The normalisation exponent `alpha` controls how aggressively the cross-spectrum
+    is whitened before back-transforming:
+
+    * ``alpha=1.0`` (default) — full PHAT: divides by |X·Y*|, equalising all
+      frequencies.  Good time resolution but ignores signal power.
+    * ``alpha=0.0`` — standard cross-correlation: no whitening, so loud transients
+      dominate the peak.
+    * ``0 < alpha < 1`` — intermediate; try 0.5–0.75 to up-weight transients while
+      retaining some frequency spreading.
+    """
+
+    def __init__(self, alpha: float = 1.0) -> None:
+        """
+        Initialize.
+
+        Parameters
+        ----------
+        alpha:
+            Spectral whitening exponent in [0, 1].
+
+        """
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError(f'alpha must be in [0, 1], got {alpha}')
+        self.alpha = alpha
 
     def estimate_lag(
         self,
@@ -52,7 +79,7 @@ class GCCPHATAligner(AudioAligner):
         refsig: np.ndarray,
         max_lag_samples: int | None = None,
     ) -> tuple[int, float]:
-        """Estimate lag using the Generalized Cross-Correlation with PHAT weighting."""
+        """Estimate lag using Generalised Cross-Correlation with configurable weighting."""
         sig = np.asarray(sig, dtype=np.float64)
         refsig = np.asarray(refsig, dtype=np.float64)
 
@@ -66,7 +93,7 @@ class GCCPHATAligner(AudioAligner):
         sig_fft = np.fft.rfft(sig, n=nfft)
         ref_fft = np.fft.rfft(refsig, n=nfft)
         cross_power = sig_fft * np.conj(ref_fft)
-        cross_power /= np.maximum(np.abs(cross_power), 1e-12)
+        cross_power /= np.maximum(np.abs(cross_power), 1e-12) ** self.alpha
         cc = np.fft.irfft(cross_power, n=nfft)
 
         max_shift = nfft // 2

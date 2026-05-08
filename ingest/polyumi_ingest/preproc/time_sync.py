@@ -60,7 +60,7 @@ class TimeSyncStep(PreprocessingStep):
 
         """
         self.max_lag_s = max_lag_s
-        self.aligner = aligner if aligner is not None else GCCPHATAligner()
+        self.aligner = aligner if aligner is not None else GCCPHATAligner(0.0)
 
     def run_step(self, scene_zarr: pathlib.Path) -> None:
         """Read the audio streams from scene_zarr and write the estimated offset."""
