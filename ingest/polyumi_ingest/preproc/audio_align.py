@@ -21,7 +21,7 @@ class AudioAligner(ABC):
         self,
         sig: np.ndarray,
         refsig: np.ndarray,
-        max_lag_samples: int | None = None,
+        max_lag_samples: int | tuple[int, int] | None = None,
     ) -> tuple[int, float]:
         """
         Estimate the sample lag of sig relative to refsig.
@@ -33,7 +33,9 @@ class AudioAligner(ABC):
         refsig:
             Reference signal (same grid as sig).
         max_lag_samples:
-            If given, restrict the search to lags within ±max_lag_samples.
+            If given, restrict the search window. An ``int`` n restricts to
+            ±n (symmetric). A ``(lo, hi)`` tuple allows an asymmetric range,
+            e.g. ``(-100, 200)``.
 
         Returns
         -------
@@ -77,7 +79,7 @@ class GCCPHATAligner(AudioAligner):
         self,
         sig: np.ndarray,
         refsig: np.ndarray,
-        max_lag_samples: int | None = None,
+        max_lag_samples: int | tuple[int, int] | None = None,
     ) -> tuple[int, float]:
         """Estimate lag using Generalised Cross-Correlation with configurable weighting."""
         sig = np.asarray(sig, dtype=np.float64)
@@ -101,7 +103,8 @@ class GCCPHATAligner(AudioAligner):
         shifts = np.arange(-max_shift, max_shift + 1)
 
         if max_lag_samples is not None:
-            mask = np.abs(shifts) <= max_lag_samples
+            lo, hi = (-max_lag_samples, max_lag_samples) if isinstance(max_lag_samples, int) else max_lag_samples
+            mask = (shifts >= lo) & (shifts <= hi)
             cc = cc[mask]
             shifts = shifts[mask]
 

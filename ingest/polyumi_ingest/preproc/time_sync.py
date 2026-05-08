@@ -47,7 +47,12 @@ def _resample_to_grid(ts: np.ndarray, values: np.ndarray, target_ts: np.ndarray)
 class TimeSyncStep(PreprocessingStep):
     """Estimate the offset between finger air audio and GoPro audio."""
 
-    def __init__(self, max_lag_s: float = 1.0, aligner: AudioAligner | None = None) -> None:
+    def __init__(
+        self,
+        max_lag_s: float = 1.0,
+        aligner: AudioAligner | None = None,
+        trim_start_s: float = 0.8,
+    ) -> None:
         """
         Initialize the time-sync step.
 
@@ -57,10 +62,14 @@ class TimeSyncStep(PreprocessingStep):
             Search window passed to the aligner (±seconds).
         aligner:
             AudioAligner instance to use. Defaults to GCCPHATAligner.
+        trim_start_s:
+            Seconds to discard from the start of each signal before alignment,
+            to avoid the hardware turn-on transient on the piezo and air mics.
 
         """
         self.max_lag_s = max_lag_s
         self.aligner = aligner if aligner is not None else GCCPHATAligner(0.0)
+        self.trim_start_s = trim_start_s
 
     def run_step(self, scene_zarr: pathlib.Path) -> None:
         """Read the audio streams from scene_zarr and write the estimated offset."""
@@ -92,7 +101,14 @@ class TimeSyncStep(PreprocessingStep):
             finger_overlap = _resample_to_grid(finger_ts, finger_audio, target_ts)
             gopro_overlap = _resample_to_grid(gopro_ts, gopro_audio, target_ts)
 
-            max_lag_samples = int(target_sr * self.max_lag_s)
+            trim_samples = int(self.trim_start_s * target_sr)
+            finger_overlap = finger_overlap[trim_samples:]
+            gopro_overlap = gopro_overlap[trim_samples:]
+            if len(finger_overlap) < 32:
+                raise RuntimeError(f'Audio overlap too short after trim in {episode_key}')
+
+            # gopro always starts a little bit ahead, so we restrict the search range to [0, +max_lag_s]
+            max_lag_samples = (0, int(target_sr * self.max_lag_s))
             lag_samples, peak = self.aligner.estimate_lag(
                 gopro_overlap, finger_overlap, max_lag_samples=max_lag_samples
             )
