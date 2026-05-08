@@ -26,8 +26,56 @@ _MOUNT_ROOTS = [
 ]
 
 
-def _find_gopro_mount() -> pathlib.Path | None:
+def _mount_unmounted_sd_cards() -> None:
+    """Attempt to mount unmounted removable FAT/exFAT partitions via udisksctl."""
+    log.info('Checking for unmounted removable FAT/exFAT partitions to mount...')
+    try:
+        result = subprocess.run(
+            ['lsblk', '--json', '-o', 'NAME,MOUNTPOINT,FSTYPE,TYPE,RM'],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return
+
+    try:
+        blockdevices = json.loads(result.stdout).get('blockdevices', [])
+    except (json.JSONDecodeError, AttributeError):
+        return
+
+    def _unmounted_partitions(devs: list) -> list[str]:
+        found = []
+        for dev in devs:
+            if (
+                dev.get('type') == 'part'
+                and dev.get('fstype') in ('vfat', 'exfat')
+                and not dev.get('mountpoint')
+                and (dev.get('rm') in (True, 1, '1') or dev['name'].startswith('mmcblk'))
+            ):
+                found.append(f"/dev/{dev['name']}")
+            found.extend(_unmounted_partitions(dev.get('children') or []))
+        return found
+
+    for dev_path in _unmounted_partitions(blockdevices):
+        log.info(f'Attempting to mount {dev_path}')
+        try:
+            subprocess.run(
+                ['udisksctl', 'mount', '-b', dev_path],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            log.info(f'Mounted {dev_path}')
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            log.debug(f'Could not mount {dev_path}: {exc}')
+
+
+def _find_gopro_mount(auto_mount: bool = True) -> pathlib.Path | None:
     """Scan common Linux auto-mount roots for a volume containing DCIM/100GOPRO."""
+    if auto_mount:
+        _mount_unmounted_sd_cards()
     for root in _MOUNT_ROOTS:
         if not root.is_dir():
             continue
@@ -82,6 +130,7 @@ def find_gopro_video(
     start_time: datetime.datetime,
     mount_point: pathlib.Path | None = None,
     threshold_ms: float = DEFAULT_THRESHOLD_MS,
+    auto_mount: bool = True,
 ) -> pathlib.Path:
     """
     Find the GoPro MP4 whose recording start best matches *start_time*.
@@ -94,6 +143,8 @@ def find_gopro_video(
         threshold_ms: Maximum allowed difference in milliseconds between the
             file's recording start and *start_time*. Raises RuntimeError if the
             best match exceeds this.
+        auto_mount: When True (default), attempt to mount any unmounted removable
+            FAT/exFAT partitions via udisksctl before scanning.
 
     Returns:
         Path to the best-matching MP4 file on the SD card.
@@ -104,7 +155,7 @@ def find_gopro_video(
 
     """
     if mount_point is None:
-        mount_point = _find_gopro_mount()
+        mount_point = _find_gopro_mount(auto_mount=auto_mount)
         if mount_point is None:
             raise FileNotFoundError(
                 'No GoPro SD card found under /media, /run/media, or /mnt.\n'
