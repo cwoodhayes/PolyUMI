@@ -42,7 +42,7 @@ def _resample_to_grid(ts: np.ndarray, values: np.ndarray, target_ts: np.ndarray)
     return np.interp(target_ts, ts, values).astype(np.float32)
 
 
-def _gcc_phat(sig: np.ndarray, refsig: np.ndarray) -> tuple[int, float]:
+def _gcc_phat(sig: np.ndarray, refsig: np.ndarray, max_lag_samples: int | None = None) -> tuple[int, float]:
     """Estimate the sample lag between sig and refsig using GCC-PHAT."""
     sig = np.asarray(sig, dtype=np.float64)
     refsig = np.asarray(refsig, dtype=np.float64)
@@ -56,6 +56,10 @@ def _gcc_phat(sig: np.ndarray, refsig: np.ndarray) -> tuple[int, float]:
     max_shift = nfft // 2
     cc = np.concatenate((cc[-max_shift:], cc[: max_shift + 1]))
     shifts = np.arange(-max_shift, max_shift + 1)
+    if max_lag_samples is not None:
+        mask = np.abs(shifts) <= max_lag_samples
+        cc = cc[mask]
+        shifts = shifts[mask]
     best_index = int(np.argmax(cc))
     return int(shifts[best_index]), float(cc[best_index])
 
@@ -63,6 +67,10 @@ def _gcc_phat(sig: np.ndarray, refsig: np.ndarray) -> tuple[int, float]:
 @register_preprocessing_step(step_number=1, step_name='time-sync')
 class TimeSyncStep(PreprocessingStep):
     """Estimate the offset between finger air audio and GoPro audio."""
+
+    def __init__(self, max_lag_s: float = 1.0) -> None:
+        """Initialize with a search window of ±max_lag_s seconds."""
+        self.max_lag_s = max_lag_s
 
     def run_step(self, scene_zarr: pathlib.Path) -> None:
         """Read the audio streams from scene_zarr and write the estimated offset."""
@@ -101,7 +109,8 @@ class TimeSyncStep(PreprocessingStep):
             finger_overlap /= finger_scale
             gopro_overlap /= gopro_scale
 
-            lag_samples, peak = _gcc_phat(gopro_overlap, finger_overlap)
+            max_lag_samples = int(target_sr * self.max_lag_s)
+            lag_samples, peak = _gcc_phat(gopro_overlap, finger_overlap, max_lag_samples=max_lag_samples)
             residual_offset_s = lag_samples / target_sr
             nominal_offset_s = float(gopro_ts[0] - finger_ts[0])
             total_offset_s = nominal_offset_s + residual_offset_s
