@@ -16,6 +16,7 @@ from rich.prompt import Confirm
 
 from polyumi_ingest.gopro_fetch import DEFAULT_THRESHOLD_MS, find_gopro_video
 from polyumi_ingest.pi_fetch import PiFetch
+from polyumi_ingest.preproc import run_preprocessing, run_preprocessing_on_recordings
 from polyumi_ingest.pzarr import FINGER_MP4, GOPRO_MP4
 from polyumi_ingest.video_helpers import encode_session_video
 
@@ -434,6 +435,44 @@ def build_zarr(
         log.error(str(e))
         raise typer.Exit(1)
     except RuntimeError as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+
+
+@app.command(name='pp')
+def preprocessing_pipeline(
+    step: int | None = typer.Argument(
+        None,
+        min=1,
+        help='Preprocessing step number. Omit to run every registered step in order.',
+    ),
+    scene: pathlib.Path | None = typer.Option(
+        None,
+        '--scene',
+        help='Scene directory or scene.zarr path. Omit to run on every scene under recordings_dir.',
+    ),
+    recordings_dir: pathlib.Path = typer.Option(
+        DEFAULT_RECORDINGS_DIR,
+        help='Directory containing scene_* folders when --scene is omitted.',
+    ),
+    copy: bool = typer.Option(
+        False,
+        '--copy',
+        help='Write the step output to scene_pp[step].zarr instead of mutating scene.zarr.',
+    ),
+):
+    """Run a preprocessing step, or the full preprocessing pipeline, on scene zarr stores."""
+    try:
+        if scene is not None:
+            output = run_preprocessing(scene, step_number=step, copy=copy)
+            log.info(f'Done. Output: {output}')
+        else:
+            outputs = run_preprocessing_on_recordings(recordings_dir, step_number=step, copy=copy)
+            if outputs:
+                log.info(f'Done. Processed {len(outputs)} scene(s).')
+            else:
+                log.info('No scenes processed.')
+    except (FileNotFoundError) as e:
         log.error(str(e))
         raise typer.Exit(1)
 
