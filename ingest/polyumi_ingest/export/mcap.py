@@ -308,6 +308,18 @@ def export_episode_to_mcap(
     has_accel = 'gopro/accl' in ep_grp
     has_gyro = 'gopro/gyro' in ep_grp
     has_gps = 'gopro/gps' in ep_grp
+    has_time_sync = 'annotations/time_sync/gopro_audio_to_finger_air_offset_s' in ep_grp
+
+    # gopro_audio_to_finger_air_offset_s = gopro_time - finger_time, so subtract it
+    # from gopro timestamps to bring them into the finger (Pi) time domain.
+    gopro_ts_shift = 0.0
+    if has_time_sync:
+        gopro_ts_shift = -float(ep_grp['annotations/time_sync/gopro_audio_to_finger_air_offset_s'][()])  # type: ignore[index]
+        log.info(f'  time sync: shifting gopro timestamps by {gopro_ts_shift:+.6f}s')
+
+    def _gopro_ts(key: str) -> np.ndarray:
+        ts: np.ndarray = ep_grp[f'timestamps/{key}'][:]  # type: ignore[index]
+        return ts + gopro_ts_shift if gopro_ts_shift != 0.0 else ts
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, 'wb') as f:
@@ -357,7 +369,7 @@ def export_episode_to_mcap(
                     writer,
                     ch['/gopro/image'],
                     ep_grp['gopro/frames'],  # type: ignore[index]
-                    ep_grp['timestamps/gopro'][:],  # type: ignore[index]
+                    _gopro_ts('gopro'),
                     frame_id='gopro',
                     quality=jpeg_quality,
                 )
@@ -368,7 +380,7 @@ def export_episode_to_mcap(
                     writer,
                     ch['/gopro/audio'],
                     ep_grp['gopro/audio'][:],  # type: ignore[index]
-                    ep_grp['timestamps/gopro_audio'][:],  # type: ignore[index]
+                    _gopro_ts('gopro_audio'),
                     chunk_size=audio_chunk_size,
                 )
 
@@ -378,7 +390,7 @@ def export_episode_to_mcap(
                     writer,
                     ch['/gopro/accel'],
                     ep_grp['gopro/accl'][:],  # type: ignore[index]
-                    ep_grp['timestamps/gopro_accl'][:],  # type: ignore[index]
+                    _gopro_ts('gopro_accl'),
                     field='accel',
                 )
 
@@ -388,7 +400,7 @@ def export_episode_to_mcap(
                     writer,
                     ch['/gopro/gyro'],
                     ep_grp['gopro/gyro'][:],  # type: ignore[index]
-                    ep_grp['timestamps/gopro_gyro'][:],  # type: ignore[index]
+                    _gopro_ts('gopro_gyro'),
                     field='gyro',
                 )
 
@@ -398,7 +410,7 @@ def export_episode_to_mcap(
                     writer,
                     ch['/gopro/gps'],
                     ep_grp['gopro/gps'][:],  # type: ignore[index]
-                    ep_grp['timestamps/gopro_gps'][:],  # type: ignore[index]
+                    _gopro_ts('gopro_gps'),
                 )
         finally:
             writer.finish()

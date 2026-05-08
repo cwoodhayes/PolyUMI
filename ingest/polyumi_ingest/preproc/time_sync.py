@@ -49,9 +49,9 @@ class TimeSyncStep(PreprocessingStep):
 
     def __init__(
         self,
-        max_lag_s: float = 1.0,
+        max_lag_s: float = 2.0,
         aligner: AudioAligner | None = None,
-        trim_start_s: float = 0.8,
+        trim_start_s: float = 0.5,
     ) -> None:
         """
         Initialize the time-sync step.
@@ -68,7 +68,7 @@ class TimeSyncStep(PreprocessingStep):
 
         """
         self.max_lag_s = max_lag_s
-        self.aligner = aligner if aligner is not None else GCCPHATAligner(0.2)
+        self.aligner = aligner if aligner is not None else GCCPHATAligner(0.0)
         self.trim_start_s = trim_start_s
         self.finger_mic_name = 'finger_piezo'
 

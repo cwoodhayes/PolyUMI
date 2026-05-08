@@ -625,6 +625,11 @@ def debug_latest(
         '-y',
         help='Non-interactive: skip prompts and keep existing artifacts as-is.',
     ),
+    run_pp: bool = typer.Option(
+        False,
+        '--pp',
+        help='Run the full preprocessing pipeline after building pzarr, before MCAP export.',
+    ),
     jpeg_quality: int = typer.Option(85, help='JPEG re-encode quality for MCAP export (1–100).'),
     audio_chunk_size: int = typer.Option(4096, min=1, help='Audio samples per RawAudio message.'),
 ):
@@ -678,6 +683,16 @@ def debug_latest(
     else:
         log.info(f'Building pzarr for {scene_name}...')
         _build_pzarr(scene_dir, skip_gopro)
+
+    # Step 2.5: optionally run full preprocessing pipeline
+    if run_pp:
+        log.info('Running preprocessing pipeline...')
+        try:
+            output = run_preprocessing(scene_dir, step_number=None, copy=False, force=True)
+            log.info(f'  -> {output}')
+        except (FileNotFoundError, FileExistsError) as e:
+            log.error(str(e))
+            raise typer.Exit(1)
 
     # Step 3: export episode 0 to MCAP
     mcap_path = scene_dir / 'episode_0.mcap'
