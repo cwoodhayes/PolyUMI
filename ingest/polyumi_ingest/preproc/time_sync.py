@@ -8,6 +8,7 @@ import pathlib
 import numpy as np
 import zarr
 
+from polyumi_ingest.preproc.audio_align import AudioAligner, GCCPHATAligner
 from polyumi_ingest.preproc.step_base import (
     PreprocessingStep,
     _write_scalar,
@@ -42,35 +43,24 @@ def _resample_to_grid(ts: np.ndarray, values: np.ndarray, target_ts: np.ndarray)
     return np.interp(target_ts, ts, values).astype(np.float32)
 
 
-def _gcc_phat(sig: np.ndarray, refsig: np.ndarray, max_lag_samples: int | None = None) -> tuple[int, float]:
-    """Estimate the sample lag between sig and refsig using GCC-PHAT."""
-    sig = np.asarray(sig, dtype=np.float64)
-    refsig = np.asarray(refsig, dtype=np.float64)
-    n = len(sig) + len(refsig)
-    nfft = 1 << (n - 1).bit_length()
-    sig_fft = np.fft.rfft(sig, n=nfft)
-    ref_fft = np.fft.rfft(refsig, n=nfft)
-    cross_power = sig_fft * np.conj(ref_fft)
-    cross_power /= np.maximum(np.abs(cross_power), 1e-12)
-    cc = np.fft.irfft(cross_power, n=nfft)
-    max_shift = nfft // 2
-    cc = np.concatenate((cc[-max_shift:], cc[: max_shift + 1]))
-    shifts = np.arange(-max_shift, max_shift + 1)
-    if max_lag_samples is not None:
-        mask = np.abs(shifts) <= max_lag_samples
-        cc = cc[mask]
-        shifts = shifts[mask]
-    best_index = int(np.argmax(cc))
-    return int(shifts[best_index]), float(cc[best_index])
-
-
 @register_preprocessing_step(step_number=1, step_name='time-sync')
 class TimeSyncStep(PreprocessingStep):
     """Estimate the offset between finger air audio and GoPro audio."""
 
-    def __init__(self, max_lag_s: float = 1.0) -> None:
-        """Initialize with a search window of ±max_lag_s seconds."""
+    def __init__(self, max_lag_s: float = 1.0, aligner: AudioAligner | None = None) -> None:
+        """
+        Initialize the time-sync step.
+
+        Parameters
+        ----------
+        max_lag_s:
+            Search window passed to the aligner (±seconds).
+        aligner:
+            AudioAligner instance to use. Defaults to GCCPHATAligner.
+
+        """
         self.max_lag_s = max_lag_s
+        self.aligner = aligner if aligner is not None else GCCPHATAligner()
 
     def run_step(self, scene_zarr: pathlib.Path) -> None:
         """Read the audio streams from scene_zarr and write the estimated offset."""
@@ -102,15 +92,10 @@ class TimeSyncStep(PreprocessingStep):
             finger_overlap = _resample_to_grid(finger_ts, finger_audio, target_ts)
             gopro_overlap = _resample_to_grid(gopro_ts, gopro_audio, target_ts)
 
-            finger_overlap -= finger_overlap.mean()
-            gopro_overlap -= gopro_overlap.mean()
-            finger_scale = float(np.std(finger_overlap)) or 1.0
-            gopro_scale = float(np.std(gopro_overlap)) or 1.0
-            finger_overlap /= finger_scale
-            gopro_overlap /= gopro_scale
-
             max_lag_samples = int(target_sr * self.max_lag_s)
-            lag_samples, peak = _gcc_phat(gopro_overlap, finger_overlap, max_lag_samples=max_lag_samples)
+            lag_samples, peak = self.aligner.estimate_lag(
+                gopro_overlap, finger_overlap, max_lag_samples=max_lag_samples
+            )
             residual_offset_s = lag_samples / target_sr
             nominal_offset_s = float(gopro_ts[0] - finger_ts[0])
             total_offset_s = nominal_offset_s + residual_offset_s
