@@ -15,7 +15,6 @@ from polyumi_ingest.pzarr.scene_files import SceneFiles
 log = logging.getLogger(__name__)
 
 PREPROCESSING_STEPS: dict[int, type[PreprocessingStep]] = {}
-_PREPROCESSING_STEP_INFO: dict[type[PreprocessingStep], tuple[int, str]] = {}
 
 
 def register_preprocessing_step(step_number: int, step_name: str):
@@ -24,31 +23,17 @@ def register_preprocessing_step(step_number: int, step_name: str):
     def decorator(cls: type[PreprocessingStep]) -> type[PreprocessingStep]:
         if step_number in PREPROCESSING_STEPS:
             raise ValueError(f'Duplicate preprocessing step: {step_number}')
+        cls.step_number = step_number  # type: ignore[attr-defined]
+        cls.step_name = step_name  # type: ignore[attr-defined]
         PREPROCESSING_STEPS[step_number] = cls
-        _PREPROCESSING_STEP_INFO[cls] = (step_number, step_name)
         return cls
 
     return decorator
 
 
-def _step_metadata(step_cls: type[PreprocessingStep]) -> tuple[int, str]:
-    try:
-        return _PREPROCESSING_STEP_INFO[step_cls]
-    except KeyError as exc:
-        raise KeyError(f'Unregistered preprocessing step class: {step_cls.__name__}') from exc
-
-
 def available_preprocessing_steps() -> list[type[PreprocessingStep]]:
     """Return registered preprocessing steps in execution order."""
     return [PREPROCESSING_STEPS[k] for k in sorted(PREPROCESSING_STEPS)]
-
-
-def get_preprocessing_step(step_number: int) -> type[PreprocessingStep]:
-    """Return the registered preprocessing step for step_number."""
-    try:
-        return PREPROCESSING_STEPS[step_number]
-    except KeyError as exc:
-        raise KeyError(f'Unknown preprocessing step: {step_number}') from exc
 
 
 def _scene_dirs(recordings_dir: pathlib.Path) -> list[pathlib.Path]:
@@ -83,15 +68,8 @@ def _write_scalar(group: zarr.Group, name: str, value: float | int) -> None:
 class PreprocessingStep(ABC):
     """Base class for a single preprocessing step."""
 
-    @property
-    def step_number(self) -> int:
-        """Return this step's numeric identifier."""
-        return _step_metadata(type(self))[0]
-
-    @property
-    def step_name(self) -> str:
-        """Return this step's display name."""
-        return _step_metadata(type(self))[1]
+    step_number: int
+    step_name: str
 
     @abstractmethod
     def run_step(self, scene_zarr: pathlib.Path) -> None:
@@ -122,24 +100,23 @@ def run_preprocessing(scene_path: pathlib.Path, step_number: int | None = None, 
 
     root = zarr.open_group(str(scene_zarr), mode='a')
     completed_steps = set(_preprocessing_steps_done(root))
-
-    if step_number is not None:
-        step_numbers = [step_number]
-    else:
-        step_numbers = sorted(PREPROCESSING_STEPS.keys())
+    step_numbers = [step_number] if step_number is not None else sorted(PREPROCESSING_STEPS)
 
     current_path = scene_path
     for number in step_numbers:
-        step_cls = get_preprocessing_step(number)
+        try:
+            step_cls = PREPROCESSING_STEPS[number]
+        except KeyError:
+            raise KeyError(f'Unknown preprocessing step: {number}')
         if number in completed_steps:
             log.info(f'Skipping {scene_zarr.name}: step {number} already complete')
             continue
-        _, step_name = _step_metadata(step_cls)
-        log.info(f'Running step {number} ({step_name}) on {scene_zarr.name}')
+        log.info(f'Running step {number} ({step_cls.step_name}) on {scene_zarr.name}')
         step = step_cls()
         current_path = step.run(current_path, copy=copy)
         scene_zarr = SceneFiles.resolve_zarr_path(current_path)
         root = zarr.open_group(str(scene_zarr), mode='a')
+        _mark_preprocessing_step(root, number)
         completed_steps = set(_preprocessing_steps_done(root))
         if step_number is None:
             copy = False

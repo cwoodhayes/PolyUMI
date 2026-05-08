@@ -10,7 +10,6 @@ import zarr
 
 from polyumi_ingest.preproc.step_base import (
     PreprocessingStep,
-    _mark_preprocessing_step,
     _write_scalar,
     register_preprocessing_step,
 )
@@ -119,5 +118,3 @@ class TimeSyncStep(PreprocessingStep):
                 f'{episode_key}: offset={total_offset_s:.6f}s '
                 f'(nominal={nominal_offset_s:.6f}s, residual={residual_offset_s:.6f}s, peak={peak:.4f})'
             )
-
-        _mark_preprocessing_step(root, self.step_number)
