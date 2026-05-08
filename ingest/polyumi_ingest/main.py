@@ -460,19 +460,25 @@ def preprocessing_pipeline(
         '--copy',
         help='Write the step output to scene_pp[step].zarr instead of mutating scene.zarr.',
     ),
+    force: bool = typer.Option(
+        False,
+        '--force',
+        '-f',
+        help='Re-run a step even if it has already been marked complete.',
+    ),
 ):
     """Run a preprocessing step, or the full preprocessing pipeline, on scene zarr stores."""
     try:
         if scene is not None:
-            output = run_preprocessing(scene, step_number=step, copy=copy)
+            output = run_preprocessing(scene, step_number=step, copy=copy, force=force)
             log.info(f'Done. Output: {output}')
         else:
-            outputs = run_preprocessing_on_recordings(recordings_dir, step_number=step, copy=copy)
+            outputs = run_preprocessing_on_recordings(recordings_dir, step_number=step, copy=copy, force=force)
             if outputs:
                 log.info(f'Done. Processed {len(outputs)} scene(s).')
             else:
                 log.info('No scenes processed.')
-    except (FileNotFoundError) as e:
+    except (FileNotFoundError, FileExistsError) as e:
         log.error(str(e))
         raise typer.Exit(1)
 

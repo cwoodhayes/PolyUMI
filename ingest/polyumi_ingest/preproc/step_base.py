@@ -45,9 +45,9 @@ def _scene_dirs(recordings_dir: pathlib.Path) -> list[pathlib.Path]:
 
 def _preprocessing_steps_done(root: zarr.Group) -> list[int]:
     raw = root.attrs.get('preprocessing_steps', [])
-    if raw is None:
+    if not isinstance(raw, list):
         return []
-    return [int(step) for step in raw]
+    return [int(step) for step in raw if isinstance(step, (int, float, str))]
 
 
 def _mark_preprocessing_step(root: zarr.Group, step_number: int) -> None:
@@ -75,7 +75,7 @@ class PreprocessingStep(ABC):
     def run_step(self, scene_zarr: pathlib.Path) -> None:
         """Mutate a scene.zarr store in place."""
 
-    def run(self, scene_path: pathlib.Path, copy: bool = False) -> pathlib.Path:
+    def run(self, scene_path: pathlib.Path, copy: bool = False, force: bool = False) -> pathlib.Path:
         """Run the step on a scene directory or scene.zarr path."""
         scene_zarr = SceneFiles.resolve_zarr_path(scene_path)
         if not scene_zarr.exists():
@@ -85,14 +85,21 @@ class PreprocessingStep(ABC):
         if copy:
             target_zarr = scene_zarr.parent / f'scene_pp{self.step_number}.zarr'
             if target_zarr.exists():
-                raise FileExistsError(f'Preprocessed scene already exists: {target_zarr}')
+                if not force:
+                    raise FileExistsError(f'Preprocessed scene already exists: {target_zarr}')
+                shutil.rmtree(target_zarr)
             shutil.copytree(scene_zarr, target_zarr)
 
         self.run_step(target_zarr)
         return target_zarr
 
 
-def run_preprocessing(scene_path: pathlib.Path, step_number: int | None = None, copy: bool = False) -> pathlib.Path:
+def run_preprocessing(
+    scene_path: pathlib.Path,
+    step_number: int | None = None,
+    copy: bool = False,
+    force: bool = False,
+) -> pathlib.Path:
     """Run one preprocessing step or the full pipeline on a scene."""
     scene_zarr = SceneFiles.resolve_zarr_path(scene_path)
     if not scene_zarr.exists():
@@ -108,12 +115,12 @@ def run_preprocessing(scene_path: pathlib.Path, step_number: int | None = None, 
             step_cls = PREPROCESSING_STEPS[number]
         except KeyError:
             raise KeyError(f'Unknown preprocessing step: {number}')
-        if number in completed_steps:
+        if number in completed_steps and not force:
             log.info(f'Skipping {scene_zarr.name}: step {number} already complete')
             continue
         log.info(f'Running step {number} ({step_cls.step_name}) on {scene_zarr.name}')
         step = step_cls()
-        current_path = step.run(current_path, copy=copy)
+        current_path = step.run(current_path, copy=copy, force=force)
         scene_zarr = SceneFiles.resolve_zarr_path(current_path)
         root = zarr.open_group(str(scene_zarr), mode='a')
         _mark_preprocessing_step(root, number)
@@ -124,7 +131,12 @@ def run_preprocessing(scene_path: pathlib.Path, step_number: int | None = None, 
     return SceneFiles.resolve_zarr_path(current_path)
 
 
-def run_preprocessing_on_recordings(recordings_dir: pathlib.Path, step_number: int | None = None, copy: bool = False) -> list[pathlib.Path]:
+def run_preprocessing_on_recordings(
+    recordings_dir: pathlib.Path,
+    step_number: int | None = None,
+    copy: bool = False,
+    force: bool = False,
+) -> list[pathlib.Path]:
     """Run preprocessing on every scene under recordings_dir."""
     outputs: list[pathlib.Path] = []
     for scene_dir in _scene_dirs(recordings_dir):
@@ -132,5 +144,5 @@ def run_preprocessing_on_recordings(recordings_dir: pathlib.Path, step_number: i
         if not zarr_path.exists():
             log.info(f'Skipping {scene_dir.name}: no scene.zarr found')
             continue
-        outputs.append(run_preprocessing(scene_dir, step_number=step_number, copy=copy))
+        outputs.append(run_preprocessing(scene_dir, step_number=step_number, copy=copy, force=force))
     return outputs
