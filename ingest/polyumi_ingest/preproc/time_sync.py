@@ -70,6 +70,7 @@ class TimeSyncStep(PreprocessingStep):
         self.max_lag_s = max_lag_s
         self.aligner = aligner if aligner is not None else GCCPHATAligner(0.0)
         self.trim_start_s = trim_start_s
+        self.finger_mic_name = 'finger_piezo'
 
     def run_step(self, scene_zarr: pathlib.Path) -> None:
         """Read the audio streams from scene_zarr and write the estimated offset."""
@@ -80,9 +81,9 @@ class TimeSyncStep(PreprocessingStep):
 
         for episode_key in episodes:
             ep = root.require_group(episode_key)
-            finger_ts = np.asarray(_arr(ep, 'timestamps/finger_air')[:], dtype=np.float64)
+            finger_ts = np.asarray(_arr(ep, f'timestamps/{self.finger_mic_name}')[:], dtype=np.float64)
             gopro_ts = np.asarray(_arr(ep, 'timestamps/gopro_audio')[:], dtype=np.float64)
-            finger_audio = _mono_audio(np.asarray(_arr(ep, 'finger/finger_air')[:]))
+            finger_audio = _mono_audio(np.asarray(_arr(ep, f'finger/{self.finger_mic_name}')[:]))
             gopro_audio = _mono_audio(np.asarray(_arr(ep, 'gopro/audio')[:]))
 
             overlap_start = max(float(finger_ts[0]), float(gopro_ts[0]))
