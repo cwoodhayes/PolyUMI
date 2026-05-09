@@ -111,3 +111,71 @@ class GCCPHATAligner(AudioAligner):
 
         best_index = int(np.argmax(cc))
         return int(shifts[best_index]), float(cc[best_index]) / n_sig
+
+
+class PowerEnvAligner(AudioAligner):
+    """
+    Cross-correlator on amplitude-power envelopes.
+
+    Instead of correlating raw waveforms (which GCC-PHAT does), this correlates
+    ``|sig|**power`` against ``|refsig|**power``.  A sample that is 4× louder
+    contributes ``4**power`` times more to the score, so sharp transients dominate
+    the alignment peak far more aggressively than any GCC-PHAT alpha setting.
+
+    Critically, signals are **not** z-score normalised — only DC is removed —
+    so absolute amplitude drives the result.
+
+    * ``power=1`` — absolute-value (half-wave rectified) correlation.
+    * ``power=2`` (default) — energy/squared-amplitude weighting.
+    * ``power=3+`` — increasingly aggressive transient emphasis; useful when
+      the dominant event is very sharp (e.g. a clap or impact).
+    """
+
+    def __init__(self, power: float = 2.0) -> None:
+        """
+        Initialize.
+
+        Parameters
+        ----------
+        power:
+            Exponent applied to ``|sig|`` before cross-correlation. Must be ≥ 1.
+
+        """
+        if power < 1.0:
+            raise ValueError(f'power must be >= 1, got {power}')
+        self.power = power
+
+    def estimate_lag(
+        self,
+        sig: np.ndarray,
+        refsig: np.ndarray,
+        max_lag_samples: int | tuple[int, int] | None = None,
+    ) -> tuple[int, float]:
+        """Estimate lag by cross-correlating amplitude-power envelopes."""
+        sig = np.asarray(sig, dtype=np.float64)
+        refsig = np.asarray(refsig, dtype=np.float64)
+        n_sig = len(sig)
+
+        sig = sig - sig.mean()
+        refsig = refsig - refsig.mean()
+
+        env_sig = np.abs(sig) ** self.power
+        env_ref = np.abs(refsig) ** self.power
+
+        n = len(env_sig) + len(env_ref)
+        nfft = 1 << (n - 1).bit_length()
+        cross_power = np.fft.rfft(env_sig, n=nfft) * np.conj(np.fft.rfft(env_ref, n=nfft))
+        cc = np.fft.irfft(cross_power, n=nfft)
+
+        max_shift = nfft // 2
+        cc = np.concatenate((cc[-max_shift:], cc[: max_shift + 1]))
+        shifts = np.arange(-max_shift, max_shift + 1)
+
+        if max_lag_samples is not None:
+            lo, hi = (-max_lag_samples, max_lag_samples) if isinstance(max_lag_samples, int) else max_lag_samples
+            mask = (shifts >= lo) & (shifts <= hi)
+            cc = cc[mask]
+            shifts = shifts[mask]
+
+        best_index = int(np.argmax(cc))
+        return int(shifts[best_index]), float(cc[best_index]) / n_sig

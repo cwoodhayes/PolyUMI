@@ -128,4 +128,5 @@ class TimeSyncStep(PreprocessingStep):
             log.info(
                 f'{episode_key}: offset={total_offset_s:.6f}s '
                 f'(nominal={nominal_offset_s:.6f}s, residual={residual_offset_s:.6f}s, peak={peak:.4f})'
+                f' with aligner={self.aligner.__class__.__name__}'
             )

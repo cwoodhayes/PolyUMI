@@ -12,10 +12,11 @@ import pathlib
 import sys
 
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 import numpy as np
 import zarr
 from matplotlib.axes import Axes
-from polyumi_ingest.preproc.audio_align import GCCPHATAligner
+from polyumi_ingest.preproc.audio_align import GCCPHATAligner, PowerEnvAligner
 from polyumi_ingest.preproc.time_sync import TimeSyncStep
 from polyumi_ingest.pzarr.scene_files import SceneFiles
 from rich.logging import RichHandler
@@ -59,9 +60,13 @@ def _plot_episode(ep: zarr.Group, episode_key: str, axes: list[Axes]) -> None:
         ax.axvline(0, color='red', linewidth=1.2, label=bar_label if i == 0 else None)
         ax.set_ylabel(ylabel, fontsize=8)
         ax.yaxis.set_label_position('right')
-        ax.tick_params(axis='x', labelsize=7)
+        ax.tick_params(axis='x', labelsize=7, labelbottom=True)
         ax.tick_params(axis='y', labelsize=6)
         ax.set_title(ylabel)
+        ax.xaxis.set_major_locator(ticker.MultipleLocator(1.0))
+        ax.xaxis.set_minor_locator(ticker.MultipleLocator(0.2))
+        ax.grid(True, axis='x', which='minor', linewidth=0.4, alpha=0.6)
+        ax.grid(True, axis='x', which='major', linewidth=0.8, alpha=0.8)
 
     axes[0].legend(fontsize=7, loc='upper right')
     axes[0].set_title(episode_key, loc='left', fontsize=8, pad=2)
@@ -87,8 +92,9 @@ def main() -> None:
         print(f'error: no scene.zarr found at {args.scene}', file=sys.stderr)
         sys.exit(1)
 
-    # step = TimeSyncStep(aligner=GCCPHATAligner(alpha=0.0))
+    # step = TimeSyncStep(aligner=GCCPHATAligner(alpha=0.0), max_lag_s=2.0, trim_start_s=0.8)
     step = TimeSyncStep()
+    # step = TimeSyncStep(aligner=PowerEnvAligner(power=1.2), trim_start_s=0.7, max_lag_s=1.5)
     scene_zarr = step.run(args.scene, copy=True, force=True)
     root = zarr.open_group(str(scene_zarr), mode='r')
     episodes = sorted(k for k in root.keys() if k.startswith('episode_'))
