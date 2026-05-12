@@ -303,6 +303,11 @@ def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) 
     # --- Annotations ---
     ann_grp.create_array('episode_start', data=np.array(finger_ts[0], dtype='float64'))
     ann_grp.create_array('episode_end', data=np.array(finger_ts[-1], dtype='float64'))
+    if meta.sync_chirp_play_time_ns is not None:
+        ann_grp.create_array(
+            'sync_chirp_play_time_s',
+            data=np.array(meta.sync_chirp_play_time_ns / 1e9, dtype='float64'),
+        )
 
 
 def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.Path:
