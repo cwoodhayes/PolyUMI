@@ -37,9 +37,10 @@ def test_time_sync_step_writes_offset_and_copy(tmp_path: pathlib.Path) -> None:
     copied_root = zarr.open_group(str(output), mode='r')
     assert copied_root.attrs['preprocessing_steps'] == [99]
 
-    offset = float(copied_root['episode_0/annotations/time_sync/gopro_to_finger_offset_s'][()])
-    residual = float(copied_root['episode_0/annotations/time_sync/residual_offset_s'][()])
-    lag_samples = int(copied_root['episode_0/annotations/time_sync/lag_samples'][()])
+    ts_attrs = copied_root['episode_0/annotations/time_sync'].attrs  # type: ignore[index]
+    offset = float(ts_attrs['gopro_to_finger_offset_s'])  # type: ignore[arg-type]
+    residual = float(ts_attrs['residual_offset_s'])  # type: ignore[arg-type]
+    lag_samples = int(ts_attrs['lag_samples'])  # type: ignore[arg-type]
 
     assert abs(offset - offset_s) < 0.02
     assert abs(residual) < 0.02
@@ -83,12 +84,10 @@ def test_chirp_time_sync_step(tmp_path: pathlib.Path) -> None:
     ts_grp = ep.create_group('timestamps')
     ts_grp.create_array('finger_air', data=finger_ts)
     ts_grp.create_array('gopro_audio', data=gopro_ts)
-    ep.create_group('annotations').create_array(
-        'sync_chirp_play_time_s', data=np.array(chirp_play_time_s)
-    )
+    ep.create_group('annotations').attrs['sync_chirp_play_time_s'] = chirp_play_time_s
 
     ChirpTimeSyncStep().run(scene_zarr)
 
     root = zarr.open_group(str(scene_zarr), mode='r')
-    offset = float(root['episode_0/annotations/time_sync/gopro_to_finger_offset_s'][()].item())
+    offset = float(root['episode_0/annotations/time_sync'].attrs['gopro_to_finger_offset_s'])  # type: ignore[arg-type]
     assert abs(offset - true_offset_s) < 1.0 / sr  # sub-sample accuracy

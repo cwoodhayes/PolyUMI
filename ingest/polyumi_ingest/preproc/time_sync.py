@@ -185,10 +185,8 @@ class ChirpTimeSyncStep(PreprocessingStep):
             gopro_sr = int(round(_infer_sample_rate(gopro_ts)))
 
             chirp_play_time_s: float | None = None
-            if 'annotations/sync_chirp_play_time_s' in ep:
-                chirp_play_time_s = float(
-                    _arr(ep, 'annotations/sync_chirp_play_time_s')[()].item()  # type: ignore
-                )
+            if 'annotations' in ep and 'sync_chirp_play_time_s' in ep['annotations'].attrs:
+                chirp_play_time_s = float(ep['annotations'].attrs['sync_chirp_play_time_s'])  # type: ignore[arg-type]
 
             ref_finger = sync_chirp.generate(finger_sr)
             ref_gopro = sync_chirp.generate(gopro_sr)

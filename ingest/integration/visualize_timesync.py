@@ -40,15 +40,15 @@ def _plot_episode(ep: zarr.Group, episode_key: str, axes: list[Axes]) -> None:
     air = _load(ep, 'finger/finger_air')
     gopro = _mono(_load(ep, 'gopro/audio'))
 
-    total_offset = float(_load(ep, 'annotations/time_sync/gopro_to_finger_offset_s'))
+    ann = ep['annotations/time_sync'].attrs  # type: ignore[index]
+    total_offset = float(ann['gopro_to_finger_offset_s'])  # type: ignore[arg-type]
 
-    ann = ep['annotations/time_sync']  # type: ignore[index]
     if 'finger_chirp_peak' in ann:
-        finger_peak = float(_load(ep, 'annotations/time_sync/finger_chirp_peak'))
-        gopro_peak = float(_load(ep, 'annotations/time_sync/gopro_chirp_peak'))
+        finger_peak = float(ann['finger_chirp_peak'])  # type: ignore[arg-type]
+        gopro_peak = float(ann['gopro_chirp_peak'])  # type: ignore[arg-type]
         peak_label = f'finger_peak={finger_peak:.3f}  gopro_peak={gopro_peak:.3f}'
     else:
-        peak = float(_load(ep, 'annotations/time_sync/peak'))
+        peak = float(ann['peak'])  # type: ignore[arg-type]
         peak_label = f'peak={peak:.3f}'
 
     # Shift each stream so that the alignment point (GoPro t0) lands at t=0 on a shared axis.
@@ -60,9 +60,9 @@ def _plot_episode(ep: zarr.Group, episode_key: str, axes: list[Axes]) -> None:
     finger_chirp_x: float | None = None
     gopro_chirp_x: float | None = None
     if 'finger_chirp_onset_s' in ann:
-        finger_chirp_x = float(_load(ep, 'annotations/time_sync/finger_chirp_onset_s')) - finger_align_t
+        finger_chirp_x = float(ann['finger_chirp_onset_s']) - finger_align_t  # type: ignore[arg-type]
     if 'gopro_chirp_onset_s' in ann:
-        gopro_chirp_x = float(_load(ep, 'annotations/time_sync/gopro_chirp_onset_s')) - gopro_t0
+        gopro_chirp_x = float(ann['gopro_chirp_onset_s']) - gopro_t0  # type: ignore[arg-type]
 
     bar_label = f'alignment point  (offset={total_offset:+.4f}s, {peak_label})'
 
