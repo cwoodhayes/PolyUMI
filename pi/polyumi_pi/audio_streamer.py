@@ -12,6 +12,7 @@ import sounddevice as sd
 import zmq
 from polyumi_pi_msgs.audio_chunk_pb2 import AudioChunk
 
+from polyumi_pi import sync_chirp
 from polyumi_pi.files.audio import AudioFile
 from polyumi_pi.files.session import SessionFiles
 
@@ -32,6 +33,7 @@ class AudioStreamer:
         channels: int = 2,
         session: SessionFiles | None = None,
         stats_conn: Connection | None = None,
+        play_sync_chirp: bool = False,
     ):
         """
         Initialize the audio streamer.
@@ -44,6 +46,8 @@ class AudioStreamer:
             channels: Number of audio input channels to capture.
             session: Optional session object used for WAV recording metadata.
             stats_conn: Optional child->parent IPC connection for final stats.
+            play_sync_chirp: If True, play a sync chirp through the speaker
+                immediately after the capture stream opens.
 
         """
         self.port = port
@@ -53,6 +57,7 @@ class AudioStreamer:
         self.chunk_ms = chunk_ms
         self.session = session
         self.stats_conn = stats_conn
+        self.play_sync_chirp = play_sync_chirp
 
     @staticmethod
     def find_device_index(name: str) -> int:
@@ -115,6 +120,7 @@ class AudioStreamer:
         sent_chunks = 0
         n_audio_chunks = 0
         audio_start_time_ns = None
+        sync_chirp_play_time_ns = None
         last_stats = time.monotonic()
         stop_event = threading.Event()
 
@@ -218,6 +224,11 @@ class AudioStreamer:
                 blocksize=blocksize,
                 callback=callback,
             ):
+                if self.play_sync_chirp:
+                    log.info('Playing sync chirp...')
+                    sync_chirp_play_time_ns = sync_chirp.play(
+                        self.sample_rate, device=self.DEVICE_NAME
+                    )
                 log.info('Streaming... Ctrl+C to stop.')
                 try:
                     while not stop_event.is_set():
@@ -241,6 +252,7 @@ class AudioStreamer:
                         'n_audio_chunks': n_audio_chunks,
                         'audio_start_time_ns': audio_start_time_ns,
                         'audio_dropped_chunks': total_callback_drops,
+                        'sync_chirp_play_time_ns': sync_chirp_play_time_ns,
                     }
                 )
             finally:

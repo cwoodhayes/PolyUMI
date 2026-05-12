@@ -132,7 +132,7 @@ async def _record_session_async(
         audio_parent_conn, audio_child_conn = multiprocessing.Pipe(duplex=False)
         audio_process = multiprocessing.Process(
             target=_run_audio_streamer,
-            args=(None, sample_rate, chunk_ms, channels, session, audio_child_conn),
+            args=(None, sample_rate, chunk_ms, channels, session, audio_child_conn, True),
         )
         audio_process.start()
         audio_child_conn.close()
@@ -176,6 +176,8 @@ async def _record_session_async(
             session.metadata.audio_dropped_chunks = int(audio_stats['audio_dropped_chunks'])
         if 'audio_start_time_ns' in audio_stats:
             session.metadata.audio_start_time_ns = audio_stats['audio_start_time_ns']
+        if 'sync_chirp_play_time_ns' in audio_stats:
+            session.metadata.sync_chirp_play_time_ns = audio_stats['sync_chirp_play_time_ns']
 
         led.set_brightness(0.0)
 
@@ -205,6 +207,7 @@ def _run_audio_streamer(
     channels: int,
     session: SessionFiles | None = None,
     stats_conn: Connection | None = None,
+    play_sync_chirp: bool = False,
 ):
     context = zmq.Context()
     streamer = AudioStreamer(
@@ -215,6 +218,7 @@ def _run_audio_streamer(
         channels=channels,
         session=session,
         stats_conn=stats_conn,
+        play_sync_chirp=play_sync_chirp,
     )
     try:
         streamer.start()
@@ -535,7 +539,8 @@ def start_scene(
     scene = SceneFiles.create()
     log.info(f'Created scene at {scene.path}')
 
-    CHANNELS = 2 # L: contact mic, R: air mic (built into the audio HAT)
+    # L: contact mic, R: air mic (built into the audio HAT)
+    CHANNELS = 2
 
     async def _run() -> None:
         # need to handle SIGTERM for `systemctl stop` to work correctly.
