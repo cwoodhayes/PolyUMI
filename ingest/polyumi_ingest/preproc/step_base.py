@@ -50,7 +50,11 @@ def _preprocessing_steps_done(root: zarr.Group) -> list[int]:
     raw = root.attrs.get('preprocessing_steps', [])
     if not isinstance(raw, list):
         return []
-    return [int(step) for step in raw if isinstance(step, (int, float, str))]
+    try:
+        return [int(step) for step in raw if isinstance(step, (int, float, str))]
+    except (ValueError, TypeError):
+        log.warning(f'Invalid preprocessing_steps attribute: {raw}')
+        return []
 
 
 def _mark_preprocessing_step(root: zarr.Group, step_number: int) -> None:
@@ -94,6 +98,8 @@ class PreprocessingStep(ABC):
             shutil.copytree(scene_zarr, target_zarr)
 
         self.run_step(target_zarr)
+        root = zarr.open_group(str(target_zarr), mode='a')
+        _mark_preprocessing_step(root, self.step_number)
         return target_zarr
 
 

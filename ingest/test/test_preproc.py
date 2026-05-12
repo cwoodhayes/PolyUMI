@@ -1,3 +1,5 @@
+"""Tests for preprocessing steps."""
+
 import pathlib
 
 import numpy as np
@@ -11,6 +13,7 @@ def _sine_wave(freq_hz: float, sample_rate: int, duration_s: float, phase: float
 
 
 def test_time_sync_step_writes_offset_and_copy(tmp_path: pathlib.Path) -> None:
+    """Verify TimeSyncStep writes the offset annotation and marks the step complete on copy."""
     scene_zarr = tmp_path / 'scene.zarr'
     root = zarr.open_group(str(scene_zarr), mode='w', zarr_format=2)
     ep = root.create_group('episode_0')
@@ -33,7 +36,7 @@ def test_time_sync_step_writes_offset_and_copy(tmp_path: pathlib.Path) -> None:
     copied_root = zarr.open_group(str(output), mode='r')
     assert copied_root.attrs['preprocessing_steps'] == [1]
 
-    offset = float(copied_root['episode_0/annotations/time_sync/gopro_audio_to_finger_air_offset_s'][()])
+    offset = float(copied_root['episode_0/annotations/time_sync/gopro_to_finger_offset_s'][()])
     residual = float(copied_root['episode_0/annotations/time_sync/residual_offset_s'][()])
     lag_samples = int(copied_root['episode_0/annotations/time_sync/lag_samples'][()])
 

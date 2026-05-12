@@ -120,7 +120,7 @@ class TimeSyncStep(PreprocessingStep):
             total_offset_s = nominal_offset_s + residual_offset_s
 
             step_group = ep.require_group('annotations').require_group('time_sync')
-            _write_scalar(step_group, 'gopro_audio_to_finger_air_offset_s', total_offset_s)
+            _write_scalar(step_group, 'gopro_to_finger_offset_s', total_offset_s)
             _write_scalar(step_group, 'nominal_start_offset_s', nominal_offset_s)
             _write_scalar(step_group, 'residual_offset_s', residual_offset_s)
             _write_scalar(step_group, 'lag_samples', lag_samples)

@@ -478,7 +478,7 @@ def preprocessing_pipeline(
                 log.info(f'Done. Processed {len(outputs)} scene(s).')
             else:
                 log.info('No scenes processed.')
-    except (FileNotFoundError, FileExistsError) as e:
+    except (FileNotFoundError, FileExistsError, KeyError) as e:
         log.error(str(e))
         raise typer.Exit(1)
 
