@@ -5,6 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 import numpy as np
+from scipy.signal import fftconvolve
 
 
 class AudioAligner(ABC):
@@ -179,3 +180,63 @@ class PowerEnvAligner(AudioAligner):
 
         best_index = int(np.argmax(cc))
         return int(shifts[best_index]), float(cc[best_index]) / n_sig
+
+
+class ChirpAligner(AudioAligner):
+    """
+    Matched-filter aligner for a known reference chirp.
+
+    Unlike the cross-correlation aligners, this class operates on a short
+    reference template (the chirp) rather than two equal-length recordings.
+    It locates the chirp's onset in ``sig`` via a matched filter and returns
+    that onset index as the lag.
+
+    ``refsig`` passed to ``estimate_lag`` must be the reference chirp at the
+    same sample rate as ``sig``. Use ``polyumi_pi.sync_chirp.generate(sr)``
+    to produce the reference at any sample rate.
+
+    ``max_lag_samples`` is reinterpreted as a search window: ``(lo, hi)``
+    restricts the search to indices ``[lo, hi)`` within ``sig``. An ``int``
+    ``n`` restricts to ``[0, n)``. If None, the entire signal is searched.
+    """
+
+    def estimate_lag(
+        self,
+        sig: np.ndarray,
+        refsig: np.ndarray,
+        max_lag_samples: int | tuple[int, int] | None = None,
+    ) -> tuple[int, float]:
+        """
+        Find the onset sample of the chirp in sig via matched filter.
+
+        Returns
+        -------
+        (onset_sample, peak)
+            onset_sample: index in ``sig`` where the chirp onset is detected.
+            peak: matched-filter output normalised by the reference norm
+                  (larger = more confident detection).
+
+        """
+        sig = np.asarray(sig, dtype=np.float64)
+        refsig = np.asarray(refsig, dtype=np.float64)
+        ref_norm = refsig / (np.linalg.norm(refsig) or 1.0)
+
+        if max_lag_samples is not None:
+            lo, hi = (0, max_lag_samples) if isinstance(max_lag_samples, int) else max_lag_samples
+            lo = max(0, lo)
+            hi = min(len(sig), hi + len(ref_norm))
+            window = sig[lo:hi]
+            offset = lo
+        else:
+            window = sig
+            offset = 0
+
+        if len(window) < len(ref_norm):
+            raise ValueError(
+                f'Search window ({len(window)} samples) shorter than reference ({len(ref_norm)} samples)'
+            )
+
+        # cc[i] = dot(window[i : i+L], ref_norm) — peak is the onset
+        cc = fftconvolve(window, ref_norm[::-1], mode='valid')
+        peak_idx = int(np.argmax(cc))
+        return peak_idx + offset, float(cc[peak_idx])

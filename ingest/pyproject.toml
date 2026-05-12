@@ -14,6 +14,7 @@ dependencies = [
     "imagecodecs",
     "pillow",
     "mcap>=1.1",
+    "scipy",
 ]
 
 [tool.uv.sources]

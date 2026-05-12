@@ -301,8 +301,13 @@ def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) 
             _write_gopro_frames(ep_grp, gopro_path)
 
     # --- Annotations ---
-    ann_grp.create_array('episode_start', data=np.array(finger_ts[0], dtype='float64'))
-    ann_grp.create_array('episode_end', data=np.array(finger_ts[-1], dtype='float64'))
+    ann_attrs: dict[str, float] = {
+        'episode_start': float(finger_ts[0]),
+        'episode_end': float(finger_ts[-1]),
+    }
+    if meta.sync_chirp_play_time_ns is not None:
+        ann_attrs['sync_chirp_play_time_s'] = meta.sync_chirp_play_time_ns / 1e9
+    ann_grp.attrs.update(ann_attrs)
 
 
 def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.Path:
@@ -421,16 +426,9 @@ def inspect_pzarr(scene_path: pathlib.Path) -> PZarrInfo:
             gopro_ts_range = (float(ts[0]), float(ts[-1]))
             gopro_mean_delta = float(np.diff(ts).mean() * 1000) if len(ts) > 1 else None
 
-        ep_start = (
-            float(_arr(ep, 'annotations/episode_start')[()])  # type: ignore[arg-type]
-            if 'annotations/episode_start' in ep
-            else None
-        )
-        ep_end = (
-            float(_arr(ep, 'annotations/episode_end')[()])  # type: ignore[arg-type]
-            if 'annotations/episode_end' in ep
-            else None
-        )
+        ann_attrs = ep['annotations'].attrs if 'annotations' in ep else {}
+        ep_start = float(ann_attrs['episode_start']) if 'episode_start' in ann_attrs else None
+        ep_end = float(ann_attrs['episode_end']) if 'episode_end' in ann_attrs else None
         episodes.append(
             EpisodeInfo(
                 index=i,

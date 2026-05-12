@@ -18,7 +18,7 @@ import numpy as np
 import zarr
 from matplotlib.axes import Axes
 from polyumi_ingest.preproc.audio_align import GCCPHATAligner, PowerEnvAligner
-from polyumi_ingest.preproc.time_sync import TimeSyncStep
+from polyumi_ingest.preproc.time_sync import ChirpTimeSyncStep, TimeSyncStep
 from polyumi_ingest.pzarr.scene_files import SceneFiles
 from rich.logging import RichHandler
 
@@ -40,25 +40,44 @@ def _plot_episode(ep: zarr.Group, episode_key: str, axes: list[Axes]) -> None:
     air = _load(ep, 'finger/finger_air')
     gopro = _mono(_load(ep, 'gopro/audio'))
 
-    total_offset = float(_load(ep, 'annotations/time_sync/gopro_to_finger_offset_s'))
-    peak = float(_load(ep, 'annotations/time_sync/peak'))
+    ann = ep['annotations/time_sync'].attrs  # type: ignore[index]
+    total_offset = float(ann['gopro_to_finger_offset_s'])  # type: ignore[arg-type]
+
+    if 'finger_chirp_peak' in ann:
+        finger_peak = float(ann['finger_chirp_peak'])  # type: ignore[arg-type]
+        gopro_peak = float(ann['gopro_chirp_peak'])  # type: ignore[arg-type]
+        peak_label = f'finger_peak={finger_peak:.3f}  gopro_peak={gopro_peak:.3f}'
+    else:
+        peak = float(ann['peak'])  # type: ignore[arg-type]
+        peak_label = f'peak={peak:.3f}'
 
     # Shift each stream so that the alignment point (GoPro t0) lands at t=0 on a shared axis.
     # total_offset ≈ gopro_ts[0] - finger_ts[0], so GoPro t0 in finger time = gopro_ts[0] - total_offset.
     gopro_t0 = float(gopro_ts[0])
     finger_align_t = gopro_t0 - total_offset
 
-    bar_label = f'alignment point  (offset={total_offset:+.4f}s, peak={peak:.3f})'
+    # Chirp onset markers in the shared time axis
+    finger_chirp_x: float | None = None
+    gopro_chirp_x: float | None = None
+    if 'finger_chirp_onset_s' in ann:
+        finger_chirp_x = float(ann['finger_chirp_onset_s']) - finger_align_t  # type: ignore[arg-type]
+    if 'gopro_chirp_onset_s' in ann:
+        gopro_chirp_x = float(ann['gopro_chirp_onset_s']) - gopro_t0  # type: ignore[arg-type]
+
+    bar_label = f'alignment point  (offset={total_offset:+.4f}s, {peak_label})'
 
     traces = [
-        (axes[0], piezo_ts - finger_align_t, piezo, 'steelblue', 'finger piezo'),
-        (axes[1], air_ts - finger_align_t, air, 'steelblue', 'finger air'),
-        (axes[2], gopro_ts - gopro_t0, gopro, 'darkorange', 'GoPro audio (mono)'),
+        (axes[0], piezo_ts - finger_align_t, piezo, 'steelblue', 'finger piezo', None),
+        (axes[1], air_ts - finger_align_t, air, 'steelblue', 'finger air', finger_chirp_x),
+        (axes[2], gopro_ts - gopro_t0, gopro, 'darkorange', 'GoPro audio (mono)', gopro_chirp_x),
     ]
-    for i, (ax, ts, data, color, ylabel) in enumerate(traces):
+    for i, (ax, ts, data, color, ylabel, chirp_x) in enumerate(traces):
         ax: Axes  # type: ignore
         ax.plot(ts, data, linewidth=0.3, color=color, rasterized=True)
         ax.axvline(0, color='red', linewidth=1.2, label=bar_label if i == 0 else None)
+        if chirp_x is not None:
+            ax.axvline(chirp_x, color='limegreen', linewidth=1.0, linestyle='--',
+                       label='chirp onset' if i == 1 else None)
         ax.set_ylabel(ylabel, fontsize=8)
         ax.yaxis.set_label_position('right')
         ax.tick_params(axis='x', labelsize=7, labelbottom=True)
@@ -70,6 +89,7 @@ def _plot_episode(ep: zarr.Group, episode_key: str, axes: list[Axes]) -> None:
         ax.grid(True, axis='x', which='major', linewidth=0.8, alpha=0.8)
 
     axes[0].legend(fontsize=7, loc='upper right')
+    axes[1].legend(fontsize=7, loc='upper right')
     axes[0].set_title(episode_key, loc='left', fontsize=8, pad=2)
     axes[2].set_xlabel('time relative to alignment point (s)', fontsize=8)
 
@@ -93,8 +113,9 @@ def main() -> None:
         sys.exit(1)
 
     # step = TimeSyncStep(aligner=GCCPHATAligner(alpha=0.0), max_lag_s=2.0, trim_start_s=0.8)
-    step = TimeSyncStep()
+    # step = TimeSyncStep()
     # step = TimeSyncStep(aligner=PowerEnvAligner(power=1.2), trim_start_s=0.7, max_lag_s=1.5)
+    step = ChirpTimeSyncStep()
     scene_zarr = step.run(args.scene, copy=True, force=True)
     root = zarr.open_group(str(scene_zarr), mode='r')
     episodes = sorted(k for k in root.keys() if k.startswith('episode_'))

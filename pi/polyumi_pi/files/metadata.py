@@ -55,6 +55,7 @@ class SessionMetadata(base.SessionDataABC):
     led_brightness: float | None = None
     gopro_sync_time: datetime | None = None
     first_frame_metadata: dict | None = None
+    sync_chirp_play_time_ns: int | None = None
     notes: str | None = None
     task: str | None = None
     robot: str | None = None
@@ -97,6 +98,7 @@ class SessionMetadata(base.SessionDataABC):
                 self.gopro_sync_time.isoformat() if self.gopro_sync_time is not None else None
             ),
             'first_frame_metadata': self.first_frame_metadata,
+            'sync_chirp_play_time_ns': self.sync_chirp_play_time_ns,
             'notes': self.notes,
             'task': self.task,
             'robot': self.robot,

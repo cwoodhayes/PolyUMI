@@ -8,7 +8,6 @@ import shutil
 from abc import ABC, abstractmethod
 from typing import TypeVar
 
-import numpy as np
 import zarr
 
 _PS = TypeVar('_PS', bound='PreprocessingStep')
@@ -66,10 +65,8 @@ def _mark_preprocessing_step(root: zarr.Group, step_number: int) -> None:
 
 
 def _write_scalar(group: zarr.Group, name: str, value: float | int) -> None:
-    """Write a scalar zarr array, replacing any existing value."""
-    if name in group:
-        del group[name]
-    group.create_array(name, data=np.array(value))
+    """Write a scalar annotation as a group attribute."""
+    group.attrs[name] = value
 
 
 class PreprocessingStep(ABC):
