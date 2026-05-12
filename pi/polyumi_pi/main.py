@@ -109,13 +109,6 @@ async def _record_session_async(
     audio_parent_conn: Connection | None = None
 
     try:
-        if gopro is not None:
-            sync_time = await gopro.set_timestamp()
-            session.set_gopro_sync_time(sync_time)
-            log.info(f'GoPro clock synced to {sync_time.isoformat()}')
-            log.info('Starting GoPro recording...')
-            await gopro.start_recording()
-
         session.metadata.led_brightness = 1.0
         led.set_brightness(1.0)
 
@@ -136,6 +129,15 @@ async def _record_session_async(
         )
         audio_process.start()
         audio_child_conn.close()
+
+        # in practice, it takes a while for the video & audio on the pi to startup.
+        # so I start the gopro afterwards.
+        if gopro is not None:
+            sync_time = await gopro.set_timestamp()
+            session.set_gopro_sync_time(sync_time)
+            log.info(f'GoPro clock synced to {sync_time.isoformat()}')
+            log.info('Starting GoPro recording...')
+            await gopro.start_recording()
 
         if hat is not None:
             hat.set_indicator(IndicatorState.RECORDING)
