@@ -40,7 +40,7 @@ def _plot_episode(ep: zarr.Group, episode_key: str, axes: list[Axes]) -> None:
     air = _load(ep, 'finger/finger_air')
     gopro = _mono(_load(ep, 'gopro/audio'))
 
-    total_offset = float(_load(ep, 'annotations/time_sync/gopro_audio_to_finger_air_offset_s'))
+    total_offset = float(_load(ep, 'annotations/time_sync/gopro_to_finger_offset_s'))
     peak = float(_load(ep, 'annotations/time_sync/peak'))
 
     # Shift each stream so that the alignment point (GoPro t0) lands at t=0 on a shared axis.

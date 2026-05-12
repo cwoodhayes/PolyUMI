@@ -308,13 +308,13 @@ def export_episode_to_mcap(
     has_accel = 'gopro/accl' in ep_grp
     has_gyro = 'gopro/gyro' in ep_grp
     has_gps = 'gopro/gps' in ep_grp
-    has_time_sync = 'annotations/time_sync/gopro_audio_to_finger_air_offset_s' in ep_grp
+    has_time_sync = 'annotations/time_sync/gopro_to_finger_offset_s' in ep_grp
 
-    # gopro_audio_to_finger_air_offset_s = gopro_time - finger_time, so subtract it
+    # gopro_to_finger_offset_s = gopro_time - finger_time, so subtract it
     # from gopro timestamps to bring them into the finger (Pi) time domain.
     gopro_ts_shift = 0.0
     if has_time_sync:
-        gopro_ts_shift = -float(ep_grp['annotations/time_sync/gopro_audio_to_finger_air_offset_s'][()])  # type: ignore[index]
+        gopro_ts_shift = -float(ep_grp['annotations/time_sync/gopro_to_finger_offset_s'][()])  # type: ignore[index]
         log.info(f'  time sync: shifting gopro timestamps by {gopro_ts_shift:+.6f}s')
 
     def _gopro_ts(key: str) -> np.ndarray:

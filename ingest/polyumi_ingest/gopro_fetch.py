@@ -47,13 +47,15 @@ def _mount_unmounted_sd_cards() -> None:
     def _unmounted_partitions(devs: list) -> list[str]:
         found = []
         for dev in devs:
+            dev_name = dev.get('name')
             if (
-                dev.get('type') == 'part'
+                dev_name
+                and dev.get('type') == 'part'
                 and dev.get('fstype') in ('vfat', 'exfat')
                 and not dev.get('mountpoint')
-                and (dev.get('rm') in (True, 1, '1') or dev['name'].startswith('mmcblk'))
+                and (dev.get('rm') in (True, 1, '1') or dev_name.startswith('mmcblk'))
             ):
-                found.append(f"/dev/{dev['name']}")
+                found.append(f'/dev/{dev_name}')
             found.extend(_unmounted_partitions(dev.get('children') or []))
         return found
 
