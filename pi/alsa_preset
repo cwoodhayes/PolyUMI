@@ -167,8 +167,8 @@ state.wm8960soundcard {
 	control.13 {
 		iface MIXER
 		name 'Speaker Playback Volume'
-		value.0 0
-		value.1 0
+		value.0 100
+		value.1 100
 		comment {
 			access 'read write'
 			type INTEGER
