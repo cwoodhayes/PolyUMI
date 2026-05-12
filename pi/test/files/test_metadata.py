@@ -29,6 +29,7 @@ def test_to_file_and_from_file_roundtrip(tmp_path):
         led_brightness=0.8,
         gopro_sync_time=sync_time,
         first_frame_metadata={'exposure_time': 5000, 'analogue_gain': 1.0},
+        sync_chirp_play_time_ns=1_234_567_890,
         notes='unit test',
         task='pick',
         robot='franka',
@@ -45,6 +46,7 @@ def test_to_file_and_from_file_roundtrip(tmp_path):
     assert loaded.led_brightness == 0.8
     assert loaded.gopro_sync_time == sync_time
     assert loaded.first_frame_metadata == {'exposure_time': 5000, 'analogue_gain': 1.0}
+    assert loaded.sync_chirp_play_time_ns == 1_234_567_890
     assert loaded.notes == 'unit test'
     assert loaded.file_version == 1
 
@@ -69,6 +71,15 @@ def test_gopro_sync_time_preserves_timezone(tmp_path):
     loaded = SessionMetadata.from_file(path)
     assert loaded.gopro_sync_time == sync_time
     assert loaded.gopro_sync_time.utcoffset() == timedelta(hours=9)
+
+
+def test_sync_chirp_play_time_ns_none_roundtrip(tmp_path):
+    """sync_chirp_play_time_ns=None survives the JSON roundtrip as None."""
+    path = tmp_path / 'metadata.json'
+    original = SessionMetadata(path=path, sync_chirp_play_time_ns=None)
+    original.to_file()
+    loaded = SessionMetadata.from_file(path)
+    assert loaded.sync_chirp_play_time_ns is None
 
 
 def test_first_frame_metadata_none_roundtrip(tmp_path):
