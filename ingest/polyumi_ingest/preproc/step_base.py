@@ -8,10 +8,10 @@ import shutil
 from abc import ABC, abstractmethod
 from typing import TypeVar
 
-_PS = TypeVar('_PS', bound='PreprocessingStep')
-
 import numpy as np
 import zarr
+
+_PS = TypeVar('_PS', bound='PreprocessingStep')
 
 from polyumi_ingest.pzarr.scene_files import SceneFiles
 

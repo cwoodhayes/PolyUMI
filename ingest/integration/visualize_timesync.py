@@ -9,6 +9,7 @@ import argparse
 import logging
 import os
 import pathlib
+import signal
 import sys
 
 import matplotlib.pyplot as plt
@@ -80,7 +81,6 @@ def main() -> None:
         format='%(message)s',
         handlers=[RichHandler(show_time=True, show_level=True, show_path=False, rich_tracebacks=True)],
     )
-    import signal
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

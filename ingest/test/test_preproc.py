@@ -20,10 +20,10 @@ def test_time_sync_step_writes_offset_and_copy(tmp_path: pathlib.Path) -> None:
     finger_audio = _sine_wave(440.0, 16_000, 1.0)
     gopro_audio = _sine_wave(440.0, 16_000, 1.0, phase=2.0 * np.pi * 440.0 * offset_s)
 
-    ep.create_group('finger').create_array('finger_air', data=finger_audio)
+    ep.create_group('finger').create_array('finger_piezo', data=finger_audio)
     ep.create_group('gopro').create_array('audio', data=gopro_audio)
     ts_grp = ep.create_group('timestamps')
-    ts_grp.create_array('finger_air', data=ts)
+    ts_grp.create_array('finger_piezo', data=ts)
     ts_grp.create_array('gopro_audio', data=ts + offset_s)
 
     step = TimeSyncStep()

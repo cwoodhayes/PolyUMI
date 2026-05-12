@@ -61,7 +61,9 @@ class TimeSyncStep(PreprocessingStep):
         max_lag_s:
             Search window passed to the aligner (±seconds).
         aligner:
-            AudioAligner instance to use. Defaults to GCCPHATAligner.
+            AudioAligner instance to use. Defaults to GCCPHATAligner(alpha=0.0)
+            (standard cross-correlation, no spectral whitening), which outperforms
+            full PHAT on piezo signals with dominant transients.
         trim_start_s:
             Seconds to discard from the start of each signal before alignment,
             to avoid the hardware turn-on transient on the piezo and air mics.
