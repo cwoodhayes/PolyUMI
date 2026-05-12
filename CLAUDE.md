@@ -22,6 +22,11 @@ pytest test/files/
 pytest test/files/test_session.py
 ```
 
+When running ingest-side pytest commands in this workspace, disable pytest plugin autoload to avoid ROS-side import side effects from system site packages:
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest ingest/test/test_preproc.py
+```
+
 ### Deploy to Pi
 ```bash
 ./deploy.sh <ssh_hostname>   # rsync pi/ + polyumi_pi_msgs to Pi, embeds git hash in _version.py

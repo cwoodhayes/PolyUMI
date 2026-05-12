@@ -16,6 +16,7 @@ from rich.prompt import Confirm
 
 from polyumi_ingest.gopro_fetch import DEFAULT_THRESHOLD_MS, find_gopro_video
 from polyumi_ingest.pi_fetch import PiFetch
+from polyumi_ingest.preproc import run_preprocessing, run_preprocessing_on_recordings
 from polyumi_ingest.pzarr import FINGER_MP4, GOPRO_MP4
 from polyumi_ingest.video_helpers import encode_session_video
 
@@ -438,6 +439,50 @@ def build_zarr(
         raise typer.Exit(1)
 
 
+@app.command(name='pp')
+def preprocessing_pipeline(
+    step: int | None = typer.Argument(
+        None,
+        min=1,
+        help='Preprocessing step number. Omit to run every registered step in order.',
+    ),
+    scene: pathlib.Path | None = typer.Option(
+        None,
+        '--scene',
+        help='Scene directory or scene.zarr path. Omit to run on every scene under recordings_dir.',
+    ),
+    recordings_dir: pathlib.Path = typer.Option(
+        DEFAULT_RECORDINGS_DIR,
+        help='Directory containing scene_* folders when --scene is omitted.',
+    ),
+    copy: bool = typer.Option(
+        False,
+        '--copy',
+        help='Write the step output to scene_pp[step].zarr instead of mutating scene.zarr.',
+    ),
+    force: bool = typer.Option(
+        False,
+        '--force',
+        '-f',
+        help='Re-run a step even if it has already been marked complete.',
+    ),
+):
+    """Run a preprocessing step, or the full preprocessing pipeline, on scene zarr stores."""
+    try:
+        if scene is not None:
+            output = run_preprocessing(scene, step_number=step, copy=copy, force=force)
+            log.info(f'Done. Output: {output}')
+        else:
+            outputs = run_preprocessing_on_recordings(recordings_dir, step_number=step, copy=copy, force=force)
+            if outputs:
+                log.info(f'Done. Processed {len(outputs)} scene(s).')
+            else:
+                log.info('No scenes processed.')
+    except (FileNotFoundError, FileExistsError, KeyError) as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+
+
 @app.command(name='archive-scene')
 def archive_scene(
     scene_path: pathlib.Path = typer.Argument(
@@ -580,6 +625,11 @@ def debug_latest(
         '-y',
         help='Non-interactive: skip prompts and keep existing artifacts as-is.',
     ),
+    run_pp: bool = typer.Option(
+        False,
+        '--pp',
+        help='Run the full preprocessing pipeline after building pzarr, before MCAP export.',
+    ),
     jpeg_quality: int = typer.Option(85, help='JPEG re-encode quality for MCAP export (1–100).'),
     audio_chunk_size: int = typer.Option(4096, min=1, help='Audio samples per RawAudio message.'),
 ):
@@ -633,6 +683,16 @@ def debug_latest(
     else:
         log.info(f'Building pzarr for {scene_name}...')
         _build_pzarr(scene_dir, skip_gopro)
+
+    # Step 2.5: optionally run full preprocessing pipeline
+    if run_pp:
+        log.info('Running preprocessing pipeline...')
+        try:
+            output = run_preprocessing(scene_dir, step_number=None, copy=False, force=True)
+            log.info(f'  -> {output}')
+        except (FileNotFoundError, FileExistsError) as e:
+            log.error(str(e))
+            raise typer.Exit(1)
 
     # Step 3: export episode 0 to MCAP
     mcap_path = scene_dir / 'episode_0.mcap'
