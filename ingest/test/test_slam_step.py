@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import csv
+import json
 import os
 import pathlib
 import unittest.mock as mock
@@ -14,8 +14,9 @@ from numcodecs import Blosc
 
 from polyumi_ingest.preproc.slam_step import (
     OrbSlam3Step,
-    _export_imu_csv,
-    _parse_trajectory_csv,
+    _export_telemetry_json,
+    _make_temp_settings_yaml,
+    _parse_and_reconcile_trajectory,
     _quat_to_se3,
 )
 
@@ -43,8 +44,7 @@ def _make_episode(
     gopro_ts = 1_000.0 + np.arange(n_frames, dtype=np.float64) / 60.0
 
     gopro_grp = ep.require_group('gopro')
-    gopro_grp.zeros('frames', shape=(n_frames, H, W, 3), dtype='uint8', chunks=(1, H, W, 3))
-    gopro_grp['frames'][:] = frames
+    gopro_grp.create_array('frames', data=frames, chunks=(1, H, W, 3))
     gopro_grp.create_array('gyro', data=rng.standard_normal((n_imu, 3)).astype(np.float32))
     gopro_grp.create_array('accl', data=rng.standard_normal((n_imu, 3)).astype(np.float32))
 
@@ -57,13 +57,29 @@ def _make_episode(
     return ep
 
 
-def _make_traj_csv(path: pathlib.Path, n: int, n_lost: int = 0) -> None:
-    with open(path, 'w', newline='') as fh:
-        writer = csv.writer(fh)
-        writer.writerow(['timestamp', 'tx', 'ty', 'tz', 'qx', 'qy', 'qz', 'qw', 'is_lost'])
-        for i in range(n):
-            lost = 1 if i < n_lost else 0
-            writer.writerow([f'{1000.0 + i / 60.0:.9f}', 0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0, lost])
+def _make_euroc_trajectory(
+    path: pathlib.Path,
+    frame_ts: np.ndarray,
+    tracked_mask: np.ndarray,
+) -> None:
+    """
+    Write a fake EuRoC-format trajectory output for frames where ``tracked_mask`` is True.
+
+    Each row is whitespace-separated::
+
+        timestamp_ns tx ty tz qx qy qz qw
+
+    Timestamps are nanoseconds of *video time* (relative to frame_ts[0]),
+    matching what ORB-SLAM3's SaveTrajectoryEuRoC writes for the gopro
+    binary's tframe values.
+    """
+    t_ref = float(frame_ts[0])
+    with open(path, 'w') as fh:
+        for i, ts in enumerate(frame_ts):
+            if not tracked_mask[i]:
+                continue
+            t_ns = (float(ts) - t_ref) * 1e9
+            fh.write(f'{t_ns:.6f} 0.1 0.2 0.3 0.0 0.0 0.0 1.0\n')
 
 
 def _calibrated_settings(tmp_path: pathlib.Path) -> pathlib.Path:
@@ -103,7 +119,7 @@ def test_mapping_episode_skipped_during_localization(tmp_path: pathlib.Path) -> 
 
     def _fake_localize(ep_grp, episode_index, atlas_path, log_dir):
         called_localize.append(ep_grp.name)
-        n_frames = len(ep_grp['timestamps/gopro'])
+        n_frames = ep_grp['timestamps/gopro'].shape[0]
         poses = np.tile(np.eye(4, dtype=np.float32), (n_frames, 1, 1))
         is_lost = np.zeros(n_frames, dtype=bool)
         from polyumi_ingest.preproc.slam_step import _write_slam_results
@@ -134,9 +150,12 @@ def test_zarr_output_schema(tmp_path: pathlib.Path) -> None:
         atlas_path.touch()
 
     def _fake_localize(ep_grp, episode_index, atlas_path, log_dir):
-        traj_csv = tmp_path / f'traj_{episode_index}.csv'
-        _make_traj_csv(traj_csv, n=n_frames, n_lost=2)
-        _, poses, is_lost = _parse_trajectory_csv(traj_csv)
+        traj_path = tmp_path / f'traj_{episode_index}.txt'
+        frame_ts = np.asarray(ep_grp['timestamps/gopro'][:], dtype=np.float64)
+        tracked = np.ones(n_frames, dtype=bool)
+        tracked[:2] = False  # first two frames lost
+        _make_euroc_trajectory(traj_path, frame_ts, tracked)
+        poses, is_lost = _parse_and_reconcile_trajectory(traj_path, frame_ts)
         from polyumi_ingest.preproc.slam_step import _write_slam_results
         _write_slam_results(ep_grp, poses, is_lost, settings, atlas_path)
 
@@ -181,28 +200,61 @@ def test_placeholder_detection_raises(tmp_path: pathlib.Path) -> None:
         step.run_step(tmp_path / 'scene.zarr')
 
 
-def test_imu_csv_axis_reorder(tmp_path: pathlib.Path) -> None:
-    """GoPro (z,x,y) IMU axes are reordered to (x,y,z) in the exported CSV."""
+def test_telemetry_json_preserves_raw_gopro_axis_order(tmp_path: pathlib.Path) -> None:
+    """
+    The exported telemetry JSON must preserve raw GoPro [z,x,y] axis order.
+
+    The mono_inertial_gopro_vi binary reorders axes itself via
+    ``value[1], value[2], value[0]`` → body [x,y,z]; if we reorder on the
+    Python side too we'd double-rotate the IMU.
+    """
     n = 10
     gyro = np.zeros((n, 3), dtype=np.float64)
-    gyro[:, 0] = 1.0  # z-axis
-    gyro[:, 1] = 2.0  # x-axis
-    gyro[:, 2] = 3.0  # y-axis
-    gyro_ts = np.arange(n, dtype=np.float64) / 200.0
-    accl = np.zeros_like(gyro)
+    gyro[:, 0] = 1.0  # GoPro z-axis
+    gyro[:, 1] = 2.0  # GoPro x-axis
+    gyro[:, 2] = 3.0  # GoPro y-axis
+    gyro_ts = 1000.0 + np.arange(n, dtype=np.float64) / 200.0
+    accl = gyro.copy()
     accl_ts = gyro_ts.copy()
 
-    csv_path = tmp_path / 'imu.csv'
-    _export_imu_csv(gyro, gyro_ts, accl, accl_ts, csv_path)
+    json_path = tmp_path / 'telemetry.json'
+    _export_telemetry_json(gyro, gyro_ts, accl, accl_ts, t_ref=1000.0, json_path=json_path)
 
-    with open(csv_path) as fh:
-        reader = csv.DictReader(fh)
-        row = next(reader)
+    with open(json_path) as fh:
+        blob = json.load(fh)
 
-    # expected: gx=2.0 (orig col 1), gy=3.0 (orig col 2), gz=1.0 (orig col 0)
-    assert abs(float(row['gx']) - 2.0) < 1e-6
-    assert abs(float(row['gy']) - 3.0) < 1e-6
-    assert abs(float(row['gz']) - 1.0) < 1e-6
+    gyro_samples = blob['1']['streams']['GYRO']['samples']
+    assert len(gyro_samples) == n
+
+    # First sample should carry raw [z=1.0, x=2.0, y=3.0]
+    val0 = gyro_samples[0]['value']
+    assert abs(val0[0] - 1.0) < 1e-6
+    assert abs(val0[1] - 2.0) < 1e-6
+    assert abs(val0[2] - 3.0) < 1e-6
+
+    # cts is ms relative to t_ref → first sample at 0
+    assert abs(float(gyro_samples[0]['cts']) - 0.0) < 1e-6
+    # 200 Hz sampling → 5 ms between samples
+    assert abs(float(gyro_samples[1]['cts']) - 5.0) < 1e-6
+
+
+def test_make_temp_settings_yaml_injects_atlas_paths(tmp_path: pathlib.Path) -> None:
+    """The temp YAML must contain the requested atlas key without losing the source content."""
+    src = tmp_path / 'src.yaml'
+    src.write_text('%YAML:1.0\nCamera.fx: 200.0\n')
+
+    save_dst = _make_temp_settings_yaml(src, tmp_path, save_atlas=tmp_path / 'a.osa')
+    content = save_dst.read_text()
+    assert 'Camera.fx: 200.0' in content
+    assert f'System.SaveAtlasToFile: "{tmp_path / "a.osa"}"' in content
+    assert 'System.LoadAtlasFromFile' not in content
+
+    load_dir = tmp_path / 'subdir'
+    load_dir.mkdir()
+    load_dst = _make_temp_settings_yaml(src, load_dir, load_atlas=tmp_path / 'a.osa')
+    content = load_dst.read_text()
+    assert f'System.LoadAtlasFromFile: "{tmp_path / "a.osa"}"' in content
+    assert 'System.SaveAtlasToFile' not in content
 
 
 def test_quat_to_se3_identity() -> None:
@@ -211,19 +263,28 @@ def test_quat_to_se3_identity() -> None:
     np.testing.assert_array_almost_equal(mat, np.eye(4))
 
 
-def test_parse_trajectory_csv_roundtrip(tmp_path: pathlib.Path) -> None:
-    """Trajectory CSV parse: lost frames get identity, tracked frames get real SE3."""
-    traj_csv = tmp_path / 'traj.csv'
-    _make_traj_csv(traj_csv, n=4, n_lost=1)
-    ts, poses, is_lost = _parse_trajectory_csv(traj_csv)
+def test_parse_and_reconcile_trajectory_aligns_and_marks_lost(tmp_path: pathlib.Path) -> None:
+    """
+    Trajectory entries should land in their corresponding frame slot.
 
-    assert len(ts) == 4
-    assert is_lost[0]
-    assert not is_lost[1]
-    assert np.all(np.isnan(poses[0]))  # lost → all-NaN
-    # tracked: quaternion (0,0,0,1) → identity rotation, translation (0.1,0.2,0.3)
-    np.testing.assert_array_almost_equal(poses[1, :3, :3], np.eye(3), decimal=5)
-    np.testing.assert_array_almost_equal(poses[1, :3, 3], [0.1, 0.2, 0.3], decimal=5)
+    Missing frames must end up with is_lost=True and an all-NaN pose.
+    """
+    n = 6
+    frame_ts = 1000.0 + np.arange(n, dtype=np.float64) / 60.0
+    tracked = np.array([False, False, True, True, True, True])
+    traj_path = tmp_path / 'traj.txt'
+    _make_euroc_trajectory(traj_path, frame_ts, tracked)
+
+    poses, is_lost = _parse_and_reconcile_trajectory(traj_path, frame_ts)
+
+    np.testing.assert_array_equal(is_lost, ~tracked)
+    # Lost rows: all NaN
+    for i in range(2):
+        assert np.all(np.isnan(poses[i]))
+    # Tracked rows: identity rotation, translation (0.1, 0.2, 0.3)
+    for i in range(2, n):
+        np.testing.assert_array_almost_equal(poses[i, :3, :3], np.eye(3), decimal=5)
+        np.testing.assert_array_almost_equal(poses[i, :3, 3], [0.1, 0.2, 0.3], decimal=5)
 
 
 # ---------------------------------------------------------------------------

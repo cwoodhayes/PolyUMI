@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import csv
+import json
 import logging
-import os
 import pathlib
 import shutil
 import subprocess
 import tempfile
-from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 import cv2
@@ -35,6 +33,11 @@ _PLACEHOLDER_MARKER = 'CALIBRATE_ME'
 
 _DEFAULT_SETTINGS_YAML = pathlib.Path(__file__).parent.parent.parent / 'config' / 'gopro_hero12_slam.yaml'
 
+# Maximum acceptable distance (as a fraction of a frame period) between a
+# trajectory entry's timestamp and the nearest frame timestamp when
+# reconciling the C++ output back onto our frame index.
+_TRAJ_TOLERANCE_FRAC = 0.5
+
 
 def _arr(grp: zarr.Group, path: str) -> zarr.Array:
     return grp[path]  # type: ignore[return-value]
@@ -48,129 +51,223 @@ def _quat_to_se3(tx: float, ty: float, tz: float, qx: float, qy: float, qz: floa
     return mat
 
 
-def _export_frames(
+def _export_video_mp4(
     frames_arr: zarr.Array,
-    ts: np.ndarray,
-    frames_dir: pathlib.Path,
+    video_path: pathlib.Path,
+    fps: float,
 ) -> None:
     """
-    Decode JpegXL frames from zarr and write individual JPEGs to frames_dir.
+    Encode all frames in ``frames_arr`` to an mp4 at the given constant fps.
 
-    Files are named by UTC timestamp in seconds: ``{ts:.6f}.jpg``.
-    Parallel decode+write via ThreadPoolExecutor mirrors write_frames_to_zarr.
+    Frames in the zarr are stored as JpegXL-decoded RGB uint8; cv2.VideoWriter
+    expects BGR. Encoding via the ``mp4v`` fourcc on Linux opencv builds is
+    lossy but feature-preserving for SLAM at typical GoPro resolutions.
     """
-    n_workers = min(os.cpu_count() or 1, len(ts))
+    n = len(frames_arr)
+    if n == 0:
+        raise RuntimeError('No frames to export')
+    first = frames_arr[0]
+    h, w = first.shape[:2]
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    writer = cv2.VideoWriter(str(video_path), fourcc, fps, (w, h))
+    if not writer.isOpened():
+        raise RuntimeError(f'Failed to open cv2.VideoWriter for {video_path}')
+    try:
+        for i in range(n):
+            rgb = frames_arr[i]
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            writer.write(bgr)
+    finally:
+        writer.release()
 
-    def _write(i: int) -> None:
-        frame = frames_arr[i]  # (H, W, 3) uint8 RGB, JpegXL decompressed by zarr
-        frame_path = frames_dir / f'{float(ts[i]):.6f}.jpg'
-        bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        cv2.imwrite(str(frame_path), bgr)
 
-    with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        futures = [pool.submit(_write, i) for i in range(len(ts))]
-    for fut in futures:
-        fut.result()
-
-
-def _export_imu_csv(
+def _export_telemetry_json(
     gyro: np.ndarray,
     gyro_ts: np.ndarray,
     accl: np.ndarray,
     accl_ts: np.ndarray,
-    csv_path: pathlib.Path,
+    t_ref: float,
+    json_path: pathlib.Path,
 ) -> None:
     """
-    Write IMU data to a CSV with columns: timestamp,gx,gy,gz,ax,ay,az.
+    Write a GoPro GPMF-style telemetry JSON.
 
-    GoPro stores IMU in (z,x,y) axis order; this reorders to (x,y,z) to match
-    what the ORB-SLAM3 binary and Tbc calibration expect (same reorder as
-    mono_inertial_gopro_vi.cc: value[1],value[2],value[0]).
+    The mono_inertial_gopro_vi binary expects::
 
-    Accelerometer samples are interpolated onto the gyroscope timestamps since
-    the two sensors may run at slightly different rates.
+        {"1": {"streams": {"ACCL": {"samples": [{"value":[z,x,y],"cts":ms}, ...]},
+                            "GYRO": {"samples": [...]}}}}
+
+    Axis order is preserved as raw GoPro [z,x,y]; the C++ binary reorders to
+    body [x,y,z] via ``value[1], value[2], value[0]``. Timestamps (``cts``)
+    are ms relative to ``t_ref`` (the first video frame's UTC time), so the
+    IMU and video share a common time origin.
+
+    Accelerometer samples are linearly interpolated onto the gyro timestamps
+    because the upstream binary iterates ACCL and GYRO independently and
+    assumes a 1:1 mapping between the two streams.
     """
-    # reorder axes: GoPro [z,x,y] → body [x,y,z]
-    gyro_xyz = gyro[:, [1, 2, 0]]
-    accl_xyz_full = accl[:, [1, 2, 0]]
-
-    # interpolate accelerometer onto gyro timestamps
     accl_interp = np.column_stack([
-        np.interp(gyro_ts, accl_ts, accl_xyz_full[:, j]) for j in range(3)
+        np.interp(gyro_ts, accl_ts, accl[:, j]) for j in range(3)
     ])
 
-    with open(csv_path, 'w', newline='') as fh:
-        writer = csv.writer(fh)
-        writer.writerow(['timestamp', 'gx', 'gy', 'gz', 'ax', 'ay', 'az'])
-        for i in range(len(gyro_ts)):
-            writer.writerow([
-                f'{gyro_ts[i]:.9f}',
-                *[f'{v:.9f}' for v in gyro_xyz[i]],
-                *[f'{v:.9f}' for v in accl_interp[i]],
-            ])
+    cts_ms = (gyro_ts - t_ref) * 1000.0
+
+    accl_samples = [
+        {
+            'value': [float(accl_interp[i, 0]), float(accl_interp[i, 1]), float(accl_interp[i, 2])],
+            'cts': float(cts_ms[i]),
+        }
+        for i in range(len(gyro_ts))
+    ]
+    gyro_samples = [
+        {
+            'value': [float(gyro[i, 0]), float(gyro[i, 1]), float(gyro[i, 2])],
+            'cts': float(cts_ms[i]),
+        }
+        for i in range(len(gyro_ts))
+    ]
+
+    blob = {
+        '1': {
+            'streams': {
+                'ACCL': {'samples': accl_samples},
+                'GYRO': {'samples': gyro_samples},
+            }
+        }
+    }
+    with open(json_path, 'w') as fh:
+        json.dump(blob, fh)
 
 
-def _export_episode(ep_grp: zarr.Group, tmp_dir: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+def _export_episode(
+    ep_grp: zarr.Group,
+    tmp_dir: pathlib.Path,
+) -> tuple[pathlib.Path, pathlib.Path, np.ndarray]:
     """
-    Export frames and IMU from an episode group to tmp_dir.
+    Export an episode's frames + IMU to mp4 + telemetry JSON in ``tmp_dir``.
 
-    Returns (frames_dir, imu_csv_path).
+    Returns (video_path, json_path, frame_ts) where ``frame_ts`` is the
+    per-frame UTC timestamp array (needed downstream to reconcile the
+    C++ trajectory output back onto the original frame indices).
     """
-    frames_dir = tmp_dir / 'frames'
-    frames_dir.mkdir()
-
     gopro_ts = np.asarray(_arr(ep_grp, 'timestamps/gopro')[:], dtype=np.float64)
-    frames_arr = _arr(ep_grp, 'gopro/frames')
-    _export_frames(frames_arr, gopro_ts, frames_dir)
-    log.info(f'  Exported {len(gopro_ts)} frames to {frames_dir}')
+    if len(gopro_ts) < 2:
+        raise RuntimeError(f'Episode has fewer than 2 frames ({len(gopro_ts)})')
+    fps = 1.0 / float(np.median(np.diff(gopro_ts)))
+    log.info(f'  Episode fps (median from frame timestamps): {fps:.3f}')
+
+    video_path = tmp_dir / 'video.mp4'
+    _export_video_mp4(_arr(ep_grp, 'gopro/frames'), video_path, fps)
+    log.info(f'  Exported {len(gopro_ts)} frames to {video_path}')
 
     gyro = np.asarray(_arr(ep_grp, 'gopro/gyro')[:], dtype=np.float64)
     gyro_ts = np.asarray(_arr(ep_grp, 'timestamps/gopro_gyro')[:], dtype=np.float64)
     accl = np.asarray(_arr(ep_grp, 'gopro/accl')[:], dtype=np.float64)
     accl_ts = np.asarray(_arr(ep_grp, 'timestamps/gopro_accl')[:], dtype=np.float64)
 
-    imu_csv = tmp_dir / 'imu.csv'
-    _export_imu_csv(gyro, gyro_ts, accl, accl_ts, imu_csv)
-    log.info(f'  Exported {len(gyro_ts)} IMU samples to {imu_csv}')
+    json_path = tmp_dir / 'telemetry.json'
+    _export_telemetry_json(gyro, gyro_ts, accl, accl_ts, float(gopro_ts[0]), json_path)
+    log.info(f'  Exported {len(gyro_ts)} IMU samples to {json_path}')
 
-    return frames_dir, imu_csv
+    return video_path, json_path, gopro_ts
 
 
-def _parse_trajectory_csv(csv_path: pathlib.Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _make_temp_settings_yaml(
+    src: pathlib.Path,
+    tmp_dir: pathlib.Path,
+    save_atlas: pathlib.Path | None = None,
+    load_atlas: pathlib.Path | None = None,
+) -> pathlib.Path:
     """
-    Parse an ORB-SLAM3 trajectory CSV.
+    Copy ``src`` settings YAML to ``tmp_dir`` with atlas paths appended.
 
-    Expected columns: timestamp,tx,ty,tz,qx,qy,qz,qw,is_lost
-
-    Returns (timestamps, poses, is_lost) where:
-      - timestamps: (N,) float64
-      - poses: (N,4,4) float32 SE3 matrices; all-NaN for lost frames
-      - is_lost: (N,) bool
+    ORB-SLAM3 reads atlas save/load paths from the YAML
+    (``System.SaveAtlasToFile`` / ``System.LoadAtlasFromFile``); the binary
+    has no CLI flag for them. We inject the right key here so the canonical
+    config file stays untouched.
     """
-    rows = []
-    with open(csv_path) as fh:
-        reader = csv.DictReader(fh)
-        for row in reader:
-            rows.append(row)
+    content = src.read_text()
+    if not content.endswith('\n'):
+        content += '\n'
+    if save_atlas is not None:
+        content += f'\nSystem.SaveAtlasToFile: "{save_atlas}"\n'
+    if load_atlas is not None:
+        content += f'\nSystem.LoadAtlasFromFile: "{load_atlas}"\n'
+    dst = tmp_dir / 'settings.yaml'
+    dst.write_text(content)
+    return dst
 
-    n = len(rows)
-    timestamps = np.zeros(n, dtype=np.float64)
-    poses = np.zeros((n, 4, 4), dtype=np.float32)
-    is_lost = np.zeros(n, dtype=bool)
 
-    for i, row in enumerate(rows):
-        timestamps[i] = float(row['timestamp'])
-        lost = bool(int(row['is_lost']))
-        is_lost[i] = lost
-        if lost:
-            poses[i] = np.full((4, 4), np.nan, dtype=np.float32)
-        else:
-            poses[i] = _quat_to_se3(
-                float(row['tx']), float(row['ty']), float(row['tz']),
-                float(row['qx']), float(row['qy']), float(row['qz']), float(row['qw']),
-            )
+def _parse_and_reconcile_trajectory(
+    traj_path: pathlib.Path,
+    frame_ts: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Parse an ORB-SLAM3 EuRoC-format trajectory and align it to ``frame_ts``.
 
-    return timestamps, poses, is_lost
+    ``SaveTrajectoryEuRoC`` writes whitespace-separated rows::
+
+        timestamp_ns tx ty tz qx qy qz qw
+
+    Lost frames are silently omitted, so we map each entry to its nearest
+    frame timestamp (within half a frame period) and mark every frame that
+    received no match as is_lost=True.
+
+    The trajectory timestamps are nanoseconds of *video time* (because the
+    C++ binary computes tframe from ``cap.get(CAP_PROP_POS_MSEC)``), so we
+    add ``frame_ts[0]`` to bring them back to UTC before matching.
+
+    Returns ``(poses, is_lost)`` shaped (N,4,4) float32 and (N,) bool. Lost
+    rows in ``poses`` are all-NaN.
+    """
+    n = len(frame_ts)
+    poses = np.full((n, 4, 4), np.nan, dtype=np.float32)
+    is_lost = np.ones(n, dtype=bool)
+
+    if n < 2:
+        return poses, is_lost
+
+    t_ref = float(frame_ts[0])
+    period = float(np.median(np.diff(frame_ts)))
+    tolerance = _TRAJ_TOLERANCE_FRAC * period
+
+    n_matched = 0
+    n_skipped = 0
+    with open(traj_path) as fh:
+        for line_no, line in enumerate(fh, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) != 8:
+                log.warning(f'  Skipping malformed trajectory line {line_no}: {line!r}')
+                continue
+            t_ns = float(parts[0])
+            tx, ty, tz, qx, qy, qz, qw = (float(p) for p in parts[1:])
+            t_utc = t_ref + t_ns / 1e9
+
+            idx_right = int(np.searchsorted(frame_ts, t_utc))
+            candidates = []
+            if idx_right > 0:
+                candidates.append(idx_right - 1)
+            if idx_right < n:
+                candidates.append(idx_right)
+            idx = min(candidates, key=lambda i: abs(frame_ts[i] - t_utc))
+
+            if abs(frame_ts[idx] - t_utc) > tolerance:
+                log.warning(
+                    f'  Trajectory entry at video t={t_ns / 1e9:.6f}s has no '
+                    f'matching frame within {tolerance * 1000:.1f}ms — skipping'
+                )
+                n_skipped += 1
+                continue
+
+            poses[idx] = _quat_to_se3(tx, ty, tz, qx, qy, qz, qw)
+            is_lost[idx] = False
+            n_matched += 1
+
+    log.info(f'  Trajectory reconciliation: {n_matched} matched, {n_skipped} skipped')
+    return poses, is_lost
 
 
 def _write_slam_results(
@@ -215,14 +312,21 @@ class OrbSlam3Step(PreprocessingStep):
     """
     ORB-SLAM3 Monocular-Inertial SLAM preprocessing step.
 
-    Phase 1 (map building): exports the MAPPING episode's frames and IMU to a
-    temp directory, invokes the map-building binary, and saves the atlas sidecar.
+    Phase 1 (map building): exports the MAPPING episode as an mp4 video plus
+    GoPro-style telemetry JSON, invokes the map-building binary, and saves the
+    atlas sidecar.
 
-    Phase 2 (localization): for each EPISODE group, exports frames and IMU,
+    Phase 2 (localization): for each EPISODE group, exports as mp4 + JSON,
     invokes the localization binary against the pre-built atlas, and writes
     ``gopro/slam_poses`` (N,4,4) float32 and ``gopro/slam_is_lost`` (N,) bool
     back into the zarr store, plus summary annotations under
     ``annotations/slam``.
+
+    The ORB-SLAM3 binaries themselves consume the existing
+    ``mono_inertial_gopro_vi`` interface (video file + GoPro telemetry JSON),
+    so the heavy lifting around format conversion happens here in Python.
+    Atlas save/load paths are injected into a per-invocation temp copy of
+    the settings YAML.
 
     Lost frames have all-NaN poses; downstream consumers must check
     ``slam_is_lost`` or test for NaN before using a pose.
@@ -246,10 +350,10 @@ class OrbSlam3Step(PreprocessingStep):
 
     map_builder_bin:
         Binary name (relative to ``orb_slam3_dir/bin/``) for the map-building
-        mode.  See OQ-2 above.
+        mode.
 
     localizer_bin:
-        Binary name for the localization mode.  See OQ-2 above.
+        Binary name for the localization mode.
 
     timeout_s:
         Per-episode subprocess timeout in seconds.  None = no timeout.
@@ -330,14 +434,16 @@ class OrbSlam3Step(PreprocessingStep):
     ) -> None:
         tmp_dir = pathlib.Path(tempfile.mkdtemp(prefix='polyumi_slam_map_'))
         try:
-            frames_dir, imu_csv = _export_episode(ep_grp, tmp_dir)
+            video_path, json_path, _ = _export_episode(ep_grp, tmp_dir)
+            settings_path = _make_temp_settings_yaml(
+                self.settings_yaml, tmp_dir, save_atlas=atlas_path,
+            )
             cmd = [
                 str(self.map_builder_bin),
                 str(self._vocab_path),
-                str(self.settings_yaml),
-                str(frames_dir),
-                str(imu_csv),
-                str(atlas_path),
+                str(settings_path),
+                str(video_path),
+                str(json_path),
             ]
             self._run_subprocess(
                 cmd,
@@ -363,16 +469,18 @@ class OrbSlam3Step(PreprocessingStep):
     ) -> None:
         tmp_dir = pathlib.Path(tempfile.mkdtemp(prefix=f'polyumi_slam_ep{episode_index}_'))
         try:
-            frames_dir, imu_csv = _export_episode(ep_grp, tmp_dir)
-            traj_csv = tmp_dir / 'trajectory.csv'
+            video_path, json_path, frame_ts = _export_episode(ep_grp, tmp_dir)
+            settings_path = _make_temp_settings_yaml(
+                self.settings_yaml, tmp_dir, load_atlas=atlas_path,
+            )
+            traj_out = tmp_dir / 'trajectory.txt'
             cmd = [
                 str(self.localizer_bin),
                 str(self._vocab_path),
-                str(self.settings_yaml),
-                str(frames_dir),
-                str(imu_csv),
-                str(atlas_path),
-                str(traj_csv),
+                str(settings_path),
+                str(video_path),
+                str(json_path),
+                str(traj_out),
             ]
             self._run_subprocess(
                 cmd,
@@ -380,12 +488,12 @@ class OrbSlam3Step(PreprocessingStep):
                 log_dir / f'episode_{episode_index}_slam.stderr',
                 label=f'ORB-SLAM3 localizer (episode {episode_index})',
             )
-            if not traj_csv.exists():
+            if not traj_out.exists():
                 raise RuntimeError(
-                    f'ORB-SLAM3 localizer completed but trajectory CSV not found: {traj_csv}'
+                    f'ORB-SLAM3 localizer completed but trajectory file not found: {traj_out}'
                 )
 
-            _, poses, is_lost = _parse_trajectory_csv(traj_csv)
+            poses, is_lost = _parse_and_reconcile_trajectory(traj_out, frame_ts)
             _write_slam_results(ep_grp, poses, is_lost, self.settings_yaml, atlas_path)
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
