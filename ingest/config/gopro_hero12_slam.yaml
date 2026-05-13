@@ -1,0 +1,98 @@
+%YAML:1.0
+
+# GoPro Hero 12 — ORB-SLAM3 Monocular-Inertial settings (fisheye / MaxLens profile)
+#
+# OPEN QUESTION: All values marked CALIBRATE_ME require a calibration run using a tool
+# such as Kalibr or OpenImuCameraCalibrator (https://github.com/urbste/OpenImuCameraCalibrator).
+# The step will refuse to run until every CALIBRATE_ME value is replaced with a real number.
+#
+# Calibration checklist:
+#   1. Camera intrinsics (fx, fy, cx, cy, xi, alpha): use a checkerboard with the
+#      MaxLens/fisheye profile at the same resolution you will record episodes.
+#   2. Camera-IMU extrinsics (Tbc): requires simultaneous camera + IMU calibration
+#      (e.g. Kalibr with imu.yaml).  Record at 200 Hz IMU + video.
+#   3. IMU noise parameters: record a static IMU log for ~2 h and use the Allan
+#      deviation to extract NoiseGyro, NoiseAcc, GyroWalk, AccWalk.
+#
+# Hero 12 ships with a 200 Hz IMU and supports MaxLens Mod 2.0 (~177° DFOV fisheye).
+# Use the DoubleSphere camera model (xi + alpha parameters), same as GoPro 9 MaxLens.
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters
+#--------------------------------------------------------------------------------------------
+Camera.type: "DoubleSphere"
+
+# Focal lengths and principal point in pixels.
+# Obtain from OpenImuCameraCalibrator or Kalibr with fisheye/double-sphere model.
+Camera.fx: 0.0  # CALIBRATE_ME
+Camera.fy: 0.0  # CALIBRATE_ME
+Camera.cx: 0.0  # CALIBRATE_ME
+Camera.cy: 0.0  # CALIBRATE_ME
+
+# DoubleSphere model parameters (xi = sphere offset, alpha = sphere blending weight).
+Camera.xi: 0.0   # CALIBRATE_ME
+Camera.alpha: 0.0  # CALIBRATE_ME
+
+# Resolution used during recording.  Must match the actual video resolution exactly.
+Camera.width: 1920   # CALIBRATE_ME: confirm resolution (common: 1920x1440, 2704x2028)
+Camera.height: 1440  # CALIBRATE_ME
+
+# Frames per second.  Must match the recording fps used for episodes.
+Camera.fps: 60.0  # CALIBRATE_ME: confirm fps (common: 30, 60)
+
+# Color channel order of the exported JPEG frames (0=BGR, 1=RGB).
+# Frames are exported as standard JPEGs so this should be 1 (RGB).
+Camera.RGB: 1
+
+#--------------------------------------------------------------------------------------------
+# Camera-IMU Extrinsics
+#--------------------------------------------------------------------------------------------
+# Transformation from camera frame to IMU body frame (T_body_camera = Tbc).
+# Rows: body x, y, z, 1  expressed in camera-frame columns.
+# Calibrate with Kalibr or OpenImuCameraCalibrator.
+# The GoPro 9 MaxLens values below are included only as a rough structural reference —
+# Hero 12 intrinsics and the MaxLens Mod 2.0 geometry differ; do not use them in production.
+Tbc: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [0.0, 0.0, 0.0, 0.0,   # CALIBRATE_ME — row 0
+          0.0, 0.0, 0.0, 0.0,   # CALIBRATE_ME — row 1
+          0.0, 0.0, 0.0, 0.0,   # CALIBRATE_ME — row 2
+          0.0, 0.0, 0.0, 1.0]
+
+#--------------------------------------------------------------------------------------------
+# IMU Noise Parameters
+#--------------------------------------------------------------------------------------------
+# Units: rad/s/sqrt(Hz), m/s^2/sqrt(Hz), rad/s^(3/2)/sqrt(Hz), m/s^(5/2)/sqrt(Hz).
+# Derive from an Allan deviation analysis of a static 2-hour IMU log.
+IMU.NoiseGyro: 0.0   # CALIBRATE_ME  (rad/s/sqrt(Hz))
+IMU.NoiseAcc: 0.0    # CALIBRATE_ME  (m/s^2/sqrt(Hz))
+IMU.GyroWalk: 0.0    # CALIBRATE_ME  (rad/s^(3/2)/sqrt(Hz))
+IMU.AccWalk: 0.0     # CALIBRATE_ME  (m/s^(5/2)/sqrt(Hz))
+
+# Hero 12 IMU runs at 200 Hz.
+IMU.Frequency: 200
+
+#--------------------------------------------------------------------------------------------
+# ORB Extractor Parameters
+#--------------------------------------------------------------------------------------------
+ORBextractor.nFeatures: 1500
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+#--------------------------------------------------------------------------------------------
+# Viewer (disable for headless/batch use)
+#--------------------------------------------------------------------------------------------
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3
+Viewer.ViewpointX: 0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -3.5
+Viewer.ViewpointF: 500

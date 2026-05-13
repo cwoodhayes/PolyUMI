@@ -6,6 +6,7 @@ import logging
 import pathlib
 from dataclasses import dataclass, field
 
+from polyumi_pi.files.metadata import SessionType
 from polyumi_pi.files.session import SessionFiles
 
 log = logging.getLogger(__name__)
@@ -72,6 +73,21 @@ class SceneFiles:
     def zarr_exists(self) -> bool:
         """True if the zarr store exists on disk."""
         return self.zarr_path.exists()
+
+    # --- session type helpers ---
+
+    @property
+    def mapping_session(self) -> SessionFiles | None:
+        """Return the MAPPING session for this scene, or None if absent."""
+        for s in self.sessions:
+            if s.metadata.session_type == SessionType.MAPPING:
+                return s
+        return None
+
+    @property
+    def episode_sessions(self) -> list[SessionFiles]:
+        """Return all EPISODE sessions in chronological order."""
+        return [s for s in self.sessions if s.metadata.session_type == SessionType.EPISODE]
 
     # --- per-session sidecar accessors ---
 
