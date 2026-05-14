@@ -64,6 +64,7 @@ class SessionMetadata(base.SessionDataABC):
     gopro_sync_time: datetime | None = None
     first_frame_metadata: dict | None = None
     sync_chirp_play_time_ns: int | None = None
+    optitrack_start_time: datetime | None = None
     notes: str | None = None
     task: str | None = None
     robot: str | None = None
@@ -108,6 +109,9 @@ class SessionMetadata(base.SessionDataABC):
             ),
             'first_frame_metadata': self.first_frame_metadata,
             'sync_chirp_play_time_ns': self.sync_chirp_play_time_ns,
+            'optitrack_start_time': (
+                self.optitrack_start_time.isoformat() if self.optitrack_start_time is not None else None
+            ),
             'notes': self.notes,
             'task': self.task,
             'robot': self.robot,
@@ -128,5 +132,7 @@ class SessionMetadata(base.SessionDataABC):
             data['camera_resolution'] = tuple(data['camera_resolution'])
         if data.get('gopro_sync_time') is not None:
             data['gopro_sync_time'] = datetime.fromisoformat(data['gopro_sync_time'])
+        if data.get('optitrack_start_time') is not None:
+            data['optitrack_start_time'] = datetime.fromisoformat(data['optitrack_start_time'])
         data['session_type'] = SessionType(data['session_type'])
         return cls(**data)

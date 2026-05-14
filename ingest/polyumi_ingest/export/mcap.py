@@ -106,6 +106,46 @@ _SCHEMA_LOCATION_FIX = json.dumps(
     }
 ).encode()
 
+_QUAT = {
+    'type': 'object',
+    'properties': {
+        'x': {'type': 'number'},
+        'y': {'type': 'number'},
+        'z': {'type': 'number'},
+        'w': {'type': 'number'},
+    },
+}
+
+_SCHEMA_POSE_STAMPED = json.dumps(
+    {
+        '$schema': 'https://json-schema.org/draft/2020-12/schema',
+        'title': 'geometry_msgs/msg/PoseStamped',
+        'type': 'object',
+        'properties': {
+            'header': {
+                'type': 'object',
+                'properties': {
+                    'stamp': {
+                        'type': 'object',
+                        'properties': {
+                            'sec': {'type': 'integer'},
+                            'nanosec': {'type': 'integer'},
+                        },
+                    },
+                    'frame_id': {'type': 'string'},
+                },
+            },
+            'pose': {
+                'type': 'object',
+                'properties': {
+                    'position': _VEC3,
+                    'orientation': _QUAT,
+                },
+            },
+        },
+    }
+).encode()
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -137,12 +177,16 @@ def _register_channels(
     has_gyro: bool,
     has_gps: bool,
     has_gopro_audio: bool,
+    has_optitrack: bool,
 ) -> dict[str, int]:
     """Register all schemas and channels; return {topic: channel_id}."""
     img_sid = writer.register_schema('foxglove.CompressedImage', 'jsonschema', _SCHEMA_COMPRESSED_IMAGE)
     aud_sid = writer.register_schema('foxglove.RawAudio', 'jsonschema', _SCHEMA_RAW_AUDIO)
     imu_sid = writer.register_schema('foxglove.Imu', 'jsonschema', _SCHEMA_IMU)
     gps_sid = writer.register_schema('foxglove.LocationFix', 'jsonschema', _SCHEMA_LOCATION_FIX)
+    pose_sid = writer.register_schema(
+        'geometry_msgs/msg/PoseStamped', 'jsonschema', _SCHEMA_POSE_STAMPED
+    )
 
     def ch(topic: str, sid: int) -> int:
         return writer.register_channel(topic=topic, message_encoding='json', schema_id=sid)
@@ -162,6 +206,8 @@ def _register_channels(
         channels['/gopro/gyro'] = ch('/gopro/gyro', imu_sid)
     if has_gps:
         channels['/gopro/gps'] = ch('/gopro/gps', gps_sid)
+    if has_optitrack:
+        channels['/optitrack/pose'] = ch('/optitrack/pose', pose_sid)
     return channels
 
 
@@ -293,6 +339,37 @@ def _write_gps(
         writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
 
 
+def _write_optitrack_poses(
+    writer: Writer,
+    channel_id: int,
+    pose_arr: np.ndarray,
+    ts: np.ndarray,
+) -> None:
+    """Write OptiTrack rigid-body poses as geometry_msgs/msg/PoseStamped messages."""
+    for i in range(len(ts)):
+        row = pose_arr[i]
+        t_s = float(ts[i])
+        ns = _ts_ns(t_s)
+        msg = json.dumps(
+            {
+                'header': {
+                    'stamp': {'sec': ns // 1_000_000_000, 'nanosec': ns % 1_000_000_000},
+                    'frame_id': 'world',
+                },
+                'pose': {
+                    'position': {'x': float(row[0]), 'y': float(row[1]), 'z': float(row[2])},
+                    'orientation': {
+                        'x': float(row[3]),
+                        'y': float(row[4]),
+                        'z': float(row[5]),
+                        'w': float(row[6]),
+                    },
+                },
+            }
+        ).encode()
+        writer.add_message(channel_id=channel_id, log_time=ns, data=msg, publish_time=ns)
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 
@@ -301,6 +378,7 @@ def export_episode_to_mcap(
     output_path: pathlib.Path,
     jpeg_quality: int = 85,
     audio_chunk_size: int = 4096,
+    root_grp: zarr.Group | None = None,
 ) -> None:
     """Write one pzarr episode group to an MCAP file at output_path."""
     has_gopro = 'gopro/frames' in ep_grp
@@ -308,6 +386,7 @@ def export_episode_to_mcap(
     has_accel = 'gopro/accl' in ep_grp
     has_gyro = 'gopro/gyro' in ep_grp
     has_gps = 'gopro/gps' in ep_grp
+    has_optitrack = root_grp is not None and 'optitrack/pose' in root_grp
     has_time_sync = (
         'annotations/time_sync' in ep_grp
         and 'gopro_to_finger_offset_s' in ep_grp['annotations/time_sync'].attrs  # type: ignore[index]
@@ -336,6 +415,7 @@ def export_episode_to_mcap(
                 has_accel=has_accel,
                 has_gyro=has_gyro,
                 has_gps=has_gps,
+                has_optitrack=has_optitrack,
             )
 
             log.info('  finger frames...')
@@ -415,6 +495,21 @@ def export_episode_to_mcap(
                     ep_grp['gopro/gps'][:],  # type: ignore[index]
                     _gopro_ts('gopro_gps'),
                 )
+
+            if has_optitrack:
+                assert root_grp is not None
+                log.info('  optitrack poses...')
+                ot_ts: np.ndarray = root_grp['optitrack/timestamps'][:]  # type: ignore[index]
+                ot_poses: np.ndarray = root_grp['optitrack/pose'][:]  # type: ignore[index]
+                # Slice to the episode time window when annotations are available.
+                ann_attrs = ep_grp['annotations'].attrs if 'annotations' in ep_grp else {}
+                ep_start = ann_attrs.get('episode_start')
+                ep_end = ann_attrs.get('episode_end')
+                if ep_start is not None and ep_end is not None:
+                    mask = (ot_ts >= float(ep_start)) & (ot_ts <= float(ep_end))
+                    ot_ts = ot_ts[mask]
+                    ot_poses = ot_poses[mask]
+                _write_optitrack_poses(writer, ch['/optitrack/pose'], ot_poses, ot_ts)
         finally:
             writer.finish()
 
@@ -450,7 +545,7 @@ def export_scene_to_mcap(
         ep_grp = zarr.open_group(str(zarr_path / ep_key), mode='r')
         out_path = out_dir / f'episode_{ep_idx}.mcap'
         log.info(f'Exporting episode {ep_idx} → {out_path}')
-        export_episode_to_mcap(ep_grp, out_path, jpeg_quality, audio_chunk_size)
+        export_episode_to_mcap(ep_grp, out_path, jpeg_quality, audio_chunk_size, root_grp=root)
         size_mb = out_path.stat().st_size / 1e6
         log.info(f'  Done ({size_mb:.1f} MB)')
         written.append(out_path)

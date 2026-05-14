@@ -16,6 +16,7 @@ import zarr
 from imagecodecs.numcodecs import Jpegxl
 from numcodecs import Blosc
 from polyumi_pi.files.session import SessionFiles
+from scipy.spatial.transform import Rotation
 
 from polyumi_ingest.gopro_fetch import _recording_start_time
 from polyumi_ingest.gpmf_parse import extract_gpmf_binary, parse_imu
@@ -310,6 +311,66 @@ def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) 
     ann_grp.attrs.update(ann_attrs)
 
 
+def _find_optitrack_csv(scene_path: pathlib.Path) -> pathlib.Path | None:
+    """Return the first CSV in scene_path whose first line starts with 'Format Version,1.23'."""
+    for p in sorted(scene_path.iterdir()):
+        if p.suffix.lower() != '.csv':
+            continue
+        try:
+            first_line = p.read_text(errors='replace').splitlines()[0]
+        except (OSError, IndexError):
+            continue
+        if first_line.startswith('Format Version,1.23'):
+            return p
+    return None
+
+
+def _parse_optitrack_csv(csv_path: pathlib.Path) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Parse an OptiTrack rigid-body CSV export into relative timestamps and 6DOF poses.
+
+    Returns:
+        times_s: (N,) float64 seconds since capture start
+        poses: (N, 7) float64 [x, y, z, qx, qy, qz, qw] (position metres, quaternion)
+
+    """
+    data_start_row = None
+    with csv_path.open() as f:
+        for i, line in enumerate(f):
+            if line.startswith('Frame,Time'):
+                data_start_row = i + 1
+                break
+    if data_start_row is None:
+        raise ValueError(f'Could not find data header row in OptiTrack CSV: {csv_path}')
+
+    data = np.loadtxt(csv_path, delimiter=',', skiprows=data_start_row, dtype=np.float64)
+    if data.ndim == 1:
+        data = data[np.newaxis, :]
+
+    # Columns: Frame, Time(s), rot_X, rot_Y, rot_Z, pos_X, pos_Y, pos_Z
+    times_s = data[:, 1]
+    rot_xyz_deg = data[:, 2:5]
+    pos_xyz = data[:, 5:8]
+
+    quats_xyzw = Rotation.from_euler('xyz', rot_xyz_deg, degrees=True).as_quat()
+    poses = np.concatenate([pos_xyz, quats_xyzw], axis=1)
+    return times_s, poses
+
+
+def _write_optitrack(root: zarr.Group, csv_path: pathlib.Path, optitrack_start_s: float) -> None:
+    """Parse OptiTrack CSV and write pose data to the root zarr group."""
+    times_s, poses = _parse_optitrack_csv(csv_path)
+    abs_timestamps = optitrack_start_s + times_s
+
+    ot_grp = root.require_group('optitrack')
+    ot_grp.create_array('pose', data=poses, compressor=_BLOSC)
+    ot_grp.create_array('timestamps', data=abs_timestamps, compressor=_BLOSC)
+
+    duration = float(times_s[-1] - times_s[0]) if len(times_s) > 1 else 0.0
+    rate = len(times_s) / duration if duration > 0 else 0.0
+    log.info(f'  OptiTrack: {len(times_s)} poses @ {rate:.0f} Hz from {csv_path.name}')
+
+
 def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.Path:
     """
     Build scene.zarr inside scene_path from processed session directories.
@@ -324,6 +385,7 @@ def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.P
     root = zarr.open_group(str(scene.zarr_path), mode='w', zarr_format=2)
 
     first_meta = sessions[0].metadata
+    optitrack_start_time = first_meta.optitrack_start_time
     root.attrs.update(
         {
             'task': first_meta.task,
@@ -335,8 +397,23 @@ def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.P
             'created_at': dt.datetime.now(dt.timezone.utc).isoformat(),
             'alignment_refs': [],
             'pzarr_version': PZARR_VERSION,
+            'optitrack_start_time': (
+                optitrack_start_time.isoformat() if optitrack_start_time is not None else None
+            ),
         }
     )
+
+    if optitrack_start_time is not None:
+        csv_path = _find_optitrack_csv(scene_path)
+        if csv_path is not None:
+            log.info(f'OptiTrack CSV found: {csv_path.name}')
+            _write_optitrack(root, csv_path, optitrack_start_time.timestamp())
+        else:
+            log.warning(
+                f'optitrack_start_time is set in {scene_path.name} but no OptiTrack CSV'
+                f' (Format Version,1.23) was found in that scene directory.'
+                f' OptiTrack poses will not be included in the zarr store.'
+            )
 
     for i, session in enumerate(sessions):
         log.info(f'[{i + 1}/{len(sessions)}] Episode {i}: {session.path.name}')
