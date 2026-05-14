@@ -20,25 +20,27 @@
 #--------------------------------------------------------------------------------------------
 # Camera Parameters
 #--------------------------------------------------------------------------------------------
-Camera.type: "DoubleSphere"
+Camera.type: "KannalaBrandt8"
 
 # Focal lengths and principal point in pixels.
-# Source: cam_calib_GX010147_ds_2.0.json (OpenImuCameraCalibrator, reproj error 0.20 px).
+# Source: cam_calib_GX010147_fi_2.0.json (OpenImuCameraCalibrator, reproj error 0.18 px).
 # Calibrated at ds_2.0 resolution (1352x1014 = 2704x2028 / 2).
 # To use at 2704x2028, multiply fx/fy/cx/cy by 2.
-Camera.fx: 426.1977377760
-Camera.fy: 425.7266949650
-Camera.cx: 674.8532486357
-Camera.cy: 504.3621214142
+Camera.fx: 421.4700653743
+Camera.fy: 421.0212489922
+Camera.cx: 674.6086093863
+Camera.cy: 504.0829405907
 
-# DoubleSphere model parameters (xi = sphere offset, alpha = sphere blending weight).
-Camera.xi: -0.0000727114   # from cam_calib_GX010147_ds_2.0.json
-Camera.alpha: 0.6973280635  # from cam_calib_GX010147_ds_2.0.json
+# KannalaBrandt8 distortion coefficients (Kannala-Brandt radial, k1..k4).
+Camera.k1: 0.0289317679
+Camera.k2: -0.1245634708
+Camera.k3: 0.1235125440
+Camera.k4: -0.0436675477
 
 # Resolution used during recording.  Must match the actual video resolution exactly.
 # These match the ds_2.0 calibration resolution; scale intrinsics if recording at 2704x2028.
-Camera.width: 1352
-Camera.height: 1014
+Camera.width: 1352.0000000000
+Camera.height: 1014.0000000000
 
 # Frames per second.  Must match the recording fps used for episodes.
 Camera.fps: 60.0  # nominal; calibration measured 59.94
@@ -55,15 +57,15 @@ Camera.RGB: 1
 # Calibrate with Kalibr or OpenImuCameraCalibrator.
 # The GoPro 9 MaxLens values below are included only as a rough structural reference —
 # Hero 12 intrinsics and the MaxLens Mod 2.0 geometry differ; do not use them in production.
-# Source: cam_imu_calib_result_GX010149.json (q_i_c + t_i_c), reproj error 1.48 px.
+# Source: cam_imu_calib_result_GX010154.json (q_i_c + t_i_c), reproj error 1.84 px.
 Tbc: !!opencv-matrix
    rows: 4
    cols: 4
    dt: f
-   data: [-0.9999878599,  0.0043832012, -0.0022511194,  0.0005700608,
-           0.0022877895,  0.0083790839, -0.9999622778, -0.0064827041,
-          -0.0043641735, -0.9999552883, -0.0083890100, -0.0016457079,
-           0.0,           0.0,           0.0,           1.0         ]
+   data: [          -0.9999991686,   0.0000184602,   0.0012893692,   0.0002025895,
+          -0.0012894699,  -0.0073250136,  -0.9999723403,  -0.0073340487,
+          -0.0000090151,  -0.9999731716,   0.0073250313,  -0.0045199605,
+           0.0000000000,   0.0000000000,   0.0000000000,   1.0000000000]
 
 #--------------------------------------------------------------------------------------------
 # IMU Noise Parameters
