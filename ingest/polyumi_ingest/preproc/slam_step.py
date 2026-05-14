@@ -156,7 +156,7 @@ def _export_episode(
     if len(gopro_ts) < 2:
         raise RuntimeError(f'Episode has fewer than 2 frames ({len(gopro_ts)})')
     fps = 1.0 / float(np.median(np.diff(gopro_ts)))
-    log.info(f'  Episode fps (median from frame timestamps): {fps:.3f}')
+    log.info(f'  Episode fps (median from frame timestamps): {fps:.3f} ({len(gopro_ts)} frames)')
 
     video_path = tmp_dir / 'video.mp4'
     _export_video_mp4(_arr(ep_grp, 'gopro/frames'), video_path, fps)
@@ -191,6 +191,7 @@ def _make_temp_settings_yaml(
     content = src.read_text()
     if not content.endswith('\n'):
         content += '\n'
+    content += '\nSystem.Viewer: 0\n'
     if save_atlas is not None:
         content += f'\nSystem.SaveAtlasToFile: "{save_atlas}"\n'
     if load_atlas is not None:
