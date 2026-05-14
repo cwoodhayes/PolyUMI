@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pathlib
 import shutil
 import subprocess
@@ -11,6 +12,7 @@ import tempfile
 from typing import TYPE_CHECKING
 
 import cv2
+import imagecodecs.numcodecs  # noqa: F401 — registers imagecodecs_jpegxl with numcodecs
 import numpy as np
 import zarr
 from numcodecs import Blosc
@@ -63,7 +65,7 @@ def _export_video_mp4(
     expects BGR. Encoding via the ``mp4v`` fourcc on Linux opencv builds is
     lossy but feature-preserving for SLAM at typical GoPro resolutions.
     """
-    n = len(frames_arr)
+    n = frames_arr.shape[0]
     if n == 0:
         raise RuntimeError('No frames to export')
     first = frames_arr[0]
@@ -337,8 +339,8 @@ class OrbSlam3Step(PreprocessingStep):
         Root directory of the ORB-SLAM3 installation.  Expected layout::
 
             {orb_slam3_dir}/
-            ├── bin/
-            │   ├── {map_builder_bin}
+            ├── {bin_subdir}/          # default "bin"; source build uses
+            │   ├── {map_builder_bin}  # "Examples/Monocular-Inertial"
             │   └── {localizer_bin}
             └── Vocabulary/
                 └── ORBvoc.txt
@@ -361,10 +363,13 @@ class OrbSlam3Step(PreprocessingStep):
 
     def __init__(
         self,
-        orb_slam3_dir: pathlib.Path = pathlib.Path('/usr/local/lib/ORB_SLAM3'),
+        orb_slam3_dir: pathlib.Path = pathlib.Path(
+            os.environ.get('ORB_SLAM3_DIR', '/usr/local/lib/ORB_SLAM3')
+        ),
         settings_yaml: pathlib.Path | None = None,
         map_builder_bin: str = 'mono_inertial_gopro_vi',
         localizer_bin: str = 'mono_inertial_gopro_vi_localize',
+        bin_subdir: str = os.environ.get('ORB_SLAM3_BIN_SUBDIR', 'bin'),
         timeout_s: float | None = None,
     ) -> None:
         """
@@ -377,17 +382,21 @@ class OrbSlam3Step(PreprocessingStep):
         settings_yaml:
             Camera/IMU settings YAML.  Defaults to the Hero 12 template.
         map_builder_bin:
-            Binary filename under orb_slam3_dir/bin/ for map building.
+            Binary filename under ``orb_slam3_dir/bin_subdir/`` for map building.
         localizer_bin:
-            Binary filename under orb_slam3_dir/bin/ for localization.
+            Binary filename under ``orb_slam3_dir/bin_subdir/`` for localization.
+        bin_subdir:
+            Subdirectory of ``orb_slam3_dir`` that contains the binaries.
+            Defaults to ``bin``; use ``Examples/Monocular-Inertial`` for a
+            standard ORB-SLAM3 source build.
         timeout_s:
             Per-episode subprocess timeout; None = no timeout.
 
         """
         self.orb_slam3_dir = pathlib.Path(orb_slam3_dir)
         self.settings_yaml = pathlib.Path(settings_yaml) if settings_yaml else _DEFAULT_SETTINGS_YAML
-        self.map_builder_bin = self.orb_slam3_dir / 'bin' / map_builder_bin
-        self.localizer_bin = self.orb_slam3_dir / 'bin' / localizer_bin
+        self.map_builder_bin = self.orb_slam3_dir / bin_subdir / map_builder_bin
+        self.localizer_bin = self.orb_slam3_dir / bin_subdir / localizer_bin
         self.timeout_s = timeout_s
 
     @property
@@ -397,8 +406,11 @@ class OrbSlam3Step(PreprocessingStep):
     def _validate_settings_yaml(self) -> None:
         if not self.settings_yaml.exists():
             raise FileNotFoundError(f'ORB-SLAM3 settings YAML not found: {self.settings_yaml}')
-        content = self.settings_yaml.read_text()
-        if _PLACEHOLDER_MARKER in content:
+        value_lines = [
+            ln for ln in self.settings_yaml.read_text().splitlines()
+            if not ln.lstrip().startswith('#')
+        ]
+        if any(_PLACEHOLDER_MARKER in ln for ln in value_lines):
             raise RuntimeError(
                 f'Settings YAML at {self.settings_yaml} still contains uncalibrated placeholder '
                 f'values (search for "{_PLACEHOLDER_MARKER}"). Fill in camera intrinsics, Tbc, '
@@ -541,9 +553,10 @@ class OrbSlam3Step(PreprocessingStep):
             episode_keys = [k for k in episodes if k != mapping_key]
 
         if not episode_keys:
-            raise RuntimeError(
-                f'No EPISODE groups found to localize in {scene_zarr} '
-                f'(only mapping episode {mapping_key} present).'
+            log.warning(
+                f'No EPISODE groups found in {scene_zarr} — only {mapping_key} '
+                f'(session_type=MAPPING) is present. Map will be built but no '
+                f'localization will run. Add episode sessions to localize.'
             )
 
         # Phase 1: map building
