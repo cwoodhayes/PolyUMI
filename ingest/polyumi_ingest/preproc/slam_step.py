@@ -410,7 +410,10 @@ class OrbSlam3Step(PreprocessingStep):
             os.environ.get('ORB_SLAM3_DIR', '/usr/local/lib/ORB_SLAM3')
         ),
         settings_yaml: pathlib.Path | None = None,
-        map_builder_bin: str = 'mono_inertial_gopro_vi',
+        # Named `*_polyumi` to disambiguate from the Cheng fork's stock
+        # mono_inertial_gopro_vi binary, which has hardcoded viewer=true and no
+        # trajectory-output flag and is therefore not a drop-in replacement.
+        map_builder_bin: str = 'mono_inertial_gopro_vi_polyumi',
         localizer_bin: str = 'mono_inertial_gopro_vi_localize',
         bin_subdir: str = os.environ.get('ORB_SLAM3_BIN_SUBDIR', 'bin'),
         timeout_s: float | None = None,

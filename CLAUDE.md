@@ -98,7 +98,12 @@ The ORB-SLAM3 step (`OrbSlam3Step`, preprocessing step 2) reads its installation
 path from environment variables. Set these before running any SLAM-related commands:
 
 ```bash
-export ORB_SLAM3_DIR=/home/conor/Documents/W2026/winter_project/slam/ORB_SLAM3
+# We use the Cheng fork (slam/ORB_SLAM3_CHENG) — it has the fixes vanilla
+# ORB-SLAM3 was missing (atlas-load activates the loaded map, null guards in
+# LocalMapping, shutdown wait-for-threads, etc.). Our PolyUMI binaries
+# (mono_inertial_gopro_vi_polyumi / mono_inertial_gopro_vi_localize) live in
+# the same Examples/Monocular-Inertial dir alongside Cheng's stock binaries.
+export ORB_SLAM3_DIR=/home/conor/Documents/W2026/winter_project/slam/ORB_SLAM3_CHENG
 export ORB_SLAM3_BIN_SUBDIR=Examples/Monocular-Inertial
 ```
 
