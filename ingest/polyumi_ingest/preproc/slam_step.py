@@ -358,8 +358,9 @@ class OrbSlam3Step(PreprocessingStep):
     ORB-SLAM3 Monocular-Inertial SLAM preprocessing step.
 
     Phase 1 (map building): exports the MAPPING episode as an mp4 video plus
-    GoPro-style telemetry JSON, invokes the map-building binary, and saves the
-    atlas sidecar.
+    GoPro-style telemetry JSON, invokes the map-building binary, saves the
+    atlas sidecar, and writes the mapping pass' own per-frame trajectory
+    (from VIBA) back to the MAPPING episode using the same schema as Phase 2.
 
     Phase 2 (localization): for each EPISODE group, exports as mp4 + JSON,
     invokes the localization binary against the pre-built atlas, and writes
@@ -518,6 +519,15 @@ class OrbSlam3Step(PreprocessingStep):
                 raise RuntimeError(
                     f'ORB-SLAM3 map builder completed but atlas not found at {atlas_path}'
                 )
+
+            # Reconcile the mapping trajectory back onto the mapping episode
+            # and persist poses next to the localized episodes' data.  Same
+            # EuRoC format and reconciliation as Phase 2 — keeps the schema
+            # consistent across MAPPING and EPISODE sessions.
+            if traj_out.exists():
+                poses, is_lost = _parse_and_reconcile_trajectory(traj_out, frame_ts)
+                _write_slam_results(ep_grp, poses, is_lost, self.settings_yaml, atlas_path)
+
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
             log.error(f'Map building failed; temp dir preserved for debugging: {tmp_dir}')
