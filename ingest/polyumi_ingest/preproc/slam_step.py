@@ -48,6 +48,11 @@ def _arr(grp: zarr.Group, path: str) -> zarr.Array:
     return grp[path]  # type: ignore[return-value]
 
 
+def _grp(grp: zarr.Group, path: str) -> zarr.Group:
+    """Narrow Group.__getitem__'s Array|Group return to Group for type checkers."""
+    return grp[path]  # type: ignore[return-value]
+
+
 def _find_gopro_mp4(ep_grp: zarr.Group, scene_zarr: pathlib.Path) -> pathlib.Path | None:
     """
     Return the original gopro.mp4 path for an episode, or None if not found.
@@ -59,7 +64,7 @@ def _find_gopro_mp4(ep_grp: zarr.Group, scene_zarr: pathlib.Path) -> pathlib.Pat
     """
     scene_dir = scene_zarr.parent
     session_dir_name = ep_grp.attrs.get('session_dir', None)
-    if session_dir_name:
+    if isinstance(session_dir_name, str) and session_dir_name:
         candidate = scene_dir / session_dir_name / _GOPRO_MP4
         if candidate.exists():
             return candidate
@@ -101,15 +106,15 @@ def _export_video_mp4(
     n = frames_arr.shape[0]
     if n == 0:
         raise RuntimeError('No frames to export')
-    first = frames_arr[0]
+    first = np.asarray(frames_arr[0])
     h, w = first.shape[:2]
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # type: ignore[attr-defined]
     writer = cv2.VideoWriter(str(video_path), fourcc, fps, (w, h))
     if not writer.isOpened():
         raise RuntimeError(f'Failed to open cv2.VideoWriter for {video_path}')
     try:
         for i in range(n):
-            rgb = frames_arr[i]
+            rgb = np.asarray(frames_arr[i])
             bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
             writer.write(bgr)
     finally:
@@ -598,7 +603,7 @@ class OrbSlam3Step(PreprocessingStep):
         mapping_key: str | None = None
         episode_keys: list[str] = []
         for ep_key in episodes:
-            ep = root[ep_key]
+            ep = _grp(root, ep_key)
             session_type = ep.attrs.get('session_type', None)
             if session_type == 'MAPPING':
                 mapping_key = ep_key
@@ -626,16 +631,18 @@ class OrbSlam3Step(PreprocessingStep):
             log.info(f'Atlas already exists at {atlas_path}, skipping map building.')
         else:
             log.info(f'Phase 1: building map from {mapping_key}...')
-            gopro_mp4 = _find_gopro_mp4(root[mapping_key], scene_zarr)
+            mapping_grp = _grp(root, mapping_key)
+            gopro_mp4 = _find_gopro_mp4(mapping_grp, scene_zarr)
             if gopro_mp4 is None:
                 log.warning('  gopro.mp4 not found; falling back to zarr re-encoding (slow).')
-            self._build_map(root[mapping_key], atlas_path, log_dir, gopro_mp4)
+            self._build_map(mapping_grp, atlas_path, log_dir, gopro_mp4)
             log.info(f'Map built: {atlas_path}')
 
         # Phase 2: per-episode localization
         for i, ep_key in enumerate(episode_keys):
             log.info(f'Phase 2: localizing {ep_key} ({i + 1}/{len(episode_keys)})...')
-            gopro_mp4 = _find_gopro_mp4(root[ep_key], scene_zarr)
+            ep_grp = _grp(root, ep_key)
+            gopro_mp4 = _find_gopro_mp4(ep_grp, scene_zarr)
             if gopro_mp4 is None:
                 log.warning(f'  gopro.mp4 not found for {ep_key}; falling back to zarr re-encoding (slow).')
-            self._localize_episode(root[ep_key], i, atlas_path, log_dir, gopro_mp4)
+            self._localize_episode(ep_grp, i, atlas_path, log_dir, gopro_mp4)
