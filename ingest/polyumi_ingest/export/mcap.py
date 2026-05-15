@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import zarr
 from mcap.writer import Writer
+from scipy.spatial.transform import Rotation
 
 from polyumi_ingest.export.helpers import encode_frames_to_jpeg
 from polyumi_ingest.pzarr.scene_files import SceneFiles
@@ -89,6 +90,33 @@ _SCHEMA_IMU = json.dumps(
     }
 ).encode()
 
+_SCHEMA_POSE_IN_FRAME = json.dumps(
+    {
+        '$schema': 'https://json-schema.org/draft/2020-12/schema',
+        'title': 'foxglove.PoseInFrame',
+        'type': 'object',
+        'properties': {
+            'timestamp': _TIME,
+            'frame_id': {'type': 'string'},
+            'pose': {
+                'type': 'object',
+                'properties': {
+                    'position': _VEC3,
+                    'orientation': {
+                        'type': 'object',
+                        'properties': {
+                            'x': {'type': 'number'},
+                            'y': {'type': 'number'},
+                            'z': {'type': 'number'},
+                            'w': {'type': 'number'},
+                        },
+                    },
+                },
+            },
+        },
+    }
+).encode()
+
 _SCHEMA_LOCATION_FIX = json.dumps(
     {
         '$schema': 'https://json-schema.org/draft/2020-12/schema',
@@ -137,12 +165,14 @@ def _register_channels(
     has_gyro: bool,
     has_gps: bool,
     has_gopro_audio: bool,
+    has_slam: bool,
 ) -> dict[str, int]:
     """Register all schemas and channels; return {topic: channel_id}."""
     img_sid = writer.register_schema('foxglove.CompressedImage', 'jsonschema', _SCHEMA_COMPRESSED_IMAGE)
     aud_sid = writer.register_schema('foxglove.RawAudio', 'jsonschema', _SCHEMA_RAW_AUDIO)
     imu_sid = writer.register_schema('foxglove.Imu', 'jsonschema', _SCHEMA_IMU)
     gps_sid = writer.register_schema('foxglove.LocationFix', 'jsonschema', _SCHEMA_LOCATION_FIX)
+    pose_sid = writer.register_schema('foxglove.PoseInFrame', 'jsonschema', _SCHEMA_POSE_IN_FRAME)
 
     def ch(topic: str, sid: int) -> int:
         return writer.register_channel(topic=topic, message_encoding='json', schema_id=sid)
@@ -162,6 +192,8 @@ def _register_channels(
         channels['/gopro/gyro'] = ch('/gopro/gyro', imu_sid)
     if has_gps:
         channels['/gopro/gps'] = ch('/gopro/gps', gps_sid)
+    if has_slam:
+        channels['/slam/pose'] = ch('/slam/pose', pose_sid)
     return channels
 
 
@@ -293,6 +325,51 @@ def _write_gps(
         writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
 
 
+def _write_slam_poses(
+    writer: Writer,
+    channel_id: int,
+    poses: np.ndarray,
+    is_lost: np.ndarray,
+    ts: np.ndarray,
+    frame_id: str,
+) -> None:
+    """Write SLAM poses as PoseInFrame messages, skipping lost frames."""
+    n = len(ts)
+    if not (len(poses) == len(is_lost) == n):
+        raise ValueError(
+            f'SLAM pose/loss/timestamp lengths mismatch: '
+            f'poses={len(poses)} is_lost={len(is_lost)} ts={n}'
+        )
+
+    # Batch the rotation→quaternion conversion: scipy returns (x, y, z, w).
+    valid_mask = ~is_lost
+    valid_idx = np.nonzero(valid_mask)[0]
+    if valid_idx.size == 0:
+        log.info('  slam poses: all frames lost, nothing to write')
+        return
+
+    valid_poses = poses[valid_idx]
+    quats = Rotation.from_matrix(valid_poses[:, :3, :3]).as_quat()  # (M, 4) xyzw
+
+    for j, i in enumerate(valid_idx):
+        t_s = float(ts[i])
+        tx, ty, tz = valid_poses[j, :3, 3].tolist()
+        qx, qy, qz, qw = quats[j].tolist()
+        msg = json.dumps(
+            {
+                'timestamp': _foxglove_time(t_s),
+                'frame_id': frame_id,
+                'pose': {
+                    'position': {'x': tx, 'y': ty, 'z': tz},
+                    'orientation': {'x': qx, 'y': qy, 'z': qz, 'w': qw},
+                },
+            }
+        ).encode()
+        writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
+
+    log.info(f'  slam poses: wrote {valid_idx.size}/{n} (lost {n - valid_idx.size})')
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 
@@ -308,6 +385,7 @@ def export_episode_to_mcap(
     has_accel = 'gopro/accl' in ep_grp
     has_gyro = 'gopro/gyro' in ep_grp
     has_gps = 'gopro/gps' in ep_grp
+    has_slam = 'gopro/slam_poses' in ep_grp and 'gopro/slam_is_lost' in ep_grp
     has_time_sync = (
         'annotations/time_sync' in ep_grp
         and 'gopro_to_finger_offset_s' in ep_grp['annotations/time_sync'].attrs  # type: ignore[index]
@@ -336,6 +414,7 @@ def export_episode_to_mcap(
                 has_accel=has_accel,
                 has_gyro=has_gyro,
                 has_gps=has_gps,
+                has_slam=has_slam,
             )
 
             log.info('  finger frames...')
@@ -414,6 +493,17 @@ def export_episode_to_mcap(
                     ch['/gopro/gps'],
                     ep_grp['gopro/gps'][:],  # type: ignore[index]
                     _gopro_ts('gopro_gps'),
+                )
+
+            if has_slam:
+                log.info('  slam poses...')
+                _write_slam_poses(
+                    writer,
+                    ch['/slam/pose'],
+                    np.asarray(ep_grp['gopro/slam_poses'][:]),  # type: ignore[index]
+                    np.asarray(ep_grp['gopro/slam_is_lost'][:]),  # type: ignore[index]
+                    _gopro_ts('gopro'),
+                    frame_id='slam',
                 )
         finally:
             writer.finish()
