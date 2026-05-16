@@ -9,9 +9,8 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
-from typing import TYPE_CHECKING
+import time
 
-import cv2
 import imagecodecs.numcodecs  # noqa: F401 — registers imagecodecs_jpegxl with numcodecs
 import numpy as np
 import zarr
@@ -22,9 +21,7 @@ from polyumi_ingest.preproc.step_base import (
     PreprocessingStep,
     register_preprocessing_step,
 )
-
-if TYPE_CHECKING:
-    pass
+from polyumi_ingest.pzarr.store import _arr, _grp
 
 log = logging.getLogger(__name__)
 
@@ -52,23 +49,14 @@ _TRAJ_TOLERANCE_FRAC = 0.5
 _GOPRO_MP4 = 'gopro.mp4'
 
 
-def _arr(grp: zarr.Group, path: str) -> zarr.Array:
-    return grp[path]  # type: ignore[return-value]
-
-
-def _grp(grp: zarr.Group, path: str) -> zarr.Group:
-    """Narrow Group.__getitem__'s Array|Group return to Group for type checkers."""
-    return grp[path]  # type: ignore[return-value]
-
-
-def _find_gopro_mp4(ep_grp: zarr.Group, scene_zarr: pathlib.Path) -> pathlib.Path | None:
+def _find_gopro_mp4(ep_grp: zarr.Group, scene_zarr: pathlib.Path) -> pathlib.Path:
     """
-    Return the original gopro.mp4 path for an episode, or None if not found.
+    Return the original gopro.mp4 path for an episode.
 
     Checks the episode's ``session_dir`` attr first (written by build_pzarr for
     new zarrs). Falls back to matching the episode index against session dirs in
     the scene directory sorted by name (same order build_pzarr uses for older
-    zarrs that predate the attr).
+    zarrs that predate the attr). Raises FileNotFoundError if not found.
     """
     scene_dir = scene_zarr.parent
     session_dir_name = ep_grp.attrs.get('session_dir', None)
@@ -82,13 +70,16 @@ def _find_gopro_mp4(ep_grp: zarr.Group, scene_zarr: pathlib.Path) -> pathlib.Pat
     try:
         ep_index = int(ep_key.split('_')[1])
     except (IndexError, ValueError):
-        return None
+        raise FileNotFoundError(f'Could not determine session directory for episode {ep_key!r}')
     session_dirs = sorted(d for d in scene_dir.iterdir() if d.is_dir() and d.name.startswith('session_'))
     if ep_index < len(session_dirs):
         candidate = session_dirs[ep_index] / _GOPRO_MP4
         if candidate.exists():
             return candidate
-    return None
+    raise FileNotFoundError(
+        f'gopro.mp4 not found for {ep_key!r} — expected at '
+        f'{session_dirs[ep_index] / _GOPRO_MP4 if ep_index < len(session_dirs) else "<no matching session dir>"}'
+    )
 
 
 def _quat_to_se3(tx: float, ty: float, tz: float, qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
@@ -97,36 +88,6 @@ def _quat_to_se3(tx: float, ty: float, tz: float, qx: float, qy: float, qz: floa
     mat[:3, :3] = Rotation.from_quat([qx, qy, qz, qw]).as_matrix().astype(np.float32)
     mat[:3, 3] = [tx, ty, tz]
     return mat
-
-
-def _export_video_mp4(
-    frames_arr: zarr.Array,
-    video_path: pathlib.Path,
-    fps: float,
-) -> None:
-    """
-    Encode all frames in ``frames_arr`` to an mp4 at the given constant fps.
-
-    Frames in the zarr are stored as JpegXL-decoded RGB uint8; cv2.VideoWriter
-    expects BGR. Encoding via the ``mp4v`` fourcc on Linux opencv builds is
-    lossy but feature-preserving for SLAM at typical GoPro resolutions.
-    """
-    n = frames_arr.shape[0]
-    if n == 0:
-        raise RuntimeError('No frames to export')
-    first = np.asarray(frames_arr[0])
-    h, w = first.shape[:2]
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # type: ignore[attr-defined]
-    writer = cv2.VideoWriter(str(video_path), fourcc, fps, (w, h))
-    if not writer.isOpened():
-        raise RuntimeError(f'Failed to open cv2.VideoWriter for {video_path}')
-    try:
-        for i in range(n):
-            rgb = np.asarray(frames_arr[i])
-            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-            writer.write(bgr)
-    finally:
-        writer.release()
 
 
 def _export_telemetry_json(
@@ -191,14 +152,13 @@ def _export_telemetry_json(
 def _export_episode(
     ep_grp: zarr.Group,
     tmp_dir: pathlib.Path,
-    gopro_mp4: pathlib.Path | None = None,
+    gopro_mp4: pathlib.Path,
 ) -> tuple[pathlib.Path, pathlib.Path, np.ndarray]:
     """
-    Export an episode's frames + IMU to mp4 + telemetry JSON in ``tmp_dir``.
+    Export an episode's IMU to a telemetry JSON in ``tmp_dir``.
 
-    If ``gopro_mp4`` is provided (the original session recording), it is used
-    directly as the video input and frame re-encoding is skipped entirely.
-    Otherwise the frames are decoded from zarr and re-encoded (slow fallback).
+    ``gopro_mp4`` is passed directly to the ORB-SLAM3 binary as the video
+    input; no re-encoding is performed.
 
     Returns (video_path, json_path, frame_ts) where ``frame_ts`` is the
     per-frame UTC timestamp array (needed downstream to reconcile the
@@ -207,16 +167,8 @@ def _export_episode(
     gopro_ts = np.asarray(_arr(ep_grp, 'timestamps/gopro')[:], dtype=np.float64)
     if len(gopro_ts) < 2:
         raise RuntimeError(f'Episode has fewer than 2 frames ({len(gopro_ts)})')
-    fps = 1.0 / float(np.median(np.diff(gopro_ts)))
-    log.info(f'  Episode fps (median from frame timestamps): {fps:.3f} ({len(gopro_ts)} frames)')
-
-    if gopro_mp4 is not None:
-        video_path = gopro_mp4
-        log.info(f'  Using original gopro.mp4: {gopro_mp4}')
-    else:
-        video_path = tmp_dir / 'video.mp4'
-        _export_video_mp4(_arr(ep_grp, 'gopro/frames'), video_path, fps)
-        log.info(f'  Exported {len(gopro_ts)} frames to {video_path}')
+    video_path = gopro_mp4
+    log.info(f'  Using original gopro.mp4: {gopro_mp4} ({len(gopro_ts)} frames)')
 
     gyro = np.asarray(_arr(ep_grp, 'gopro/gyro')[:], dtype=np.float64)
     gyro_ts = np.asarray(_arr(ep_grp, 'timestamps/gopro_gyro')[:], dtype=np.float64)
@@ -512,8 +464,9 @@ class OrbSlam3Step(PreprocessingStep):
         ep_grp: zarr.Group,
         atlas_path: pathlib.Path,
         log_dir: pathlib.Path,
-        gopro_mp4: pathlib.Path | None = None,
+        scene_zarr: pathlib.Path,
     ) -> None:
+        gopro_mp4 = _find_gopro_mp4(ep_grp, scene_zarr)
         tmp_dir = pathlib.Path(tempfile.mkdtemp(prefix='polyumi_slam_map_'))
         try:
             video_path, json_path, frame_ts = _export_episode(ep_grp, tmp_dir, gopro_mp4)
@@ -536,8 +489,6 @@ class OrbSlam3Step(PreprocessingStep):
                 label='ORB-SLAM3 map builder',
                 cwd=log_dir,
             )
-            if traj_out.exists():
-                log.info(f'  Mapping trajectory saved to {traj_out}')
             if not atlas_path.exists():
                 raise RuntimeError(
                     f'ORB-SLAM3 map builder completed but atlas not found at {atlas_path}'
@@ -548,6 +499,7 @@ class OrbSlam3Step(PreprocessingStep):
             # EuRoC format and reconciliation as Phase 2 — keeps the schema
             # consistent across MAPPING and EPISODE sessions.
             if traj_out.exists():
+                log.info(f'  Mapping trajectory saved to {traj_out}')
                 poses, is_lost = _parse_and_reconcile_trajectory(traj_out, frame_ts)
                 _write_slam_results(ep_grp, poses, is_lost, self.settings_yaml, atlas_path)
 
@@ -562,8 +514,9 @@ class OrbSlam3Step(PreprocessingStep):
         episode_index: int,
         atlas_path: pathlib.Path,
         log_dir: pathlib.Path,
-        gopro_mp4: pathlib.Path | None = None,
+        scene_zarr: pathlib.Path,
     ) -> None:
+        gopro_mp4 = _find_gopro_mp4(ep_grp, scene_zarr)
         tmp_dir = pathlib.Path(tempfile.mkdtemp(prefix=f'polyumi_slam_ep{episode_index}_'))
         try:
             video_path, json_path, frame_ts = _export_episode(ep_grp, tmp_dir, gopro_mp4)
@@ -654,17 +607,16 @@ class OrbSlam3Step(PreprocessingStep):
         else:
             log.info(f'Phase 1: building map from {mapping_key}...')
             mapping_grp = _grp(root, mapping_key)
-            gopro_mp4 = _find_gopro_mp4(mapping_grp, scene_zarr)
-            if gopro_mp4 is None:
-                log.warning('  gopro.mp4 not found; falling back to zarr re-encoding (slow).')
-            self._build_map(mapping_grp, atlas_path, log_dir, gopro_mp4)
-            log.info(f'Map built: {atlas_path}')
+            t0 = time.monotonic()
+            self._build_map(mapping_grp, atlas_path, log_dir, scene_zarr)
+            elapsed = time.monotonic() - t0
+            log.info(f'Map built in {elapsed:.1f}s: {atlas_path}')
 
         # Phase 2: per-episode localization
         for i, ep_key in enumerate(episode_keys):
             log.info(f'Phase 2: localizing {ep_key} ({i + 1}/{len(episode_keys)})...')
             ep_grp = _grp(root, ep_key)
-            gopro_mp4 = _find_gopro_mp4(ep_grp, scene_zarr)
-            if gopro_mp4 is None:
-                log.warning(f'  gopro.mp4 not found for {ep_key}; falling back to zarr re-encoding (slow).')
-            self._localize_episode(ep_grp, i, atlas_path, log_dir, gopro_mp4)
+            t0 = time.monotonic()
+            self._localize_episode(ep_grp, i, atlas_path, log_dir, scene_zarr)
+            elapsed = time.monotonic() - t0
+            log.info(f'Localized {ep_key} in {elapsed:.1f}s')

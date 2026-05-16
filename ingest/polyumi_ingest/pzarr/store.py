@@ -44,6 +44,11 @@ def _arr(grp: zarr.Group, path: str) -> zarr.Array:
     return grp[path]  # type: ignore[return-value]
 
 
+def _grp(grp: zarr.Group, path: str) -> zarr.Group:
+    """Narrow Group.__getitem__'s Array|Group return to Group for type checkers."""
+    return grp[path]  # type: ignore[return-value]
+
+
 def _finger_timestamps(video_dir: pathlib.Path, first_wall_ns: int) -> np.ndarray:
     """
     Return UTC-seconds float64 timestamps for each finger camera frame.

@@ -15,13 +15,9 @@ from polyumi_ingest.preproc.step_base import (
     _write_scalar,
     register_preprocessing_step,
 )
+from polyumi_ingest.pzarr.store import _arr
 
 log = logging.getLogger(__name__)
-
-
-def _arr(grp: zarr.Group, path: str) -> zarr.Array:
-    """Return a typed zarr.Array from a group by path."""
-    return grp[path]  # type: ignore[return-value]
 
 
 def _infer_sample_rate(ts: np.ndarray) -> float:

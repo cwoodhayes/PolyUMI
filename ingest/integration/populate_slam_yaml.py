@@ -127,7 +127,9 @@ def _set_tbc(content: str, Tbc: np.ndarray, source_file: str, reproj: float) -> 
     )
 
     # Match from the source comment through the closing ] of the data block
-    pattern = r'# Source: cam_imu_calib_result.*?data: \[.*?\]'
+    # Match the Tbc block whether or not a Source comment is already present
+    # (first run from a fresh template won't have it; subsequent runs will).
+    pattern = r'(?:# Source: cam_imu_calib_result[^\n]*\n)?Tbc: !!opencv-matrix\n.*?data: \[.*?\]'
     new_content, n = re.subn(pattern, replacement, content, flags=re.DOTALL)
     if n == 0:
         raise ValueError('Could not find Tbc block to replace in YAML')
@@ -166,6 +168,7 @@ def populate(dataset_dir: pathlib.Path, yaml_path: pathlib.Path) -> None:
 
 
 def main() -> None:
+    """Entry point: parse args and run populate."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         '--dataset',
