@@ -33,7 +33,7 @@ ros2_ws/
     polyumi_pi_msgs/   # Protobuf message definitions (camera frame, audio chunk)
     polyumi_ros2/      # ROS 2 nodes + Foxglove launch files
 external/
-  ORB_SLAM3_PolyUMI/   # Git submodule: our ORB-SLAM3 fork (mono-inertial SLAM for the GoPro pass)
+  ORB_SLAM3_PolyUMI/   # Git submodule: PolyUMI's ORB_SLAM3 fork (monocular visual-inertial SLAM for the GoPro Hero 12)
 ```
 
 ## Prerequisites
@@ -71,7 +71,7 @@ source install/setup.bash
 cd ..
 ```
 
-Build the ORB-SLAM3 fork. First, install the system dependencies (Ubuntu;
+Build the [ORB-SLAM3 fork](https://github.com/cwoodhayes/ORB_SLAM3_PolyUMI). First, install the system dependencies (Ubuntu;
 the fork's [README.md](external/ORB_SLAM3_PolyUMI/README.md) has more detail):
 
 ```bash
@@ -127,12 +127,17 @@ pingest fetch --host <pi_ssh_hostname>
 pingest fetch-gopro --host <pi_ssh_hostname>
 
 # PROCESSING SESSIONS ON DISK
-# process all new scenes on disk into their pzarr form, skipping already-processed scenes:
+# ingest all new scenes on disk into their pzarr form, skipping already-processed scenes:
 pingest process-all
+# run the preprocessing pipeline on a particular scene (time alignment, SLAM, etc)
+pingest pp <scene_directory> 
+# export a single session to MCAP for easy visualization in foxglove (use the foxglove config 
+# in ingest/foxglove)
+pingest export-mcap <scene_directory> <session_number>
 ```
 
-The at-rest data format used during the preprocessing stage managed by `pingest` is a custom
-zarr format stored in `scene.zarr` in each scene directory, referred to in these docs as `pzarr`. See [docs/data-format.md](docs/data-format.md) for details on the format & the rationale behind it.
+The at-rest data format used during the preprocessing stage managed by `pingest` is a
+zarr-based format stored in `scene.zarr` in each scene directory, referred to in these docs as `pzarr`. See [docs/data-format.md](docs/data-format.md) for details on the format & the rationale behind it.
 
 ## Streaming / Demos
 
