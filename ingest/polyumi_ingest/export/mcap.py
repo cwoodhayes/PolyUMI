@@ -9,8 +9,6 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import zarr
 from mcap.writer import Writer
-from scipy.spatial.transform import Rotation
-
 from polyumi_ingest.export.helpers import encode_frames_to_jpeg
 from polyumi_ingest.pzarr.scene_files import SceneFiles
 
@@ -134,46 +132,6 @@ _SCHEMA_LOCATION_FIX = json.dumps(
     }
 ).encode()
 
-_QUAT = {
-    'type': 'object',
-    'properties': {
-        'x': {'type': 'number'},
-        'y': {'type': 'number'},
-        'z': {'type': 'number'},
-        'w': {'type': 'number'},
-    },
-}
-
-_SCHEMA_POSE_STAMPED = json.dumps(
-    {
-        '$schema': 'https://json-schema.org/draft/2020-12/schema',
-        'title': 'geometry_msgs/msg/PoseStamped',
-        'type': 'object',
-        'properties': {
-            'header': {
-                'type': 'object',
-                'properties': {
-                    'stamp': {
-                        'type': 'object',
-                        'properties': {
-                            'sec': {'type': 'integer'},
-                            'nanosec': {'type': 'integer'},
-                        },
-                    },
-                    'frame_id': {'type': 'string'},
-                },
-            },
-            'pose': {
-                'type': 'object',
-                'properties': {
-                    'position': _VEC3,
-                    'orientation': _QUAT,
-                },
-            },
-        },
-    }
-).encode()
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -213,10 +171,7 @@ def _register_channels(
     aud_sid = writer.register_schema('foxglove.RawAudio', 'jsonschema', _SCHEMA_RAW_AUDIO)
     imu_sid = writer.register_schema('foxglove.Imu', 'jsonschema', _SCHEMA_IMU)
     gps_sid = writer.register_schema('foxglove.LocationFix', 'jsonschema', _SCHEMA_LOCATION_FIX)
-    pose_stamped_sid = writer.register_schema(
-        'geometry_msgs/msg/PoseStamped', 'jsonschema', _SCHEMA_POSE_STAMPED
-    )
-    pose_in_frame_sid = writer.register_schema('foxglove.PoseInFrame', 'jsonschema', _SCHEMA_POSE_IN_FRAME)
+    pose_sid = writer.register_schema('foxglove.PoseInFrame', 'jsonschema', _SCHEMA_POSE_IN_FRAME)
 
     def ch(topic: str, sid: int) -> int:
         return writer.register_channel(topic=topic, message_encoding='json', schema_id=sid)
@@ -237,9 +192,9 @@ def _register_channels(
     if has_gps:
         channels['/gopro/gps'] = ch('/gopro/gps', gps_sid)
     if has_optitrack:
-        channels['/optitrack/pose'] = ch('/optitrack/pose', pose_stamped_sid)
+        channels['/optitrack/pose'] = ch('/optitrack/pose', pose_sid)
     if has_slam:
-        channels['/slam/pose'] = ch('/slam/pose', pose_in_frame_sid)
+        channels['/slam/pose'] = ch('/slam/pose', pose_sid)
     return channels
 
 
@@ -377,17 +332,14 @@ def _write_optitrack_poses(
     pose_arr: np.ndarray,
     ts: np.ndarray,
 ) -> None:
-    """Write OptiTrack rigid-body poses as geometry_msgs/msg/PoseStamped messages."""
+    """Write OptiTrack rigid-body poses as foxglove.PoseInFrame messages."""
     for i in range(len(ts)):
         row = pose_arr[i]
         t_s = float(ts[i])
-        ns = _ts_ns(t_s)
         msg = json.dumps(
             {
-                'header': {
-                    'stamp': {'sec': ns // 1_000_000_000, 'nanosec': ns % 1_000_000_000},
-                    'frame_id': 'world',
-                },
+                'timestamp': _foxglove_time(t_s),
+                'frame_id': 'world',
                 'pose': {
                     'position': {'x': float(row[0]), 'y': float(row[1]), 'z': float(row[2])},
                     'orientation': {
@@ -399,38 +351,29 @@ def _write_optitrack_poses(
                 },
             }
         ).encode()
-        writer.add_message(channel_id=channel_id, log_time=ns, data=msg, publish_time=ns)
+        writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
 
 
 def _write_slam_poses(
     writer: Writer,
     channel_id: int,
     poses: np.ndarray,
-    is_lost: np.ndarray,
     ts: np.ndarray,
     frame_id: str,
 ) -> None:
-    """Write SLAM poses as PoseInFrame messages, skipping lost frames."""
+    """Write SLAM poses as PoseInFrame messages, skipping lost (NaN) frames."""
     n = len(ts)
-    if not (len(poses) == len(is_lost) == n):
-        raise ValueError(
-            f'SLAM pose/loss/timestamp lengths mismatch: '
-            f'poses={len(poses)} is_lost={len(is_lost)} ts={n}'
-        )
+    if len(poses) != n:
+        raise ValueError(f'SLAM pose/timestamp length mismatch: poses={len(poses)} ts={n}')
 
-    valid_mask = ~is_lost
-    valid_idx = np.nonzero(valid_mask)[0]
+    valid_idx = np.nonzero(~np.isnan(poses[:, 0]))[0]
     if valid_idx.size == 0:
         log.info('  slam poses: all frames lost, nothing to write')
         return
 
-    valid_poses = poses[valid_idx]
-    quats = Rotation.from_matrix(valid_poses[:, :3, :3]).as_quat()  # (M, 4) xyzw
-
-    for j, i in enumerate(valid_idx):
+    for i in valid_idx:
         t_s = float(ts[i])
-        tx, ty, tz = valid_poses[j, :3, 3].tolist()
-        qx, qy, qz, qw = quats[j].tolist()
+        tx, ty, tz, qx, qy, qz, qw = poses[i].tolist()
         msg = json.dumps(
             {
                 'timestamp': _foxglove_time(t_s),
@@ -463,7 +406,7 @@ def export_episode_to_mcap(
     has_gyro = 'gopro/gyro' in ep_grp
     has_gps = 'gopro/gps' in ep_grp
     has_optitrack = root_grp is not None and 'optitrack/pose' in root_grp
-    has_slam = 'gopro/slam_poses' in ep_grp and 'gopro/slam_is_lost' in ep_grp
+    has_slam = 'gopro/slam_poses' in ep_grp
     has_time_sync = (
         'annotations/time_sync' in ep_grp
         and 'gopro_to_finger_offset_s' in ep_grp['annotations/time_sync'].attrs  # type: ignore[index]
@@ -595,7 +538,6 @@ def export_episode_to_mcap(
                     writer,
                     ch['/slam/pose'],
                     np.asarray(ep_grp['gopro/slam_poses'][:]),  # type: ignore[index]
-                    np.asarray(ep_grp['gopro/slam_is_lost'][:]),  # type: ignore[index]
                     _gopro_ts('gopro'),
                     frame_id='slam',
                 )
