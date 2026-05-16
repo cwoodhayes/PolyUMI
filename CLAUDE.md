@@ -94,13 +94,28 @@ uv run pytest ...
 
 ## Testing SLAM
 
-The ORB-SLAM3 step (`OrbSlam3Step`, preprocessing step 2) reads its installation
-path from environment variables. Set these before running any SLAM-related commands:
+The ORB-SLAM3 step (`OrbSlam3Step`, preprocessing step 2) uses the
+`external/ORB_SLAM3_PolyUMI` git submodule by default — a PolyUMI fork of
+Chi-Cheng Chang's ORB-SLAM3 fork, with additional patches (atlas-load activates
+the loaded map, null guards in LocalMapping, shutdown wait-for-threads,
+`ReconstructH` `vP3D` assignment, etc.) and our two custom binaries
+(`mono_inertial_gopro_vi_polyumi` for mapping, `mono_inertial_gopro_vi_localize`
+for localization) living in `Examples/Monocular-Inertial/`.
+
+After a fresh clone, init the submodule and build it:
 
 ```bash
-export ORB_SLAM3_DIR=/home/conor/Documents/W2026/winter_project/slam/ORB_SLAM3
-export ORB_SLAM3_BIN_SUBDIR=Examples/Monocular-Inertial
+git submodule update --init --recursive
+cd external/ORB_SLAM3_PolyUMI && bash build.sh
 ```
+
+The build script builds Pangolin in-tree (`Thirdparty/Pangolin`) and passes
+`CMAKE_PREFIX_PATH` so ORB-SLAM3's `find_package(Pangolin)` finds it; nothing extra to set up.
+
+No env vars are required for the in-repo install — `OrbSlam3Step` resolves
+`external/ORB_SLAM3_PolyUMI` from the slam_step.py source location.
+Override `ORB_SLAM3_DIR` / `ORB_SLAM3_BIN_SUBDIR` only if you want to point at
+an out-of-tree build.
 
 Run the SLAM step on a single scene:
 ```bash

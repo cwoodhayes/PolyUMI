@@ -45,6 +45,11 @@ def _arr(grp: zarr.Group, path: str) -> zarr.Array:
     return grp[path]  # type: ignore[return-value]
 
 
+def _grp(grp: zarr.Group, path: str) -> zarr.Group:
+    """Narrow Group.__getitem__'s Array|Group return to Group for type checkers."""
+    return grp[path]  # type: ignore[return-value]
+
+
 def _finger_timestamps(video_dir: pathlib.Path, first_wall_ns: int) -> np.ndarray:
     """
     Return UTC-seconds float64 timestamps for each finger camera frame.
@@ -419,6 +424,7 @@ def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.P
         log.info(f'[{i + 1}/{len(sessions)}] Episode {i}: {session.path.name}')
         ep_grp = root.require_group(f'episode_{i}')
         ep_grp.attrs['session_type'] = session.metadata.session_type.value
+        ep_grp.attrs['session_dir'] = session.path.name
         _write_episode(ep_grp, session, skip_gopro)
 
     return scene.zarr_path

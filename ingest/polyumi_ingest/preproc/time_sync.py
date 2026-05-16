@@ -15,13 +15,9 @@ from polyumi_ingest.preproc.step_base import (
     _write_scalar,
     register_preprocessing_step,
 )
+from polyumi_ingest.pzarr.store import _arr
 
 log = logging.getLogger(__name__)
-
-
-def _arr(grp: zarr.Group, path: str) -> zarr.Array:
-    """Return a typed zarr.Array from a group by path."""
-    return grp[path]  # type: ignore[return-value]
 
 
 def _infer_sample_rate(ts: np.ndarray) -> float:
@@ -77,7 +73,7 @@ class TimeSyncStep(PreprocessingStep):
         self.trim_start_s = trim_start_s
         self.finger_mic_name = 'finger_piezo'
 
-    def run_step(self, scene_zarr: pathlib.Path) -> None:
+    def run_step(self, scene_zarr: pathlib.Path, force: bool = False) -> None:
         """Read the audio streams from scene_zarr and write the estimated offset."""
         root = zarr.open_group(str(scene_zarr), mode='a')
         episodes = sorted(k for k in root.keys() if k.startswith('episode_'))
@@ -166,7 +162,7 @@ class ChirpTimeSyncStep(PreprocessingStep):
         self.search_radius_s = search_radius_s
         self._aligner = ChirpAligner()
 
-    def run_step(self, scene_zarr: pathlib.Path) -> None:
+    def run_step(self, scene_zarr: pathlib.Path, force: bool = False) -> None:
         """Detect chirp onsets in both recordings and write the estimated offset."""
         root = zarr.open_group(str(scene_zarr), mode='a')
         episodes = sorted(k for k in root.keys() if k.startswith('episode_'))

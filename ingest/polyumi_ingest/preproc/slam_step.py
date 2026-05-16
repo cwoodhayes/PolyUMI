@@ -9,9 +9,8 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
-from typing import TYPE_CHECKING
+import time
 
-import cv2
 import imagecodecs.numcodecs  # noqa: F401 — registers imagecodecs_jpegxl with numcodecs
 import numpy as np
 import zarr
@@ -22,9 +21,7 @@ from polyumi_ingest.preproc.step_base import (
     PreprocessingStep,
     register_preprocessing_step,
 )
-
-if TYPE_CHECKING:
-    pass
+from polyumi_ingest.pzarr.store import _arr, _grp
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +30,15 @@ _BLOSC = Blosc(cname='zstd', clevel=5, shuffle=Blosc.SHUFFLE)
 # Marker string used in the settings YAML to flag values that need calibration.
 _PLACEHOLDER_MARKER = 'CALIBRATE_ME'
 
-_DEFAULT_SETTINGS_YAML = pathlib.Path(__file__).parent.parent.parent / 'config' / 'gopro_hero12_slam.yaml'
+# Repo-root-relative default install path for the ORB-SLAM3 fork — the git
+# submodule at external/ORB_SLAM3_PolyUMI.  Set ORB_SLAM3_DIR in the env to
+# override (useful if you're working out-of-tree).
+_REPO_ROOT = pathlib.Path(__file__).parent.parent.parent.parent
+_DEFAULT_ORB_SLAM3_DIR = _REPO_ROOT / 'external' / 'ORB_SLAM3_PolyUMI'
+
+_DEFAULT_SETTINGS_YAML = (
+    _DEFAULT_ORB_SLAM3_DIR / 'Examples' / 'Monocular-Inertial' / 'gopro_hero12_slam.yaml'
+)
 
 # Maximum acceptable distance (as a fraction of a frame period) between a
 # trajectory entry's timestamp and the nearest frame timestamp when
@@ -41,8 +46,40 @@ _DEFAULT_SETTINGS_YAML = pathlib.Path(__file__).parent.parent.parent / 'config' 
 _TRAJ_TOLERANCE_FRAC = 0.5
 
 
-def _arr(grp: zarr.Group, path: str) -> zarr.Array:
-    return grp[path]  # type: ignore[return-value]
+_GOPRO_MP4 = 'gopro.mp4'
+
+
+def _find_gopro_mp4(ep_grp: zarr.Group, scene_zarr: pathlib.Path) -> pathlib.Path:
+    """
+    Return the original gopro.mp4 path for an episode.
+
+    Checks the episode's ``session_dir`` attr first (written by build_pzarr for
+    new zarrs). Falls back to matching the episode index against session dirs in
+    the scene directory sorted by name (same order build_pzarr uses for older
+    zarrs that predate the attr). Raises FileNotFoundError if not found.
+    """
+    scene_dir = scene_zarr.parent
+    session_dir_name = ep_grp.attrs.get('session_dir', None)
+    if isinstance(session_dir_name, str) and session_dir_name:
+        candidate = scene_dir / session_dir_name / _GOPRO_MP4
+        if candidate.exists():
+            return candidate
+
+    # Fallback: derive from episode index by sorting session directories.
+    ep_key = ep_grp.name.lstrip('/')
+    try:
+        ep_index = int(ep_key.split('_')[1])
+    except (IndexError, ValueError):
+        raise FileNotFoundError(f'Could not determine session directory for episode {ep_key!r}')
+    session_dirs = sorted(d for d in scene_dir.iterdir() if d.is_dir() and d.name.startswith('session_'))
+    if ep_index < len(session_dirs):
+        candidate = session_dirs[ep_index] / _GOPRO_MP4
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        f'gopro.mp4 not found for {ep_key!r} — expected at '
+        f'{session_dirs[ep_index] / _GOPRO_MP4 if ep_index < len(session_dirs) else "<no matching session dir>"}'
+    )
 
 
 def _quat_to_se3(tx: float, ty: float, tz: float, qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
@@ -51,36 +88,6 @@ def _quat_to_se3(tx: float, ty: float, tz: float, qx: float, qy: float, qz: floa
     mat[:3, :3] = Rotation.from_quat([qx, qy, qz, qw]).as_matrix().astype(np.float32)
     mat[:3, 3] = [tx, ty, tz]
     return mat
-
-
-def _export_video_mp4(
-    frames_arr: zarr.Array,
-    video_path: pathlib.Path,
-    fps: float,
-) -> None:
-    """
-    Encode all frames in ``frames_arr`` to an mp4 at the given constant fps.
-
-    Frames in the zarr are stored as JpegXL-decoded RGB uint8; cv2.VideoWriter
-    expects BGR. Encoding via the ``mp4v`` fourcc on Linux opencv builds is
-    lossy but feature-preserving for SLAM at typical GoPro resolutions.
-    """
-    n = frames_arr.shape[0]
-    if n == 0:
-        raise RuntimeError('No frames to export')
-    first = frames_arr[0]
-    h, w = first.shape[:2]
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    writer = cv2.VideoWriter(str(video_path), fourcc, fps, (w, h))
-    if not writer.isOpened():
-        raise RuntimeError(f'Failed to open cv2.VideoWriter for {video_path}')
-    try:
-        for i in range(n):
-            rgb = frames_arr[i]
-            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-            writer.write(bgr)
-    finally:
-        writer.release()
 
 
 def _export_telemetry_json(
@@ -108,6 +115,7 @@ def _export_telemetry_json(
     because the upstream binary iterates ACCL and GYRO independently and
     assumes a 1:1 mapping between the two streams.
     """
+    assert np.all(np.diff(accl_ts) > 0), 'accl_ts must be strictly monotonically increasing'
     accl_interp = np.column_stack([
         np.interp(gyro_ts, accl_ts, accl[:, j]) for j in range(3)
     ])
@@ -144,9 +152,13 @@ def _export_telemetry_json(
 def _export_episode(
     ep_grp: zarr.Group,
     tmp_dir: pathlib.Path,
+    gopro_mp4: pathlib.Path,
 ) -> tuple[pathlib.Path, pathlib.Path, np.ndarray]:
     """
-    Export an episode's frames + IMU to mp4 + telemetry JSON in ``tmp_dir``.
+    Export an episode's IMU to a telemetry JSON in ``tmp_dir``.
+
+    ``gopro_mp4`` is passed directly to the ORB-SLAM3 binary as the video
+    input; no re-encoding is performed.
 
     Returns (video_path, json_path, frame_ts) where ``frame_ts`` is the
     per-frame UTC timestamp array (needed downstream to reconcile the
@@ -155,12 +167,8 @@ def _export_episode(
     gopro_ts = np.asarray(_arr(ep_grp, 'timestamps/gopro')[:], dtype=np.float64)
     if len(gopro_ts) < 2:
         raise RuntimeError(f'Episode has fewer than 2 frames ({len(gopro_ts)})')
-    fps = 1.0 / float(np.median(np.diff(gopro_ts)))
-    log.info(f'  Episode fps (median from frame timestamps): {fps:.3f}')
-
-    video_path = tmp_dir / 'video.mp4'
-    _export_video_mp4(_arr(ep_grp, 'gopro/frames'), video_path, fps)
-    log.info(f'  Exported {len(gopro_ts)} frames to {video_path}')
+    video_path = gopro_mp4
+    log.info(f'  Using original gopro.mp4: {gopro_mp4} ({len(gopro_ts)} frames)')
 
     gyro = np.asarray(_arr(ep_grp, 'gopro/gyro')[:], dtype=np.float64)
     gyro_ts = np.asarray(_arr(ep_grp, 'timestamps/gopro_gyro')[:], dtype=np.float64)
@@ -179,6 +187,7 @@ def _make_temp_settings_yaml(
     tmp_dir: pathlib.Path,
     save_atlas: pathlib.Path | None = None,
     load_atlas: pathlib.Path | None = None,
+    viewer: bool = False,
 ) -> pathlib.Path:
     """
     Copy ``src`` settings YAML to ``tmp_dir`` with atlas paths appended.
@@ -191,6 +200,7 @@ def _make_temp_settings_yaml(
     content = src.read_text()
     if not content.endswith('\n'):
         content += '\n'
+    content += f'\nSystem.Viewer: {1 if viewer else 0}\n'
     if save_atlas is not None:
         content += f'\nSystem.SaveAtlasToFile: "{save_atlas}"\n'
     if load_atlas is not None:
@@ -315,8 +325,9 @@ class OrbSlam3Step(PreprocessingStep):
     ORB-SLAM3 Monocular-Inertial SLAM preprocessing step.
 
     Phase 1 (map building): exports the MAPPING episode as an mp4 video plus
-    GoPro-style telemetry JSON, invokes the map-building binary, and saves the
-    atlas sidecar.
+    GoPro-style telemetry JSON, invokes the map-building binary, saves the
+    atlas sidecar, and writes the mapping pass' own per-frame trajectory
+    (from VIBA) back to the MAPPING episode using the same schema as Phase 2.
 
     Phase 2 (localization): for each EPISODE group, exports as mp4 + JSON,
     invokes the localization binary against the pre-built atlas, and writes
@@ -336,12 +347,15 @@ class OrbSlam3Step(PreprocessingStep):
     Constructor arguments
     ---------------------
     orb_slam3_dir:
-        Root directory of the ORB-SLAM3 installation.  Expected layout::
+        Root directory of the ORB-SLAM3 installation.  Defaults to the
+        ``external/ORB_SLAM3_PolyUMI`` git submodule.  Override via the
+        ``ORB_SLAM3_DIR`` env var to point at an out-of-tree build.
+        Expected layout::
 
             {orb_slam3_dir}/
-            ├── {bin_subdir}/          # default "bin"; source build uses
-            │   ├── {map_builder_bin}  # "Examples/Monocular-Inertial"
-            │   └── {localizer_bin}
+            ├── {bin_subdir}/          # default Examples/Monocular-Inertial
+            │   ├── {map_builder_bin}  # mono_inertial_gopro_vi_polyumi
+            │   └── {localizer_bin}    # mono_inertial_gopro_vi_localize
             └── Vocabulary/
                 └── ORBvoc.txt
 
@@ -363,13 +377,14 @@ class OrbSlam3Step(PreprocessingStep):
 
     def __init__(
         self,
-        orb_slam3_dir: pathlib.Path = pathlib.Path(
-            os.environ.get('ORB_SLAM3_DIR', '/usr/local/lib/ORB_SLAM3')
-        ),
+        orb_slam3_dir: pathlib.Path | None = None,
         settings_yaml: pathlib.Path | None = None,
-        map_builder_bin: str = 'mono_inertial_gopro_vi',
+        # Named `*_polyumi` to disambiguate from the Cheng fork's stock
+        # mono_inertial_gopro_vi binary, which has hardcoded viewer=true and no
+        # trajectory-output flag and is therefore not a drop-in replacement.
+        map_builder_bin: str = 'mono_inertial_gopro_vi_polyumi',
         localizer_bin: str = 'mono_inertial_gopro_vi_localize',
-        bin_subdir: str = os.environ.get('ORB_SLAM3_BIN_SUBDIR', 'bin'),
+        bin_subdir: str | None = None,
         timeout_s: float | None = None,
     ) -> None:
         """
@@ -387,12 +402,16 @@ class OrbSlam3Step(PreprocessingStep):
             Binary filename under ``orb_slam3_dir/bin_subdir/`` for localization.
         bin_subdir:
             Subdirectory of ``orb_slam3_dir`` that contains the binaries.
-            Defaults to ``bin``; use ``Examples/Monocular-Inertial`` for a
-            standard ORB-SLAM3 source build.
+            Defaults to ``Examples/Monocular-Inertial`` to match the in-repo
+            ORB_SLAM3_PolyUMI build layout.
         timeout_s:
             Per-episode subprocess timeout; None = no timeout.
 
         """
+        if orb_slam3_dir is None:
+            orb_slam3_dir = pathlib.Path(os.environ.get('ORB_SLAM3_DIR', str(_DEFAULT_ORB_SLAM3_DIR)))
+        if bin_subdir is None:
+            bin_subdir = os.environ.get('ORB_SLAM3_BIN_SUBDIR', 'Examples/Monocular-Inertial')
         self.orb_slam3_dir = pathlib.Path(orb_slam3_dir)
         self.settings_yaml = pathlib.Path(settings_yaml) if settings_yaml else _DEFAULT_SETTINGS_YAML
         self.map_builder_bin = self.orb_slam3_dir / bin_subdir / map_builder_bin
@@ -423,6 +442,7 @@ class OrbSlam3Step(PreprocessingStep):
         stdout_log: pathlib.Path,
         stderr_log: pathlib.Path,
         label: str,
+        cwd: pathlib.Path | None = None,
     ) -> None:
         log.info(f'  Running: {" ".join(cmd)}')
         with open(stdout_log, 'w') as fout, open(stderr_log, 'w') as ferr:
@@ -431,6 +451,7 @@ class OrbSlam3Step(PreprocessingStep):
                 stdout=fout,
                 stderr=ferr,
                 timeout=self.timeout_s,
+                cwd=cwd,
             )
         if result.returncode != 0:
             raise RuntimeError(
@@ -443,30 +464,45 @@ class OrbSlam3Step(PreprocessingStep):
         ep_grp: zarr.Group,
         atlas_path: pathlib.Path,
         log_dir: pathlib.Path,
+        scene_zarr: pathlib.Path,
     ) -> None:
+        gopro_mp4 = _find_gopro_mp4(ep_grp, scene_zarr)
         tmp_dir = pathlib.Path(tempfile.mkdtemp(prefix='polyumi_slam_map_'))
         try:
-            video_path, json_path, _ = _export_episode(ep_grp, tmp_dir)
+            video_path, json_path, frame_ts = _export_episode(ep_grp, tmp_dir, gopro_mp4)
             settings_path = _make_temp_settings_yaml(
                 self.settings_yaml, tmp_dir, save_atlas=atlas_path,
             )
+            traj_out = log_dir / 'mapping_trajectory.txt'
             cmd = [
                 str(self.map_builder_bin),
                 str(self._vocab_path),
                 str(settings_path),
                 str(video_path),
                 str(json_path),
+                str(traj_out),
             ]
             self._run_subprocess(
                 cmd,
                 log_dir / 'mapping_slam.stdout',
                 log_dir / 'mapping_slam.stderr',
                 label='ORB-SLAM3 map builder',
+                cwd=log_dir,
             )
             if not atlas_path.exists():
                 raise RuntimeError(
                     f'ORB-SLAM3 map builder completed but atlas not found at {atlas_path}'
                 )
+
+            # Reconcile the mapping trajectory back onto the mapping episode
+            # and persist poses next to the localized episodes' data.  Same
+            # EuRoC format and reconciliation as Phase 2 — keeps the schema
+            # consistent across MAPPING and EPISODE sessions.
+            if traj_out.exists():
+                log.info(f'  Mapping trajectory saved to {traj_out}')
+                poses, is_lost = _parse_and_reconcile_trajectory(traj_out, frame_ts)
+                _write_slam_results(ep_grp, poses, is_lost, self.settings_yaml, atlas_path)
+
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
             log.error(f'Map building failed; temp dir preserved for debugging: {tmp_dir}')
@@ -478,10 +514,12 @@ class OrbSlam3Step(PreprocessingStep):
         episode_index: int,
         atlas_path: pathlib.Path,
         log_dir: pathlib.Path,
+        scene_zarr: pathlib.Path,
     ) -> None:
+        gopro_mp4 = _find_gopro_mp4(ep_grp, scene_zarr)
         tmp_dir = pathlib.Path(tempfile.mkdtemp(prefix=f'polyumi_slam_ep{episode_index}_'))
         try:
-            video_path, json_path, frame_ts = _export_episode(ep_grp, tmp_dir)
+            video_path, json_path, frame_ts = _export_episode(ep_grp, tmp_dir, gopro_mp4)
             settings_path = _make_temp_settings_yaml(
                 self.settings_yaml, tmp_dir, load_atlas=atlas_path,
             )
@@ -499,6 +537,7 @@ class OrbSlam3Step(PreprocessingStep):
                 log_dir / f'episode_{episode_index}_slam.stdout',
                 log_dir / f'episode_{episode_index}_slam.stderr',
                 label=f'ORB-SLAM3 localizer (episode {episode_index})',
+                cwd=log_dir,
             )
             if not traj_out.exists():
                 raise RuntimeError(
@@ -512,7 +551,7 @@ class OrbSlam3Step(PreprocessingStep):
             log.error(f'Localization failed; temp dir preserved: {tmp_dir}')
             raise
 
-    def run_step(self, scene_zarr: pathlib.Path) -> None:
+    def run_step(self, scene_zarr: pathlib.Path, force: bool = False) -> None:
         """
         Run map building then per-episode localization on scene_zarr.
 
@@ -536,7 +575,7 @@ class OrbSlam3Step(PreprocessingStep):
         mapping_key: str | None = None
         episode_keys: list[str] = []
         for ep_key in episodes:
-            ep = root[ep_key]
+            ep = _grp(root, ep_key)
             session_type = ep.attrs.get('session_type', None)
             if session_type == 'MAPPING':
                 mapping_key = ep_key
@@ -560,14 +599,24 @@ class OrbSlam3Step(PreprocessingStep):
             )
 
         # Phase 1: map building
+        if atlas_path.exists() and force:
+            log.info(f'--force: removing existing atlas at {atlas_path}')
+            atlas_path.unlink()
         if atlas_path.exists():
             log.info(f'Atlas already exists at {atlas_path}, skipping map building.')
         else:
             log.info(f'Phase 1: building map from {mapping_key}...')
-            self._build_map(root[mapping_key], atlas_path, log_dir)
-            log.info(f'Map built: {atlas_path}')
+            mapping_grp = _grp(root, mapping_key)
+            t0 = time.monotonic()
+            self._build_map(mapping_grp, atlas_path, log_dir, scene_zarr)
+            elapsed = time.monotonic() - t0
+            log.info(f'Map built in {elapsed:.1f}s: {atlas_path}')
 
         # Phase 2: per-episode localization
         for i, ep_key in enumerate(episode_keys):
             log.info(f'Phase 2: localizing {ep_key} ({i + 1}/{len(episode_keys)})...')
-            self._localize_episode(root[ep_key], i, atlas_path, log_dir)
+            ep_grp = _grp(root, ep_key)
+            t0 = time.monotonic()
+            self._localize_episode(ep_grp, i, atlas_path, log_dir, scene_zarr)
+            elapsed = time.monotonic() - t0
+            log.info(f'Localized {ep_key} in {elapsed:.1f}s')

@@ -634,7 +634,7 @@ def debug_latest(
     audio_chunk_size: int = typer.Option(4096, min=1, help='Audio samples per RawAudio message.'),
 ):
     """
-    Fetch the latest scene, build its pzarr, and export episode 0 to MCAP.
+    Fetch the latest scene, build its pzarr, and export the last episode to MCAP.
 
     Useful for polyumi-pi development & testing the ingest pipeline quickly.
     """
@@ -662,7 +662,7 @@ def debug_latest(
                         recordings_dir=recordings_dir,
                         mount_point=None,
                         threshold_ms=DEFAULT_THRESHOLD_MS,
-                        latest=True,
+                        latest=False,
                     )
                 except typer.Exit:
                     pass
@@ -694,23 +694,32 @@ def debug_latest(
             log.error(str(e))
             raise typer.Exit(1)
 
-    # Step 3: export episode 0 to MCAP
-    mcap_path = scene_dir / 'episode_0.mcap'
+    # Step 3: export last episode to MCAP
+    import zarr as _zarr
+
+    _root = _zarr.open_group(str(zarr_path), mode='r')
+    _ep_keys = sorted(k for k in _root.keys() if k.startswith('episode_'))
+    if not _ep_keys:
+        log.error(f'No episodes found in {zarr_path}')
+        raise typer.Exit(1)
+    last_ep = int(_ep_keys[-1].split('_')[-1])
+
+    mcap_path = scene_dir / f'episode_{last_ep}.mcap'
     if mcap_path.exists():
         if yes:
-            log.info('episode_0.mcap already exists, skipping re-export.')
+            log.info(f'episode_{last_ep}.mcap already exists, skipping re-export.')
             raise typer.Exit()
-        if not Confirm.ask('episode_0.mcap already exists. Re-export?', default=False):
+        if not Confirm.ask(f'episode_{last_ep}.mcap already exists. Re-export?', default=False):
             log.info('Skipping MCAP export.')
             raise typer.Exit()
         mcap_path.unlink()
 
-    log.info('Exporting episode 0 to MCAP...')
+    log.info(f'Exporting episode {last_ep} to MCAP...')
     try:
         written = export_scene_to_mcap(
             scene_path=scene_dir,
             output_dir=scene_dir,
-            episode=0,
+            episode=last_ep,
             jpeg_quality=jpeg_quality,
             audio_chunk_size=audio_chunk_size,
         )

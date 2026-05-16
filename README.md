@@ -32,6 +32,8 @@ ros2_ws/
   src/
     polyumi_pi_msgs/   # Protobuf message definitions (camera frame, audio chunk)
     polyumi_ros2/      # ROS 2 nodes + Foxglove launch files
+external/
+  ORB_SLAM3_PolyUMI/   # Git submodule: PolyUMI's ORB_SLAM3 fork (monocular visual-inertial SLAM for the GoPro Hero 12)
 ```
 
 ## Prerequisites
@@ -43,6 +45,15 @@ ros2_ws/
 ## Installation
 
 ### PC
+
+Clone the repo and initialize the ORB-SLAM3 submodule (used by the SLAM
+preprocessing step):
+
+```bash
+git clone git@github.com:cwoodhayes/PolyUMI.git
+cd PolyUMI
+git submodule update --init --recursive
+```
 
 Install ingest dependencies (includes the `polyumi_pi` package for shared data types):
 
@@ -57,7 +68,28 @@ cd ros2_ws
 rosdep install --from-paths src --ignore-src -r --rosdistro kilted
 colcon build
 source install/setup.bash
+cd ..
 ```
+
+Build the [ORB-SLAM3 fork](https://github.com/cwoodhayes/ORB_SLAM3_PolyUMI). First, install the system dependencies (Ubuntu;
+the fork's [README.md](external/ORB_SLAM3_PolyUMI/README.md) has more detail):
+
+```bash
+sudo apt install libopencv-dev libeigen3-dev libboost-serialization-dev
+```
+
+Then run the build script (~15 minutes; also builds the nested Pangolin,
+DBoW2, g2o, and Sophus submodules in-tree):
+
+```bash
+cd external/ORB_SLAM3_PolyUMI
+bash build.sh
+cd ../..
+```
+
+The ingest CLI then finds the binaries automatically — no env vars needed.
+Set `ORB_SLAM3_DIR` and `ORB_SLAM3_BIN_SUBDIR` only if pointing at an
+out-of-tree build.
 
 ### RPi
 
@@ -95,12 +127,17 @@ pingest fetch --host <pi_ssh_hostname>
 pingest fetch-gopro --host <pi_ssh_hostname>
 
 # PROCESSING SESSIONS ON DISK
-# process all new scenes on disk into their pzarr form, skipping already-processed scenes:
+# ingest all new scenes on disk into their pzarr form, skipping already-processed scenes:
 pingest process-all
+# run the preprocessing pipeline on a particular scene (time alignment, SLAM, etc)
+pingest pp <scene_directory> 
+# export a single session to MCAP for easy visualization in foxglove (use the foxglove config 
+# in ingest/foxglove)
+pingest export-mcap <scene_directory> <session_number>
 ```
 
-The at-rest data format used during the preprocessing stage managed by `pingest` is a custom
-zarr format stored in `scene.zarr` in each scene directory, referred to in these docs as `pzarr`. See [docs/data-format.md](docs/data-format.md) for details on the format & the rationale behind it.
+The at-rest data format used during the preprocessing stage managed by `pingest` is a
+zarr-based format stored in `scene.zarr` in each scene directory, referred to in these docs as `pzarr`. See [docs/data-format.md](docs/data-format.md) for details on the format & the rationale behind it.
 
 ## Streaming / Demos
 
