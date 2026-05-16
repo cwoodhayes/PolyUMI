@@ -11,7 +11,7 @@ The output YAML must already contain Camera.fx/fy/cx/cy/k1-k4 and Tbc keys.
 Usage:
     uv run python ingest/integration/populate_slam_yaml.py \\
         --dataset slam/OpenImuCameraCalibrator/calibration_datasets/gopro-hero-12_polyumi_gripper_2 \\
-        [--yaml ingest/config/gopro_hero12_slam.yaml]
+        [--yaml external/ORB_SLAM3_PolyUMI/Examples/Monocular-Inertial/gopro_hero12_slam.yaml]
 """
 
 import argparse
@@ -24,7 +24,9 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 _DEFAULT_YAML = (
-    pathlib.Path(__file__).parent.parent / 'config' / 'gopro_hero12_slam.yaml'
+    pathlib.Path(__file__).parent.parent.parent
+    / 'external' / 'ORB_SLAM3_PolyUMI'
+    / 'Examples' / 'Monocular-Inertial' / 'gopro_hero12_slam.yaml'
 )
 
 

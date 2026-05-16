@@ -154,6 +154,7 @@ def _export_telemetry_json(
     because the upstream binary iterates ACCL and GYRO independently and
     assumes a 1:1 mapping between the two streams.
     """
+    assert np.all(np.diff(accl_ts) > 0), 'accl_ts must be strictly monotonically increasing'
     accl_interp = np.column_stack([
         np.interp(gyro_ts, accl_ts, accl[:, j]) for j in range(3)
     ])
@@ -234,6 +235,7 @@ def _make_temp_settings_yaml(
     tmp_dir: pathlib.Path,
     save_atlas: pathlib.Path | None = None,
     load_atlas: pathlib.Path | None = None,
+    viewer: bool = False,
 ) -> pathlib.Path:
     """
     Copy ``src`` settings YAML to ``tmp_dir`` with atlas paths appended.
@@ -246,7 +248,7 @@ def _make_temp_settings_yaml(
     content = src.read_text()
     if not content.endswith('\n'):
         content += '\n'
-    content += '\nSystem.Viewer: 0\n'
+    content += f'\nSystem.Viewer: {1 if viewer else 0}\n'
     if save_atlas is not None:
         content += f'\nSystem.SaveAtlasToFile: "{save_atlas}"\n'
     if load_atlas is not None:
@@ -423,16 +425,14 @@ class OrbSlam3Step(PreprocessingStep):
 
     def __init__(
         self,
-        orb_slam3_dir: pathlib.Path = pathlib.Path(
-            os.environ.get('ORB_SLAM3_DIR', str(_DEFAULT_ORB_SLAM3_DIR))
-        ),
+        orb_slam3_dir: pathlib.Path | None = None,
         settings_yaml: pathlib.Path | None = None,
         # Named `*_polyumi` to disambiguate from the Cheng fork's stock
         # mono_inertial_gopro_vi binary, which has hardcoded viewer=true and no
         # trajectory-output flag and is therefore not a drop-in replacement.
         map_builder_bin: str = 'mono_inertial_gopro_vi_polyumi',
         localizer_bin: str = 'mono_inertial_gopro_vi_localize',
-        bin_subdir: str = os.environ.get('ORB_SLAM3_BIN_SUBDIR', 'Examples/Monocular-Inertial'),
+        bin_subdir: str | None = None,
         timeout_s: float | None = None,
     ) -> None:
         """
@@ -456,6 +456,10 @@ class OrbSlam3Step(PreprocessingStep):
             Per-episode subprocess timeout; None = no timeout.
 
         """
+        if orb_slam3_dir is None:
+            orb_slam3_dir = pathlib.Path(os.environ.get('ORB_SLAM3_DIR', str(_DEFAULT_ORB_SLAM3_DIR)))
+        if bin_subdir is None:
+            bin_subdir = os.environ.get('ORB_SLAM3_BIN_SUBDIR', 'Examples/Monocular-Inertial')
         self.orb_slam3_dir = pathlib.Path(orb_slam3_dir)
         self.settings_yaml = pathlib.Path(settings_yaml) if settings_yaml else _DEFAULT_SETTINGS_YAML
         self.map_builder_bin = self.orb_slam3_dir / bin_subdir / map_builder_bin

@@ -96,25 +96,25 @@ def main() -> None:
         log.error(f'Episode {args.episode} not found in {scene_zarr}')
         sys.exit(1)
 
-    tmp = pathlib.Path(tempfile.mkdtemp(prefix='polyumi_slam_view_'))
-    log.info(f'Exporting {ep_key} to {tmp}...')
-    video_path, json_path, _ = _export_episode(root[ep_key], tmp)
+    with tempfile.TemporaryDirectory(prefix='polyumi_slam_view_') as tmp_str:
+        tmp = pathlib.Path(tmp_str)
+        log.info(f'Exporting {ep_key} to {tmp}...')
+        video_path, json_path, _ = _export_episode(root[ep_key], tmp)
 
-    # Build a temp settings YAML: load the pre-built atlas, viewer ON.
-    settings_path = _make_temp_settings_yaml(step.settings_yaml, tmp, load_atlas=atlas_path)
-    content = settings_path.read_text().replace('System.Viewer: 0', 'System.Viewer: 1')
-    settings_path.write_text(content)
+        settings_path = _make_temp_settings_yaml(
+            step.settings_yaml, tmp, load_atlas=atlas_path, viewer=True
+        )
 
-    cmd = [
-        str(step.map_builder_bin),
-        str(step._vocab_path),
-        str(settings_path),
-        str(video_path),
-        str(json_path),
-    ]
-    log.info('Launching viewer (close the Pangolin window to exit)...')
-    log.info('  ' + ' '.join(cmd))
-    subprocess.run(cmd)
+        cmd = [
+            str(step.map_builder_bin),
+            str(step._vocab_path),
+            str(settings_path),
+            str(video_path),
+            str(json_path),
+        ]
+        log.info('Launching viewer (close the Pangolin window to exit)...')
+        log.info('  ' + ' '.join(cmd))
+        subprocess.run(cmd)
 
 
 if __name__ == '__main__':
