@@ -24,6 +24,7 @@ from rich.prompt import Confirm
 
 from polyumi_pi.audio_streamer import AudioStreamer
 from polyumi_pi.cam_streamer import CameraStreamer
+from polyumi_pi.files.metadata import SessionType
 from polyumi_pi.files.scene import SceneFiles
 from polyumi_pi.files.session import DEFAULT_RECORDINGS_DIR, SessionFiles
 from polyumi_pi.gopro.gopro_config import GoProConfig, load_gopro_config, save_gopro_config
@@ -576,6 +577,9 @@ def start_scene(
                     session = scene.create_session()
                     session.metadata.robot = robot
                     session.metadata.task = task
+                    session.metadata.session_type = (
+                        SessionType.MAPPING if session_count == 1 else SessionType.EPISODE
+                    )
                     session.init_audio(
                         sample_rate=sample_rate,
                         channels=CHANNELS,

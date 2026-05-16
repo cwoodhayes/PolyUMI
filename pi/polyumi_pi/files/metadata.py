@@ -1,5 +1,6 @@
 """Metadata file abstraction for PolyUMI data collection."""
 
+import enum
 import json
 import logging
 import pathlib
@@ -12,6 +13,13 @@ from uuid import uuid4
 from polyumi_pi.files import base
 
 log = logging.getLogger('pi_metadata')
+
+
+class SessionType(str, enum.Enum):
+    """Whether a session is used to build a SLAM map or to record a task episode."""
+
+    MAPPING = "MAPPING"
+    EPISODE = "EPISODE"
 
 
 def _get_git_hash() -> str:
@@ -59,6 +67,7 @@ class SessionMetadata(base.SessionDataABC):
     notes: str | None = None
     task: str | None = None
     robot: str | None = None
+    session_type: SessionType = SessionType.EPISODE
     polyumi_version: str = field(default_factory=lambda: _GIT_HASH)
 
     # manually maintained file version to handle breaking changes to
@@ -102,6 +111,7 @@ class SessionMetadata(base.SessionDataABC):
             'notes': self.notes,
             'task': self.task,
             'robot': self.robot,
+            'session_type': self.session_type.value,
             'polyumi_version': self.polyumi_version,
             'file_version': self.file_version,
         }
@@ -118,4 +128,5 @@ class SessionMetadata(base.SessionDataABC):
             data['camera_resolution'] = tuple(data['camera_resolution'])
         if data.get('gopro_sync_time') is not None:
             data['gopro_sync_time'] = datetime.fromisoformat(data['gopro_sync_time'])
+        data['session_type'] = SessionType(data['session_type'])
         return cls(**data)

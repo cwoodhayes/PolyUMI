@@ -1,0 +1,3 @@
+[submodule "external/ORB_SLAM3_PolyUMI"]
+	path = external/ORB_SLAM3_PolyUMI
+	url = git@github.com:cwoodhayes/ORB_SLAM3_PolyUMI.git

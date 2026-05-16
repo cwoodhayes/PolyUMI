@@ -92,6 +92,60 @@ uv run pytest ...
 
 `uv` selects the correct workspace venv automatically. Bare `python` / `pip` will pick up the wrong venv (e.g. `pi/.venv`) and produce "module not found" errors or install into the wrong place.
 
+## Testing SLAM
+
+The ORB-SLAM3 step (`OrbSlam3Step`, preprocessing step 2) uses the
+`external/ORB_SLAM3_PolyUMI` git submodule by default — a PolyUMI fork of
+Chi-Cheng Chang's ORB-SLAM3 fork, with additional patches (atlas-load activates
+the loaded map, null guards in LocalMapping, shutdown wait-for-threads,
+`ReconstructH` `vP3D` assignment, etc.) and our two custom binaries
+(`mono_inertial_gopro_vi_polyumi` for mapping, `mono_inertial_gopro_vi_localize`
+for localization) living in `Examples/Monocular-Inertial/`.
+
+After a fresh clone, init the submodule and build it:
+
+```bash
+git submodule update --init --recursive
+cd external/ORB_SLAM3_PolyUMI && bash build.sh
+```
+
+The build script builds Pangolin in-tree (`Thirdparty/Pangolin`) and passes
+`CMAKE_PREFIX_PATH` so ORB-SLAM3's `find_package(Pangolin)` finds it; nothing extra to set up.
+
+No env vars are required for the in-repo install — `OrbSlam3Step` resolves
+`external/ORB_SLAM3_PolyUMI` from the slam_step.py source location.
+Override `ORB_SLAM3_DIR` / `ORB_SLAM3_BIN_SUBDIR` only if you want to point at
+an out-of-tree build.
+
+Run the SLAM step on a single scene:
+```bash
+pingest pp 2 --scene recordings/scene_YYYY-MM-DD_hh-mm-ss_XXXX
+# --force to re-run if already marked complete
+pingest pp 2 --scene recordings/scene_YYYY-MM-DD_hh-mm-ss_XXXX --force
+```
+
+Test scene: `recordings/scene_2026-05-12_21-36-44_7985` — has one MAPPING episode,
+no EPISODE sessions. Step will build the map and warn about missing episodes; that's expected.
+
+**Camera model:** The YAML at `ingest/config/gopro_hero12_slam.yaml` currently uses
+`DoubleSphere` (from the first calibration run), but this ORB-SLAM3 build only supports
+`Pinhole` and `KannalaBrandt8`. A recalibration with `--camera_model=FISHEYE` in the
+OpenImuCameraCalibrator Docker container is needed before map building will succeed.
+`FISHEYE` in OpenImuCameraCalibrator = `KannalaBrandt8` in ORB-SLAM3 (same Kannala-Brandt
+4-parameter model; output fields `radial_distortion_1..4` → `Camera.k1..k4`).
+
+Recalibration command (corners already extracted, so this is fast):
+```bash
+# inside the OpenImuCameraCalibrator Docker container
+python python/run_gopro_calibration.py \
+  --path_calib_dataset=/home/calibration_datasets/gopro-hero-12_polyumi_gripper_1 \
+  --checker_size_m=0.021 \
+  --image_downsample_factor=2 \
+  --camera_model=FISHEYE \
+  --recompute_corners=0 \
+  --path_to_build build/applications/
+```
+
 ## Docstring Formatting
 
 This project enforces pydocstyle via ruff. The rules that come up most often:
