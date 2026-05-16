@@ -486,6 +486,7 @@ class OrbSlam3Step(PreprocessingStep):
         stdout_log: pathlib.Path,
         stderr_log: pathlib.Path,
         label: str,
+        cwd: pathlib.Path | None = None,
     ) -> None:
         log.info(f'  Running: {" ".join(cmd)}')
         with open(stdout_log, 'w') as fout, open(stderr_log, 'w') as ferr:
@@ -494,6 +495,7 @@ class OrbSlam3Step(PreprocessingStep):
                 stdout=fout,
                 stderr=ferr,
                 timeout=self.timeout_s,
+                cwd=cwd,
             )
         if result.returncode != 0:
             raise RuntimeError(
@@ -528,6 +530,7 @@ class OrbSlam3Step(PreprocessingStep):
                 log_dir / 'mapping_slam.stdout',
                 log_dir / 'mapping_slam.stderr',
                 label='ORB-SLAM3 map builder',
+                cwd=log_dir,
             )
             if traj_out.exists():
                 log.info(f'  Mapping trajectory saved to {traj_out}')
@@ -577,6 +580,7 @@ class OrbSlam3Step(PreprocessingStep):
                 log_dir / f'episode_{episode_index}_slam.stdout',
                 log_dir / f'episode_{episode_index}_slam.stderr',
                 label=f'ORB-SLAM3 localizer (episode {episode_index})',
+                cwd=log_dir,
             )
             if not traj_out.exists():
                 raise RuntimeError(
