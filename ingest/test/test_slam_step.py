@@ -113,11 +113,11 @@ def test_mapping_episode_skipped_during_localization(tmp_path: pathlib.Path) -> 
     called_build = []
     called_localize = []
 
-    def _fake_build(ep_grp, atlas_path, log_dir):
+    def _fake_build(ep_grp, atlas_path, log_dir, gopro_mp4=None):
         called_build.append(ep_grp.name)
         atlas_path.touch()
 
-    def _fake_localize(ep_grp, episode_index, atlas_path, log_dir):
+    def _fake_localize(ep_grp, episode_index, atlas_path, log_dir, gopro_mp4=None):
         called_localize.append(ep_grp.name)
         n_frames = ep_grp['timestamps/gopro'].shape[0]
         poses = np.tile(np.eye(4, dtype=np.float32), (n_frames, 1, 1))
@@ -146,10 +146,10 @@ def test_zarr_output_schema(tmp_path: pathlib.Path) -> None:
     settings = _calibrated_settings(tmp_path)
     step = OrbSlam3Step(settings_yaml=settings)
 
-    def _fake_build(ep_grp, atlas_path, log_dir):
+    def _fake_build(ep_grp, atlas_path, log_dir, gopro_mp4=None):
         atlas_path.touch()
 
-    def _fake_localize(ep_grp, episode_index, atlas_path, log_dir):
+    def _fake_localize(ep_grp, episode_index, atlas_path, log_dir, gopro_mp4=None):
         traj_path = tmp_path / f'traj_{episode_index}.txt'
         frame_ts = np.asarray(ep_grp['timestamps/gopro'][:], dtype=np.float64)
         tracked = np.ones(n_frames, dtype=bool)

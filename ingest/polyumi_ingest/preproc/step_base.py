@@ -76,7 +76,7 @@ class PreprocessingStep(ABC):
     step_name: str
 
     @abstractmethod
-    def run_step(self, scene_zarr: pathlib.Path) -> None:
+    def run_step(self, scene_zarr: pathlib.Path, force: bool = False) -> None:
         """Mutate a scene.zarr store in place."""
 
     def run(self, scene_path: pathlib.Path, copy: bool = False, force: bool = False) -> pathlib.Path:
@@ -94,7 +94,7 @@ class PreprocessingStep(ABC):
                 shutil.rmtree(target_zarr)
             shutil.copytree(scene_zarr, target_zarr)
 
-        self.run_step(target_zarr)
+        self.run_step(target_zarr, force=force)
         root = zarr.open_group(str(target_zarr), mode='a')
         _mark_preprocessing_step(root, self.step_number)
         return target_zarr

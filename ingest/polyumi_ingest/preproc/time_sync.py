@@ -77,7 +77,7 @@ class TimeSyncStep(PreprocessingStep):
         self.trim_start_s = trim_start_s
         self.finger_mic_name = 'finger_piezo'
 
-    def run_step(self, scene_zarr: pathlib.Path) -> None:
+    def run_step(self, scene_zarr: pathlib.Path, force: bool = False) -> None:
         """Read the audio streams from scene_zarr and write the estimated offset."""
         root = zarr.open_group(str(scene_zarr), mode='a')
         episodes = sorted(k for k in root.keys() if k.startswith('episode_'))
@@ -166,7 +166,7 @@ class ChirpTimeSyncStep(PreprocessingStep):
         self.search_radius_s = search_radius_s
         self._aligner = ChirpAligner()
 
-    def run_step(self, scene_zarr: pathlib.Path) -> None:
+    def run_step(self, scene_zarr: pathlib.Path, force: bool = False) -> None:
         """Detect chirp onsets in both recordings and write the estimated offset."""
         root = zarr.open_group(str(scene_zarr), mode='a')
         episodes = sorted(k for k in root.keys() if k.startswith('episode_'))

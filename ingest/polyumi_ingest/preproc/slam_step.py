@@ -590,7 +590,7 @@ class OrbSlam3Step(PreprocessingStep):
             log.error(f'Localization failed; temp dir preserved: {tmp_dir}')
             raise
 
-    def run_step(self, scene_zarr: pathlib.Path) -> None:
+    def run_step(self, scene_zarr: pathlib.Path, force: bool = False) -> None:
         """
         Run map building then per-episode localization on scene_zarr.
 
@@ -638,6 +638,9 @@ class OrbSlam3Step(PreprocessingStep):
             )
 
         # Phase 1: map building
+        if atlas_path.exists() and force:
+            log.info(f'--force: removing existing atlas at {atlas_path}')
+            atlas_path.unlink()
         if atlas_path.exists():
             log.info(f'Atlas already exists at {atlas_path}, skipping map building.')
         else:
