@@ -32,6 +32,8 @@ ros2_ws/
   src/
     polyumi_pi_msgs/   # Protobuf message definitions (camera frame, audio chunk)
     polyumi_ros2/      # ROS 2 nodes + Foxglove launch files
+external/
+  ORB_SLAM3_PolyUMI/   # Git submodule: our ORB-SLAM3 fork (mono-inertial SLAM for the GoPro pass)
 ```
 
 ## Prerequisites
@@ -43,6 +45,15 @@ ros2_ws/
 ## Installation
 
 ### PC
+
+Clone the repo and initialize the ORB-SLAM3 submodule (used by the SLAM
+preprocessing step):
+
+```bash
+git clone git@github.com:cwoodhayes/PolyUMI.git
+cd PolyUMI
+git submodule update --init --recursive
+```
 
 Install ingest dependencies (includes the `polyumi_pi` package for shared data types):
 
@@ -57,7 +68,28 @@ cd ros2_ws
 rosdep install --from-paths src --ignore-src -r --rosdistro kilted
 colcon build
 source install/setup.bash
+cd ..
 ```
+
+Build the ORB-SLAM3 fork. First, install the system dependencies (Ubuntu;
+the fork's [README.md](external/ORB_SLAM3_PolyUMI/README.md) has more detail):
+
+```bash
+sudo apt install libopencv-dev libeigen3-dev libboost-serialization-dev
+```
+
+Then run the build script (~15 minutes; also builds the nested Pangolin,
+DBoW2, g2o, and Sophus submodules in-tree):
+
+```bash
+cd external/ORB_SLAM3_PolyUMI
+bash build.sh
+cd ../..
+```
+
+The ingest CLI then finds the binaries automatically — no env vars needed.
+Set `ORB_SLAM3_DIR` and `ORB_SLAM3_BIN_SUBDIR` only if pointing at an
+out-of-tree build.
 
 ### RPi
 

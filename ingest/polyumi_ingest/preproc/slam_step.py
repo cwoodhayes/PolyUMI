@@ -35,6 +35,12 @@ _PLACEHOLDER_MARKER = 'CALIBRATE_ME'
 
 _DEFAULT_SETTINGS_YAML = pathlib.Path(__file__).parent.parent.parent / 'config' / 'gopro_hero12_slam.yaml'
 
+# Repo-root-relative default install path for the ORB-SLAM3 fork — the git
+# submodule at external/ORB_SLAM3_PolyUMI.  Set ORB_SLAM3_DIR in the env to
+# override (useful if you're working out-of-tree).
+_REPO_ROOT = pathlib.Path(__file__).parent.parent.parent.parent
+_DEFAULT_ORB_SLAM3_DIR = _REPO_ROOT / 'external' / 'ORB_SLAM3_PolyUMI'
+
 # Maximum acceptable distance (as a fraction of a frame period) between a
 # trajectory entry's timestamp and the nearest frame timestamp when
 # reconciling the C++ output back onto our frame index.
@@ -385,12 +391,15 @@ class OrbSlam3Step(PreprocessingStep):
     Constructor arguments
     ---------------------
     orb_slam3_dir:
-        Root directory of the ORB-SLAM3 installation.  Expected layout::
+        Root directory of the ORB-SLAM3 installation.  Defaults to the
+        ``external/ORB_SLAM3_PolyUMI`` git submodule.  Override via the
+        ``ORB_SLAM3_DIR`` env var to point at an out-of-tree build.
+        Expected layout::
 
             {orb_slam3_dir}/
-            ├── {bin_subdir}/          # default "bin"; source build uses
-            │   ├── {map_builder_bin}  # "Examples/Monocular-Inertial"
-            │   └── {localizer_bin}
+            ├── {bin_subdir}/          # default Examples/Monocular-Inertial
+            │   ├── {map_builder_bin}  # mono_inertial_gopro_vi_polyumi
+            │   └── {localizer_bin}    # mono_inertial_gopro_vi_localize
             └── Vocabulary/
                 └── ORBvoc.txt
 
@@ -413,7 +422,7 @@ class OrbSlam3Step(PreprocessingStep):
     def __init__(
         self,
         orb_slam3_dir: pathlib.Path = pathlib.Path(
-            os.environ.get('ORB_SLAM3_DIR', '/usr/local/lib/ORB_SLAM3')
+            os.environ.get('ORB_SLAM3_DIR', str(_DEFAULT_ORB_SLAM3_DIR))
         ),
         settings_yaml: pathlib.Path | None = None,
         # Named `*_polyumi` to disambiguate from the Cheng fork's stock
@@ -421,7 +430,7 @@ class OrbSlam3Step(PreprocessingStep):
         # trajectory-output flag and is therefore not a drop-in replacement.
         map_builder_bin: str = 'mono_inertial_gopro_vi_polyumi',
         localizer_bin: str = 'mono_inertial_gopro_vi_localize',
-        bin_subdir: str = os.environ.get('ORB_SLAM3_BIN_SUBDIR', 'bin'),
+        bin_subdir: str = os.environ.get('ORB_SLAM3_BIN_SUBDIR', 'Examples/Monocular-Inertial'),
         timeout_s: float | None = None,
     ) -> None:
         """
@@ -439,8 +448,8 @@ class OrbSlam3Step(PreprocessingStep):
             Binary filename under ``orb_slam3_dir/bin_subdir/`` for localization.
         bin_subdir:
             Subdirectory of ``orb_slam3_dir`` that contains the binaries.
-            Defaults to ``bin``; use ``Examples/Monocular-Inertial`` for a
-            standard ORB-SLAM3 source build.
+            Defaults to ``Examples/Monocular-Inertial`` to match the in-repo
+            ORB_SLAM3_PolyUMI build layout.
         timeout_s:
             Per-episode subprocess timeout; None = no timeout.
 
