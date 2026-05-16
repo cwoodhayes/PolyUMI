@@ -206,7 +206,7 @@ def _make_temp_settings_yaml(
 def _parse_and_reconcile_trajectory(
     traj_path: pathlib.Path,
     frame_ts: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> np.ndarray:
     """
     Parse an ORB-SLAM3 EuRoC-format trajectory and align it to ``frame_ts``.
 
