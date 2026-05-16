@@ -33,13 +33,15 @@ _BLOSC = Blosc(cname='zstd', clevel=5, shuffle=Blosc.SHUFFLE)
 # Marker string used in the settings YAML to flag values that need calibration.
 _PLACEHOLDER_MARKER = 'CALIBRATE_ME'
 
-_DEFAULT_SETTINGS_YAML = pathlib.Path(__file__).parent.parent.parent / 'config' / 'gopro_hero12_slam.yaml'
-
 # Repo-root-relative default install path for the ORB-SLAM3 fork — the git
 # submodule at external/ORB_SLAM3_PolyUMI.  Set ORB_SLAM3_DIR in the env to
 # override (useful if you're working out-of-tree).
 _REPO_ROOT = pathlib.Path(__file__).parent.parent.parent.parent
 _DEFAULT_ORB_SLAM3_DIR = _REPO_ROOT / 'external' / 'ORB_SLAM3_PolyUMI'
+
+_DEFAULT_SETTINGS_YAML = (
+    _DEFAULT_ORB_SLAM3_DIR / 'Examples' / 'Monocular-Inertial' / 'gopro_hero12_slam.yaml'
+)
 
 # Maximum acceptable distance (as a fraction of a frame period) between a
 # trajectory entry's timestamp and the nearest frame timestamp when
