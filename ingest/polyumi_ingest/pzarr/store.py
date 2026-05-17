@@ -345,28 +345,49 @@ def _parse_optitrack_csv(csv_path: pathlib.Path) -> tuple[np.ndarray, np.ndarray
     """
     Parse an OptiTrack rigid-body CSV export into relative timestamps and 6DOF poses.
 
+    Supports CSVs with multiple rigid bodies. When more than one rigid body is
+    present the first one whose name contains "PolyUMI" is used; if none match,
+    the first rigid body is used (columns 2-7).
+
     Returns:
         times_s: (N,) float64 seconds since capture start
         poses: (N, 7) float64 [x, y, z, qx, qy, qz, qw] (position metres, quaternion)
 
     """
+    name_row_fields: list[str] = []
     data_start_row = None
     with csv_path.open() as f:
         for i, line in enumerate(f):
+            stripped = line.rstrip('\n')
+            if stripped.startswith(',Name,'):
+                name_row_fields = stripped.split(',')
             if line.startswith('Frame,Time'):
                 data_start_row = i + 1
                 break
     if data_start_row is None:
         raise ValueError(f'Could not find data header row in OptiTrack CSV: {csv_path}')
 
+    # Each rigid body occupies 6 data columns (rot X/Y/Z, pos X/Y/Z) starting at col 2.
+    # Find the first column belonging to a rigid body named "PolyUMI*".
+    rb_col_start = 2  # default: first rigid body
+    if name_row_fields:
+        for col_idx, name in enumerate(name_row_fields[2:], start=2):
+            if 'PolyUMI' in name:
+                rb_col_start = col_idx
+                break
+        else:
+            log.warning(
+                'No rigid body named "PolyUMI*" found in OptiTrack CSV; '
+                'falling back to first rigid body (cols 2-7).'
+            )
+
     data = np.loadtxt(csv_path, delimiter=',', skiprows=data_start_row, dtype=np.float64)
     if data.ndim == 1:
         data = data[np.newaxis, :]
 
-    # Columns: Frame, Time(s), rot_X, rot_Y, rot_Z, pos_X, pos_Y, pos_Z
     times_s = data[:, 1]
-    rot_xyz_deg = data[:, 2:5]
-    pos_xyz = data[:, 5:8]
+    rot_xyz_deg = data[:, rb_col_start : rb_col_start + 3]
+    pos_xyz = data[:, rb_col_start + 3 : rb_col_start + 6]
 
     quats_xyzw = Rotation.from_euler('xyz', rot_xyz_deg, degrees=True).as_quat()
     poses = np.concatenate([pos_xyz, quats_xyzw], axis=1)

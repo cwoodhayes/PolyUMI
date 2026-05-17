@@ -117,6 +117,31 @@ _SCHEMA_POSE_IN_FRAME = json.dumps(
     }
 ).encode()
 
+_QUAT = {
+    'type': 'object',
+    'properties': {
+        'x': {'type': 'number'},
+        'y': {'type': 'number'},
+        'z': {'type': 'number'},
+        'w': {'type': 'number'},
+    },
+}
+
+_SCHEMA_FRAME_TRANSFORM = json.dumps(
+    {
+        '$schema': 'https://json-schema.org/draft/2020-12/schema',
+        'title': 'foxglove.FrameTransform',
+        'type': 'object',
+        'properties': {
+            'timestamp': _TIME,
+            'parent_frame_id': {'type': 'string'},
+            'child_frame_id': {'type': 'string'},
+            'translation': _VEC3,
+            'rotation': _QUAT,
+        },
+    }
+).encode()
+
 _SCHEMA_LOCATION_FIX = json.dumps(
     {
         '$schema': 'https://json-schema.org/draft/2020-12/schema',
@@ -174,6 +199,7 @@ def _register_channels(
     imu_sid = writer.register_schema('foxglove.Imu', 'jsonschema', _SCHEMA_IMU)
     gps_sid = writer.register_schema('foxglove.LocationFix', 'jsonschema', _SCHEMA_LOCATION_FIX)
     pose_sid = writer.register_schema('foxglove.PoseInFrame', 'jsonschema', _SCHEMA_POSE_IN_FRAME)
+    tf_sid = writer.register_schema('foxglove.FrameTransform', 'jsonschema', _SCHEMA_FRAME_TRANSFORM)
 
     def ch(topic: str, sid: int) -> int:
         return writer.register_channel(topic=topic, message_encoding='json', schema_id=sid)
@@ -182,6 +208,7 @@ def _register_channels(
         '/finger/image': ch('/finger/image', img_sid),
         '/finger/piezo': ch('/finger/piezo', aud_sid),
         '/finger/air': ch('/finger/air', aud_sid),
+        '/tf_static': ch('/tf_static', tf_sid),
     }
     if has_gopro:
         channels['/gopro/image'] = ch('/gopro/image', img_sid)
@@ -406,6 +433,28 @@ def _write_optitrack_poses(
         writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
 
 
+def _write_static_transform(
+    writer: Writer,
+    channel_id: int,
+    t_s: float,
+    parent: str,
+    child: str,
+    translation: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    rotation: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
+) -> None:
+    """Write a single foxglove.FrameTransform message on /tf_static."""
+    msg = json.dumps(
+        {
+            'timestamp': _foxglove_time(t_s),
+            'parent_frame_id': parent,
+            'child_frame_id': child,
+            'translation': {'x': translation[0], 'y': translation[1], 'z': translation[2]},
+            'rotation': {'x': rotation[0], 'y': rotation[1], 'z': rotation[2], 'w': rotation[3]},
+        }
+    ).encode()
+    writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
+
+
 def _write_slam_poses(
     writer: Writer,
     channel_id: int,
@@ -489,6 +538,11 @@ def export_episode_to_mcap(
                 has_optitrack=has_optitrack,
                 has_slam=has_slam,
             )
+
+            # Static transforms: slam and world share the same origin.
+            if has_slam:
+                t0 = float(ep_grp['timestamps/finger'][0])
+                _write_static_transform(writer, ch['/tf_static'], t0, parent='world', child='slam')
 
             if has_optitrack:
                 assert root_grp is not None
