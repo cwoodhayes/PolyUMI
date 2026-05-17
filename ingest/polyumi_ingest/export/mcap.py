@@ -357,20 +357,20 @@ def _transform_optitrack_pose(
 
 def _gripper_calib_transforms(calib: dict) -> tuple[RigidTransform, RigidTransform, RigidTransform]:
     """Build (T_gb_rb, T_gb_gp, T_o_w) RigidTransforms from a gripper_calib zarr-attrs dict."""
-    rb = calib['T_gripper_base_to_optitrack']
+    rb = calib['T_gripper_base_to_optitrack_rigid_body']
     gp = calib['T_gripper_base_to_gopro']
     world = calib['T_optitrack_to_world']
     T_gb_rb = RigidTransform.from_components(
-        translation=np.array(rb['translation']),
-        rotation=Rotation.from_euler('xyz', rb['rotation'], degrees=True),
+        translation=np.array(rb['translation'], dtype=float),
+        rotation=Rotation.from_quat(rb['rotation']),
     )
     T_gb_gp = RigidTransform.from_components(
-        translation=np.array(gp['translation']),
-        rotation=Rotation.from_euler('xyz', gp['rotation'], degrees=True),
+        translation=np.array(gp['translation'], dtype=float),
+        rotation=Rotation.from_quat(gp['rotation']),
     )
     T_o_w = RigidTransform.from_components(
-        translation=np.array(world['translation']),
-        rotation=Rotation.from_euler('xyz', world['rotation'], degrees=True),
+        translation=np.array(world['translation'], dtype=float),
+        rotation=Rotation.from_quat(world['rotation']),
     )
     return T_gb_rb, T_gb_gp, T_o_w
 
@@ -490,6 +490,27 @@ def export_episode_to_mcap(
                 has_slam=has_slam,
             )
 
+            if has_optitrack:
+                assert root_grp is not None
+                log.info('  optitrack poses...')
+                gripper_calib = root_grp.attrs.get('gripper_calib')
+                if not isinstance(gripper_calib, dict):
+                    raise RuntimeError(
+                        'gripper_calib not found in scene.zarr root attrs; rebuild the pzarr to embed the calibration.'
+                    )
+                ot_ts: np.ndarray = root_grp['optitrack/timestamps'][:]  # type: ignore[index]
+                ot_poses: np.ndarray = root_grp['optitrack/pose'][:]  # type: ignore[index]
+                # Slice to the episode time window when annotations are available.
+                ann_attrs = ep_grp['annotations'].attrs if 'annotations' in ep_grp else {}
+                ep_start = ann_attrs.get('episode_start')
+                ep_end = ann_attrs.get('episode_end')
+                if ep_start is not None and ep_end is not None:
+                    mask = (ot_ts >= float(ep_start)) & (ot_ts <= float(ep_end))
+                    ot_ts = ot_ts[mask]
+                    ot_poses = ot_poses[mask]
+                _write_optitrack_poses(writer, ch['/optitrack/pose'], ot_poses, ot_ts, gripper_calib)
+
+
             log.info('  finger frames...')
             _write_video(
                 writer,
@@ -567,26 +588,6 @@ def export_episode_to_mcap(
                     ep_grp['gopro/gps'][:],  # type: ignore[index]
                     _gopro_ts('gopro_gps'),
                 )
-
-            if has_optitrack:
-                assert root_grp is not None
-                log.info('  optitrack poses...')
-                gripper_calib = root_grp.attrs.get('gripper_calib')
-                if not isinstance(gripper_calib, dict):
-                    raise RuntimeError(
-                        'gripper_calib not found in scene.zarr root attrs; rebuild the pzarr to embed the calibration.'
-                    )
-                ot_ts: np.ndarray = root_grp['optitrack/timestamps'][:]  # type: ignore[index]
-                ot_poses: np.ndarray = root_grp['optitrack/pose'][:]  # type: ignore[index]
-                # Slice to the episode time window when annotations are available.
-                ann_attrs = ep_grp['annotations'].attrs if 'annotations' in ep_grp else {}
-                ep_start = ann_attrs.get('episode_start')
-                ep_end = ann_attrs.get('episode_end')
-                if ep_start is not None and ep_end is not None:
-                    mask = (ot_ts >= float(ep_start)) & (ot_ts <= float(ep_end))
-                    ot_ts = ot_ts[mask]
-                    ot_poses = ot_poses[mask]
-                _write_optitrack_poses(writer, ch['/optitrack/pose'], ot_poses, ot_ts, gripper_calib)
 
             if has_slam:
                 log.info('  slam poses...')
