@@ -316,6 +316,17 @@ def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) 
     ann_grp.attrs.update(ann_attrs)
 
 
+_GRIPPER_CALIB_YAML = pathlib.Path(__file__).parent.parent.parent / 'config' / 'gripper_calib.yaml'
+
+
+def _load_gripper_calib() -> dict:
+    """Load gripper calibration transforms from config/gripper_calib.yaml."""
+    import yaml
+
+    with _GRIPPER_CALIB_YAML.open() as f:
+        return yaml.safe_load(f)
+
+
 def _find_optitrack_csv(scene_path: pathlib.Path) -> pathlib.Path | None:
     """Return the first CSV in scene_path whose first line starts with 'Format Version,1.23'."""
     for p in sorted(scene_path.iterdir()):
@@ -405,6 +416,7 @@ def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.P
             'optitrack_start_time': (
                 optitrack_start_time.isoformat() if optitrack_start_time is not None else None
             ),
+            'gripper_calib': _load_gripper_calib(),
         }
     )
 

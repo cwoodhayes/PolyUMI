@@ -15,7 +15,6 @@ import imagecodecs.numcodecs  # noqa: F401 — registers imagecodecs_jpegxl with
 import numpy as np
 import zarr
 from numcodecs import Blosc
-from scipy.spatial.transform import Rotation
 
 from polyumi_ingest.preproc.step_base import (
     PreprocessingStep,
@@ -80,7 +79,6 @@ def _find_gopro_mp4(ep_grp: zarr.Group, scene_zarr: pathlib.Path) -> pathlib.Pat
         f'gopro.mp4 not found for {ep_key!r} — expected at '
         f'{session_dirs[ep_index] / _GOPRO_MP4 if ep_index < len(session_dirs) else "<no matching session dir>"}'
     )
-
 
 
 def _export_telemetry_json(
