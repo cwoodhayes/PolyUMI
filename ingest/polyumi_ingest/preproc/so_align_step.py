@@ -9,6 +9,7 @@ import numpy as np
 import zarr
 from scipy.spatial.transform import Rotation
 
+from polyumi_ingest.config import load_gripper_calib
 from polyumi_ingest.preproc.step_base import PreprocessingStep, register_preprocessing_step
 from polyumi_ingest.pzarr.store import arr, grp
 from polyumi_ingest.transforms import gripper_calib_transforms, transform_optitrack_pose
@@ -86,11 +87,8 @@ class SlamToWorldAlignStep(PreprocessingStep):
             self._write_identity(root)
             return
 
-        gripper_calib = root.attrs.get('gripper_calib')
-        if not isinstance(gripper_calib, dict):
-            log.warning('No gripper_calib in scene attrs; storing identity T_ws.')
-            self._write_identity(root)
-            return
+        gripper_calib = load_gripper_calib()
+        root.attrs['gripper_calib'] = gripper_calib
 
         T_gb_rb, T_gb_gp, _ = gripper_calib_transforms(gripper_calib)
         ot_ts = np.asarray(root['optitrack/timestamps'][:], dtype=np.float64)

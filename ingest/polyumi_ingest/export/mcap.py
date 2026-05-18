@@ -494,7 +494,12 @@ def export_episode_to_mcap(
                 has_slam=has_slam,
             )
 
+            # Use the earliest timestamp across all streams as the TF anchor so that
+            # static transforms precede every data message (gopro timestamps can be
+            # earlier than finger timestamps after time-sync correction).
             t0 = float(ep_grp['timestamps/finger'][0])  # type: ignore
+            if 'timestamps/gopro' in ep_grp:
+                t0 = min(t0, float(_gopro_ts('gopro')[0]))
 
             if has_optitrack:
                 assert root_grp is not None
@@ -539,14 +544,13 @@ def export_episode_to_mcap(
 
                 ot_ts: np.ndarray = root_grp['optitrack/timestamps'][:]  # type: ignore[index]
                 ot_poses: np.ndarray = root_grp['optitrack/pose'][:]  # type: ignore[index]
-                # Slice to the episode time window when annotations are available.
-                ann_attrs = ep_grp['annotations'].attrs if 'annotations' in ep_grp else {}
-                ep_start = ann_attrs.get('episode_start')
-                ep_end = ann_attrs.get('episode_end')
-                if ep_start is not None and ep_end is not None:
-                    mask = (ot_ts >= float(ep_start)) & (ot_ts <= float(ep_end))  # type: ignore
-                    ot_ts = ot_ts[mask]
-                    ot_poses = ot_poses[mask]
+                # Clip optitrack to the episode recording window.  Use t0 as the lower
+                # bound (earliest of finger/gopro) so poses are present from the very
+                # first data message; use the last finger timestamp as the upper bound.
+                ep_ts_last = float(ep_grp['timestamps/finger'][-1])  # type: ignore
+                mask = (ot_ts >= t0) & (ot_ts <= ep_ts_last)  # type: ignore
+                ot_ts = ot_ts[mask]
+                ot_poses = ot_poses[mask]
                 _write_optitrack_poses(writer, ch['/optitrack/pose'], ot_poses, ot_ts, gripper_calib)
 
             log.info('  finger frames...')
