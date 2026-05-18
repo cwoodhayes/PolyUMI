@@ -7,7 +7,6 @@ import pathlib
 
 import numpy as np
 import zarr
-from numcodecs import Blosc
 from scipy.spatial.transform import RigidTransform, Rotation
 
 from polyumi_ingest.preproc.step_base import PreprocessingStep, register_preprocessing_step
@@ -15,8 +14,6 @@ from polyumi_ingest.pzarr.store import _arr, _grp
 from polyumi_ingest.transforms import gripper_calib_transforms, transform_optitrack_pose
 
 log = logging.getLogger(__name__)
-
-_BLOSC = Blosc(cname='zstd', clevel=5, shuffle=Blosc.SHUFFLE)
 
 
 @register_preprocessing_step(step_number=3, step_name='slam-world-align')
@@ -44,6 +41,14 @@ class SlamToWorldAlignStep(PreprocessingStep):
     ``optitrack/timestamps``) and at least one episode with ``gopro/slam_poses``.
     """
 
+    @staticmethod
+    def _write_identity(root: zarr.Group) -> None:
+        """Store an identity transform as slam_to_world_transform."""
+        root.attrs['slam_to_world_transform'] = {
+            'translation': [0.0, 0.0, 0.0],
+            'rotation': [0.0, 0.0, 0.0, 1.0],
+        }
+
     def run_step(self, scene_zarr: pathlib.Path, force: bool = False) -> None:
         """Compute T_ws and write it to the root zarr attrs."""
         root = zarr.open_group(str(scene_zarr), mode='a')
@@ -53,12 +58,14 @@ class SlamToWorldAlignStep(PreprocessingStep):
             return
 
         if 'optitrack/pose' not in root:
-            log.warning('No optitrack data in scene; skipping slam-world alignment.')
+            log.warning('No optitrack data in scene; storing identity T_ws.')
+            self._write_identity(root)
             return
 
         gripper_calib = root.attrs.get('gripper_calib')
         if not isinstance(gripper_calib, dict):
-            log.warning('No gripper_calib in scene attrs; skipping slam-world alignment.')
+            log.warning('No gripper_calib in scene attrs; storing identity T_ws.')
+            self._write_identity(root)
             return
 
         T_gb_rb, T_gb_gp, T_o_w = gripper_calib_transforms(gripper_calib)
@@ -88,7 +95,8 @@ class SlamToWorldAlignStep(PreprocessingStep):
                 slam_poses_parts.append(poses[valid])
 
         if not slam_ts_parts:
-            log.warning('No valid SLAM poses found across any episode; skipping slam-world alignment.')
+            log.warning('No valid SLAM poses found across any episode; storing identity T_ws.')
+            self._write_identity(root)
             return
 
         slam_ts = np.concatenate(slam_ts_parts)
@@ -101,15 +109,17 @@ class SlamToWorldAlignStep(PreprocessingStep):
         if t_start >= t_end:
             log.warning(
                 f'No time overlap between SLAM ({slam_ts.min():.3f}–{slam_ts.max():.3f}s) '
-                f'and OptiTrack ({ot_ts.min():.3f}–{ot_ts.max():.3f}s); skipping.'
+                f'and OptiTrack ({ot_ts.min():.3f}–{ot_ts.max():.3f}s); storing identity T_ws.'
             )
+            self._write_identity(root)
             return
 
         slam_poses_T = slam_poses[(slam_ts >= t_start) & (slam_ts <= t_end)]
         ot_poses_T = ot_poses[(ot_ts >= t_start) & (ot_ts <= t_end)]
 
         if len(slam_poses_T) == 0 or len(ot_poses_T) == 0:
-            log.warning('No poses inside the overlap window; skipping slam-world alignment.')
+            log.warning('No poses inside the overlap window; storing identity T_ws.')
+            self._write_identity(root)
             return
 
         log.info(
