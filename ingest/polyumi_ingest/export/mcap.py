@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import zarr
 from mcap.writer import Writer
+
 from polyumi_ingest.export.helpers import encode_frames_to_jpeg
 from polyumi_ingest.pzarr.scene_files import SceneFiles
 from polyumi_ingest.transforms import gripper_calib_transforms, transform_optitrack_pose
@@ -249,7 +250,7 @@ def _write_video(
             if b % log_every_batch == 0:
                 log.info(f'    {frame_id}: frame {batch_start}/{n}')
             batch_end = min(batch_start + _ENCODE_BATCH, n)
-            jpegs = encode_frames_to_jpeg(frames_arr[batch_start:batch_end], quality, executor)
+            jpegs = encode_frames_to_jpeg(np.asarray(frames_arr[batch_start:batch_end]), quality, executor)
             for j, jpeg in enumerate(jpegs):
                 t_s = float(ts[batch_start + j])
                 msg = json.dumps(
@@ -461,14 +462,16 @@ def export_episode_to_mcap(
     has_optitrack = root_grp is not None and 'optitrack/pose' in root_grp
     has_slam = 'gopro/slam_poses' in ep_grp
     has_time_sync = (
-        'annotations/time_sync' in ep_grp and 'gopro_to_finger_offset_s' in ep_grp['annotations/time_sync'].attrs  # type: ignore[index]
+        'annotations/time_sync' in ep_grp
+        and 'gopro_to_finger_offset_s' in ep_grp['annotations/time_sync'].attrs  # type: ignore[index]
     )
 
     # gopro_to_finger_offset_s = gopro_time - finger_time, so subtract it
     # from gopro timestamps to bring them into the finger (Pi) time domain.
     gopro_ts_shift = 0.0
     if has_time_sync:
-        gopro_ts_shift = -float(ep_grp['annotations/time_sync'].attrs['gopro_to_finger_offset_s'])  # type: ignore[index]
+        gopro_ts_shift = -float(ep_grp['annotations/time_sync']
+                                .attrs['gopro_to_finger_offset_s'])  # type: ignore[index]
         log.info(f'  time sync: shifting gopro timestamps by {gopro_ts_shift:+.6f}s')
 
     def _gopro_ts(key: str) -> np.ndarray:
@@ -494,12 +497,15 @@ def export_episode_to_mcap(
             # Static transform: slam → world.  Use the computed T_ws if available,
             # otherwise fall back to identity (slam and world share the same origin).
             if has_slam:
-                t0 = float(ep_grp['timestamps/finger'][0])
+                t0 = float(ep_grp['timestamps/finger'][0])  # type: ignore
                 t_ws_attrs = root_grp.attrs.get('slam_to_world_transform') if root_grp is not None else None
                 if isinstance(t_ws_attrs, dict):
                     _write_static_transform(
-                        writer, ch['/tf_static'], t0,
-                        parent='world', child='slam',
+                        writer,
+                        ch['/tf_static'],
+                        t0,
+                        parent='world',
+                        child='slam',
                         translation=tuple(t_ws_attrs['translation']),  # type: ignore[arg-type]
                         rotation=tuple(t_ws_attrs['rotation']),  # type: ignore[arg-type]
                     )
@@ -521,11 +527,10 @@ def export_episode_to_mcap(
                 ep_start = ann_attrs.get('episode_start')
                 ep_end = ann_attrs.get('episode_end')
                 if ep_start is not None and ep_end is not None:
-                    mask = (ot_ts >= float(ep_start)) & (ot_ts <= float(ep_end))
+                    mask = (ot_ts >= float(ep_start)) & (ot_ts <= float(ep_end))  # type: ignore
                     ot_ts = ot_ts[mask]
                     ot_poses = ot_poses[mask]
                 _write_optitrack_poses(writer, ch['/optitrack/pose'], ot_poses, ot_ts, gripper_calib)
-
 
             log.info('  finger frames...')
             _write_video(

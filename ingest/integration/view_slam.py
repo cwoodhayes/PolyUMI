@@ -43,6 +43,7 @@ log = logging.getLogger(__name__)
 
 
 def main() -> None:
+    """Entry point."""
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
