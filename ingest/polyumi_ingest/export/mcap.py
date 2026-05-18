@@ -9,10 +9,9 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import zarr
 from mcap.writer import Writer
-from scipy.spatial.transform import RigidTransform, Rotation
-
 from polyumi_ingest.export.helpers import encode_frames_to_jpeg
 from polyumi_ingest.pzarr.scene_files import SceneFiles
+from polyumi_ingest.transforms import gripper_calib_transforms, transform_optitrack_pose
 
 log = logging.getLogger('export.mcap')
 
@@ -355,53 +354,6 @@ def _write_gps(
         writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
 
 
-def _transform_optitrack_pose(
-    o_pose: np.ndarray, T_gb_rb: RigidTransform, T_gb_gp: RigidTransform, T_o_w: RigidTransform
-) -> np.ndarray:
-    """
-    Transform optitrack rigid-body pose to the pose of the gropro frame in world frame.
-
-    Args:
-        o_pose: OptiTrack rigid-body pose in optitrack frame (ie T_o_rb). (7,) (xyz xyzw)
-        T_gb_rb: Transformation from gripper base to optitrack rigid body.
-        T_gb_gp: Transformation from gripper base to gopro frame.
-        T_o_w: Transformation from optitrack frame to world frame.
-
-    Returns:
-        Transformed pose in the gopro frame (xyz xyzw)
-
-    """
-    R_o_rb = Rotation.from_quat(o_pose[3:])
-    T_o_rb = RigidTransform.from_components(translation=o_pose[:3], rotation=R_o_rb)
-
-    T_o_gp = T_o_rb * T_gb_rb.inv() * T_gb_gp
-    T_w_gp = T_o_w.inv() * T_o_gp
-    out = np.zeros(7)
-    out[:3] = T_w_gp.translation
-    out[3:] = T_w_gp.rotation.as_quat()
-    return out
-
-
-def _gripper_calib_transforms(calib: dict) -> tuple[RigidTransform, RigidTransform, RigidTransform]:
-    """Build (T_gb_rb, T_gb_gp, T_o_w) RigidTransforms from a gripper_calib zarr-attrs dict."""
-    rb = calib['T_gripper_base_to_optitrack_rigid_body']
-    gp = calib['T_gripper_base_to_gopro']
-    world = calib['T_optitrack_to_world']
-    T_gb_rb = RigidTransform.from_components(
-        translation=np.array(rb['translation'], dtype=float),
-        rotation=Rotation.from_quat(rb['rotation']),
-    )
-    T_gb_gp = RigidTransform.from_components(
-        translation=np.array(gp['translation'], dtype=float),
-        rotation=Rotation.from_quat(gp['rotation']),
-    )
-    T_o_w = RigidTransform.from_components(
-        translation=np.array(world['translation'], dtype=float),
-        rotation=Rotation.from_quat(world['rotation']),
-    )
-    return T_gb_rb, T_gb_gp, T_o_w
-
-
 def _write_optitrack_poses(
     writer: Writer,
     channel_id: int,
@@ -410,10 +362,10 @@ def _write_optitrack_poses(
     gripper_calib: dict,
 ) -> None:
     """Write OptiTrack rigid-body poses as foxglove.PoseInFrame messages."""
-    T_gb_rb, T_gb_gp, T_o_w = _gripper_calib_transforms(gripper_calib)
+    T_gb_rb, T_gb_gp, T_o_w = gripper_calib_transforms(gripper_calib)
 
     for i in range(len(ts)):
-        row = _transform_optitrack_pose(pose_arr[i], T_gb_rb, T_gb_gp, T_o_w)
+        row = transform_optitrack_pose(pose_arr[i], T_gb_rb, T_gb_gp, T_o_w)
         t_s = float(ts[i])
         msg = json.dumps(
             {
@@ -539,10 +491,20 @@ def export_episode_to_mcap(
                 has_slam=has_slam,
             )
 
-            # Static transforms: slam and world share the same origin.
+            # Static transform: slam → world.  Use the computed T_ws if available,
+            # otherwise fall back to identity (slam and world share the same origin).
             if has_slam:
                 t0 = float(ep_grp['timestamps/finger'][0])
-                _write_static_transform(writer, ch['/tf_static'], t0, parent='world', child='slam')
+                t_ws_attrs = root_grp.attrs.get('slam_to_world_transform') if root_grp is not None else None
+                if isinstance(t_ws_attrs, dict):
+                    _write_static_transform(
+                        writer, ch['/tf_static'], t0,
+                        parent='world', child='slam',
+                        translation=tuple(t_ws_attrs['translation']),  # type: ignore[arg-type]
+                        rotation=tuple(t_ws_attrs['rotation']),  # type: ignore[arg-type]
+                    )
+                else:
+                    _write_static_transform(writer, ch['/tf_static'], t0, parent='world', child='slam')
 
             if has_optitrack:
                 assert root_grp is not None
