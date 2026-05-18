@@ -5,19 +5,18 @@ from scipy.spatial.transform import RigidTransform, Rotation
 
 
 def transform_optitrack_pose(
-    o_pose: np.ndarray, T_gb_rb: RigidTransform, T_gb_gp: RigidTransform, T_o_w: RigidTransform
+    o_pose: np.ndarray, T_gb_rb: RigidTransform, T_gb_gp: RigidTransform
 ) -> np.ndarray:
     """
-    Transform an OptiTrack rigid-body pose to the GoPro frame in world coordinates.
+    Transform an OptiTrack rigid-body pose to the GoPro frame in optitrack coordinates.
 
     Args:
         o_pose: OptiTrack rigid-body pose in optitrack frame (T_o_rb). (7,) [x y z qx qy qz qw]
         T_gb_rb: Pose of the optitrack rigid body in the gripper-base frame.
         T_gb_gp: Pose of the GoPro frame in the gripper-base frame.
-        T_o_w: Pose of the world frame in the optitrack frame.
 
     Returns:
-        GoPro pose in world frame. (7,) [x y z qx qy qz qw]
+        GoPro pose in optitrack frame. (7,) [x y z qx qy qz qw]
 
     """
     T_o_rb = RigidTransform.from_components(
@@ -25,10 +24,9 @@ def transform_optitrack_pose(
         rotation=Rotation.from_quat(o_pose[3:]),
     )
     T_o_gp = T_o_rb * T_gb_rb.inv() * T_gb_gp
-    T_w_gp = T_o_w.inv() * T_o_gp
     out = np.zeros(7)
-    out[:3] = T_w_gp.translation
-    out[3:] = T_w_gp.rotation.as_quat()
+    out[:3] = T_o_gp.translation
+    out[3:] = T_o_gp.rotation.as_quat()
     return out
 
 

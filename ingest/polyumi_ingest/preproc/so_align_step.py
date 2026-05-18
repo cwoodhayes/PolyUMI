@@ -54,12 +54,12 @@ class SlamToWorldAlignStep(PreprocessingStep):
     Horn's closed-form SVD method then solves for the rotation R and translation t
     that minimise::
 
-        Σ ‖R · p_slam_i + t − p_world_i‖²
+        Σ ‖R · p_slam_i + t − p_optitrack_i‖²
 
-    The result is written to the root zarr attrs as ``slam_to_world_transform``
+    The result is written to the root zarr attrs as ``slam_to_optitrack_transform``
     with keys ``translation`` (list of 3 floats) and ``rotation`` (list of 4
     floats, xyzw).  The MCAP exporter reads this attr and uses it as the static
-    ``world → slam`` frame transform.
+    ``optitrack → slam`` frame transform.
 
     Prerequisites: OptiTrack data in the root group (``optitrack/pose`` and
     ``optitrack/timestamps``) and at least one episode with ``gopro/slam_poses``.
@@ -67,8 +67,8 @@ class SlamToWorldAlignStep(PreprocessingStep):
 
     @staticmethod
     def _write_identity(root: zarr.Group) -> None:
-        """Store an identity transform as slam_to_world_transform."""
-        root.attrs['slam_to_world_transform'] = {
+        """Store an identity transform as slam_to_optitrack_transform."""
+        root.attrs['slam_to_optitrack_transform'] = {
             'translation': [0.0, 0.0, 0.0],
             'rotation': [0.0, 0.0, 0.0, 1.0],
         }
@@ -77,8 +77,8 @@ class SlamToWorldAlignStep(PreprocessingStep):
         """Compute T_ws and write it to the root zarr attrs."""
         root = zarr.open_group(str(scene_zarr), mode='a')
 
-        if 'slam_to_world_transform' in root.attrs and not force:
-            log.info('slam_to_world_transform already present; use --force to recompute.')
+        if 'slam_to_optitrack_transform' in root.attrs and not force:
+            log.info('slam_to_optitrack_transform already present; use --force to recompute.')
             return
 
         if 'optitrack/pose' not in root:
@@ -92,12 +92,12 @@ class SlamToWorldAlignStep(PreprocessingStep):
             self._write_identity(root)
             return
 
-        T_gb_rb, T_gb_gp, T_o_w = gripper_calib_transforms(gripper_calib)
+        T_gb_rb, T_gb_gp, _ = gripper_calib_transforms(gripper_calib)
         ot_ts = np.asarray(root['optitrack/timestamps'][:], dtype=np.float64)
         ot_poses = np.asarray(root['optitrack/pose'][:], dtype=np.float64)
 
-        # Convert OptiTrack poses to world-frame GoPro positions (xyz only; SVD is position-based).
-        ot_world_pos = np.array([transform_optitrack_pose(p, T_gb_rb, T_gb_gp, T_o_w)[:3] for p in ot_poses])
+        # Convert OptiTrack poses to optitrack-frame GoPro positions (xyz only; SVD is position-based).
+        ot_world_pos = np.array([transform_optitrack_pose(p, T_gb_rb, T_gb_gp)[:3] for p in ot_poses])
 
         # Collect SLAM poses across all episodes, correcting to the finger/optitrack clock.
         slam_ts_parts: list[np.ndarray] = []
@@ -166,7 +166,7 @@ class SlamToWorldAlignStep(PreprocessingStep):
             f'RMS={rms_error:.4f} m  N={len(slam_pos_ov)}'
         )
 
-        root.attrs['slam_to_world_transform'] = {
+        root.attrs['slam_to_optitrack_transform'] = {
             'translation': t.tolist(),
             'rotation': rotation_xyzw.tolist(),
         }

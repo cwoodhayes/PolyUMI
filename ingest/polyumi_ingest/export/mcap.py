@@ -363,15 +363,15 @@ def _write_optitrack_poses(
     gripper_calib: dict,
 ) -> None:
     """Write OptiTrack rigid-body poses as foxglove.PoseInFrame messages."""
-    T_gb_rb, T_gb_gp, T_o_w = gripper_calib_transforms(gripper_calib)
+    T_gb_rb, T_gb_gp, _ = gripper_calib_transforms(gripper_calib)
 
     for i in range(len(ts)):
-        row = transform_optitrack_pose(pose_arr[i], T_gb_rb, T_gb_gp, T_o_w)
+        row = transform_optitrack_pose(pose_arr[i], T_gb_rb, T_gb_gp)
         t_s = float(ts[i])
         msg = json.dumps(
             {
                 'timestamp': _foxglove_time(t_s),
-                'frame_id': 'world',
+                'frame_id': 'optitrack',
                 'pose': {
                     'position': {'x': float(row[0]), 'y': float(row[1]), 'z': float(row[2])},
                     'orientation': {
@@ -494,30 +494,7 @@ def export_episode_to_mcap(
                 has_slam=has_slam,
             )
 
-            # Static transform: slam → world.  Use the computed T_ws if available,
-            # otherwise fall back to identity (slam and world share the same origin).
-            if has_slam:
-                t0 = float(ep_grp['timestamps/finger'][0])  # type: ignore
-                t_ws_attrs = root_grp.attrs.get('slam_to_world_transform') if root_grp is not None else None
-                if isinstance(t_ws_attrs, dict):
-                    t_vals = np.asarray(t_ws_attrs['translation'], dtype=float)
-                    r_vals = np.asarray(t_ws_attrs['rotation'], dtype=float)
-                    if t_vals.shape != (3,) or r_vals.shape != (4,):
-                        raise RuntimeError(
-                            f'slam_to_world_transform has unexpected shape: '
-                            f'translation={t_vals.shape} rotation={r_vals.shape}'
-                        )
-                    _write_static_transform(
-                        writer,
-                        ch['/tf_static'],
-                        t0,
-                        parent='world',
-                        child='slam',
-                        translation=(t_vals[0], t_vals[1], t_vals[2]),
-                        rotation=(r_vals[0], r_vals[1], r_vals[2], r_vals[3]),
-                    )
-                else:
-                    _write_static_transform(writer, ch['/tf_static'], t0, parent='world', child='slam')
+            t0 = float(ep_grp['timestamps/finger'][0])  # type: ignore
 
             if has_optitrack:
                 assert root_grp is not None
@@ -527,6 +504,39 @@ def export_episode_to_mcap(
                     raise RuntimeError(
                         'gripper_calib not found in scene.zarr root attrs; rebuild the pzarr to embed the calibration.'
                     )
+
+                # Static transform: world → optitrack (from gripper calibration).
+                ow = gripper_calib['T_optitrack_to_world']
+                ow_t = np.asarray(ow['translation'], dtype=float)
+                ow_r = np.asarray(ow['rotation'], dtype=float)
+                _write_static_transform(
+                    writer, ch['/tf_static'], t0,
+                    parent='world', child='optitrack',
+                    translation=(ow_t[0], ow_t[1], ow_t[2]),
+                    rotation=(ow_r[0], ow_r[1], ow_r[2], ow_r[3]),
+                )
+
+                # Static transform: optitrack → slam.  Use computed T_os if available,
+                # otherwise fall back to identity.
+                if has_slam:
+                    t_os_attrs = root_grp.attrs.get('slam_to_optitrack_transform')
+                    if isinstance(t_os_attrs, dict):
+                        t_vals = np.asarray(t_os_attrs['translation'], dtype=float)
+                        r_vals = np.asarray(t_os_attrs['rotation'], dtype=float)
+                        if t_vals.shape != (3,) or r_vals.shape != (4,):
+                            raise RuntimeError(
+                                f'slam_to_optitrack_transform has unexpected shape: '
+                                f'translation={t_vals.shape} rotation={r_vals.shape}'
+                            )
+                        _write_static_transform(
+                            writer, ch['/tf_static'], t0,
+                            parent='optitrack', child='slam',
+                            translation=(t_vals[0], t_vals[1], t_vals[2]),
+                            rotation=(r_vals[0], r_vals[1], r_vals[2], r_vals[3]),
+                        )
+                    else:
+                        _write_static_transform(writer, ch['/tf_static'], t0, parent='optitrack', child='slam')
+
                 ot_ts: np.ndarray = root_grp['optitrack/timestamps'][:]  # type: ignore[index]
                 ot_poses: np.ndarray = root_grp['optitrack/pose'][:]  # type: ignore[index]
                 # Slice to the episode time window when annotations are available.

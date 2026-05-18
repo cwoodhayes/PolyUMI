@@ -30,3 +30,4 @@ T_gripper_base_to_gopro:
 T_optitrack_to_world:
   translation: [0.0, 0.0, 0.0] # meters
   rotation: [-0.7071068, 0, 0, 0.7071068] # quaternion
+  # rotation: [0, 0, 0, 1] # quaternion
