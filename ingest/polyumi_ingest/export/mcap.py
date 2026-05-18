@@ -500,14 +500,21 @@ def export_episode_to_mcap(
                 t0 = float(ep_grp['timestamps/finger'][0])  # type: ignore
                 t_ws_attrs = root_grp.attrs.get('slam_to_world_transform') if root_grp is not None else None
                 if isinstance(t_ws_attrs, dict):
+                    t_vals = np.asarray(t_ws_attrs['translation'], dtype=float)
+                    r_vals = np.asarray(t_ws_attrs['rotation'], dtype=float)
+                    if t_vals.shape != (3,) or r_vals.shape != (4,):
+                        raise RuntimeError(
+                            f'slam_to_world_transform has unexpected shape: '
+                            f'translation={t_vals.shape} rotation={r_vals.shape}'
+                        )
                     _write_static_transform(
                         writer,
                         ch['/tf_static'],
                         t0,
                         parent='world',
                         child='slam',
-                        translation=tuple(t_ws_attrs['translation']),  # type: ignore[arg-type]
-                        rotation=tuple(t_ws_attrs['rotation']),  # type: ignore[arg-type]
+                        translation=(t_vals[0], t_vals[1], t_vals[2]),
+                        rotation=(r_vals[0], r_vals[1], r_vals[2], r_vals[3]),
                     )
                 else:
                     _write_static_transform(writer, ch['/tf_static'], t0, parent='world', child='slam')

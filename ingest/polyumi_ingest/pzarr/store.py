@@ -40,12 +40,12 @@ def _git_sha() -> str:
         return 'unknown'
 
 
-def _arr(grp: zarr.Group, path: str) -> zarr.Array:
+def arr(grp: zarr.Group, path: str) -> zarr.Array:
     """Return a typed zarr.Array from a group by path; consolidates zarr's untyped __getitem__."""
     return grp[path]  # type: ignore[return-value]
 
 
-def _grp(grp: zarr.Group, path: str) -> zarr.Group:
+def grp(grp: zarr.Group, path: str) -> zarr.Group:
     """Narrow Group.__getitem__'s Array|Group return to Group for type checkers."""
     return grp[path]  # type: ignore[return-value]
 
@@ -389,6 +389,7 @@ def _parse_optitrack_csv(csv_path: pathlib.Path) -> tuple[np.ndarray, np.ndarray
     rot_xyz_deg = data[:, rb_col_start : rb_col_start + 3]
     pos_xyz = data[:, rb_col_start + 3 : rb_col_start + 6]
 
+    # Motive exports rotations as extrinsic XYZ Euler angles (header: "Rotation Type,XYZ").
     quats_xyzw = Rotation.from_euler('xyz', rot_xyz_deg, degrees=True).as_quat()
     poses = np.concatenate([pos_xyz, quats_xyzw], axis=1)
     return times_s, poses
@@ -400,6 +401,9 @@ def _write_optitrack(root: zarr.Group, csv_path: pathlib.Path, optitrack_start_s
     abs_timestamps = optitrack_start_s + times_s
 
     ot_grp = root.require_group('optitrack')
+    for name in ('pose', 'timestamps'):
+        if name in ot_grp:
+            del ot_grp[name]
     ot_grp.create_array('pose', data=poses, compressor=_BLOSC)
     ot_grp.create_array('timestamps', data=abs_timestamps, compressor=_BLOSC)
 
@@ -517,29 +521,29 @@ def inspect_pzarr(scene_path: pathlib.Path) -> PZarrInfo:
         finger_ts_range: tuple[float, float] | None = None
         finger_mean_delta: float | None = None
         if 'timestamps/finger' in ep:
-            ts: np.ndarray = _arr(ep, 'timestamps/finger')[:]  # type: ignore[assignment]
+            ts: np.ndarray = arr(ep, 'timestamps/finger')[:]  # type: ignore[assignment]
             finger_ts_range = (float(ts[0]), float(ts[-1]))
             finger_mean_delta = float(np.diff(ts).mean() * 1000) if len(ts) > 1 else None
 
         finger_piezo_ts_range: tuple[float, float] | None = None
         if 'timestamps/finger_piezo' in ep:
-            ts = _arr(ep, 'timestamps/finger_piezo')[:]  # type: ignore[assignment]
+            ts = arr(ep, 'timestamps/finger_piezo')[:]  # type: ignore[assignment]
             finger_piezo_ts_range = (float(ts[0]), float(ts[-1]))
 
         finger_air_ts_range: tuple[float, float] | None = None
         if 'timestamps/finger_air' in ep:
-            ts = _arr(ep, 'timestamps/finger_air')[:]  # type: ignore[assignment]
+            ts = arr(ep, 'timestamps/finger_air')[:]  # type: ignore[assignment]
             finger_air_ts_range = (float(ts[0]), float(ts[-1]))
 
         gopro_audio_ts_range: tuple[float, float] | None = None
         if 'timestamps/gopro_audio' in ep:
-            ts = _arr(ep, 'timestamps/gopro_audio')[:]  # type: ignore[assignment]
+            ts = arr(ep, 'timestamps/gopro_audio')[:]  # type: ignore[assignment]
             gopro_audio_ts_range = (float(ts[0]), float(ts[-1]))
 
         gopro_ts_range: tuple[float, float] | None = None
         gopro_mean_delta: float | None = None
         if 'timestamps/gopro' in ep:
-            ts = _arr(ep, 'timestamps/gopro')[:]  # type: ignore[assignment]
+            ts = arr(ep, 'timestamps/gopro')[:]  # type: ignore[assignment]
             gopro_ts_range = (float(ts[0]), float(ts[-1]))
             gopro_mean_delta = float(np.diff(ts).mean() * 1000) if len(ts) > 1 else None
 
@@ -549,14 +553,14 @@ def inspect_pzarr(scene_path: pathlib.Path) -> PZarrInfo:
         episodes.append(
             EpisodeInfo(
                 index=i,
-                finger_shape=_arr(ep, 'finger/frames').shape if 'finger/frames' in ep else None,
-                finger_piezo_shape=_arr(ep, 'finger/finger_piezo').shape if 'finger/finger_piezo' in ep else None,
-                finger_air_shape=_arr(ep, 'finger/finger_air').shape if 'finger/finger_air' in ep else None,
-                gopro_shape=_arr(ep, 'gopro/frames').shape if 'gopro/frames' in ep else None,
-                accl_shape=_arr(ep, 'gopro/accl').shape if 'gopro/accl' in ep else None,
-                gyro_shape=_arr(ep, 'gopro/gyro').shape if 'gopro/gyro' in ep else None,
-                gps_shape=_arr(ep, 'gopro/gps').shape if 'gopro/gps' in ep else None,
-                gopro_audio_shape=_arr(ep, 'gopro/audio').shape if 'gopro/audio' in ep else None,
+                finger_shape=arr(ep, 'finger/frames').shape if 'finger/frames' in ep else None,
+                finger_piezo_shape=arr(ep, 'finger/finger_piezo').shape if 'finger/finger_piezo' in ep else None,
+                finger_air_shape=arr(ep, 'finger/finger_air').shape if 'finger/finger_air' in ep else None,
+                gopro_shape=arr(ep, 'gopro/frames').shape if 'gopro/frames' in ep else None,
+                accl_shape=arr(ep, 'gopro/accl').shape if 'gopro/accl' in ep else None,
+                gyro_shape=arr(ep, 'gopro/gyro').shape if 'gopro/gyro' in ep else None,
+                gps_shape=arr(ep, 'gopro/gps').shape if 'gopro/gps' in ep else None,
+                gopro_audio_shape=arr(ep, 'gopro/audio').shape if 'gopro/audio' in ep else None,
                 gopro_audio_ts_range=gopro_audio_ts_range,
                 finger_ts_range=finger_ts_range,
                 finger_ts_mean_delta_ms=finger_mean_delta,
@@ -582,4 +586,4 @@ def read_frame(scene_path: pathlib.Path, episode: int = 0, frame: int = 0) -> np
     """Read a single frame from scene.zarr; returns (H, W, 3) uint8 RGB array."""
     zarr_path = SceneFiles.resolve_zarr_path(scene_path)
     root = zarr.open_group(str(zarr_path), mode='r')
-    return _arr(root, f'episode_{episode}/finger/frames')[frame]  # type: ignore[return-value]
+    return arr(root, f'episode_{episode}/finger/frames')[frame]  # type: ignore[return-value]

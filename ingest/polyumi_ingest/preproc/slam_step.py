@@ -20,7 +20,7 @@ from polyumi_ingest.preproc.step_base import (
     PreprocessingStep,
     register_preprocessing_step,
 )
-from polyumi_ingest.pzarr.store import _arr, _grp
+from polyumi_ingest.pzarr.store import arr, grp
 
 log = logging.getLogger(__name__)
 
@@ -155,16 +155,16 @@ def _export_episode(
     per-frame UTC timestamp array (needed downstream to reconcile the
     C++ trajectory output back onto the original frame indices).
     """
-    gopro_ts = np.asarray(_arr(ep_grp, 'timestamps/gopro')[:], dtype=np.float64)
+    gopro_ts = np.asarray(arr(ep_grp, 'timestamps/gopro')[:], dtype=np.float64)
     if len(gopro_ts) < 2:
         raise RuntimeError(f'Episode has fewer than 2 frames ({len(gopro_ts)})')
     video_path = gopro_mp4
     log.info(f'  Using original gopro.mp4: {gopro_mp4} ({len(gopro_ts)} frames)')
 
-    gyro = np.asarray(_arr(ep_grp, 'gopro/gyro')[:], dtype=np.float64)
-    gyro_ts = np.asarray(_arr(ep_grp, 'timestamps/gopro_gyro')[:], dtype=np.float64)
-    accl = np.asarray(_arr(ep_grp, 'gopro/accl')[:], dtype=np.float64)
-    accl_ts = np.asarray(_arr(ep_grp, 'timestamps/gopro_accl')[:], dtype=np.float64)
+    gyro = np.asarray(arr(ep_grp, 'gopro/gyro')[:], dtype=np.float64)
+    gyro_ts = np.asarray(arr(ep_grp, 'timestamps/gopro_gyro')[:], dtype=np.float64)
+    accl = np.asarray(arr(ep_grp, 'gopro/accl')[:], dtype=np.float64)
+    accl_ts = np.asarray(arr(ep_grp, 'timestamps/gopro_accl')[:], dtype=np.float64)
 
     json_path = tmp_dir / 'telemetry.json'
     _export_telemetry_json(gyro, gyro_ts, accl, accl_ts, float(gopro_ts[0]), json_path)
@@ -561,7 +561,7 @@ class OrbSlam3Step(PreprocessingStep):
         mapping_key: str | None = None
         episode_keys: list[str] = []
         for ep_key in episodes:
-            ep = _grp(root, ep_key)
+            ep = grp(root, ep_key)
             session_type = ep.attrs.get('session_type', None)
             if session_type == 'MAPPING':
                 mapping_key = ep_key
@@ -592,7 +592,7 @@ class OrbSlam3Step(PreprocessingStep):
             log.info(f'Atlas already exists at {atlas_path}, skipping map building.')
         else:
             log.info(f'Phase 1: building map from {mapping_key}...')
-            mapping_grp = _grp(root, mapping_key)
+            mapping_grp = grp(root, mapping_key)
             t0 = time.monotonic()
             self._build_map(mapping_grp, atlas_path, log_dir, scene_zarr)
             elapsed = time.monotonic() - t0
@@ -601,7 +601,7 @@ class OrbSlam3Step(PreprocessingStep):
         # Phase 2: per-episode localization
         for i, ep_key in enumerate(episode_keys):
             log.info(f'Phase 2: localizing {ep_key} ({i + 1}/{len(episode_keys)})...')
-            ep_grp = _grp(root, ep_key)
+            ep_grp = grp(root, ep_key)
             t0 = time.monotonic()
             self._localize_episode(ep_grp, i, atlas_path, log_dir, scene_zarr)
             elapsed = time.monotonic() - t0

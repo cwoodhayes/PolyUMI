@@ -10,7 +10,7 @@ import zarr
 from scipy.spatial.transform import RigidTransform, Rotation
 
 from polyumi_ingest.preproc.step_base import PreprocessingStep, register_preprocessing_step
-from polyumi_ingest.pzarr.store import _arr, _grp
+from polyumi_ingest.pzarr.store import arr, grp
 from polyumi_ingest.transforms import gripper_calib_transforms, transform_optitrack_pose
 
 log = logging.getLogger(__name__)
@@ -76,11 +76,11 @@ class SlamToWorldAlignStep(PreprocessingStep):
         slam_ts_parts: list[np.ndarray] = []
         slam_poses_parts: list[np.ndarray] = []
         for ep_key in sorted(k for k in root.keys() if k.startswith('episode_')):
-            ep_grp = _grp(root, ep_key)
+            ep_grp = grp(root, ep_key)
             if 'gopro/slam_poses' not in ep_grp:
                 continue
-            poses = np.asarray(_arr(ep_grp, 'gopro/slam_poses')[:], dtype=np.float64)
-            gopro_ts = np.asarray(_arr(ep_grp, 'timestamps/gopro')[:], dtype=np.float64)
+            poses = np.asarray(arr(ep_grp, 'gopro/slam_poses')[:], dtype=np.float64)
+            gopro_ts = np.asarray(arr(ep_grp, 'timestamps/gopro')[:], dtype=np.float64)
 
             # Shift GoPro timestamps into the finger (= OptiTrack) clock domain.
             if 'annotations/time_sync' in ep_grp:
