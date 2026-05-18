@@ -17,7 +17,6 @@ from polyumi_ingest.preproc.slam_step import (
     _export_telemetry_json,
     _make_temp_settings_yaml,
     _parse_and_reconcile_trajectory,
-    _quat_to_se3,
 )
 
 _BLOSC = Blosc(cname='zstd', clevel=5, shuffle=Blosc.SHUFFLE)
@@ -120,10 +119,10 @@ def test_mapping_episode_skipped_during_localization(tmp_path: pathlib.Path) -> 
     def _fake_localize(ep_grp, episode_index, atlas_path, log_dir, scene_zarr):
         called_localize.append(ep_grp.name)
         n_frames = ep_grp['timestamps/gopro'].shape[0]
-        poses = np.tile(np.eye(4, dtype=np.float32), (n_frames, 1, 1))
-        is_lost = np.zeros(n_frames, dtype=bool)
+        poses = np.zeros((n_frames, 7), dtype=np.float64)
+        poses[:, 6] = 1.0  # identity quaternion w=1
         from polyumi_ingest.preproc.slam_step import _write_slam_results
-        _write_slam_results(ep_grp, poses, is_lost, settings, atlas_path)
+        _write_slam_results(ep_grp, poses, settings, atlas_path)
 
     with mock.patch.object(step, '_build_map', side_effect=_fake_build), \
          mock.patch.object(step, '_localize_episode', side_effect=_fake_localize):
@@ -155,9 +154,9 @@ def test_zarr_output_schema(tmp_path: pathlib.Path) -> None:
         tracked = np.ones(n_frames, dtype=bool)
         tracked[:2] = False  # first two frames lost
         _make_euroc_trajectory(traj_path, frame_ts, tracked)
-        poses, is_lost = _parse_and_reconcile_trajectory(traj_path, frame_ts)
+        poses = _parse_and_reconcile_trajectory(traj_path, frame_ts)
         from polyumi_ingest.preproc.slam_step import _write_slam_results
-        _write_slam_results(ep_grp, poses, is_lost, settings, atlas_path)
+        _write_slam_results(ep_grp, poses, settings, atlas_path)
 
     with mock.patch.object(step, '_build_map', side_effect=_fake_build), \
          mock.patch.object(step, '_localize_episode', side_effect=_fake_localize):
@@ -167,11 +166,9 @@ def test_zarr_output_schema(tmp_path: pathlib.Path) -> None:
 
     # Array names and shapes
     assert 'gopro/slam_poses' in ep1
-    assert 'gopro/slam_is_lost' in ep1
-    assert ep1['gopro/slam_poses'].shape == (n_frames, 4, 4)
-    assert ep1['gopro/slam_poses'].dtype == np.float32
-    assert ep1['gopro/slam_is_lost'].shape == (n_frames,)
-    assert ep1['gopro/slam_is_lost'].dtype == bool
+    assert 'gopro/slam_is_lost' not in ep1
+    assert ep1['gopro/slam_poses'].shape == (n_frames, 7)
+    assert ep1['gopro/slam_poses'].dtype == np.float64
 
     # Annotation attribute keys
     slam_attrs = ep1['annotations/slam'].attrs
@@ -183,7 +180,7 @@ def test_zarr_output_schema(tmp_path: pathlib.Path) -> None:
     assert int(slam_attrs['n_frames_lost']) == 2
     assert abs(float(slam_attrs['tracking_ratio']) - (4 / 6)) < 1e-5
 
-    # Lost frames → all-NaN pose
+    # Lost frames → all-NaN row in (N,7) array
     poses_arr = ep1['gopro/slam_poses'][:]
     for i in range(2):  # first 2 rows were lost
         assert np.all(np.isnan(poses_arr[i]))
@@ -257,17 +254,11 @@ def test_make_temp_settings_yaml_injects_atlas_paths(tmp_path: pathlib.Path) -> 
     assert 'System.SaveAtlasToFile' not in content
 
 
-def test_quat_to_se3_identity() -> None:
-    """Identity quaternion should yield identity SE3."""
-    mat = _quat_to_se3(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
-    np.testing.assert_array_almost_equal(mat, np.eye(4))
-
-
 def test_parse_and_reconcile_trajectory_aligns_and_marks_lost(tmp_path: pathlib.Path) -> None:
     """
     Trajectory entries should land in their corresponding frame slot.
 
-    Missing frames must end up with is_lost=True and an all-NaN pose.
+    Missing frames must end up as all-NaN rows in the (N,7) pose array.
     """
     n = 6
     frame_ts = 1000.0 + np.arange(n, dtype=np.float64) / 60.0
@@ -275,16 +266,16 @@ def test_parse_and_reconcile_trajectory_aligns_and_marks_lost(tmp_path: pathlib.
     traj_path = tmp_path / 'traj.txt'
     _make_euroc_trajectory(traj_path, frame_ts, tracked)
 
-    poses, is_lost = _parse_and_reconcile_trajectory(traj_path, frame_ts)
+    poses = _parse_and_reconcile_trajectory(traj_path, frame_ts)
 
-    np.testing.assert_array_equal(is_lost, ~tracked)
+    assert poses.shape == (n, 7)
     # Lost rows: all NaN
     for i in range(2):
         assert np.all(np.isnan(poses[i]))
-    # Tracked rows: identity rotation, translation (0.1, 0.2, 0.3)
+    # Tracked rows: translation (0.1, 0.2, 0.3), identity quaternion (0,0,0,1)
     for i in range(2, n):
-        np.testing.assert_array_almost_equal(poses[i, :3, :3], np.eye(3), decimal=5)
-        np.testing.assert_array_almost_equal(poses[i, :3, 3], [0.1, 0.2, 0.3], decimal=5)
+        np.testing.assert_array_almost_equal(poses[i, :3], [0.1, 0.2, 0.3], decimal=5)
+        np.testing.assert_array_almost_equal(poses[i, 3:], [0.0, 0.0, 0.0, 1.0], decimal=5)
 
 
 # ---------------------------------------------------------------------------
@@ -311,5 +302,4 @@ def test_slam_step_smoke() -> None:
     for ep_key in episode_keys:
         ep = root[ep_key]
         assert 'gopro/slam_poses' in ep
-        assert 'gopro/slam_is_lost' in ep
         assert 'annotations/slam' in ep

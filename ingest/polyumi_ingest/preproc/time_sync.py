@@ -15,7 +15,7 @@ from polyumi_ingest.preproc.step_base import (
     _write_scalar,
     register_preprocessing_step,
 )
-from polyumi_ingest.pzarr.store import _arr
+from polyumi_ingest.pzarr.store import arr
 
 log = logging.getLogger(__name__)
 
@@ -82,10 +82,10 @@ class TimeSyncStep(PreprocessingStep):
 
         for episode_key in episodes:
             ep = root.require_group(episode_key)
-            finger_ts = np.asarray(_arr(ep, f'timestamps/{self.finger_mic_name}')[:], dtype=np.float64)
-            gopro_ts = np.asarray(_arr(ep, 'timestamps/gopro_audio')[:], dtype=np.float64)
-            finger_audio = _mono_audio(np.asarray(_arr(ep, f'finger/{self.finger_mic_name}')[:]))
-            gopro_audio = _mono_audio(np.asarray(_arr(ep, 'gopro/audio')[:]))
+            finger_ts = np.asarray(arr(ep, f'timestamps/{self.finger_mic_name}')[:], dtype=np.float64)
+            gopro_ts = np.asarray(arr(ep, 'timestamps/gopro_audio')[:], dtype=np.float64)
+            finger_audio = _mono_audio(np.asarray(arr(ep, f'finger/{self.finger_mic_name}')[:]))
+            gopro_audio = _mono_audio(np.asarray(arr(ep, 'gopro/audio')[:]))
 
             overlap_start = max(float(finger_ts[0]), float(gopro_ts[0]))
             overlap_end = min(float(finger_ts[-1]), float(gopro_ts[-1]))
@@ -172,12 +172,12 @@ class ChirpTimeSyncStep(PreprocessingStep):
         for episode_key in episodes:
             ep = root.require_group(episode_key)
 
-            finger_air = _mono_audio(np.asarray(_arr(ep, 'finger/finger_air')[:]))
-            finger_ts = np.asarray(_arr(ep, 'timestamps/finger_air')[:], dtype=np.float64)
+            finger_air = _mono_audio(np.asarray(arr(ep, 'finger/finger_air')[:]))
+            finger_ts = np.asarray(arr(ep, 'timestamps/finger_air')[:], dtype=np.float64)
             finger_sr = int(round(_infer_sample_rate(finger_ts)))
 
-            gopro_audio = _mono_audio(np.asarray(_arr(ep, 'gopro/audio')[:]))
-            gopro_ts = np.asarray(_arr(ep, 'timestamps/gopro_audio')[:], dtype=np.float64)
+            gopro_audio = _mono_audio(np.asarray(arr(ep, 'gopro/audio')[:]))
+            gopro_ts = np.asarray(arr(ep, 'timestamps/gopro_audio')[:], dtype=np.float64)
             gopro_sr = int(round(_infer_sample_rate(gopro_ts)))
 
             chirp_play_time_s: float | None = None

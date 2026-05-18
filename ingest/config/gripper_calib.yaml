@@ -1,0 +1,32 @@
+
+# calibrates the transforms between the pose the optitrack reports
+# for the gripper, and the actual gripper.
+# necessary because Motive just picks the centroid of the markers as the 
+# origin of the rigid body frame--I have no control over it.
+
+# gripper base frame:
+# x - forward
+# y - left
+# z - up
+
+# gopro frame:
+# x - right
+# y - down
+# z - forward
+
+# gripper base origin is at the center of the front edge of the gripper base.
+# calibrated by placing gripper base origin at at optitrack origin.
+T_gripper_base_to_optitrack_rigid_body:
+  translation: [0.0689, 0.0481, 0.174] # meters
+  rotation: [ 0.2657295, -0.0025321, 0.9610813, 0.0755255 ] # quaternion
+
+# measured approximately irl + in onshape
+T_gripper_base_to_gopro:
+  translation: [-.049, 0.21, 0.0] # meters
+  rotation: [ 0.5, -0.5, 0.5, -0.5 ] # quaternion
+
+# for some reason, optitrack has z along the floor. 
+# i want world to have z up
+T_optitrack_to_world:
+  translation: [0.0, 0.0, 0.0] # meters
+  rotation: [-0.7071068, 0, 0, 0.7071068] # quaternion
