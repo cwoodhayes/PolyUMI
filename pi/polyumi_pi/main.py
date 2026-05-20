@@ -45,6 +45,8 @@ logging.basicConfig(
         )
     ],
 )
+logging.getLogger('open_gopro').setLevel(logging.WARNING)
+logging.getLogger('bleak').setLevel(logging.WARNING)
 log = logging.getLogger('pi_streamer')
 
 app = typer.Typer()
