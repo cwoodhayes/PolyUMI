@@ -27,6 +27,7 @@ class SceneFiles(SessionDataABC):
 
     scene_id: str
     sessions: list[SessionFiles] = field(default_factory=list)
+    optitrack_start_time: datetime | None = None
 
     @classmethod
     def create(
@@ -50,11 +51,14 @@ class SceneFiles(SessionDataABC):
             latest_symlink.unlink()
         latest_symlink.symlink_to(self.path)
 
-        return SessionFiles.create(
+        session = SessionFiles.create(
             base_dir=self.path,
             add_latest_symlink=False,
             scene_id=self.scene_id,
         )
+        if self.optitrack_start_time is not None:
+            session.metadata.optitrack_start_time = self.optitrack_start_time
+        return session
 
     @classmethod
     def from_file(cls, path: pathlib.Path) -> SceneFiles:

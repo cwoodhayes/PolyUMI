@@ -30,6 +30,7 @@ from polyumi_pi.files.session import DEFAULT_RECORDINGS_DIR, SessionFiles
 from polyumi_pi.gopro.gopro_config import GoProConfig, load_gopro_config, save_gopro_config
 from polyumi_pi.gopro.gopro_wrapper import GoProWrapper
 from polyumi_pi.led_manager import LEDManager
+from polyumi_pi.optitrack import await_optitrack_esync
 from polyumi_pi.raspi_driver import IndicatorState, RaspiDriver
 
 logging.basicConfig(
@@ -516,6 +517,10 @@ def start_scene(
     no_gopro: bool = typer.Option(
         False, '--no-gopro', help='Skip GoPro connection (for debugging).'
     ),
+    optitrack: bool = typer.Option(
+        False, '--optitrack', help="If true, expect the e-sync signal to be plugged into pin 40, and await"
+        "the line to go high before enabling recording sessions (see optitrack.py for details)."
+    )
 ):
     """
     Record sessions triggered by button presses on GPIO23.
@@ -566,6 +571,9 @@ def start_scene(
                     log.info('GoPro connected')
                 else:
                     gopro = None
+
+                if optitrack:
+                    await await_optitrack_esync(scene, hat)
 
                 session_count = 0
                 while True:

@@ -4,6 +4,8 @@ import asyncio
 import enum
 import logging
 
+from polyumi_pi.constants import BUTTON_PIN, INDICATOR_PIN
+
 log = logging.getLogger('raspi_driver')
 
 
@@ -12,21 +14,19 @@ class IndicatorState(enum.Enum):
 
     INACTIVE = enum.auto()
     READY = enum.auto()
+    AWAITING_ESYNC = enum.auto()
     RECORDING = enum.auto()
 
 
 class RaspiDriver:
     """Manages the RaspiAudio ULTRA++ HAT and its exposed GPIO peripherals."""
 
-    BUTTON_PIN = 23
-    INDICATOR_PIN = 25
-
     def __init__(self, bounce_time_ms: int = 50) -> None:
         """Initialize GPIO button on pin 23 and indicator LED on pin 25."""
         from gpiozero import PWMLED, Button
 
-        self._button = Button(self.BUTTON_PIN, bounce_time=bounce_time_ms / 1000)
-        self._indicator = PWMLED(self.INDICATOR_PIN)
+        self._button = Button(BUTTON_PIN, bounce_time=bounce_time_ms / 1000)
+        self._indicator = PWMLED(INDICATOR_PIN)
 
     async def wait_for_press(self) -> None:
         """Wait asynchronously for a single button press."""
@@ -45,6 +45,8 @@ class RaspiDriver:
                 self._indicator.off()
             case IndicatorState.READY:
                 self._indicator.on()
+            case IndicatorState.AWAITING_ESYNC:
+                self._indicator.blink(on_time=0.2, off_time=0.2)
             case IndicatorState.RECORDING:
                 self._indicator.pulse()
             case _:

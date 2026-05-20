@@ -13,6 +13,7 @@ import zmq
 from polyumi_pi_msgs.audio_chunk_pb2 import AudioChunk
 
 from polyumi_pi import sync_chirp
+from polyumi_pi.constants import AUDIO_DEVICE
 from polyumi_pi.files.audio import AudioFile
 from polyumi_pi.files.session import SessionFiles
 
@@ -22,7 +23,7 @@ log = logging.getLogger('pi_audio_streamer')
 class AudioStreamer:
     """Class for streaming audio data over zmq."""
 
-    DEVICE_NAME = 'wm8960-soundcard'  # matches ALSA card name
+    DEVICE_NAME = AUDIO_DEVICE
 
     def __init__(
         self,
