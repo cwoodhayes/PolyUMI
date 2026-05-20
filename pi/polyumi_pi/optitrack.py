@@ -41,26 +41,16 @@ async def await_optitrack_esync(
     Control the indicator light to make the user aware of the status, and write
     the esync start time to files when it does arrive.
     """
-    from gpiozero import DigitalInputDevice
+    loop = asyncio.get_running_loop()
 
-    esync = DigitalInputDevice(ESYNC_PIN, pull_up=False)
-    try:
-        log.info(f'Awaiting OptiTrack e-sync on GPIO {ESYNC_PIN}...')
-        hat.set_indicator(IndicatorState.AWAITING_ESYNC)
-        sync_chirp.beep(2, AUDIO_OUTPUT_SAMPLE_RATE, device=AUDIO_DEVICE)
+    log.info(f'Awaiting OptiTrack e-sync on GPIO {ESYNC_PIN}...')
+    hat.set_indicator(IndicatorState.AWAITING_ESYNC)
+    sync_chirp.beep(2, AUDIO_OUTPUT_SAMPLE_RATE, device=AUDIO_DEVICE)
 
-        loop = asyncio.get_running_loop()
-        event = asyncio.Event()
-        esync.when_activated = lambda: loop.call_soon_threadsafe(event.set)
-        try:
-            await event.wait()
-        finally:
-            esync.when_activated = None
+    await loop.run_in_executor(None, hat.wait_for_esync)
 
-        esync_time = datetime.now(timezone.utc)
-        hat.set_indicator(IndicatorState.READY)
-        sync_chirp.beep(1, AUDIO_OUTPUT_SAMPLE_RATE, device=AUDIO_DEVICE)
-        scene.optitrack_start_time = esync_time
-        log.info(f'OptiTrack e-sync received at {esync_time.isoformat()}')
-    finally:
-        esync.close()
+    esync_time = datetime.now(timezone.utc)
+    hat.set_indicator(IndicatorState.READY)
+    sync_chirp.beep(1, AUDIO_OUTPUT_SAMPLE_RATE, device=AUDIO_DEVICE)
+    scene.optitrack_start_time = esync_time
+    log.info(f'OptiTrack e-sync received at {esync_time.isoformat()}')

@@ -24,7 +24,7 @@ def generate(sample_rate: int) -> np.ndarray:
 
 BEEP_FREQ_HZ = 880.0
 BEEP_DURATION_S = 0.1
-BEEP_GAP_S = 0.1
+BEEP_GAP_S = 0.05
 
 
 def beep(count: int, sample_rate: int, device: int | str | None = None) -> None:
