@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import zarr
 from mcap.writer import Writer
+from scipy.spatial.transform import RigidTransform, Rotation
 
 from polyumi_ingest.export.helpers import encode_frames_to_jpeg
 from polyumi_ingest.pzarr.scene_files import SceneFiles
@@ -512,13 +513,18 @@ def export_episode_to_mcap(
 
                 # Static transform: world → optitrack (from gripper calibration).
                 ow = gripper_calib['T_optitrack_to_world']
-                ow_t = np.asarray(ow['translation'], dtype=float)
-                ow_r = np.asarray(ow['rotation'], dtype=float)
+                ow = RigidTransform.from_components(
+                    translation=np.asarray(ow['translation'], dtype=float),  # type: ignore
+                    rotation=Rotation.from_quat(np.asarray(ow['rotation'], dtype=float)),  # type: ignore
+                )
+                wo = ow.inv()
+                wo_t = wo.translation
+                wo_r = wo.rotation.as_quat()
                 _write_static_transform(
                     writer, ch['/tf_static'], t0,
                     parent='world', child='optitrack',
-                    translation=(ow_t[0], ow_t[1], ow_t[2]),
-                    rotation=(ow_r[0], ow_r[1], ow_r[2], ow_r[3]),
+                    translation=(wo_t[0], wo_t[1], wo_t[2]),
+                    rotation=(wo_r[0], wo_r[1], wo_r[2], wo_r[3]),
                 )
 
                 # Static transform: optitrack → slam.  Use computed T_os if available,
