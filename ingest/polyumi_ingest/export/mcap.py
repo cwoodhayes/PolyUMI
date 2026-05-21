@@ -11,6 +11,7 @@ import zarr
 from mcap.writer import Writer
 from scipy.spatial.transform import RigidTransform, Rotation
 
+from polyumi_ingest.config import load_gripper_calib
 from polyumi_ingest.export.helpers import encode_frames_to_jpeg
 from polyumi_ingest.pzarr.scene_files import SceneFiles
 from polyumi_ingest.transforms import gripper_calib_transforms, transform_optitrack_pose
@@ -397,13 +398,15 @@ def _write_static_transform(
     rotation: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
 ) -> None:
     """Write a single foxglove.FrameTransform message on /tf_static."""
+    tx, ty, tz = (float(v) for v in translation)
+    rx, ry, rz, rw = (float(v) for v in rotation)
     msg = json.dumps(
         {
             'timestamp': _foxglove_time(t_s),
             'parent_frame_id': parent,
             'child_frame_id': child,
-            'translation': {'x': translation[0], 'y': translation[1], 'z': translation[2]},
-            'rotation': {'x': rotation[0], 'y': rotation[1], 'z': rotation[2], 'w': rotation[3]},
+            'translation': {'x': tx, 'y': ty, 'z': tz},
+            'rotation': {'x': rx, 'y': ry, 'z': rz, 'w': rw},
         }
     ).encode()
     writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
@@ -507,9 +510,8 @@ def export_episode_to_mcap(
                 log.info('  optitrack poses...')
                 gripper_calib = root_grp.attrs.get('gripper_calib')
                 if not isinstance(gripper_calib, dict):
-                    raise RuntimeError(
-                        'gripper_calib not found in scene.zarr root attrs; rebuild the pzarr to embed the calibration.'
-                    )
+                    log.warning('gripper_calib not in scene.zarr attrs; loading from config file.')
+                    gripper_calib = load_gripper_calib()
 
                 # Static transform: world → optitrack (from gripper calibration).
                 ow = gripper_calib['T_optitrack_to_world']
