@@ -7,7 +7,7 @@ import pathlib
 
 import numpy as np
 import zarr
-from scipy.spatial.transform import Rotation
+from scipy.spatial.transform import RigidTransform, Rotation
 
 from polyumi_ingest.config import load_gripper_calib
 from polyumi_ingest.preproc.step_base import PreprocessingStep, register_preprocessing_step
@@ -19,15 +19,18 @@ log = logging.getLogger(__name__)
 
 def _svd_align(src: np.ndarray, dst: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """
-    Solve for R, t minimising sum ||R @ src_i + t - dst_i||² (Horn's method).
+    Solve for R, t minimising sum ||R @ src_i + t - dst_i||^2 (Horn's method).
 
     Args:
-        src: (N, 3) positions in source frame (SLAM).
-        dst: (N, 3) corresponding positions in destination frame (world).
+        src: (N, 3) positions in source frame.
+        dst: (N, 3) corresponding positions in destination frame.
 
     Returns:
         R: (3, 3) rotation matrix.
-        t: (3,) translation.  world_p ≈ R @ slam_p + t.
+        t: (3,) translation.  dst_p =(approx) R @ src_p + t.
+
+    See https://roboticsknowledgebase.com/wiki/math/registration-techniques/
+    for a good explanation of this algorithm.
 
     """
     c_src = src.mean(axis=0)
@@ -41,23 +44,23 @@ def _svd_align(src: np.ndarray, dst: np.ndarray) -> tuple[np.ndarray, np.ndarray
     return R, t
 
 
-@register_preprocessing_step(step_number=3, step_name='slam-world-align')
+@register_preprocessing_step(step_number=3, step_name='slam-optitrack-align')
 class SlamToWorldAlignStep(PreprocessingStep):
     """
-    Compute and store the SLAM-to-world rigid transform T_ws.
+    Compute and store the optitrack-to-slam rigid transform T_ws.
 
     Only runs if there is both slam and optitrack data to align; otherwise stores an identity transform.
     For each episode that has SLAM poses, collects (timestamp, slam_position) pairs
     and applies any time-sync correction so the timestamps align with the OptiTrack
-    clock domain.  OptiTrack poses are converted to world-frame GoPro positions via
-    the gripper calibration chain.  Within the time overlap window, OptiTrack world
+    clock domain.  OptiTrack poses are converted to optitrack-frame GoPro positions via
+    the gripper calibration chain.  Within the time overlap window, OptiTrack
     positions are interpolated to each SLAM timestamp, producing matched point pairs.
     Horn's closed-form SVD method then solves for the rotation R and translation t
     that minimise::
 
         Σ ‖R · p_slam_i + t − p_optitrack_i‖²
 
-    The result is written to the root zarr attrs as ``slam_to_optitrack_transform``
+    The result is written to the root zarr attrs as ``optitrack_to_slam_transform``
     with keys ``translation`` (list of 3 floats) and ``rotation`` (list of 4
     floats, xyzw).  The MCAP exporter reads this attr and uses it as the static
     ``optitrack → slam`` frame transform.
@@ -68,8 +71,8 @@ class SlamToWorldAlignStep(PreprocessingStep):
 
     @staticmethod
     def _write_identity(root: zarr.Group) -> None:
-        """Store an identity transform as slam_to_optitrack_transform."""
-        root.attrs['slam_to_optitrack_transform'] = {
+        """Store an identity transform as optitrack_to_slam_transform."""
+        root.attrs['optitrack_to_slam_transform'] = {
             'translation': [0.0, 0.0, 0.0],
             'rotation': [0.0, 0.0, 0.0, 1.0],
         }
@@ -78,8 +81,8 @@ class SlamToWorldAlignStep(PreprocessingStep):
         """Compute T_ws and write it to the root zarr attrs."""
         root = zarr.open_group(str(scene_zarr), mode='a')
 
-        if 'slam_to_optitrack_transform' in root.attrs and not force:
-            log.info('slam_to_optitrack_transform already present; use --force to recompute.')
+        if 'optitrack_to_slam_transform' in root.attrs and not force:
+            log.info('optitrack_to_slam_transform already present; use --force to recompute.')
             return
 
         if 'optitrack/pose' not in root:
@@ -95,7 +98,7 @@ class SlamToWorldAlignStep(PreprocessingStep):
         ot_poses = np.asarray(root['optitrack/pose'][:], dtype=np.float64)
 
         # Convert OptiTrack poses to optitrack-frame GoPro positions (xyz only; SVD is position-based).
-        ot_world_pos = np.array([transform_optitrack_pose(p, T_gb_rb, T_gb_gp)[:3] for p in ot_poses])
+        ot_gopro_pos = np.array([transform_optitrack_pose(p, T_gb_rb, T_gb_gp)[:3] for p in ot_poses])
 
         # Collect SLAM poses across all episodes, correcting to the finger/optitrack clock.
         slam_ts_parts: list[np.ndarray] = []
@@ -152,19 +155,20 @@ class SlamToWorldAlignStep(PreprocessingStep):
         log.info(f'Overlap window: {t_end - t_start:.1f}s  ({len(slam_ts_ov)} SLAM poses)')
 
         # Interpolate OptiTrack world positions at each SLAM timestamp.
-        world_pos_ov = np.column_stack([np.interp(slam_ts_ov, ot_ts, ot_world_pos[:, i]) for i in range(3)])
+        ot_pos_ov = np.column_stack([np.interp(slam_ts_ov, ot_ts, ot_gopro_pos[:, i]) for i in range(3)])
 
-        R, t = _svd_align(slam_pos_ov, world_pos_ov)
+        # we want optitrack -> slam so we can make optitrack the parent in a tf tree later.
+        R, t = _svd_align(slam_pos_ov, ot_pos_ov)
         rotation_xyzw = Rotation.from_matrix(R).as_quat()
 
-        residuals = (R @ slam_pos_ov.T).T + t - world_pos_ov  # (N, 3)
+        residuals = (R @ slam_pos_ov.T).T + t - ot_pos_ov  # (N, 3)
         rms_error = float(np.sqrt(np.mean(np.sum(residuals**2, axis=1))))
         log.info(
-            f'T_ws  translation={t.tolist()}  rotation(xyzw)={rotation_xyzw.tolist()}  '
+            f'T_os  translation={t.tolist()}  rotation(xyzw)={rotation_xyzw.tolist()}  '
             f'RMS={rms_error:.4f} m  N={len(slam_pos_ov)}'
         )
 
-        root.attrs['slam_to_optitrack_transform'] = {
+        root.attrs['optitrack_to_slam_transform'] = {
             'translation': t.tolist(),
             'rotation': rotation_xyzw.tolist(),
         }

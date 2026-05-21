@@ -532,13 +532,13 @@ def export_episode_to_mcap(
                 # Static transform: optitrack → slam.  Use computed T_os if available,
                 # otherwise fall back to identity.
                 if has_slam:
-                    t_os_attrs = root_grp.attrs.get('slam_to_optitrack_transform')
+                    t_os_attrs = root_grp.attrs.get('optitrack_to_slam_transform')
                     if isinstance(t_os_attrs, dict):
                         t_vals = np.asarray(t_os_attrs['translation'], dtype=float)
                         r_vals = np.asarray(t_os_attrs['rotation'], dtype=float)
                         if t_vals.shape != (3,) or r_vals.shape != (4,):
                             raise RuntimeError(
-                                f'slam_to_optitrack_transform has unexpected shape: '
+                                f'optitrack_to_slam_transform has unexpected shape: '
                                 f'translation={t_vals.shape} rotation={r_vals.shape}'
                             )
                         _write_static_transform(
