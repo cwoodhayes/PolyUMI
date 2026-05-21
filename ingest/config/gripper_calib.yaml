@@ -4,10 +4,10 @@
 # necessary because Motive just picks the centroid of the markers as the 
 # origin of the rigid body frame--I have no control over it.
 
-# gripper base frame:
+# gripper base frame (due to how i calibrated it):
 # x - forward
-# y - left
-# z - up
+# y - up
+# z - left
 
 # gopro frame:
 # x - right
@@ -24,12 +24,13 @@ T_gripper_base_to_optitrack_rigid_body:
 # measured approximately irl + in onshape
 T_gripper_base_to_gopro:
   translation: [-.049, 0.21, 0.0] # meters
-  rotation: [ 0.5, -0.5, 0.5, -0.5 ] # quaternion
-  # rotation: [0, 0, 0, 1] # quaternion
+  # rotation: [ 0, 0, -0.7071068, 0.7071068 ] # quaternion
+  # rotation: [ 0.5, -0.5, 0.5, -0.5 ]
+  rotation: [ -0.5, -0.5, 0.5, 0.5 ]
 
-# for some reason, optitrack has z along the floor. 
-# i want world to have z up
+
 T_optitrack_to_world:
   translation: [0.0, 0.0, 0.0] # meters
-  rotation: [-0.7071068, 0, 0, 0.7071068] # quaternion
-  # rotation: [0, 0, 0, 1] # quaternion
+  # for z along the floor; old motive configuration.
+  # rotation: [-0.7071068, 0, 0, 0.7071068] # quaternion
+  rotation: [0, 0, 0, 1] # quaternion

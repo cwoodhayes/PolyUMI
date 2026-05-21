@@ -379,7 +379,7 @@ def _parse_optitrack_csv(csv_path: pathlib.Path) -> tuple[np.ndarray, np.ndarray
     pos_xyz = data[:, rb_col_start + 3 : rb_col_start + 6]
 
     # Motive exports rotations as extrinsic XYZ Euler angles (header: "Rotation Type,XYZ").
-    quats_xyzw = Rotation.from_euler('xyz', rot_xyz_deg, degrees=True).as_quat()
+    quats_xyzw = Rotation.from_euler('XYZ', rot_xyz_deg, degrees=True).as_quat()
     poses = np.concatenate([pos_xyz, quats_xyzw], axis=1)
     return times_s, poses
 
