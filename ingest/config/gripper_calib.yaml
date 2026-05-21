@@ -24,7 +24,10 @@ T_gripper_base_to_optitrack_rigid_body:
 # measured approximately irl + in onshape
 T_gripper_base_to_gopro:
   translation: [-.049, 0.21, 0.0] # meters
-  rotation: [ 0, 0, -0.7071068, 0.7071068 ] # quaternion
+  # rotation: [ 0, 0, -0.7071068, 0.7071068 ] # quaternion
+  # rotation: [ 0.5, -0.5, 0.5, -0.5 ]
+  rotation: [ -0.5, -0.5, 0.5, 0.5 ]
+
 
 T_optitrack_to_world:
   translation: [0.0, 0.0, 0.0] # meters
