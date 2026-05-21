@@ -3,6 +3,7 @@
 import asyncio
 import enum
 import logging
+import time
 
 from polyumi_pi.constants import BUTTON_PIN, ESYNC_PIN, INDICATOR_PIN
 
@@ -23,7 +24,7 @@ class IndicatorState(enum.Enum):
 class RaspiDriver:
     """Manages the RaspiAudio ULTRA++ HAT and its exposed GPIO peripherals."""
 
-    def __init__(self, bounce_time_ms: int = 50) -> None:
+    def __init__(self) -> None:
         """Initialize GPIO pins and indicator LED."""
         # using lgpio here instead of gpiozero
         # because gpiozero wasn't playing nice with async/await
@@ -36,7 +37,6 @@ class RaspiDriver:
         self._handle = _lgpio.gpiochip_open(_GPIOCHIP)
         _lgpio.gpio_claim_input(self._handle, BUTTON_PIN, _lgpio.SET_PULL_UP)
         _lgpio.gpio_claim_input(self._handle, ESYNC_PIN, _lgpio.SET_PULL_NONE)
-        self._bounce_time_ms = bounce_time_ms
         self._indicator = PWMLED(INDICATOR_PIN)
 
     def get_lgpio_handle(self) -> int:
@@ -55,6 +55,7 @@ class RaspiDriver:
             if val == 0 and last == 1:
                 return
             last = val
+            time.sleep(0.001)
 
     def wait_for_esync(self) -> None:
         """Block until a rising edge is detected on the esync pin."""
@@ -64,6 +65,8 @@ class RaspiDriver:
             if val == 1 and last == 0:
                 return
             last = val
+            # faster poll due to desired accuracy on esync.
+            time.sleep(0.0001)
 
     def set_indicator(self, state: IndicatorState) -> None:
         """Set the indicator LED state."""

@@ -520,8 +520,8 @@ def start_scene(
         False, '--no-gopro', help='Skip GoPro connection (for debugging).'
     ),
     optitrack: bool = typer.Option(
-        False, '--optitrack', help="If true, expect the e-sync signal to be plugged into pin 40, and await"
-        "the line to go high before enabling recording sessions (see optitrack.py for details)."
+        False, '--optitrack', help="If true, expect the e-sync signal & gnd to be plugged into pin 37 & 39, and await"
+        " the line to go high before enabling recording sessions (see optitrack.py for details)."
     )
 ):
     """
