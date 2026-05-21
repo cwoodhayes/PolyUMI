@@ -224,6 +224,7 @@ def _register_channels(
         channels['/gopro/gps'] = ch('/gopro/gps', gps_sid)
     if has_optitrack:
         channels['/optitrack/pose'] = ch('/optitrack/pose', pose_sid)
+        channels['/optitrack/pose_raw'] = ch('/optitrack/pose_raw', pose_sid)
     if has_slam:
         channels['/slam/pose'] = ch('/slam/pose', pose_sid)
     return channels
@@ -357,35 +358,43 @@ def _write_gps(
         writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
 
 
+def _pose_msg(t_s: float, frame_id: str, row: np.ndarray) -> bytes:
+    """Encode a foxglove.PoseInFrame JSON message from a (7,) [x y z qx qy qz qw] row."""
+    return json.dumps(
+        {
+            'timestamp': _foxglove_time(t_s),
+            'frame_id': frame_id,
+            'pose': {
+                'position': {'x': float(row[0]), 'y': float(row[1]), 'z': float(row[2])},
+                'orientation': {
+                    'x': float(row[3]),
+                    'y': float(row[4]),
+                    'z': float(row[5]),
+                    'w': float(row[6]),
+                },
+            },
+        }
+    ).encode()
+
+
 def _write_optitrack_poses(
     writer: Writer,
     channel_id: int,
+    raw_channel_id: int,
     pose_arr: np.ndarray,
     ts: np.ndarray,
     gripper_calib: dict,
 ) -> None:
-    """Write OptiTrack rigid-body poses as foxglove.PoseInFrame messages."""
+    """Write OptiTrack poses: transformed (GoPro frame) and raw (rigid-body frame)."""
     T_gb_rb, T_gb_gp, _ = gripper_calib_transforms(gripper_calib)
 
     for i in range(len(ts)):
-        row = transform_optitrack_pose(pose_arr[i], T_gb_rb, T_gb_gp)
         t_s = float(ts[i])
-        msg = json.dumps(
-            {
-                'timestamp': _foxglove_time(t_s),
-                'frame_id': 'optitrack',
-                'pose': {
-                    'position': {'x': float(row[0]), 'y': float(row[1]), 'z': float(row[2])},
-                    'orientation': {
-                        'x': float(row[3]),
-                        'y': float(row[4]),
-                        'z': float(row[5]),
-                        'w': float(row[6]),
-                    },
-                },
-            }
-        ).encode()
-        writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
+        transformed = transform_optitrack_pose(pose_arr[i], T_gb_rb, T_gb_gp)
+        writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s),
+                           data=_pose_msg(t_s, 'optitrack', transformed), publish_time=_ts_ns(t_s))
+        writer.add_message(channel_id=raw_channel_id, log_time=_ts_ns(t_s),
+                           data=_pose_msg(t_s, 'optitrack', pose_arr[i]), publish_time=_ts_ns(t_s))
 
 
 def _write_static_transform(
@@ -431,18 +440,8 @@ def _write_slam_poses(
 
     for i in valid_idx:
         t_s = float(ts[i])
-        tx, ty, tz, qx, qy, qz, qw = poses[i].tolist()
-        msg = json.dumps(
-            {
-                'timestamp': _foxglove_time(t_s),
-                'frame_id': frame_id,
-                'pose': {
-                    'position': {'x': tx, 'y': ty, 'z': tz},
-                    'orientation': {'x': qx, 'y': qy, 'z': qz, 'w': qw},
-                },
-            }
-        ).encode()
-        writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
+        writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s),
+                           data=_pose_msg(t_s, frame_id, poses[i]), publish_time=_ts_ns(t_s))
 
     log.info(f'  slam poses: wrote {valid_idx.size}/{n} (lost {n - valid_idx.size})')
 
@@ -559,7 +558,9 @@ def export_episode_to_mcap(
                 mask = (ot_ts >= t0) & (ot_ts <= ep_ts_last)  # type: ignore
                 ot_ts = ot_ts[mask]
                 ot_poses = ot_poses[mask]
-                _write_optitrack_poses(writer, ch['/optitrack/pose'], ot_poses, ot_ts, gripper_calib)
+                _write_optitrack_poses(
+                    writer, ch['/optitrack/pose'], ch['/optitrack/pose_raw'], ot_poses, ot_ts, gripper_calib
+                )
 
             log.info('  finger frames...')
             _write_video(
