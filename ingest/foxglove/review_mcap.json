@@ -1,5 +1,75 @@
 {
   "configById": {
+    "3D!oah9y3": {
+      "cameraState": {
+        "perspective": true,
+        "distance": 6.47067089947399,
+        "phi": 60.00000000000097,
+        "thetaOffset": 60.000000000001776,
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followMode": "follow-pose",
+      "followTf": "world",
+      "scene": {},
+      "transforms": {},
+      "topics": {
+        "/optitrack/pose": {
+          "visible": true,
+          "axisScale": 0.5
+        }
+      },
+      "layers": {
+        "grid": {
+          "visible": true,
+          "drawBehind": false,
+          "instanceId": "f21a88ed-cc7d-4285-91f8-9811ca4f02a0",
+          "layerId": "foxglove.Grid",
+          "size": 10,
+          "divisions": 10,
+          "lineWidth": 1,
+          "color": "#248eff",
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "publish": {
+        "type": "point",
+        "poseTopic": "/move_base_simple/goal",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "synchronize": false,
+      "imageMode": {}
+    },
     "Image!3zkla5f": {
       "cameraState": {
         "distance": 20,
@@ -154,12 +224,13 @@
       "volume": 1,
       "slidingViewWidth": 10,
       "topic": "/gopro/audio",
-      "muted": true
+      "muted": false
     },
     "Audio!2w9y83j": {
       "volume": 1,
       "slidingViewWidth": 10,
-      "topic": "/finger/piezo"
+      "topic": "/finger/piezo",
+      "muted": false
     },
     "Audio!1v0aezy": {
       "volume": 0.8731,
@@ -178,9 +249,14 @@
   },
   "layout": {
     "first": {
-      "first": "Image!3zkla5f",
+      "first": {
+        "first": "3D!oah9y3",
+        "second": "Image!3zkla5f",
+        "direction": "row"
+      },
       "second": "Image!24wk5v",
-      "direction": "row"
+      "direction": "row",
+      "splitPercentage": 71.28001014564859
     },
     "second": {
       "first": {

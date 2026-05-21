@@ -9,10 +9,12 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import zarr
 from mcap.writer import Writer
-from scipy.spatial.transform import Rotation
+from scipy.spatial.transform import RigidTransform, Rotation
 
+from polyumi_ingest.config import load_gripper_calib
 from polyumi_ingest.export.helpers import encode_frames_to_jpeg
 from polyumi_ingest.pzarr.scene_files import SceneFiles
+from polyumi_ingest.transforms import gripper_calib_transforms, transform_optitrack_pose
 
 log = logging.getLogger('export.mcap')
 
@@ -117,6 +119,31 @@ _SCHEMA_POSE_IN_FRAME = json.dumps(
     }
 ).encode()
 
+_QUAT = {
+    'type': 'object',
+    'properties': {
+        'x': {'type': 'number'},
+        'y': {'type': 'number'},
+        'z': {'type': 'number'},
+        'w': {'type': 'number'},
+    },
+}
+
+_SCHEMA_FRAME_TRANSFORM = json.dumps(
+    {
+        '$schema': 'https://json-schema.org/draft/2020-12/schema',
+        'title': 'foxglove.FrameTransform',
+        'type': 'object',
+        'properties': {
+            'timestamp': _TIME,
+            'parent_frame_id': {'type': 'string'},
+            'child_frame_id': {'type': 'string'},
+            'translation': _VEC3,
+            'rotation': _QUAT,
+        },
+    }
+).encode()
+
 _SCHEMA_LOCATION_FIX = json.dumps(
     {
         '$schema': 'https://json-schema.org/draft/2020-12/schema',
@@ -165,6 +192,7 @@ def _register_channels(
     has_gyro: bool,
     has_gps: bool,
     has_gopro_audio: bool,
+    has_optitrack: bool,
     has_slam: bool,
 ) -> dict[str, int]:
     """Register all schemas and channels; return {topic: channel_id}."""
@@ -173,6 +201,7 @@ def _register_channels(
     imu_sid = writer.register_schema('foxglove.Imu', 'jsonschema', _SCHEMA_IMU)
     gps_sid = writer.register_schema('foxglove.LocationFix', 'jsonschema', _SCHEMA_LOCATION_FIX)
     pose_sid = writer.register_schema('foxglove.PoseInFrame', 'jsonschema', _SCHEMA_POSE_IN_FRAME)
+    tf_sid = writer.register_schema('foxglove.FrameTransform', 'jsonschema', _SCHEMA_FRAME_TRANSFORM)
 
     def ch(topic: str, sid: int) -> int:
         return writer.register_channel(topic=topic, message_encoding='json', schema_id=sid)
@@ -181,6 +210,7 @@ def _register_channels(
         '/finger/image': ch('/finger/image', img_sid),
         '/finger/piezo': ch('/finger/piezo', aud_sid),
         '/finger/air': ch('/finger/air', aud_sid),
+        '/tf_static': ch('/tf_static', tf_sid),
     }
     if has_gopro:
         channels['/gopro/image'] = ch('/gopro/image', img_sid)
@@ -192,6 +222,9 @@ def _register_channels(
         channels['/gopro/gyro'] = ch('/gopro/gyro', imu_sid)
     if has_gps:
         channels['/gopro/gps'] = ch('/gopro/gps', gps_sid)
+    if has_optitrack:
+        channels['/optitrack/pose'] = ch('/optitrack/pose', pose_sid)
+        channels['/optitrack/pose_raw'] = ch('/optitrack/pose_raw', pose_sid)
     if has_slam:
         channels['/slam/pose'] = ch('/slam/pose', pose_sid)
     return channels
@@ -220,7 +253,7 @@ def _write_video(
             if b % log_every_batch == 0:
                 log.info(f'    {frame_id}: frame {batch_start}/{n}')
             batch_end = min(batch_start + _ENCODE_BATCH, n)
-            jpegs = encode_frames_to_jpeg(frames_arr[batch_start:batch_end], quality, executor)
+            jpegs = encode_frames_to_jpeg(np.asarray(frames_arr[batch_start:batch_end]), quality, executor)
             for j, jpeg in enumerate(jpegs):
                 t_s = float(ts[batch_start + j])
                 msg = json.dumps(
@@ -325,47 +358,90 @@ def _write_gps(
         writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
 
 
+def _pose_msg(t_s: float, frame_id: str, row: np.ndarray) -> bytes:
+    """Encode a foxglove.PoseInFrame JSON message from a (7,) [x y z qx qy qz qw] row."""
+    return json.dumps(
+        {
+            'timestamp': _foxglove_time(t_s),
+            'frame_id': frame_id,
+            'pose': {
+                'position': {'x': float(row[0]), 'y': float(row[1]), 'z': float(row[2])},
+                'orientation': {
+                    'x': float(row[3]),
+                    'y': float(row[4]),
+                    'z': float(row[5]),
+                    'w': float(row[6]),
+                },
+            },
+        }
+    ).encode()
+
+
+def _write_optitrack_poses(
+    writer: Writer,
+    channel_id: int,
+    raw_channel_id: int,
+    pose_arr: np.ndarray,
+    ts: np.ndarray,
+    gripper_calib: dict,
+) -> None:
+    """Write OptiTrack poses: transformed (GoPro frame) and raw (rigid-body frame)."""
+    T_gb_rb, T_gb_gp, _ = gripper_calib_transforms(gripper_calib)
+
+    for i in range(len(ts)):
+        t_s = float(ts[i])
+        transformed = transform_optitrack_pose(pose_arr[i], T_gb_rb, T_gb_gp)
+        writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s),
+                           data=_pose_msg(t_s, 'optitrack', transformed), publish_time=_ts_ns(t_s))
+        writer.add_message(channel_id=raw_channel_id, log_time=_ts_ns(t_s),
+                           data=_pose_msg(t_s, 'optitrack', pose_arr[i]), publish_time=_ts_ns(t_s))
+
+
+def _write_static_transform(
+    writer: Writer,
+    channel_id: int,
+    t_s: float,
+    parent: str,
+    child: str,
+    translation: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    rotation: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
+) -> None:
+    """Write a single foxglove.FrameTransform message on /tf_static."""
+    tx, ty, tz = (float(v) for v in translation)
+    rx, ry, rz, rw = (float(v) for v in rotation)
+    msg = json.dumps(
+        {
+            'timestamp': _foxglove_time(t_s),
+            'parent_frame_id': parent,
+            'child_frame_id': child,
+            'translation': {'x': tx, 'y': ty, 'z': tz},
+            'rotation': {'x': rx, 'y': ry, 'z': rz, 'w': rw},
+        }
+    ).encode()
+    writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
+
+
 def _write_slam_poses(
     writer: Writer,
     channel_id: int,
     poses: np.ndarray,
-    is_lost: np.ndarray,
     ts: np.ndarray,
     frame_id: str,
 ) -> None:
-    """Write SLAM poses as PoseInFrame messages, skipping lost frames."""
+    """Write SLAM poses as PoseInFrame messages, skipping lost (NaN) frames."""
     n = len(ts)
-    if not (len(poses) == len(is_lost) == n):
-        raise ValueError(
-            f'SLAM pose/loss/timestamp lengths mismatch: '
-            f'poses={len(poses)} is_lost={len(is_lost)} ts={n}'
-        )
+    if len(poses) != n:
+        raise ValueError(f'SLAM pose/timestamp length mismatch: poses={len(poses)} ts={n}')
 
-    # Batch the rotation→quaternion conversion: scipy returns (x, y, z, w).
-    valid_mask = ~is_lost
-    valid_idx = np.nonzero(valid_mask)[0]
+    valid_idx = np.nonzero(~np.isnan(poses[:, 0]))[0]
     if valid_idx.size == 0:
         log.info('  slam poses: all frames lost, nothing to write')
         return
 
-    valid_poses = poses[valid_idx]
-    quats = Rotation.from_matrix(valid_poses[:, :3, :3]).as_quat()  # (M, 4) xyzw
-
-    for j, i in enumerate(valid_idx):
+    for i in valid_idx:
         t_s = float(ts[i])
-        tx, ty, tz = valid_poses[j, :3, 3].tolist()
-        qx, qy, qz, qw = quats[j].tolist()
-        msg = json.dumps(
-            {
-                'timestamp': _foxglove_time(t_s),
-                'frame_id': frame_id,
-                'pose': {
-                    'position': {'x': tx, 'y': ty, 'z': tz},
-                    'orientation': {'x': qx, 'y': qy, 'z': qz, 'w': qw},
-                },
-            }
-        ).encode()
-        writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
+        writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s),
+                           data=_pose_msg(t_s, frame_id, poses[i]), publish_time=_ts_ns(t_s))
 
     log.info(f'  slam poses: wrote {valid_idx.size}/{n} (lost {n - valid_idx.size})')
 
@@ -378,6 +454,7 @@ def export_episode_to_mcap(
     output_path: pathlib.Path,
     jpeg_quality: int = 85,
     audio_chunk_size: int = 4096,
+    root_grp: zarr.Group | None = None,
 ) -> None:
     """Write one pzarr episode group to an MCAP file at output_path."""
     has_gopro = 'gopro/frames' in ep_grp
@@ -385,7 +462,8 @@ def export_episode_to_mcap(
     has_accel = 'gopro/accl' in ep_grp
     has_gyro = 'gopro/gyro' in ep_grp
     has_gps = 'gopro/gps' in ep_grp
-    has_slam = 'gopro/slam_poses' in ep_grp and 'gopro/slam_is_lost' in ep_grp
+    has_optitrack = root_grp is not None and 'optitrack/pose' in root_grp
+    has_slam = 'gopro/slam_poses' in ep_grp
     has_time_sync = (
         'annotations/time_sync' in ep_grp
         and 'gopro_to_finger_offset_s' in ep_grp['annotations/time_sync'].attrs  # type: ignore[index]
@@ -395,7 +473,8 @@ def export_episode_to_mcap(
     # from gopro timestamps to bring them into the finger (Pi) time domain.
     gopro_ts_shift = 0.0
     if has_time_sync:
-        gopro_ts_shift = -float(ep_grp['annotations/time_sync'].attrs['gopro_to_finger_offset_s'])  # type: ignore[index]
+        gopro_ts_shift = -float(ep_grp['annotations/time_sync']
+                                .attrs['gopro_to_finger_offset_s'])  # type: ignore[index]
         log.info(f'  time sync: shifting gopro timestamps by {gopro_ts_shift:+.6f}s')
 
     def _gopro_ts(key: str) -> np.ndarray:
@@ -414,8 +493,74 @@ def export_episode_to_mcap(
                 has_accel=has_accel,
                 has_gyro=has_gyro,
                 has_gps=has_gps,
+                has_optitrack=has_optitrack,
                 has_slam=has_slam,
             )
+
+            # Use the earliest timestamp across all streams as the TF anchor so that
+            # static transforms precede every data message (gopro timestamps can be
+            # earlier than finger timestamps after time-sync correction).
+            t0 = float(ep_grp['timestamps/finger'][0])  # type: ignore
+            if 'timestamps/gopro' in ep_grp:
+                t0 = min(t0, float(_gopro_ts('gopro')[0]))
+
+            if has_optitrack:
+                assert root_grp is not None
+                log.info('  optitrack poses...')
+                gripper_calib = root_grp.attrs.get('gripper_calib')
+                if not isinstance(gripper_calib, dict):
+                    log.warning('gripper_calib not in scene.zarr attrs; loading from config file.')
+                    gripper_calib = load_gripper_calib()
+
+                # Static transform: world → optitrack (from gripper calibration).
+                ow = gripper_calib['T_optitrack_to_world']
+                ow = RigidTransform.from_components(
+                    translation=np.asarray(ow['translation'], dtype=float),  # type: ignore
+                    rotation=Rotation.from_quat(np.asarray(ow['rotation'], dtype=float)),  # type: ignore
+                )
+                wo = ow.inv()
+                wo_t = wo.translation
+                wo_r = wo.rotation.as_quat()
+                _write_static_transform(
+                    writer, ch['/tf_static'], t0,
+                    parent='world', child='optitrack',
+                    translation=(wo_t[0], wo_t[1], wo_t[2]),
+                    rotation=(wo_r[0], wo_r[1], wo_r[2], wo_r[3]),
+                )
+
+                # Static transform: optitrack → slam.  Use computed T_os if available,
+                # otherwise fall back to identity.
+                if has_slam:
+                    t_os_attrs = root_grp.attrs.get('optitrack_to_slam_transform')
+                    if isinstance(t_os_attrs, dict):
+                        t_vals = np.asarray(t_os_attrs['translation'], dtype=float)
+                        r_vals = np.asarray(t_os_attrs['rotation'], dtype=float)
+                        if t_vals.shape != (3,) or r_vals.shape != (4,):
+                            raise RuntimeError(
+                                f'optitrack_to_slam_transform has unexpected shape: '
+                                f'translation={t_vals.shape} rotation={r_vals.shape}'
+                            )
+                        _write_static_transform(
+                            writer, ch['/tf_static'], t0,
+                            parent='optitrack', child='slam',
+                            translation=(t_vals[0], t_vals[1], t_vals[2]),
+                            rotation=(r_vals[0], r_vals[1], r_vals[2], r_vals[3]),
+                        )
+                    else:
+                        _write_static_transform(writer, ch['/tf_static'], t0, parent='optitrack', child='slam')
+
+                ot_ts: np.ndarray = root_grp['optitrack/timestamps'][:]  # type: ignore[index]
+                ot_poses: np.ndarray = root_grp['optitrack/pose'][:]  # type: ignore[index]
+                # Clip optitrack to the episode recording window.  Use t0 as the lower
+                # bound (earliest of finger/gopro) so poses are present from the very
+                # first data message; use the last finger timestamp as the upper bound.
+                ep_ts_last = float(ep_grp['timestamps/finger'][-1])  # type: ignore
+                mask = (ot_ts >= t0) & (ot_ts <= ep_ts_last)  # type: ignore
+                ot_ts = ot_ts[mask]
+                ot_poses = ot_poses[mask]
+                _write_optitrack_poses(
+                    writer, ch['/optitrack/pose'], ch['/optitrack/pose_raw'], ot_poses, ot_ts, gripper_calib
+                )
 
             log.info('  finger frames...')
             _write_video(
@@ -501,7 +646,6 @@ def export_episode_to_mcap(
                     writer,
                     ch['/slam/pose'],
                     np.asarray(ep_grp['gopro/slam_poses'][:]),  # type: ignore[index]
-                    np.asarray(ep_grp['gopro/slam_is_lost'][:]),  # type: ignore[index]
                     _gopro_ts('gopro'),
                     frame_id='slam',
                 )
@@ -540,7 +684,7 @@ def export_scene_to_mcap(
         ep_grp = zarr.open_group(str(zarr_path / ep_key), mode='r')
         out_path = out_dir / f'episode_{ep_idx}.mcap'
         log.info(f'Exporting episode {ep_idx} → {out_path}')
-        export_episode_to_mcap(ep_grp, out_path, jpeg_quality, audio_chunk_size)
+        export_episode_to_mcap(ep_grp, out_path, jpeg_quality, audio_chunk_size, root_grp=root)
         size_mb = out_path.stat().st_size / 1e6
         log.info(f'  Done ({size_mb:.1f} MB)')
         written.append(out_path)

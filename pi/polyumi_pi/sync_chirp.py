@@ -6,7 +6,7 @@ import numpy as np
 import sounddevice as sd
 
 DURATION_S = 0.5
-F0 = 1000.0
+F0 = 440.0
 F1 = 7000.0
 
 

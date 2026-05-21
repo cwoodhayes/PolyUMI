@@ -15,13 +15,12 @@ import imagecodecs.numcodecs  # noqa: F401 — registers imagecodecs_jpegxl with
 import numpy as np
 import zarr
 from numcodecs import Blosc
-from scipy.spatial.transform import Rotation
 
 from polyumi_ingest.preproc.step_base import (
     PreprocessingStep,
     register_preprocessing_step,
 )
-from polyumi_ingest.pzarr.store import _arr, _grp
+from polyumi_ingest.pzarr.store import arr, grp
 
 log = logging.getLogger(__name__)
 
@@ -80,14 +79,6 @@ def _find_gopro_mp4(ep_grp: zarr.Group, scene_zarr: pathlib.Path) -> pathlib.Pat
         f'gopro.mp4 not found for {ep_key!r} — expected at '
         f'{session_dirs[ep_index] / _GOPRO_MP4 if ep_index < len(session_dirs) else "<no matching session dir>"}'
     )
-
-
-def _quat_to_se3(tx: float, ty: float, tz: float, qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
-    """Build a 4×4 SE3 matrix from translation + unit quaternion (x,y,z,w)."""
-    mat = np.eye(4, dtype=np.float32)
-    mat[:3, :3] = Rotation.from_quat([qx, qy, qz, qw]).as_matrix().astype(np.float32)
-    mat[:3, 3] = [tx, ty, tz]
-    return mat
 
 
 def _export_telemetry_json(
@@ -164,16 +155,16 @@ def _export_episode(
     per-frame UTC timestamp array (needed downstream to reconcile the
     C++ trajectory output back onto the original frame indices).
     """
-    gopro_ts = np.asarray(_arr(ep_grp, 'timestamps/gopro')[:], dtype=np.float64)
+    gopro_ts = np.asarray(arr(ep_grp, 'timestamps/gopro')[:], dtype=np.float64)
     if len(gopro_ts) < 2:
         raise RuntimeError(f'Episode has fewer than 2 frames ({len(gopro_ts)})')
     video_path = gopro_mp4
     log.info(f'  Using original gopro.mp4: {gopro_mp4} ({len(gopro_ts)} frames)')
 
-    gyro = np.asarray(_arr(ep_grp, 'gopro/gyro')[:], dtype=np.float64)
-    gyro_ts = np.asarray(_arr(ep_grp, 'timestamps/gopro_gyro')[:], dtype=np.float64)
-    accl = np.asarray(_arr(ep_grp, 'gopro/accl')[:], dtype=np.float64)
-    accl_ts = np.asarray(_arr(ep_grp, 'timestamps/gopro_accl')[:], dtype=np.float64)
+    gyro = np.asarray(arr(ep_grp, 'gopro/gyro')[:], dtype=np.float64)
+    gyro_ts = np.asarray(arr(ep_grp, 'timestamps/gopro_gyro')[:], dtype=np.float64)
+    accl = np.asarray(arr(ep_grp, 'gopro/accl')[:], dtype=np.float64)
+    accl_ts = np.asarray(arr(ep_grp, 'timestamps/gopro_accl')[:], dtype=np.float64)
 
     json_path = tmp_dir / 'telemetry.json'
     _export_telemetry_json(gyro, gyro_ts, accl, accl_ts, float(gopro_ts[0]), json_path)
@@ -213,7 +204,7 @@ def _make_temp_settings_yaml(
 def _parse_and_reconcile_trajectory(
     traj_path: pathlib.Path,
     frame_ts: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> np.ndarray:
     """
     Parse an ORB-SLAM3 EuRoC-format trajectory and align it to ``frame_ts``.
 
@@ -229,15 +220,14 @@ def _parse_and_reconcile_trajectory(
     C++ binary computes tframe from ``cap.get(CAP_PROP_POS_MSEC)``), so we
     add ``frame_ts[0]`` to bring them back to UTC before matching.
 
-    Returns ``(poses, is_lost)`` shaped (N,4,4) float32 and (N,) bool. Lost
-    rows in ``poses`` are all-NaN.
+    Returns ``poses`` shaped (N,7) float64 ``[x,y,z, qx,qy,qz,qw]``. Lost
+    rows are all-NaN.
     """
     n = len(frame_ts)
-    poses = np.full((n, 4, 4), np.nan, dtype=np.float32)
-    is_lost = np.ones(n, dtype=bool)
+    poses = np.full((n, 7), np.nan, dtype=np.float64)
 
     if n < 2:
-        return poses, is_lost
+        return poses
 
     t_ref = float(frame_ts[0])
     period = float(np.median(np.diff(frame_ts)))
@@ -274,18 +264,16 @@ def _parse_and_reconcile_trajectory(
                 n_skipped += 1
                 continue
 
-            poses[idx] = _quat_to_se3(tx, ty, tz, qx, qy, qz, qw)
-            is_lost[idx] = False
+            poses[idx] = [tx, ty, tz, qx, qy, qz, qw]
             n_matched += 1
 
     log.info(f'  Trajectory reconciliation: {n_matched} matched, {n_skipped} skipped')
-    return poses, is_lost
+    return poses
 
 
 def _write_slam_results(
     ep_grp: zarr.Group,
     poses: np.ndarray,
-    is_lost: np.ndarray,
     settings_path: pathlib.Path,
     atlas_path: pathlib.Path,
 ) -> None:
@@ -294,12 +282,10 @@ def _write_slam_results(
 
     if 'slam_poses' in gopro_grp:
         del gopro_grp['slam_poses']
-    if 'slam_is_lost' in gopro_grp:
-        del gopro_grp['slam_is_lost']
 
     gopro_grp.create_array('slam_poses', data=poses, compressor=_BLOSC)
-    gopro_grp.create_array('slam_is_lost', data=is_lost, compressor=_BLOSC)
 
+    is_lost = np.isnan(poses[:, 0])
     n_total = int(len(is_lost))
     n_lost = int(is_lost.sum())
     # count transitions lost→tracked (each run of tracked frames after a gap)
@@ -331,8 +317,8 @@ class OrbSlam3Step(PreprocessingStep):
 
     Phase 2 (localization): for each EPISODE group, exports as mp4 + JSON,
     invokes the localization binary against the pre-built atlas, and writes
-    ``gopro/slam_poses`` (N,4,4) float32 and ``gopro/slam_is_lost`` (N,) bool
-    back into the zarr store, plus summary annotations under
+    ``gopro/slam_poses`` (N,7) float64 ``[x,y,z, qx,qy,qz,qw]`` back into the
+    zarr store (NaN rows = lost frames), plus summary annotations under
     ``annotations/slam``.
 
     The ORB-SLAM3 binaries themselves consume the existing
@@ -342,7 +328,7 @@ class OrbSlam3Step(PreprocessingStep):
     the settings YAML.
 
     Lost frames have all-NaN poses; downstream consumers must check
-    ``slam_is_lost`` or test for NaN before using a pose.
+    NaN before using a pose.
 
     Constructor arguments
     ---------------------
@@ -500,8 +486,8 @@ class OrbSlam3Step(PreprocessingStep):
             # consistent across MAPPING and EPISODE sessions.
             if traj_out.exists():
                 log.info(f'  Mapping trajectory saved to {traj_out}')
-                poses, is_lost = _parse_and_reconcile_trajectory(traj_out, frame_ts)
-                _write_slam_results(ep_grp, poses, is_lost, self.settings_yaml, atlas_path)
+                poses = _parse_and_reconcile_trajectory(traj_out, frame_ts)
+                _write_slam_results(ep_grp, poses, self.settings_yaml, atlas_path)
 
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
@@ -544,8 +530,8 @@ class OrbSlam3Step(PreprocessingStep):
                     f'ORB-SLAM3 localizer completed but trajectory file not found: {traj_out}'
                 )
 
-            poses, is_lost = _parse_and_reconcile_trajectory(traj_out, frame_ts)
-            _write_slam_results(ep_grp, poses, is_lost, self.settings_yaml, atlas_path)
+            poses = _parse_and_reconcile_trajectory(traj_out, frame_ts)
+            _write_slam_results(ep_grp, poses, self.settings_yaml, atlas_path)
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
             log.error(f'Localization failed; temp dir preserved: {tmp_dir}')
@@ -575,7 +561,7 @@ class OrbSlam3Step(PreprocessingStep):
         mapping_key: str | None = None
         episode_keys: list[str] = []
         for ep_key in episodes:
-            ep = _grp(root, ep_key)
+            ep = grp(root, ep_key)
             session_type = ep.attrs.get('session_type', None)
             if session_type == 'MAPPING':
                 mapping_key = ep_key
@@ -606,7 +592,7 @@ class OrbSlam3Step(PreprocessingStep):
             log.info(f'Atlas already exists at {atlas_path}, skipping map building.')
         else:
             log.info(f'Phase 1: building map from {mapping_key}...')
-            mapping_grp = _grp(root, mapping_key)
+            mapping_grp = grp(root, mapping_key)
             t0 = time.monotonic()
             self._build_map(mapping_grp, atlas_path, log_dir, scene_zarr)
             elapsed = time.monotonic() - t0
@@ -615,7 +601,7 @@ class OrbSlam3Step(PreprocessingStep):
         # Phase 2: per-episode localization
         for i, ep_key in enumerate(episode_keys):
             log.info(f'Phase 2: localizing {ep_key} ({i + 1}/{len(episode_keys)})...')
-            ep_grp = _grp(root, ep_key)
+            ep_grp = grp(root, ep_key)
             t0 = time.monotonic()
             self._localize_episode(ep_grp, i, atlas_path, log_dir, scene_zarr)
             elapsed = time.monotonic() - t0

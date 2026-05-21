@@ -1029,6 +1029,7 @@ dependencies = [
     { name = "numcodecs" },
     { name = "pillow" },
     { name = "polyumi-pi" },
+    { name = "pyyaml" },
     { name = "scipy" },
     { name = "zarr" },
 ]
@@ -1045,6 +1046,7 @@ requires-dist = [
     { name = "numcodecs" },
     { name = "pillow" },
     { name = "polyumi-pi", editable = "pi" },
+    { name = "pyyaml" },
     { name = "scipy" },
     { name = "zarr", specifier = ">=3.0" },
 ]
