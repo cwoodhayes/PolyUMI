@@ -6,7 +6,6 @@ import pathlib
 import numpy as np
 import zarr
 from numcodecs import Blosc
-from scipy.spatial.transform import Rotation
 
 _BLOSC = Blosc(cname='zstd', clevel=5, shuffle=Blosc.SHUFFLE)
 
@@ -38,6 +37,7 @@ def parse_optitrack_csv(csv_path: pathlib.Path) -> tuple[np.ndarray, np.ndarray]
     Returns:
         times_s: (N,) float64 seconds since capture start
         poses: (N, 7) float64 [x, y, z, qx, qy, qz, qw] (position metres, quaternion)
+
     """
     name_row_fields: list[str] = []
     data_start_row = None
@@ -47,6 +47,13 @@ def parse_optitrack_csv(csv_path: pathlib.Path) -> tuple[np.ndarray, np.ndarray]
             if stripped.startswith(',Name,'):
                 name_row_fields = stripped.split(',')
             if line.startswith('Frame,Time'):
+                # check that this is outputting quaternions and not euler angles
+                fields = stripped.split(',')
+                if fields[2:6] != ['X', 'Y', 'Z', 'W']:
+                    raise ValueError(
+                        f'Unexpected OptiTrack CSV format in {csv_path}: '
+                        f'expected quaternion columns "X,Y,Z,W" but got {fields[2:6]}'
+                    )
                 data_start_row = i + 1
                 break
     if data_start_row is None:
@@ -61,9 +68,8 @@ def parse_optitrack_csv(csv_path: pathlib.Path) -> tuple[np.ndarray, np.ndarray]
                 rb_col_start = col_idx
                 break
         else:
-            log.warning(
-                'No rigid body named "PolyUMI*" found in OptiTrack CSV; '
-                'falling back to first rigid body (cols 2-7).'
+            raise ValueError(
+                f'No rigid body named "PolyUMI*" found in OptiTrack CSV: {csv_path}'
             )
 
     data = np.loadtxt(csv_path, delimiter=',', skiprows=data_start_row, dtype=np.float64)
@@ -71,12 +77,10 @@ def parse_optitrack_csv(csv_path: pathlib.Path) -> tuple[np.ndarray, np.ndarray]
         data = data[np.newaxis, :]
 
     times_s = data[:, 1]
-    rot_xyz_deg = data[:, rb_col_start : rb_col_start + 3]
-    pos_xyz = data[:, rb_col_start + 3 : rb_col_start + 6]
+    rot_quat = data[:, rb_col_start: rb_col_start + 4]
+    pos_xyz = data[:, rb_col_start + 4: rb_col_start + 7]
 
-    # Motive exports rotations as extrinsic XYZ Euler angles (header: "Rotation Type,XYZ").
-    quats_xyzw = Rotation.from_euler('XYZ', rot_xyz_deg, degrees=True).as_quat()
-    poses = np.concatenate([pos_xyz, quats_xyzw], axis=1)
+    poses = np.concatenate([pos_xyz, rot_quat], axis=1)
     return times_s, poses
 
 
