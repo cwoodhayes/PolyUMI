@@ -163,6 +163,8 @@ The launch file accepts two arguments: `pi_host` (default `10.106.10.62`) and `v
 
 ## Hardware Notes
 
+The Raspberry Pi app in `pi/` also depends upon a custom fork of [OpenGoPro](https://github.com/cwoodhayes/OpenGoPro) with some specific extra capabilities & one bugfix; without these the library cannot connect over BLE on Debian Trixie (and its downsteam RPi fork which we are using.)
+
 ### PiSugar Battery
 
 Battery status is accessible at `http://<pi_ip>:8421` or via I2C:
