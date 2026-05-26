@@ -110,6 +110,8 @@ class ArucoGripperWidthStep(PreprocessingStep):
 
         raw_ts: list[float] = []
         raw_widths: list[float] = []
+        # Marker-index ordering: 0 = left_id, 1 = right_id. NaN where not detected.
+        finger_corners = np.full((n_frames, 2, 4, 2), np.nan, dtype=np.float32)
         for i in tqdm(range(n_frames), desc=f'{episode_key} aruco', unit='frame'):
             frame = np.asarray(frames_arr[i])
             tag_dict = detect_localize_aruco_tags(
@@ -118,6 +120,10 @@ class ArucoGripperWidthStep(PreprocessingStep):
                 marker_size_map=marker_size_map,
                 fisheye_intr_dict=intr,
             )
+            if left_id in tag_dict:
+                finger_corners[i, 0] = tag_dict[left_id]['corners']
+            if right_id in tag_dict:
+                finger_corners[i, 1] = tag_dict[right_id]['corners']
             width = get_gripper_width(
                 tag_dict,
                 left_id=left_id,
@@ -146,7 +152,7 @@ class ArucoGripperWidthStep(PreprocessingStep):
             width_m = np.full(n_frames, np.nan, dtype=np.float32)
 
         out_grp = ep.require_group('annotations').require_group('gripper_width')
-        for arr_name in ('width_m', 'raw_widths_m', 'raw_timestamps_s'):
+        for arr_name in ('width_m', 'raw_widths_m', 'raw_timestamps_s', 'finger_corners'):
             if arr_name in out_grp:
                 del out_grp[arr_name]
         out_grp.create_array('width_m', data=width_m, compressor=_BLOSC)
@@ -160,6 +166,7 @@ class ArucoGripperWidthStep(PreprocessingStep):
             data=np.array(raw_ts, dtype=np.float64),
             compressor=_BLOSC,
         )
+        out_grp.create_array('finger_corners', data=finger_corners, compressor=_BLOSC)
 
         out_grp.attrs['detection_rate'] = float(detection_rate)
         out_grp.attrs['n_detected'] = int(n_detected)

@@ -32,3 +32,7 @@ def test_aruco_step_no_markers(tmp_path: pathlib.Path) -> None:
     assert int(out_grp.attrs['n_detected']) == 0  # type: ignore[arg-type]
     assert int(out_grp.attrs['n_frames']) == n_frames  # type: ignore[arg-type]
     assert root.attrs['preprocessing_steps'] == [4]
+
+    finger_corners = np.asarray(out_grp['finger_corners'][:])  # type: ignore[index]
+    assert finger_corners.shape == (n_frames, 2, 4, 2)
+    assert np.isnan(finger_corners).all()

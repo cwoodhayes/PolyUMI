@@ -37,6 +37,24 @@ _VEC3 = {
     },
 }
 
+_COLOR = {
+    'type': 'object',
+    'properties': {
+        'r': {'type': 'number'},
+        'g': {'type': 'number'},
+        'b': {'type': 'number'},
+        'a': {'type': 'number'},
+    },
+}
+
+_POINT2 = {
+    'type': 'object',
+    'properties': {
+        'x': {'type': 'number'},
+        'y': {'type': 'number'},
+    },
+}
+
 _SCHEMA_COMPRESSED_IMAGE = json.dumps(
     {
         '$schema': 'https://json-schema.org/draft/2020-12/schema',
@@ -161,6 +179,72 @@ _SCHEMA_LOCATION_FIX = json.dumps(
     }
 ).encode()
 
+_SCHEMA_GRIPPER_WIDTH = json.dumps(
+    {
+        '$schema': 'https://json-schema.org/draft/2020-12/schema',
+        'title': 'polyumi.GripperWidth',
+        'type': 'object',
+        'properties': {
+            'timestamp': _TIME,
+            'width_m': {'type': 'number'},
+        },
+    }
+).encode()
+
+_SCHEMA_IMAGE_ANNOTATIONS = json.dumps(
+    {
+        '$schema': 'https://json-schema.org/draft/2020-12/schema',
+        'title': 'foxglove.ImageAnnotations',
+        'type': 'object',
+        'properties': {
+            'points': {
+                'type': 'array',
+                'items': {
+                    'type': 'object',
+                    'properties': {
+                        'timestamp': _TIME,
+                        # PointsAnnotationType: 1=POINTS, 2=LINE_LOOP, 3=LINE_STRIP, 4=LINE_LIST
+                        'type': {'type': 'integer'},
+                        'points': {'type': 'array', 'items': _POINT2},
+                        'outline_color': _COLOR,
+                        'outline_colors': {'type': 'array', 'items': _COLOR},
+                        'fill_color': _COLOR,
+                        'thickness': {'type': 'number'},
+                    },
+                },
+            },
+            'circles': {
+                'type': 'array',
+                'items': {
+                    'type': 'object',
+                    'properties': {
+                        'timestamp': _TIME,
+                        'position': _POINT2,
+                        'diameter': {'type': 'number'},
+                        'thickness': {'type': 'number'},
+                        'fill_color': _COLOR,
+                        'outline_color': _COLOR,
+                    },
+                },
+            },
+            'texts': {
+                'type': 'array',
+                'items': {
+                    'type': 'object',
+                    'properties': {
+                        'timestamp': _TIME,
+                        'position': _POINT2,
+                        'text': {'type': 'string'},
+                        'font_size': {'type': 'number'},
+                        'text_color': _COLOR,
+                        'background_color': _COLOR,
+                    },
+                },
+            },
+        },
+    }
+).encode()
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -194,6 +278,7 @@ def _register_channels(
     has_gopro_audio: bool,
     has_optitrack: bool,
     has_slam: bool,
+    has_aruco: bool,
 ) -> dict[str, int]:
     """Register all schemas and channels; return {topic: channel_id}."""
     img_sid = writer.register_schema('foxglove.CompressedImage', 'jsonschema', _SCHEMA_COMPRESSED_IMAGE)
@@ -202,6 +287,8 @@ def _register_channels(
     gps_sid = writer.register_schema('foxglove.LocationFix', 'jsonschema', _SCHEMA_LOCATION_FIX)
     pose_sid = writer.register_schema('foxglove.PoseInFrame', 'jsonschema', _SCHEMA_POSE_IN_FRAME)
     tf_sid = writer.register_schema('foxglove.FrameTransform', 'jsonschema', _SCHEMA_FRAME_TRANSFORM)
+    ann_sid = writer.register_schema('foxglove.ImageAnnotations', 'jsonschema', _SCHEMA_IMAGE_ANNOTATIONS)
+    width_sid = writer.register_schema('polyumi.GripperWidth', 'jsonschema', _SCHEMA_GRIPPER_WIDTH)
 
     def ch(topic: str, sid: int) -> int:
         return writer.register_channel(topic=topic, message_encoding='json', schema_id=sid)
@@ -227,6 +314,9 @@ def _register_channels(
         channels['/optitrack/pose_raw'] = ch('/optitrack/pose_raw', pose_sid)
     if has_slam:
         channels['/slam/pose'] = ch('/slam/pose', pose_sid)
+    if has_aruco:
+        channels['/gopro/aruco_annotations'] = ch('/gopro/aruco_annotations', ann_sid)
+        channels['/gripper/width'] = ch('/gripper/width', width_sid)
     return channels
 
 
@@ -446,6 +536,106 @@ def _write_slam_poses(
     log.info(f'  slam poses: wrote {valid_idx.size}/{n} (lost {n - valid_idx.size})')
 
 
+# Foxglove PointsAnnotationType: 2 = LINE_LOOP (closed polygon through all points).
+_PA_LINE_LOOP = 2
+
+_ARUCO_QUAD_COLOR = {'r': 1.0, 'g': 0.2, 'b': 0.2, 'a': 1.0}
+_ARUCO_TEXT_COLOR = {'r': 1.0, 'g': 1.0, 'b': 1.0, 'a': 1.0}
+_ARUCO_TEXT_BG = {'r': 0.0, 'g': 0.0, 'b': 0.0, 'a': 0.6}
+
+
+def _write_aruco_annotations(
+    writer: Writer,
+    channel_id: int,
+    finger_corners: np.ndarray,
+    ts: np.ndarray,
+    frame_id: str,
+    left_id: int,
+    right_id: int,
+) -> None:
+    """
+    Write per-frame foxglove.ImageAnnotations from a (N, 2, 4, 2) corners array.
+
+    Slot 0 = left_id, slot 1 = right_id (as written by aruco_step). Frames where
+    a marker wasn't detected have NaN corners and are skipped per-marker. A
+    message is emitted for every frame (possibly empty) so the channel covers
+    the full timeline.
+    """
+    n = len(ts)
+    if finger_corners.shape != (n, 2, 4, 2):
+        raise ValueError(
+            f'finger_corners shape {finger_corners.shape} != expected ({n}, 2, 4, 2)'
+        )
+    marker_ids = (left_id, right_id)
+    fg_time_cache: dict[int, dict] = {}
+
+    def fg_time(t_s: float) -> dict:
+        ns = _ts_ns(t_s)
+        cached = fg_time_cache.get(ns)
+        if cached is None:
+            cached = {'sec': ns // 1_000_000_000, 'nsec': ns % 1_000_000_000}
+            fg_time_cache[ns] = cached
+        return cached
+
+    n_messages = 0
+    n_quads = 0
+    for i in range(n):
+        t_s = float(ts[i])
+        t_fg = fg_time(t_s)
+        points_annotations = []
+        texts = []
+        for slot, marker_id in enumerate(marker_ids):
+            corners = finger_corners[i, slot]
+            if np.isnan(corners).any():
+                continue
+            pts = [{'x': float(c[0]), 'y': float(c[1])} for c in corners]
+            points_annotations.append({
+                'timestamp': t_fg,
+                'type': _PA_LINE_LOOP,
+                'points': pts,
+                'outline_color': _ARUCO_QUAD_COLOR,
+                'thickness': 2.0,
+            })
+            cx = float(corners[:, 0].mean())
+            cy = float(corners[:, 1].mean())
+            texts.append({
+                'timestamp': t_fg,
+                'position': {'x': cx, 'y': cy},
+                'text': str(marker_id),
+                'font_size': 14.0,
+                'text_color': _ARUCO_TEXT_COLOR,
+                'background_color': _ARUCO_TEXT_BG,
+            })
+            n_quads += 1
+        msg = json.dumps({'points': points_annotations, 'texts': texts}).encode()
+        writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
+        n_messages += 1
+
+    log.info(f'  aruco annotations: {n_messages} frames, {n_quads} marker quads drawn')
+
+
+def _write_gripper_width(
+    writer: Writer,
+    channel_id: int,
+    width_m: np.ndarray,
+    ts: np.ndarray,
+) -> None:
+    """Write the dense per-frame gripper width series as polyumi.GripperWidth messages."""
+    n = len(ts)
+    if len(width_m) != n:
+        raise ValueError(f'width_m/timestamp length mismatch: width_m={len(width_m)} ts={n}')
+    n_valid = 0
+    for i in range(n):
+        t_s = float(ts[i])
+        w = float(width_m[i])
+        if np.isnan(w):
+            continue
+        msg = json.dumps({'timestamp': _foxglove_time(t_s), 'width_m': w}).encode()
+        writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
+        n_valid += 1
+    log.info(f'  gripper width: wrote {n_valid}/{n} samples')
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 
@@ -464,6 +654,7 @@ def export_episode_to_mcap(
     has_gps = 'gopro/gps' in ep_grp
     has_optitrack = root_grp is not None and 'optitrack/pose' in root_grp
     has_slam = 'gopro/slam_poses' in ep_grp
+    has_aruco = 'annotations/gripper_width/finger_corners' in ep_grp
     has_time_sync = (
         'annotations/time_sync' in ep_grp
         and 'gopro_to_finger_offset_s' in ep_grp['annotations/time_sync'].attrs  # type: ignore[index]
@@ -495,6 +686,7 @@ def export_episode_to_mcap(
                 has_gps=has_gps,
                 has_optitrack=has_optitrack,
                 has_slam=has_slam,
+                has_aruco=has_aruco,
             )
 
             # Use the earliest timestamp across all streams as the TF anchor so that
@@ -648,6 +840,28 @@ def export_episode_to_mcap(
                     np.asarray(ep_grp['gopro/slam_poses'][:]),  # type: ignore[index]
                     _gopro_ts('gopro'),
                     frame_id='slam',
+                )
+
+            if has_aruco:
+                log.info('  aruco annotations...')
+                gw_grp = ep_grp['annotations/gripper_width']
+                gopro_ts = _gopro_ts('gopro')
+                _write_aruco_annotations(
+                    writer,
+                    ch['/gopro/aruco_annotations'],
+                    np.asarray(gw_grp['finger_corners'][:]),  # type: ignore[index]
+                    gopro_ts,
+                    frame_id='gopro',
+                    left_id=int(gw_grp.attrs['left_id']),  # type: ignore[arg-type]
+                    right_id=int(gw_grp.attrs['right_id']),  # type: ignore[arg-type]
+                )
+
+                log.info('  gripper width...')
+                _write_gripper_width(
+                    writer,
+                    ch['/gripper/width'],
+                    np.asarray(gw_grp['width_m'][:]),  # type: ignore[index]
+                    gopro_ts,
                 )
         finally:
             writer.finish()
