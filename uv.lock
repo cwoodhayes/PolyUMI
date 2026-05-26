@@ -594,6 +594,12 @@ wheels = [
 ]
 
 [[package]]
+name = "lgpio"
+version = "0.2.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/56/33/26ec2e8049eaa2f077bf23a12dc61ca559fbfa7bea0516bf263d657ae275/lgpio-0.2.2.0.tar.gz", hash = "sha256:11372e653b200f76a0b3ef8a23a0735c85ec678a9f8550b9893151ed0f863fff", size = 90087, upload-time = "2024-03-29T21:59:55.901Z" }
+
+[[package]]
 name = "libarchive-c"
 version = "5.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1061,6 +1067,7 @@ source = { editable = "pi" }
 dependencies = [
     { name = "fastapi" },
     { name = "gpiozero" },
+    { name = "lgpio" },
     { name = "numpy" },
     { name = "open-gopro" },
     { name = "opencv-python-headless" },
@@ -1078,6 +1085,7 @@ dependencies = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.135.1" },
     { name = "gpiozero", specifier = ">=2.0" },
+    { name = "lgpio", specifier = ">=0.2.2.0" },
     { name = "numpy", specifier = ">=2.4.3" },
     { name = "open-gopro", git = "https://github.com/cwoodhayes/OpenGoPro?subdirectory=demos%2Fpython%2Fsdk_wireless_camera_control&branch=pi-trixie-fix" },
     { name = "opencv-python-headless", specifier = ">=4.12.0.88" },
