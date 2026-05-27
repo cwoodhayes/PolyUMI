@@ -92,6 +92,17 @@ uv run pytest ...
 
 `uv` selects the correct workspace venv automatically. Bare `python` / `pip` will pick up the wrong venv (e.g. `pi/.venv`) and produce "module not found" errors or install into the wrong place.
 
+**If `uv run` fails by trying to rebuild `lgpio` (Pi-only, needs `swig`):** this happens when `VIRTUAL_ENV` points at `pi/.venv` (e.g. set by a parent shell). Don't try to install swig — instead run with the already-built root venv:
+
+```bash
+unset VIRTUAL_ENV && .venv/bin/python -c "..."
+unset VIRTUAL_ENV && .venv/bin/ruff check ...
+# or for ruff-only:
+unset VIRTUAL_ENV && uvx ruff check ...
+```
+
+The root `.venv` already has `polyumi_ingest` and its deps installed; bypassing `uv run` skips dependency resolution (which is what pulls in the unbuildable `lgpio` transitive).
+
 ## Testing SLAM
 
 The ORB-SLAM3 step (`OrbSlam3Step`, preprocessing step 2) uses the
