@@ -20,7 +20,7 @@
 # z - up
 
 # gripper base origin is at the center of the front edge of the gripper base.
-# calibrated by placing gripper base origin at at optitrack origin.
+# calibrated by placing gripper base origin at optitrack origin.
 T_gripper_base_to_optitrack_rigid_body:
   translation: [-0.071377, 0.17301, 0.048436] # meters
   rotation: [ -0.267789, 0.958962, -0.000048, 0.093174 ] # quaternion

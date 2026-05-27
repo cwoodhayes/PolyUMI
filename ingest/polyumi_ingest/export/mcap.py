@@ -549,7 +549,6 @@ def _write_aruco_annotations(
     channel_id: int,
     finger_corners: np.ndarray,
     ts: np.ndarray,
-    frame_id: str,
     left_id: int,
     right_id: int,
 ) -> None:
@@ -655,7 +654,12 @@ def export_episode_to_mcap(
     has_gps = 'gopro/gps' in ep_grp
     has_optitrack = root_grp is not None and 'optitrack/pose' in root_grp
     has_slam = 'gopro/slam_poses' in ep_grp
-    has_aruco = 'annotations/gripper_width/finger_corners' in ep_grp
+    has_aruco = (
+        'annotations/gripper_width/finger_corners' in ep_grp
+        and 'annotations/gripper_width/width_m' in ep_grp
+        and 'left_id' in ep_grp['annotations/gripper_width'].attrs  # type: ignore[index]
+        and 'right_id' in ep_grp['annotations/gripper_width'].attrs  # type: ignore[index]
+    )
     has_time_sync = (
         'annotations/time_sync' in ep_grp
         and 'gopro_to_finger_offset_s' in ep_grp['annotations/time_sync'].attrs  # type: ignore[index]
@@ -852,7 +856,6 @@ def export_episode_to_mcap(
                     ch['/gopro/aruco_annotations'],
                     np.asarray(gw_grp['finger_corners'][:]),  # type: ignore[index]
                     gopro_ts,
-                    frame_id='gopro',
                     left_id=int(gw_grp.attrs['left_id']),  # type: ignore[arg-type]
                     right_id=int(gw_grp.attrs['right_id']),  # type: ignore[arg-type]
                 )
