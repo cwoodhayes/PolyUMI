@@ -3,13 +3,13 @@
     "3D!oah9y3": {
       "cameraState": {
         "perspective": true,
-        "distance": 6.47067089947399,
-        "phi": 60.00000000000097,
-        "thetaOffset": 60.000000000001776,
+        "distance": 4.75653770507567,
+        "phi": 64.15066143422517,
+        "thetaOffset": 81.68425293044227,
         "targetOffset": [
-          0,
-          0,
-          0
+          1.650753264349346,
+          -0.2316390528999956,
+          -1.4708773164830975e-16
         ],
         "target": [
           0,
@@ -28,12 +28,37 @@
       },
       "followMode": "follow-pose",
       "followTf": "world",
-      "scene": {},
-      "transforms": {},
+      "scene": {
+        "meshUpAxis": "z_up"
+      },
+      "transforms": {
+        "frame:slam": {
+          "visible": false
+        },
+        "frame:optitrack": {
+          "visible": true
+        },
+        "frame:world": {
+          "visible": false
+        },
+        "frame:gopro": {
+          "visible": false
+        },
+        "frame:finger": {
+          "visible": false
+        }
+      },
       "topics": {
         "/optitrack/pose": {
           "visible": true,
-          "axisScale": 0.5
+          "axisScale": 0.3
+        },
+        "/slam/pose": {
+          "visible": true
+        },
+        "/optitrack/pose_raw": {
+          "visible": false,
+          "axisScale": 0.1
         }
       },
       "layers": {
@@ -68,7 +93,8 @@
         "poseEstimateThetaDeviation": 0.26179939
       },
       "synchronize": false,
-      "imageMode": {}
+      "imageMode": {},
+      "fixedFrame": "world"
     },
     "Image!3zkla5f": {
       "cameraState": {
@@ -157,7 +183,12 @@
       },
       "synchronize": false,
       "imageMode": {
-        "imageTopic": "/gopro/image"
+        "imageTopic": "/gopro/image",
+        "annotations": {
+          "/gopro/aruco_annotations": {
+            "visible": false
+          }
+        }
       }
     },
     "Plot!3ahq65t": {
@@ -220,20 +251,33 @@
         }
       ]
     },
+    "Plot!3z3pxs": {
+      "foxglovePanelTitle": "Gripper",
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gripper/width.width_m",
+          "enabled": true,
+          "color": "#4e98e2",
+          "id": "b7a60942-bf94-4200-b3d5-85eb5f763be2",
+          "label": "Gripper Width (m)"
+        }
+      ]
+    },
     "Audio!3nxj4f9": {
-      "volume": 1,
+      "volume": 0,
       "slidingViewWidth": 10,
       "topic": "/gopro/audio",
-      "muted": false
+      "muted": true
     },
     "Audio!2w9y83j": {
-      "volume": 1,
+      "volume": 0.94,
       "slidingViewWidth": 10,
       "topic": "/finger/piezo",
       "muted": false
     },
     "Audio!1v0aezy": {
-      "volume": 0.8731,
+      "volume": 0,
       "slidingViewWidth": 10,
       "topic": "/finger/air",
       "muted": true
@@ -261,8 +305,13 @@
     "second": {
       "first": {
         "first": "Plot!3ahq65t",
-        "second": "Plot!35segx7",
-        "direction": "row"
+        "second": {
+          "first": "Plot!35segx7",
+          "second": "Plot!3z3pxs",
+          "direction": "row"
+        },
+        "direction": "row",
+        "splitPercentage": 33.166770768269835
       },
       "second": {
         "first": {
