@@ -466,13 +466,37 @@ def preprocessing_pipeline(
         '-f',
         help='Re-run a step even if it has already been marked complete.',
     ),
+    skip_gopro: bool = typer.Option(
+        False,
+        '--skip-gopro',
+        help='Skip GoPro frame ingestion when auto-building missing pzarr stores.',
+    ),
 ):
     """Run a preprocessing step, or the full preprocessing pipeline, on scene zarr stores."""
+    # When no step is specified, auto-build scene.zarr for scenes that don't have one yet,
+    # so `pingest pp` works end-to-end on a freshly fetched scene directory.
+    auto_build = step is None
     try:
         if scene is not None:
+            if auto_build and scene.suffix != '.zarr' and not (scene / 'scene.zarr').exists():
+                log.info(f'No scene.zarr found at {scene}; building pzarr first...')
+                if not skip_gopro:
+                    _require_gopro_mp4s(scene)
+                _build_pzarr(scene, skip_gopro)
             output = run_preprocessing(scene, step_number=step, copy=copy, force=force)
             log.info(f'Done. Output: {output}')
         else:
+            if auto_build:
+                recordings_dir_resolved = recordings_dir.resolve()
+                if recordings_dir_resolved.is_dir():
+                    for scene_dir in sorted(
+                        p for p in recordings_dir_resolved.iterdir() if p.is_dir() and p.name.startswith('scene_')
+                    ):
+                        if not (scene_dir / 'scene.zarr').exists():
+                            log.info(f'No scene.zarr found for {scene_dir.name}; building pzarr first...')
+                            if not skip_gopro:
+                                _require_gopro_mp4s(scene_dir)
+                            _build_pzarr(scene_dir, skip_gopro)
             outputs = run_preprocessing_on_recordings(recordings_dir, step_number=step, copy=copy, force=force)
             if outputs:
                 log.info(f'Done. Processed {len(outputs)} scene(s).')
@@ -605,6 +629,21 @@ def _build_pzarr(scene_dir: pathlib.Path, skip_gopro: bool) -> None:
     except (RuntimeError, NotImplementedError) as e:
         log.error(str(e))
         raise typer.Exit(1)
+
+
+def _require_gopro_mp4s(scene_dir: pathlib.Path) -> None:
+    """Raise FileNotFoundError if any session under scene_dir is missing gopro.mp4."""
+    from polyumi_ingest.pzarr.scene_files import GOPRO_MP4, SceneFiles
+
+    scene = SceneFiles.from_path(scene_dir)
+    missing = [s.path / GOPRO_MP4 for s in scene.sessions if not (s.path / GOPRO_MP4).exists()]
+    if missing:
+        joined = '\n  '.join(str(p) for p in missing)
+        raise FileNotFoundError(
+            f'Cannot auto-build pzarr for {scene_dir.name}: missing gopro.mp4 in '
+            f'{len(missing)} session(s):\n  {joined}\n'
+            f'Run `pingest fetch-gopro` first, or pass --skip-gopro to ingest without GoPro frames.'
+        )
 
 
 @app.command(name='debug-latest')

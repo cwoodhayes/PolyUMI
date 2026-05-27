@@ -137,7 +137,7 @@ pingest export-mcap <scene_directory> <session_number>
 ```
 
 The at-rest data format used during the preprocessing stage managed by `pingest` is a
-zarr-based format stored in `scene.zarr` in each scene directory, referred to in these docs as `pzarr`. See [docs/data-format.md](docs/data-format.md) for details on the format & the rationale behind it.
+zarr-based format stored in `scene.zarr` in each scene directory, referred to in these docs as `pzarr`. See [docs/data-format.md](docs/data-format.md) for details on the format & the rationale behind it. The GoPro camera calibration shared by SLAM and the ArUco gripper-width step is documented in [docs/camera-calibration.md](docs/camera-calibration.md).
 
 ## Streaming / Demos
 

@@ -25,9 +25,14 @@ from scipy.spatial.transform import Rotation
 
 _DEFAULT_YAML = (
     pathlib.Path(__file__).parent.parent.parent
-    / 'external' / 'ORB_SLAM3_PolyUMI'
-    / 'Examples' / 'Monocular-Inertial' / 'gopro_hero12_slam.yaml'
+    / 'external'
+    / 'ORB_SLAM3_PolyUMI'
+    / 'Examples'
+    / 'Monocular-Inertial'
+    / 'gopro_hero12_slam.yaml'
 )
+
+_INGEST_INTRINSICS_JSON = pathlib.Path(__file__).parent.parent / 'config' / 'gopro_intrinsics.json'
 
 
 def _find_json(directory: pathlib.Path, pattern: str) -> pathlib.Path:
@@ -45,21 +50,19 @@ def load_fisheye_intrinsics(dataset_dir: pathlib.Path) -> dict:
     Load camera intrinsics from a FISHEYE cam_calib JSON.
 
     Returns a dict with fx, fy, cx, cy, k1-k4, width, height, fps,
-    reproj_error, and source_file.
+    reproj_error, source_file, and source_path (full path to the JSON).
     """
     json_path = _find_json(dataset_dir / 'cam', 'cam_calib_*_fi_*.json')
     with open(json_path) as f:
         d = json.load(f)
     if d.get('intrinsic_type') != 'FISHEYE':
-        raise ValueError(
-            f'Expected FISHEYE intrinsics in {json_path.name}, '
-            f'got {d.get("intrinsic_type")!r}'
-        )
+        raise ValueError(f'Expected FISHEYE intrinsics in {json_path.name}, got {d.get("intrinsic_type")!r}')
     intr = d['intrinsics']
     fl = intr['focal_length']
     ar = intr['aspect_ratio']
     return {
         'source_file': json_path.name,
+        'source_path': json_path,
         'reproj_error': d['final_reproj_error'],
         'width': d['image_width'],
         'height': d['image_height'],
@@ -100,9 +103,7 @@ def load_cam_imu(dataset_dir: pathlib.Path) -> dict:
 
 def _set_scalar(content: str, key: str, value: float) -> str:
     pattern = rf'^({re.escape(key)}\s*:)\s*[^\n#]*'
-    new_content, n = re.subn(
-        pattern, rf'\1 {value:.10f}', content, flags=re.MULTILINE
-    )
+    new_content, n = re.subn(pattern, rf'\1 {value:.10f}', content, flags=re.MULTILINE)
     if n == 0:
         raise KeyError(f'Key not found in YAML: {key!r}')
     return new_content
@@ -157,14 +158,23 @@ def populate(dataset_dir: pathlib.Path, yaml_path: pathlib.Path) -> None:
 
     yaml_path.write_text(content)
 
+    # Mirror the source FISHEYE JSON to ingest/config/ so the ArUco preprocessing
+    # step (which expects the OpenImuCameraCalibrator JSON shape consumed by
+    # UMI's parse_fisheye_intrinsics) reads from the same calibration as SLAM.
+    _INGEST_INTRINSICS_JSON.parent.mkdir(parents=True, exist_ok=True)
+    _INGEST_INTRINSICS_JSON.write_bytes(intr['source_path'].read_bytes())
+
     print(f'Updated {yaml_path}')
     print(f'  Camera intrinsics  ({intr["source_file"]}): reproj {intr["reproj_error"]:.3f} px')
     print(f'    fx={intr["fx"]:.4f}  fy={intr["fy"]:.4f}  cx={intr["cx"]:.4f}  cy={intr["cy"]:.4f}')
     print(f'    k1={intr["k1"]:.6f}  k2={intr["k2"]:.6f}  k3={intr["k3"]:.6f}  k4={intr["k4"]:.6f}')
     print(f'  Cam-IMU extrinsics ({extr["source_file"]}): reproj {extr["reproj_error"]:.3f} px')
     if extr['reproj_error'] > 1.0:
-        print(f'  Warning: cam-IMU reproj error {extr["reproj_error"]:.2f} px > 1.0 px — '
-              f'consider re-recording with more aggressive rotational motion')
+        print(
+            f'  Warning: cam-IMU reproj error {extr["reproj_error"]:.2f} px > 1.0 px — '
+            f'consider re-recording with more aggressive rotational motion'
+        )
+    print(f'Mirrored intrinsics JSON to {_INGEST_INTRINSICS_JSON}')
 
 
 def main() -> None:

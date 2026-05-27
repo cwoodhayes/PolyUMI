@@ -4,33 +4,53 @@
 # necessary because Motive just picks the centroid of the markers as the 
 # origin of the rigid body frame--I have no control over it.
 
-# gripper base frame (due to how i calibrated it):
+# gripper base frame (due to how the optitrack is set up, and how I oriented the gripper to calibrate it):
 # x - forward
 # y - up
-# z - left
+# z - right
 
 # gopro frame:
 # x - right
 # y - down
 # z - forward
 
+# world frame:
+# x - right
+# y - forward
+# z - up
+
 # gripper base origin is at the center of the front edge of the gripper base.
-# calibrated by placing gripper base origin at at optitrack origin.
+# calibrated by placing gripper base origin at optitrack origin.
 T_gripper_base_to_optitrack_rigid_body:
-  translation: [0.0689, 0.0481, 0.174] # meters
-  rotation: [ 0.2657295, -0.0025321, 0.9610813, 0.0755255 ] # quaternion
-  # rotation: [0, 0, 0, 1] # quaternion
+  translation: [-0.071377, 0.17301, 0.048436] # meters
+  rotation: [ -0.267789, 0.958962, -0.000048, 0.093174 ] # quaternion
 
 # measured approximately irl + in onshape
 T_gripper_base_to_gopro:
   translation: [-.049, 0.21, 0.0] # meters
   # rotation: [ 0, 0, -0.7071068, 0.7071068 ] # quaternion
   # rotation: [ 0.5, -0.5, 0.5, -0.5 ]
-  rotation: [ -0.5, -0.5, 0.5, 0.5 ]
+  rotation: [ 0.7071068, 0, 0.7071068, 0 ]
 
 
 T_optitrack_to_world:
   translation: [0.0, 0.0, 0.0] # meters
-  # for z along the floor; old motive configuration.
-  # rotation: [-0.7071068, 0, 0, 0.7071068] # quaternion
-  rotation: [0, 0, 0, 1] # quaternion
+  # for z along the floor
+  rotation: [ 0.5, 0.5, 0.5, -0.5 ]
+  # rotation: [0, 0, 0, 1] # quaternion
+
+gripper_fingers:
+  # calibrated experimentally.
+  closed_mm: 5.0 # mm between the finger tags when closed
+  open_mm: 100.0 # mm between the finger tags when open
+
+# ArUco markers placed on the gripper fingers, used by the gripper-width
+# preprocessing step (aruco_step.py) to derive a 1DOF gripper width from
+# the GoPro video. IDs / size follow the UMI convention (left=0, right=1, 16mm).
+aruco_finger_tags:
+  dictionary: DICT_4X4_50
+  left_id: 0
+  right_id: 1
+  marker_size_m: 0.016
+  nominal_z_m: 0.072    # expected depth of finger tags from GoPro (metres)
+  z_tolerance_m: 0.008  # acceptance window around nominal_z (metres)

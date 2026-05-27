@@ -602,7 +602,11 @@ class OrbSlam3Step(PreprocessingStep):
         for i, ep_key in enumerate(episode_keys):
             log.info(f'Phase 2: localizing {ep_key} ({i + 1}/{len(episode_keys)})...')
             ep_grp = grp(root, ep_key)
+            # Use the zarr episode index (parsed from ep_key) so log filenames
+            # and tmp dirs line up with the episode_N group in scene.zarr,
+            # rather than the position within episode_keys (which skips MAPPING).
+            ep_index = int(ep_key.split('_')[1])
             t0 = time.monotonic()
-            self._localize_episode(ep_grp, i, atlas_path, log_dir, scene_zarr)
+            self._localize_episode(ep_grp, ep_index, atlas_path, log_dir, scene_zarr)
             elapsed = time.monotonic() - t0
             log.info(f'Localized {ep_key} in {elapsed:.1f}s')
