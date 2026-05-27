@@ -209,9 +209,11 @@ def get_gripper_width(tag_dict, left_id, right_id, nominal_z=0.072, z_tolerance=
     if (left_x is not None) and (right_x is not None):
         width = right_x - left_x
     elif left_x is not None:
+        # Only one marker visible: assume gripper is centered in frame so the
+        # other finger is at -left_x. Inaccurate when the gripper is off-centre.
         width = abs(left_x) * 2
     elif right_x is not None:
-        width = abs(right_x) * 2
+        width = abs(right_x) * 2  # same approximation, mirrored
     return width
 
 

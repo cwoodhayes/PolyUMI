@@ -608,7 +608,8 @@ def _write_aruco_annotations(
             })
             n_quads += 1
         msg = json.dumps({'points': points_annotations, 'texts': texts}).encode()
-        writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
+        t_ns = _ts_ns(t_s)
+        writer.add_message(channel_id=channel_id, log_time=t_ns, data=msg, publish_time=t_ns)
         n_messages += 1
 
     log.info(f'  aruco annotations: {n_messages} frames, {n_quads} marker quads drawn')

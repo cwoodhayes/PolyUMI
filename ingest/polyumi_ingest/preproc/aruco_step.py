@@ -147,6 +147,10 @@ class ArucoGripperWidthStep(PreprocessingStep):
             interp = get_interp1d(np.array(raw_ts), np.array(raw_widths))
             width_m = interp(timestamps).astype(np.float32)
         elif n_detected == 1:
+            log.warning(
+                f'{episode_key}: only 1 frame had a valid detection; '
+                f'filling all {n_frames} frames with that constant width.'
+            )
             width_m = np.full(n_frames, raw_widths[0], dtype=np.float32)
         else:
             width_m = np.full(n_frames, np.nan, dtype=np.float32)

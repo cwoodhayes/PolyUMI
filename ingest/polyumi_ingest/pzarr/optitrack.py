@@ -59,7 +59,7 @@ def parse_optitrack_csv(csv_path: pathlib.Path) -> tuple[np.ndarray, np.ndarray]
     if data_start_row is None:
         raise ValueError(f'Could not find data header row in OptiTrack CSV: {csv_path}')
 
-    # Each rigid body occupies 6 data columns (rot X/Y/Z, pos X/Y/Z) starting at col 2.
+    # Each rigid body occupies 7 data columns (quat X/Y/Z/W, pos X/Y/Z) starting at col 2.
     # Find the first column belonging to a rigid body named "PolyUMI*".
     rb_col_start = 2  # default: first rigid body
     if name_row_fields:
