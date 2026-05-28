@@ -159,11 +159,11 @@ curl -s -X POST http://localhost:8000/predict_cartesian/ \
 **`package.xml` additions:** `geometry_msgs`, `tf2_ros`, `tf2_geometry_msgs`  
 **`setup.py` addition:** `policy_client_node = polyumi_ros2.policy_client_node:main`
 
-- [ ] `policy_client_node.py` implemented
-- [ ] `package.xml` / `setup.py` updated
-- [ ] `colcon build` succeeds
-- [ ] node starts: `ros2 run polyumi_ros2 policy_client_node`
-- [ ] with dummy server running: logs received 8-vector actions at 10 Hz
+- [x] `policy_client_node.py` implemented
+- [x] `package.xml` / `setup.py` updated
+- [x] `colcon build` succeeds
+- [x] node starts: `ros2 run polyumi_ros2 policy_client_node`
+- [ ] with dummy server running: logs received 8-vector actions at 10 Hz (needs camera + TF — real hardware)
 
 ---
 
