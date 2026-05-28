@@ -17,7 +17,7 @@ ignore = [
 ]
 
 [tool.uv.workspace]
-members = ["ingest"]
+members = ["ingest", "inference_server"]
 
 [tool.uv.sources]
 polyumi_pi = { path = "pi", editable = true }

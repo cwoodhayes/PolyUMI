@@ -117,9 +117,9 @@ curl -s -X POST http://localhost:8000/predict_cartesian/ \
   }' | python3 -m json.tool
 ```
 
-- [ ] `inference_server/pyproject.toml` created (`fastapi`, `uvicorn`, `numpy` deps)
-- [ ] `dummy_server.py` implemented
-- [ ] smoke test returns `{"actions": [[...8 floats...]], "n_action_steps": 1}` with X oscillating across calls
+- [x] `inference_server/pyproject.toml` created (`fastapi`, `uvicorn`, `numpy` deps)
+- [x] `dummy_server.py` implemented
+- [x] smoke test returns `{"actions": [[...8 floats...]], "n_action_steps": 1}` with X oscillating across calls
 
 ---
 
