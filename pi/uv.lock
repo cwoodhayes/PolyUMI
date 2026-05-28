@@ -699,8 +699,6 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
-    { name = "gpiozero" },
-    { name = "lgpio" },
     { name = "numpy" },
     { name = "open-gopro" },
     { name = "opencv-python-headless" },
@@ -708,10 +706,16 @@ dependencies = [
     { name = "protobuf" },
     { name = "pyzmq" },
     { name = "rich" },
-    { name = "rpi-hardware-pwm" },
     { name = "sounddevice" },
     { name = "typer" },
     { name = "uvicorn" },
+]
+
+[package.optional-dependencies]
+pi = [
+    { name = "gpiozero" },
+    { name = "lgpio" },
+    { name = "rpi-hardware-pwm" },
 ]
 
 [package.dev-dependencies]
@@ -723,8 +727,8 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.135.1" },
-    { name = "gpiozero", specifier = ">=2.0" },
-    { name = "lgpio", specifier = ">=0.2.2.0" },
+    { name = "gpiozero", marker = "extra == 'pi'", specifier = ">=2.0" },
+    { name = "lgpio", marker = "extra == 'pi'", specifier = ">=0.2.2.0" },
     { name = "numpy", specifier = ">=2.4.3" },
     { name = "open-gopro", git = "https://github.com/cwoodhayes/OpenGoPro?subdirectory=demos%2Fpython%2Fsdk_wireless_camera_control&branch=pi-trixie-fix" },
     { name = "opencv-python-headless", specifier = ">=4.12.0.88" },
@@ -732,11 +736,12 @@ requires-dist = [
     { name = "protobuf", specifier = ">=6,<7" },
     { name = "pyzmq", specifier = ">=27.1.0" },
     { name = "rich", specifier = ">=14.3.3" },
-    { name = "rpi-hardware-pwm", specifier = ">=0.3.1" },
+    { name = "rpi-hardware-pwm", marker = "extra == 'pi'", specifier = ">=0.3.1" },
     { name = "sounddevice", specifier = ">=0.5.5" },
     { name = "typer", specifier = ">=0.24.1" },
     { name = "uvicorn", specifier = ">=0.41.0" },
 ]
+provides-extras = ["pi"]
 
 [package.metadata.requires-dev]
 dev = [

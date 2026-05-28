@@ -207,9 +207,11 @@ Then on the Pi, install the Python environment and the `polyumi-pi` script:
 cd ~/PolyUMI/pi
 # venv should have already been created by cloud-init, but run this if you need to recreate it for any reason (e.g. to pull in new system packages like picamera2):
 # uv venv --system-site-packages
-uv sync --no-dev
+uv sync --no-dev --extra pi
 source .venv/bin/activate
 ```
+
+The `pi` extra pulls in the Raspberry Pi hardware-only dependencies (`lgpio`, `gpiozero`, `rpi-hardware-pwm`) that the full app needs at runtime. They are gated behind this extra because `lgpio` can't build off-Pi (it needs `swig`), so a plain PC dev sync omits them. `deploy.sh` passes `--extra pi` automatically.
 
 `picamera2` must be installed via `apt`, not pip — the `--system-site-packages` flag above pulls it in from the system.
 (this apt install & others is handled by the `cloud-init` [provisioning](docs/pi-provisioning.md) workflow).

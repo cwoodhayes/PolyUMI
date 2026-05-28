@@ -3,5 +3,6 @@ requires = [
     "setuptools>=68",
     "wheel",
     "grpcio-tools>=1.78.0",
+    "protobuf",
 ]
 build-backend = "setuptools.build_meta"
