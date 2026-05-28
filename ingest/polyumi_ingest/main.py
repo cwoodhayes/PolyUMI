@@ -618,6 +618,35 @@ def export_mcap(
         log.info(f'  {path}')
 
 
+@app.command(name='export-dp')
+def export_dp(
+    scene_path: pathlib.Path = typer.Argument(
+        ...,
+        help='Scene directory containing scene.zarr, or a scene.zarr path directly.',
+    ),
+    output_path: pathlib.Path = typer.Option(
+        ...,
+        '--output',
+        '-o',
+        help='Output ReplayBuffer zarr path.',
+    ),
+    pose_source: str = typer.Option(
+        'optitrack',
+        help="Pose source for state/action: 'optitrack' or 'slam'.",
+    ),
+):
+    """Export a pzarr scene to a diffusion-policy ReplayBuffer zarr."""
+    from polyumi_ingest.export.dp import export_scene_to_dp
+
+    try:
+        n = export_scene_to_dp(scene_path, output_path, pose_source=pose_source)
+    except (FileNotFoundError, ValueError, RuntimeError) as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+
+    log.info(f'Exported {n} episode(s) → {output_path}')
+
+
 def _build_pzarr(scene_dir: pathlib.Path, skip_gopro: bool) -> None:
     """Build pzarr for scene_dir, raising typer.Exit(1) on failure."""
     from polyumi_ingest.pzarr import build_pzarr
