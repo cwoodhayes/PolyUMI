@@ -355,6 +355,23 @@ def inspect_zarr(
     for k, v in sorted(info.attrs.items()):
         console.print(f'  {k}: {v}')
 
+    def _fmt_rate(freq_hz: float | None) -> str:
+        if freq_hz is None:
+            return ''
+        if freq_hz >= 1000:
+            return f'{freq_hz / 1000:.1f} kHz'
+        return f'{freq_hz:.2f} Hz'
+
+    def _fmt_ts(ts_range: tuple[float, float] | None) -> str:
+        if ts_range is None:
+            return ''
+        return f'{ts_range[0]:.3f} → {ts_range[1]:.3f} s'
+
+    def _add_stream_row(table: Table, label: str, stream) -> None:
+        if stream.shape is None:
+            return
+        table.add_row(label, str(stream.shape), _fmt_rate(stream.freq_hz), _fmt_ts(stream.ts_range))
+
     for ep in info.episodes:
         duration = None
         if ep.episode_start is not None and ep.episode_end is not None:
@@ -365,40 +382,31 @@ def inspect_zarr(
         table = Table(show_header=True, header_style='bold cyan')
         table.add_column('Array')
         table.add_column('Shape')
-        table.add_column('Info')
-        if ep.finger_shape is not None:
-            ts_info = ''
-            if ep.finger_ts_range is not None:
-                ts_info = f'{ep.finger_ts_range[0]:.3f} → {ep.finger_ts_range[1]:.3f} s'
-                if ep.finger_ts_mean_delta_ms is not None:
-                    ts_info += f'  (Δ={ep.finger_ts_mean_delta_ms:.1f} ms avg)'
-            table.add_row('finger/frames', str(ep.finger_shape), ts_info)
-        if ep.gopro_shape is not None:
-            ts_info = ''
-            if ep.gopro_ts_range is not None:
-                ts_info = f'{ep.gopro_ts_range[0]:.3f} → {ep.gopro_ts_range[1]:.3f} s'
-                if ep.gopro_ts_mean_delta_ms is not None:
-                    ts_info += f'  (Δ={ep.gopro_ts_mean_delta_ms:.1f} ms avg)'
-            table.add_row('gopro/frames', str(ep.gopro_shape), ts_info)
-        if ep.finger_piezo_shape is not None:
-            ts_info = ''
-            if ep.finger_piezo_ts_range is not None:
-                ts_info = f'{ep.finger_piezo_ts_range[0]:.3f} → {ep.finger_piezo_ts_range[1]:.3f} s'
-            table.add_row('finger/finger_piezo', str(ep.finger_piezo_shape), ts_info)
-        if ep.finger_air_shape is not None:
-            ts_info = ''
-            if ep.finger_air_ts_range is not None:
-                ts_info = f'{ep.finger_air_ts_range[0]:.3f} → {ep.finger_air_ts_range[1]:.3f} s'
-            table.add_row('finger/finger_air', str(ep.finger_air_shape), ts_info)
-        if ep.gopro_audio_shape is not None:
-            ts_info = ''
-            if ep.gopro_audio_ts_range is not None:
-                ts_info = f'{ep.gopro_audio_ts_range[0]:.3f} → {ep.gopro_audio_ts_range[1]:.3f} s'
-            table.add_row('gopro/audio', str(ep.gopro_audio_shape), ts_info)
+        table.add_column('Rate', justify='right')
+        table.add_column('Timestamps')
+        _add_stream_row(table, 'finger/frames', ep.finger)
+        _add_stream_row(table, 'finger/finger_piezo', ep.finger_piezo)
+        _add_stream_row(table, 'finger/finger_air', ep.finger_air)
+        _add_stream_row(table, 'gopro/frames', ep.gopro)
+        _add_stream_row(table, 'gopro/accl', ep.gopro_accl)
+        _add_stream_row(table, 'gopro/gyro', ep.gopro_gyro)
+        _add_stream_row(table, 'gopro/gps', ep.gopro_gps)
+        _add_stream_row(table, 'gopro/audio', ep.gopro_audio)
         if duration is not None:
             ep_info = f'{ep.episode_start:.3f} → {ep.episode_end:.3f} s  ({duration:.2f} s)'
-            table.add_row('episode_start / end', '', ep_info)
+            table.add_row('episode_start / end', '', '', ep_info)
         console.print(table)
+
+    if info.optitrack is not None:
+        ot = info.optitrack
+        console.print('\n[bold]OptiTrack (scene-level):[/bold]')
+        ot_table = Table(show_header=True, header_style='bold cyan')
+        ot_table.add_column('Array')
+        ot_table.add_column('Shape')
+        ot_table.add_column('Rate', justify='right')
+        ot_table.add_column('Timestamps')
+        ot_table.add_row('optitrack/pose', str(ot.shape), _fmt_rate(ot.freq_hz), _fmt_ts(ot.ts_range))
+        console.print(ot_table)
 
     total_bytes = sum(f.stat().st_size for f in info.zarr_path.rglob('*') if f.is_file())
     console.print(f'\n[bold]Total size:[/bold] {_human_size(total_bytes)}')
