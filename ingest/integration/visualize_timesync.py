@@ -107,12 +107,12 @@ def _plot_episode(
         gopro_chirp_x = float(ann['gopro_chirp_onset_s']) - gopro_ref  # type: ignore[arg-type]
 
     bar_label = f'alignment point  (offset={total_offset:+.4f}s, {peak_label})'
-    mode_tag = 'aligned' if unaligned else 'unaligned'
+    mode_tag = 'unaligned' if unaligned else 'aligned'
 
     traces = [
-        (axes[0], piezo_ts - finger_align_t, piezo, 'steelblue', 'finger piezo', finger_chirp_x),
-        (axes[1], air_ts - finger_align_t, air, 'steelblue', 'finger air', finger_chirp_x),
-        (axes[2], gopro_ts - gopro_ref, gopro, 'darkorange', 'GoPro audio (mono)', gopro_chirp_x),
+        (axes[0], piezo_ts - finger_align_t, piezo, 'steelblue', 'finger piezo (RPi)', finger_chirp_x),
+        (axes[1], air_ts - finger_align_t, air, 'steelblue', 'finger mic (RPi)', finger_chirp_x),
+        (axes[2], gopro_ts - gopro_ref, gopro, 'darkorange', 'GoPro mic', gopro_chirp_x),
     ]
     for i, (ax, ts, data, color, ylabel, chirp_x) in enumerate(traces):
         ax: Axes  # type: ignore
@@ -122,7 +122,6 @@ def _plot_episode(
         if chirp_x is not None:
             ax.axvline(chirp_x, color='green', linewidth=3.0, linestyle='--',
                        label=f'chirp onset ({chirp_x:.3f}s)' if i == 1 else None)
-        ax.set_ylabel(ylabel, fontsize=8)
         ax.yaxis.set_label_position('right')
         ax.tick_params(axis='x', labelsize=7, labelbottom=True)
         ax.tick_params(axis='y', labelsize=6)
@@ -132,9 +131,12 @@ def _plot_episode(
         ax.grid(True, axis='x', which='minor', linewidth=0.4, alpha=0.6)
         ax.grid(True, axis='x', which='major', linewidth=0.8, alpha=0.8)
 
-    axes[1].legend(fontsize=15, loc='upper right')
+    axes[1].legend(fontsize=12, loc='upper right')
     axes[0].set_title(f'{episode_key}  [{mode_tag}]', loc='left', fontsize=8, pad=2)
-    axes[2].set_xlabel('time relative to finger alignment point (s)', fontsize=8)
+    if unaligned:
+        axes[2].set_title('Time since start of session (for each system)', loc='right', fontsize=8, pad=2)
+    else:
+        axes[2].set_xlabel('time relative to finger alignment point (s)', fontsize=8)
 
 
 def main() -> None:
