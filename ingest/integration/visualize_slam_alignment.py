@@ -74,6 +74,56 @@ def _load_slam_poses(root: zarr.Group) -> tuple[np.ndarray, np.ndarray]:
     return ts[order], pos[order]
 
 
+def _plot_split(
+    ax: plt.Axes,
+    ts: np.ndarray,
+    pos: np.ndarray,
+    t_start: float,
+    t_end: float,
+    color: str,
+    label: str,
+    linewidth: float,
+    alpha: float,
+) -> None:
+    """
+    Plot a trajectory, drawing the portion outside [t_start, t_end] dotted.
+
+    The overlapping portion is drawn solid. A single boundary point is shared
+    between segments so the line stays visually continuous.
+    """
+    in_window = (ts >= t_start) & (ts <= t_end)
+
+    if in_window.all():
+        ax.plot(pos[:, 0], pos[:, 1], pos[:, 2], color=color, linewidth=linewidth, alpha=alpha, label=label)
+        return
+    if not in_window.any():
+        ax.plot(pos[:, 0], pos[:, 1], pos[:, 2], color=color, linewidth=linewidth, alpha=alpha,
+                linestyle=':', label=label)
+        return
+
+    # Group contiguous runs of in/out-of-window samples and plot each as its own segment.
+    change_points = np.flatnonzero(np.diff(in_window.astype(int))) + 1
+    segment_bounds = [0, *change_points.tolist(), len(ts)]
+    labeled_solid = False
+    labeled_dotted = False
+    for i in range(len(segment_bounds) - 1):
+        lo, hi = segment_bounds[i], segment_bounds[i + 1]
+        # Extend by one sample on each side so segments connect visually.
+        lo_ext = max(0, lo - 1)
+        hi_ext = min(len(ts), hi + 1)
+        seg = pos[lo_ext:hi_ext]
+        if in_window[lo]:
+            seg_label = label if not labeled_solid else None
+            labeled_solid = True
+            linestyle = '-'
+        else:
+            seg_label = f'{label} (no overlap)' if not labeled_dotted else None
+            labeled_dotted = True
+            linestyle = ':'
+        ax.plot(seg[:, 0], seg[:, 1], seg[:, 2], color=color, linewidth=linewidth, alpha=alpha,
+                linestyle=linestyle, label=seg_label)
+
+
 def _draw_axes(ax: plt.Axes, origin: np.ndarray, R: np.ndarray, scale: float, label: str) -> None:
     """Draw RGB xyz axes at origin with orientation R (3x3, columns = x/y/z dirs)."""
     colors = ['red', 'green', 'blue']
@@ -141,14 +191,18 @@ def main() -> None:
     rms_rot = tf.get('rms_rot_deg', float('nan'))
     scene_name = scene_zarr.parent.name
 
+    # Time overlap window between SLAM and OptiTrack (same definition as SlamToWorldAlignStep).
+    t_start = max(float(slam_ts.min()), float(ot_ts.min()))
+    t_end = min(float(slam_ts.max()), float(ot_ts.max()))
+
     fig = plt.figure(figsize=(13, 9))
     ax = fig.add_subplot(111, projection='3d')
 
-    ax.plot(ot_gopro[:, 0], ot_gopro[:, 1], ot_gopro[:, 2],
-            color='royalblue', linewidth=1.2, alpha=0.85, label='OptiTrack (ground truth)')
+    _plot_split(ax, ot_ts, ot_gopro[:, :3], t_start, t_end,
+                color='royalblue', label='OptiTrack (ground truth)', linewidth=1.2, alpha=0.85)
 
-    ax.plot(slam_pos_aligned[:, 0], slam_pos_aligned[:, 1], slam_pos_aligned[:, 2],
-            color='darkorange', linewidth=1.0, alpha=0.85, label='SLAM aligned (R·p + t)')
+    _plot_split(ax, slam_ts, slam_pos_aligned, t_start, t_end,
+                color='darkorange', label='SLAM aligned (R·p + t)', linewidth=1.0, alpha=0.85)
 
     ax.plot(slam_pos_unaligned[:, 0], slam_pos_unaligned[:, 1], slam_pos_unaligned[:, 2],
             color='gray', linewidth=0.8, alpha=0.5, linestyle='--', label='SLAM unaligned (centroid-shifted)')
