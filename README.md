@@ -28,6 +28,7 @@ It combines the [Universal Manipulation Interface (UMI)](https://umi-gripper.git
 ```
 pi/               # RPi client: camera, audio, LED streaming + episode recording
 ingest/           # PC-side CLI: fetch sessions from Pi, encode video
+inference_server/ # GPU-side FastAPI server for diffusion-policy inference (see docs/franka-inference-bringup.md)
 ros2_ws/
   src/
     polyumi_pi_msgs/   # Protobuf message definitions (camera frame, audio chunk)
@@ -134,6 +135,8 @@ pingest pp <scene_directory>
 # export a single session to MCAP for easy visualization in foxglove (use the foxglove config 
 # in ingest/foxglove)
 pingest export-mcap <scene_directory> <session_number>
+# export a scene's EPISODE sessions to a diffusion-policy ReplayBuffer zarr:
+pingest export-dp <scene_directory> --output <output.zarr>
 ```
 
 The at-rest data format used during the preprocessing stage managed by `pingest` is a

@@ -93,7 +93,7 @@ New `uv` package at repo root with `pyproject.toml`. Two server files:
 - Sine-wave oscillator on X axis, ±0.05 m around a configurable home pose.
 - Home pose set via env var `HOME_POSE` (default: `"0.4 0.0 0.4 0 0 0 1 0.04"` —
   xyz + quaternion + gripper width).
-- Uses `agent_pos[-1]` from the request as the oscillation centre (ignores image content).
+- Oscillates around the fixed `HOME_POSE` (parsed once at startup); ignores `agent_pos`/image content.
 - Validates required `observations` keys; returns 422 on missing fields.
 - Returns `n_action_steps` copies of the oscillated pose (all identical, for simplicity).
 
@@ -145,6 +145,8 @@ curl -s -X POST http://localhost:8000/predict_cartesian/ \
 6. POST to `/predict_cartesian/` with `n_obs_steps` and `n_action_steps=1`.
 7. On success: log returned action (Phase 1) / execute it (Phase 2).
 8. On HTTP error / timeout: log and skip tick; do not raise.
+9. The timer uses a `MutuallyExclusiveCallbackGroup`; if a previous tick's POST is still
+   in flight when the next tick fires, that tick is skipped and a warning is logged.
 
 **ROS2 parameters:**
 | Name | Default | Description |
@@ -156,7 +158,7 @@ curl -s -X POST http://localhost:8000/predict_cartesian/ \
 | `image_width` | `256` | Resize width (matches `shape_meta image: [3, 256, 256]`) |
 | `image_height` | `256` | Resize height |
 
-**`package.xml` additions:** `geometry_msgs`, `tf2_ros`, `tf2_geometry_msgs`  
+**`package.xml` additions:** `tf2_ros`  
 **`setup.py` addition:** `policy_client_node = polyumi_ros2.policy_client_node:main`
 
 - [x] `policy_client_node.py` implemented
