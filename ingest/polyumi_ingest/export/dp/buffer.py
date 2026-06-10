@@ -106,6 +106,11 @@ def _export_episode(
 
     # img, gripper width, and slam poses all live on the gopro frame grid → one index.
     gidx = _nearest_idx(gopro_ts, target_ts)
+    if np.any(np.diff(gidx) < 0):
+        raise RuntimeError(
+            f'{episode_key}: gopro frame indices are non-monotonic after resampling to {HZ} Hz '
+            f'(gopro_ts has gaps larger than 1/{HZ}s). Refusing to write.'
+        )
     img = _decode_resized_frames(arr(ep, 'gopro/frames'), gidx)
 
     if pose_source == 'optitrack':
@@ -151,7 +156,8 @@ def export_scene_to_dp(
     output_path: pathlib.Path,
     pose_source: str = 'optitrack',
 ) -> int:
-    """Export EPISODE sessions of a pzarr scene to a diffusion-policy ReplayBuffer zarr.
+    """
+    Export EPISODE sessions of a pzarr scene to a diffusion-policy ReplayBuffer zarr.
 
     Returns the number of episodes written. MAPPING sessions are skipped.
     """

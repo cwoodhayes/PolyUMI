@@ -348,7 +348,7 @@ def inspect_zarr(
 
     console = Console()
     console.print(f'\n[bold]Store:[/bold] {info.zarr_path}')
-    console.print(f'[bold]Format:[/bold] zarr v{info.zarr_format}\n')
+    console.print(f'[bold]Format:[/bold] zarr v{info.zarr_format}, pzarr v{info.pzarr_version}\n')
     console.print('[bold]Tree:[/bold]')
     console.print(Text.from_ansi(str(info.tree)))
     console.print('\n[bold]Scene metadata:[/bold]')

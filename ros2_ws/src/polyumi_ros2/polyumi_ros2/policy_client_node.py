@@ -24,6 +24,7 @@ import rclpy
 import rclpy.time
 import urllib.request
 import urllib.error
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import Image
@@ -65,9 +66,12 @@ class PolicyClientNode(Node):
         # Subscribers
         self.create_subscription(Image, image_topic, self._image_cb, 10)
 
-        # Control timer
+        # Control timer — exclusive callback group ensures only one tick (and its
+        # blocking POST) runs at a time; an in-flight tick causes the next one to
+        # be skipped rather than overlapping.
+        self._tick_lock = threading.Lock()
         period = 1.0 / control_hz
-        self.create_timer(period, self._control_tick)
+        self.create_timer(period, self._control_tick, callback_group=MutuallyExclusiveCallbackGroup())
 
         # Throttle for "buffer not full" warning
         self._last_warn_t: rclpy.time.Time | None = None
@@ -80,10 +84,9 @@ class PolicyClientNode(Node):
 
     def _image_cb(self, msg: Image) -> None:
         """Convert incoming ROS image to float32 numpy array and cache it."""
-        # Support rgb8 and bgr8 encodings
-        dtype = np.uint8
-        channels = 3
-        img = np.frombuffer(msg.data, dtype=dtype).reshape(msg.height, msg.width, channels)
+        if msg.encoding not in ('rgb8', 'bgr8'):
+            raise ValueError(f'Unsupported image encoding {msg.encoding!r}; expected rgb8 or bgr8')
+        img = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
         if msg.encoding == 'bgr8':
             img = img[:, :, ::-1].copy()  # BGR → RGB
         resized = cv2.resize(img, (self._image_w, self._image_h), interpolation=cv2.INTER_LINEAR)
@@ -96,37 +99,50 @@ class PolicyClientNode(Node):
     # ------------------------------------------------------------------
 
     def _control_tick(self) -> None:
-        """Assemble one observation, fill buffer, POST to inference server."""
-        # --- 1. Get latest image ---
-        with self._latest_image_lock:
-            image = self._latest_image
-        if image is None:
-            self._warn_throttled('Waiting for first camera image')
+        """
+        Assemble one observation, fill buffer, POST to inference server.
+
+        If the previous tick's POST is still in flight, this tick is skipped
+        (and a warning logged) rather than overlapping with it.
+        """
+        if not self._tick_lock.acquire(blocking=False):
+            self.get_logger().warn('Dropped control tick: previous POST to inference server still in flight')
             return
+        try:
+            # --- 1. Get latest image ---
+            with self._latest_image_lock:
+                image = self._latest_image
+            if image is None:
+                self._warn_throttled('Waiting for first camera image')
+                return
 
-        # --- 2. Get EEF pose from TF ---
-        agent_pos = self._lookup_agent_pos()
-        if agent_pos is None:
-            return  # warning already logged inside
+            # --- 2. Get EEF pose from TF ---
+            agent_pos = self._lookup_agent_pos()
+            if agent_pos is None:
+                return  # warning already logged inside
 
-        # --- 3. Append to history buffer ---
-        self._obs_buffer.append((image, agent_pos))
-        if len(self._obs_buffer) < self._n_obs_steps:
-            self._warn_throttled(f'Observation buffer filling ({len(self._obs_buffer)}/{self._n_obs_steps})')
-            return
+            # --- 3. Append to history buffer ---
+            self._obs_buffer.append((image, agent_pos))
+            if len(self._obs_buffer) < self._n_obs_steps:
+                self._warn_throttled(f'Observation buffer filling ({len(self._obs_buffer)}/{self._n_obs_steps})')
+                return
 
-        # --- 4. Serialize and POST ---
-        images = [obs[0].tolist() for obs in self._obs_buffer]
-        poses = [obs[1].tolist() for obs in self._obs_buffer]
-        payload = {
-            'n_obs_steps': self._n_obs_steps,
-            'n_action_steps': 1,
-            'observations': {
-                'image': images,
-                'agent_pos': poses,
-            },
-        }
-        self._post_and_log(payload)
+            # --- 4. Serialize and POST ---
+            # TODO(Phase 2): images as nested-list JSON is ~1.5MB+ per frame and slow to
+            # encode/decode at 10 Hz. Switch to base64-encoded raw bytes or msgpack.
+            images = [obs[0].tolist() for obs in self._obs_buffer]
+            poses = [obs[1].tolist() for obs in self._obs_buffer]
+            payload = {
+                'n_obs_steps': self._n_obs_steps,
+                'n_action_steps': 1,
+                'observations': {
+                    'image': images,
+                    'agent_pos': poses,
+                },
+            }
+            self._post_and_log(payload)
+        finally:
+            self._tick_lock.release()
 
     def _lookup_agent_pos(self) -> np.ndarray | None:
         """Look up panda_EE in panda_link0 and return [x,y,z,qx,qy,qz,qw, gripper=0]."""

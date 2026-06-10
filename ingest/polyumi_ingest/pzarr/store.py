@@ -497,6 +497,7 @@ class PZarrInfo:
 
     zarr_path: pathlib.Path
     zarr_format: int
+    pzarr_version: int
     tree: object
     attrs: dict  # type: ignore[type-arg]
     episodes: list[EpisodeInfo]
@@ -523,6 +524,7 @@ def inspect_pzarr(scene_path: pathlib.Path) -> PZarrInfo:
 
     root = zarr.open_group(str(zarr_path), mode='r')
     n_episodes = int(root.attrs.get('n_episodes', 0))  # type: ignore[arg-type]
+    pzarr_version = int(root.attrs.get('pzarr_version', 1))  # type: ignore[arg-type]
 
     episodes = []
     for i in range(n_episodes):
@@ -564,6 +566,7 @@ def inspect_pzarr(scene_path: pathlib.Path) -> PZarrInfo:
     return PZarrInfo(
         zarr_path=zarr_path,
         zarr_format=root.metadata.zarr_format,
+        pzarr_version=pzarr_version,
         tree=root.tree(),
         attrs=dict(root.attrs),
         episodes=episodes,

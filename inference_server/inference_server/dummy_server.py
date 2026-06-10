@@ -93,13 +93,12 @@ def predict_cartesian(req: PredictRequest) -> PredictResponse:
             detail=f'agent_pos must have shape [{req.n_obs_steps}, {AGENT_POS_DIM}]',
         )
 
-    # Oscillate X around the most recent agent_pos (ignoring home pose env var at runtime)
-    current_pose = np.array(agent_pos[-1])
+    # Oscillate X around the fixed home pose (set via HOME_POSE env var at startup)
     phase = 2 * math.pi * _call_count / OSCILLATION_PERIOD_STEPS
     delta_x = OSCILLATION_AMPLITUDE_M * math.sin(phase)
     _call_count += 1
 
-    target = current_pose.copy()
+    target = _home_pose.copy()
     target[0] += delta_x
 
     model_n_action_steps = 8  # matches training config n_action_steps
