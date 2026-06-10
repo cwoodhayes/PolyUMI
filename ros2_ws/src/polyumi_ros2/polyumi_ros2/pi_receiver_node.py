@@ -59,17 +59,9 @@ class PiReceiverNode(Node):
         self.declare_parameter('port', 5555)
         self.declare_parameter('audio_port', 5556)
 
-        self._pi_host = (
-            self.get_parameter('pi_host').get_parameter_value().string_value
-        )
-        self._port = (
-            self.get_parameter('port').get_parameter_value().integer_value
-        )
-        self._audio_port = (
-            self.get_parameter('audio_port')
-            .get_parameter_value()
-            .integer_value
-        )
+        self._pi_host = self.get_parameter('pi_host').get_parameter_value().string_value
+        self._port = self.get_parameter('port').get_parameter_value().integer_value
+        self._audio_port = self.get_parameter('audio_port').get_parameter_value().integer_value
 
         self.camera_pub = self.create_publisher(
             CompressedImage,
@@ -84,23 +76,16 @@ class PiReceiverNode(Node):
 
         self._zmq_context = zmq.Context()
 
-        recv_thread = threading.Thread(
-            target=self._camera_recv_loop, daemon=True
-        )
+        recv_thread = threading.Thread(target=self._camera_recv_loop, daemon=True)
         recv_thread.start()
 
-        audio_recv_thread = threading.Thread(
-            target=self._audio_recv_loop, daemon=True
-        )
+        audio_recv_thread = threading.Thread(target=self._audio_recv_loop, daemon=True)
         audio_recv_thread.start()
 
         self.get_logger().info(
-            f'Receiving from tcp://{self._pi_host}:{self._port}, '
-            f'publishing on /pi/camera/image/compressed'
+            f'Receiving from tcp://{self._pi_host}:{self._port}, publishing on /pi/camera/image/compressed'
         )
-        self.get_logger().info(
-            f'Receiving audio from tcp://{self._pi_host}:{self._audio_port}'
-        )
+        self.get_logger().info(f'Receiving audio from tcp://{self._pi_host}:{self._audio_port}')
         self.get_logger().info('Publishing audio on /pi/audio/raw')
 
     def _camera_recv_loop(self):
@@ -149,9 +134,7 @@ class PiReceiverNode(Node):
             frame_bytes = max(1, proto.channels * bytes_per_sample)
             sample_frames = len(proto.pcm_data) // frame_bytes
             if proto.sample_rate > 0:
-                expected_delta_ns = int(
-                    sample_frames * 1_000_000_000 / proto.sample_rate
-                )
+                expected_delta_ns = int(sample_frames * 1_000_000_000 / proto.sample_rate)
             else:
                 expected_delta_ns = 0
 
@@ -160,9 +143,7 @@ class PiReceiverNode(Node):
                 if delta_ns > int(expected_delta_ns * 1.5):
                     gap_warnings += 1
                     self.get_logger().warning(
-                        'Audio timestamp gap: '
-                        f'delta={delta_ns / 1e6:.2f}ms '
-                        f'expected={expected_delta_ns / 1e6:.2f}ms'
+                        f'Audio timestamp gap: delta={delta_ns / 1e6:.2f}ms expected={expected_delta_ns / 1e6:.2f}ms'
                     )
             last_ts_ns = proto.timestamp_ns
             chunks += 1
@@ -177,10 +158,7 @@ class PiReceiverNode(Node):
 
             now_ns = self.get_clock().now().nanoseconds
             if now_ns - last_stats_t >= 1_000_000_000:
-                self.get_logger().info(
-                    'Audio rx stats: '
-                    f'chunks={chunks}/s gaps={gap_warnings}'
-                )
+                self.get_logger().info(f'Audio rx stats: chunks={chunks}/s gaps={gap_warnings}')
                 chunks = 0
                 gap_warnings = 0
                 last_stats_t = now_ns

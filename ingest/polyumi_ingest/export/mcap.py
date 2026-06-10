@@ -481,10 +481,18 @@ def _write_optitrack_poses(
     for i in range(len(ts)):
         t_s = float(ts[i])
         transformed = transform_optitrack_pose(pose_arr[i], T_gb_rb, T_gb_gp)
-        writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s),
-                           data=_pose_msg(t_s, 'optitrack', transformed), publish_time=_ts_ns(t_s))
-        writer.add_message(channel_id=raw_channel_id, log_time=_ts_ns(t_s),
-                           data=_pose_msg(t_s, 'optitrack', pose_arr[i]), publish_time=_ts_ns(t_s))
+        writer.add_message(
+            channel_id=channel_id,
+            log_time=_ts_ns(t_s),
+            data=_pose_msg(t_s, 'optitrack', transformed),
+            publish_time=_ts_ns(t_s),
+        )
+        writer.add_message(
+            channel_id=raw_channel_id,
+            log_time=_ts_ns(t_s),
+            data=_pose_msg(t_s, 'optitrack', pose_arr[i]),
+            publish_time=_ts_ns(t_s),
+        )
 
 
 def _write_static_transform(
@@ -530,8 +538,12 @@ def _write_slam_poses(
 
     for i in valid_idx:
         t_s = float(ts[i])
-        writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s),
-                           data=_pose_msg(t_s, frame_id, poses[i]), publish_time=_ts_ns(t_s))
+        writer.add_message(
+            channel_id=channel_id,
+            log_time=_ts_ns(t_s),
+            data=_pose_msg(t_s, frame_id, poses[i]),
+            publish_time=_ts_ns(t_s),
+        )
 
     log.info(f'  slam poses: wrote {valid_idx.size}/{n} (lost {n - valid_idx.size})')
 
@@ -562,9 +574,7 @@ def _write_aruco_annotations(
     """
     n = len(ts)
     if finger_corners.shape != (n, 2, 4, 2):
-        raise ValueError(
-            f'finger_corners shape {finger_corners.shape} != expected ({n}, 2, 4, 2)'
-        )
+        raise ValueError(f'finger_corners shape {finger_corners.shape} != expected ({n}, 2, 4, 2)')
     marker_ids = (left_id, right_id)
     fg_time_cache: dict[int, dict] = {}
 
@@ -588,23 +598,27 @@ def _write_aruco_annotations(
             if np.isnan(corners).any():
                 continue
             pts = [{'x': float(c[0]), 'y': float(c[1])} for c in corners]
-            points_annotations.append({
-                'timestamp': t_fg,
-                'type': _PA_LINE_LOOP,
-                'points': pts,
-                'outline_color': _ARUCO_QUAD_COLOR,
-                'thickness': 2.0,
-            })
+            points_annotations.append(
+                {
+                    'timestamp': t_fg,
+                    'type': _PA_LINE_LOOP,
+                    'points': pts,
+                    'outline_color': _ARUCO_QUAD_COLOR,
+                    'thickness': 2.0,
+                }
+            )
             cx = float(corners[:, 0].mean())
             cy = float(corners[:, 1].mean())
-            texts.append({
-                'timestamp': t_fg,
-                'position': {'x': cx, 'y': cy},
-                'text': str(marker_id),
-                'font_size': 14.0,
-                'text_color': _ARUCO_TEXT_COLOR,
-                'background_color': _ARUCO_TEXT_BG,
-            })
+            texts.append(
+                {
+                    'timestamp': t_fg,
+                    'position': {'x': cx, 'y': cy},
+                    'text': str(marker_id),
+                    'font_size': 14.0,
+                    'text_color': _ARUCO_TEXT_COLOR,
+                    'background_color': _ARUCO_TEXT_BG,
+                }
+            )
             n_quads += 1
         msg = json.dumps({'points': points_annotations, 'texts': texts}).encode()
         t_ns = _ts_ns(t_s)
@@ -661,16 +675,14 @@ def export_episode_to_mcap(
         and 'right_id' in ep_grp['annotations/gripper_width'].attrs  # type: ignore[index]
     )
     has_time_sync = (
-        'annotations/time_sync' in ep_grp
-        and 'gopro_to_finger_offset_s' in ep_grp['annotations/time_sync'].attrs  # type: ignore[index]
+        'annotations/time_sync' in ep_grp and 'gopro_to_finger_offset_s' in ep_grp['annotations/time_sync'].attrs  # type: ignore[index]
     )
 
     # gopro_to_finger_offset_s = gopro_time - finger_time, so subtract it
     # from gopro timestamps to bring them into the finger (Pi) time domain.
     gopro_ts_shift = 0.0
     if has_time_sync:
-        gopro_ts_shift = -float(ep_grp['annotations/time_sync']
-                                .attrs['gopro_to_finger_offset_s'])  # type: ignore[index]
+        gopro_ts_shift = -float(ep_grp['annotations/time_sync'].attrs['gopro_to_finger_offset_s'])  # type: ignore[index]
         log.info(f'  time sync: shifting gopro timestamps by {gopro_ts_shift:+.6f}s')
 
     def _gopro_ts(key: str) -> np.ndarray:
@@ -719,8 +731,11 @@ def export_episode_to_mcap(
                 wo_t = wo.translation
                 wo_r = wo.rotation.as_quat()
                 _write_static_transform(
-                    writer, ch['/tf_static'], t0,
-                    parent='world', child='optitrack',
+                    writer,
+                    ch['/tf_static'],
+                    t0,
+                    parent='world',
+                    child='optitrack',
                     translation=(wo_t[0], wo_t[1], wo_t[2]),
                     rotation=(wo_r[0], wo_r[1], wo_r[2], wo_r[3]),
                 )
@@ -738,8 +753,11 @@ def export_episode_to_mcap(
                                 f'translation={t_vals.shape} rotation={r_vals.shape}'
                             )
                         _write_static_transform(
-                            writer, ch['/tf_static'], t0,
-                            parent='optitrack', child='slam',
+                            writer,
+                            ch['/tf_static'],
+                            t0,
+                            parent='optitrack',
+                            child='slam',
                             translation=(t_vals[0], t_vals[1], t_vals[2]),
                             rotation=(r_vals[0], r_vals[1], r_vals[2], r_vals[3]),
                         )

@@ -1,7 +1,7 @@
 """Setup for the polyumi_pi_msgs package."""
 
-import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from setuptools import find_packages, setup
@@ -14,16 +14,15 @@ def compile_protos():
     package_dir = Path(__file__).resolve().parent
     proto_root = package_dir / package_name
     proto_files = sorted(proto_root.glob('*.proto'))
-    protoc = shutil.which('protoc')
 
-    if protoc is None:
-        raise RuntimeError(
-            'protoc executable not found on PATH. Install protobuf-compiler.'
-        )
-
+    # Use the protoc bundled with grpcio-tools (a build dependency) rather than
+    # the system protoc, which may be too old to support the built-in --pyi_out
+    # generator (added in protobuf 3.20).
     for proto_file in proto_files:
         proto_cmd = [
-            protoc,
+            sys.executable,
+            '-m',
+            'grpc_tools.protoc',
             f'-I={proto_root}',
             f'--pyi_out={proto_root}',
             f'--python_out={proto_root}',

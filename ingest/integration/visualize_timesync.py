@@ -31,17 +31,68 @@ def _mono(audio: np.ndarray) -> np.ndarray:
     return audio if audio.ndim == 1 else audio.mean(axis=1)
 
 
-def _plot_episode(ep: zarr.Group, episode_key: str, axes: list[Axes]) -> None:
-    piezo_ts = _load(ep, 'timestamps/finger_piezo')
-    air_ts = _load(ep, 'timestamps/finger_air')
-    gopro_ts = _load(ep, 'timestamps/gopro_audio')
+def _slice_window(
+    ts_arr: zarr.Array, data_arr: zarr.Array, t_start: float, t_end: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Load only the samples within [t_start, t_end] from zarr arrays."""
+    # Approximate index bounds using uniform spacing assumption (avoids loading full ts array).
+    n = ts_arr.shape[0]
+    t0 = float(ts_arr[0])
+    t1 = float(ts_arr[-1])
+    dt = (t1 - t0) / (n - 1) if n > 1 else 1.0
+    i0 = max(0, int((t_start - t0) / dt) - 2)
+    i1 = min(n, int((t_end - t0) / dt) + 2)
+    ts = np.asarray(ts_arr[i0:i1])
+    data = np.asarray(data_arr[i0:i1])
+    mask = (ts >= t_start) & (ts <= t_end)
+    return ts[mask], data[mask]
 
-    piezo = _load(ep, 'finger/finger_piezo')
-    air = _load(ep, 'finger/finger_air')
-    gopro = _mono(_load(ep, 'gopro/audio'))
 
+def _plot_episode(
+    ep: zarr.Group,
+    episode_key: str,
+    axes: list[Axes],
+    window_s: float = 8.0,
+    unaligned: bool = True,
+) -> None:
     ann = ep['annotations/time_sync'].attrs  # type: ignore[index]
     total_offset = float(ann['gopro_to_finger_offset_s'])  # type: ignore[arg-type]
+
+    gopro_t0 = float(ep['timestamps/gopro_audio'][0])
+    finger_align_t = gopro_t0 - total_offset
+
+    # Window in absolute time for each stream.
+    # In aligned mode the GoPro window is shifted back by total_offset so both
+    # streams land at t=0 on a shared axis. In unaligned mode each stream is
+    # windowed around its own natural start time so the clock offset is visible.
+    finger_t_start = finger_align_t - 1.0
+    finger_t_end = finger_align_t + window_s
+    if unaligned:
+        gopro_t_start = gopro_t0 - 1.0
+        gopro_t_end = gopro_t0 + window_s
+    else:
+        gopro_t_start = finger_align_t - 1.0
+        gopro_t_end = finger_align_t + window_s
+
+    piezo_ts, piezo = _slice_window(
+        ep['timestamps/finger_piezo'],
+        ep['finger/finger_piezo'],
+        finger_t_start,
+        finger_t_end,  # type: ignore[arg-type]
+    )
+    air_ts, air = _slice_window(
+        ep['timestamps/finger_air'],
+        ep['finger/finger_air'],
+        finger_t_start,
+        finger_t_end,  # type: ignore[arg-type]
+    )
+    gopro_ts, gopro_raw = _slice_window(
+        ep['timestamps/gopro_audio'],
+        ep['gopro/audio'],
+        gopro_t_start,
+        gopro_t_end,  # type: ignore[arg-type]
+    )
+    gopro = _mono(gopro_raw)
 
     if 'finger_chirp_peak' in ann:
         finger_peak = float(ann['finger_chirp_peak'])  # type: ignore[arg-type]
@@ -51,34 +102,40 @@ def _plot_episode(ep: zarr.Group, episode_key: str, axes: list[Axes]) -> None:
         peak = float(ann['peak'])  # type: ignore[arg-type]
         peak_label = f'peak={peak:.3f}'
 
-    # Shift each stream so that the alignment point (GoPro t0) lands at t=0 on a shared axis.
-    # total_offset ≈ gopro_ts[0] - finger_ts[0], so GoPro t0 in finger time = gopro_ts[0] - total_offset.
-    gopro_t0 = float(gopro_ts[0])
-    finger_align_t = gopro_t0 - total_offset
+    # Shared time reference: finger stream always uses finger_align_t as origin.
+    # In aligned mode GoPro also uses finger_align_t (= gopro_t0 - offset) so the
+    # two chirps overlap. In unaligned mode GoPro uses gopro_t0, preserving the
+    # raw clock offset between the devices.
+    gopro_ref = gopro_t0 if unaligned else finger_align_t
 
-    # Chirp onset markers in the shared time axis
     finger_chirp_x: float | None = None
     gopro_chirp_x: float | None = None
     if 'finger_chirp_onset_s' in ann:
         finger_chirp_x = float(ann['finger_chirp_onset_s']) - finger_align_t  # type: ignore[arg-type]
     if 'gopro_chirp_onset_s' in ann:
-        gopro_chirp_x = float(ann['gopro_chirp_onset_s']) - gopro_t0  # type: ignore[arg-type]
+        gopro_chirp_x = float(ann['gopro_chirp_onset_s']) - gopro_ref  # type: ignore[arg-type]
 
     bar_label = f'alignment point  (offset={total_offset:+.4f}s, {peak_label})'
+    mode_tag = 'unaligned' if unaligned else 'aligned'
 
     traces = [
-        (axes[0], piezo_ts - finger_align_t, piezo, 'steelblue', 'finger piezo', None),
-        (axes[1], air_ts - finger_align_t, air, 'steelblue', 'finger air', finger_chirp_x),
-        (axes[2], gopro_ts - gopro_t0, gopro, 'darkorange', 'GoPro audio (mono)', gopro_chirp_x),
+        (axes[0], piezo_ts - finger_align_t, piezo, 'steelblue', 'finger piezo (RPi)', finger_chirp_x),
+        (axes[1], air_ts - finger_align_t, air, 'steelblue', 'finger mic (RPi)', finger_chirp_x),
+        (axes[2], gopro_ts - gopro_ref, gopro, 'darkorange', 'GoPro mic', gopro_chirp_x),
     ]
     for i, (ax, ts, data, color, ylabel, chirp_x) in enumerate(traces):
         ax: Axes  # type: ignore
         ax.plot(ts, data, linewidth=0.3, color=color, rasterized=True)
-        ax.axvline(0, color='red', linewidth=1.2, label=bar_label if i == 0 else None)
+        if not unaligned:
+            ax.axvline(0, color='red', linewidth=1.2, label=bar_label if i == 0 else None)
         if chirp_x is not None:
-            ax.axvline(chirp_x, color='limegreen', linewidth=1.0, linestyle='--',
-                       label='chirp onset' if i == 1 else None)
-        ax.set_ylabel(ylabel, fontsize=8)
+            ax.axvline(
+                chirp_x,
+                color='green',
+                linewidth=3.0,
+                linestyle='--',
+                label=f'chirp onset ({chirp_x:.3f}s)' if i == 1 else None,
+            )
         ax.yaxis.set_label_position('right')
         ax.tick_params(axis='x', labelsize=7, labelbottom=True)
         ax.tick_params(axis='y', labelsize=6)
@@ -88,10 +145,12 @@ def _plot_episode(ep: zarr.Group, episode_key: str, axes: list[Axes]) -> None:
         ax.grid(True, axis='x', which='minor', linewidth=0.4, alpha=0.6)
         ax.grid(True, axis='x', which='major', linewidth=0.8, alpha=0.8)
 
-    axes[0].legend(fontsize=7, loc='upper right')
-    axes[1].legend(fontsize=7, loc='upper right')
-    axes[0].set_title(episode_key, loc='left', fontsize=8, pad=2)
-    axes[2].set_xlabel('time relative to alignment point (s)', fontsize=8)
+    axes[1].legend(fontsize=12, loc='upper right')
+    axes[0].set_title(f'{episode_key}  [{mode_tag}]', loc='left', fontsize=8, pad=2)
+    if unaligned:
+        axes[2].set_title('Time since start of session (for each system)', loc='right', fontsize=8, pad=2)
+    else:
+        axes[2].set_xlabel('time relative to finger alignment point (s)', fontsize=8)
 
 
 def main() -> None:
@@ -105,6 +164,11 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('scene', type=pathlib.Path, help='Scene directory or scene.zarr path.')
+    parser.add_argument(
+        '--unaligned',
+        action='store_true',
+        help='Show raw (unaligned) GoPro audio without applying the time offset.',
+    )
     args = parser.parse_args()
 
     scene_zarr = SceneFiles.resolve_zarr_path(args.scene)
@@ -115,8 +179,11 @@ def main() -> None:
     # step = TimeSyncStep(aligner=GCCPHATAligner(alpha=0.0), max_lag_s=2.0, trim_start_s=0.8)
     # step = TimeSyncStep()
     # step = TimeSyncStep(aligner=PowerEnvAligner(power=1.2), trim_start_s=0.7, max_lag_s=1.5)
-    step = ChirpTimeSyncStep()
-    scene_zarr = step.run(args.scene, copy=True, force=True)
+    # step = ChirpTimeSyncStep()
+    # print("Running time sync step...")
+    # scene_zarr = step.run(args.scene, copy=True, force=True)
+    print('Time sync step completed. Visualizing results...')
+    scene_zarr = SceneFiles.resolve_zarr_path(args.scene)
     root = zarr.open_group(str(scene_zarr), mode='r')
     episodes = sorted(k for k in root.keys() if k.startswith('episode_'))
     if not episodes:
@@ -131,7 +198,7 @@ def main() -> None:
 
         fig, axes = plt.subplots(3, 1, figsize=(16, 7), sharex=True)
         fig.suptitle(f'{scene_zarr.parent.name}  /  {episode_key}', fontsize=9)
-        _plot_episode(ep, episode_key, list(axes))  # type: ignore[arg-type]
+        _plot_episode(ep, episode_key, list(axes), unaligned=args.unaligned)  # type: ignore[arg-type]
         fig.tight_layout(rect=(0, 0, 1, 0.97))
 
     try:

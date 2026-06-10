@@ -109,9 +109,7 @@ class VideoFile(SessionDataABC):
     ) -> None:
         """Write one JPEG frame and append its timestamp to the sidecar CSV."""
         if self._timestamps_writer is None:
-            raise RuntimeError(
-                'Video recording is not active. Use this inside recording().'
-            )
+            raise RuntimeError('Video recording is not active. Use this inside recording().')
 
         ts_ns = time_ns() if timestamp_ns_value is None else timestamp_ns_value
         frame_path = self.path / _FRAME_NAME.format(self._frame_idx)

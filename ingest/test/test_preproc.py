@@ -51,8 +51,8 @@ def test_chirp_time_sync_step(tmp_path: pathlib.Path) -> None:
     """ChirpTimeSyncStep recovers the inter-device offset from injected chirps."""
     sr = 16_000
     duration_s = 10.0
-    true_offset_s = 0.75    # GoPro clock is 0.75 s ahead of finger clock
-    start_delay_s = 2.0     # GoPro starts recording 2 s after the Pi (physical time)
+    true_offset_s = 0.75  # GoPro clock is 0.75 s ahead of finger clock
+    start_delay_s = 2.0  # GoPro starts recording 2 s after the Pi (physical time)
 
     # Pi and GoPro have independent start times; GoPro clock = Pi clock + true_offset_s
     finger_start_s = 1_000.0
@@ -66,12 +66,12 @@ def test_chirp_time_sync_step(tmp_path: pathlib.Path) -> None:
 
     finger_audio = rng.normal(0, 0.01, n).astype(np.float32)
     onset_finger = int((chirp_play_time_s - finger_start_s) * sr)
-    finger_audio[onset_finger:onset_finger + len(chirp)] += chirp
+    finger_audio[onset_finger : onset_finger + len(chirp)] += chirp
 
     # In GoPro-clock, the chirp event happens at chirp_play_time_s + true_offset_s
     gopro_audio = rng.normal(0, 0.01, n).astype(np.float32)
     onset_gopro = int((chirp_play_time_s + true_offset_s - gopro_start_s) * sr)
-    gopro_audio[onset_gopro:onset_gopro + len(chirp)] += chirp
+    gopro_audio[onset_gopro : onset_gopro + len(chirp)] += chirp
 
     finger_ts = finger_start_s + np.arange(n, dtype=np.float64) / sr
     gopro_ts = gopro_start_s + np.arange(n, dtype=np.float64) / sr

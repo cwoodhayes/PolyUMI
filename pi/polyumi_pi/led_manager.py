@@ -19,9 +19,7 @@ class LEDManager:
 
     def __init__(self) -> None:
         """Initialize the LED manager."""
-        self.pwm: rpi_hardware_pwm.HardwarePWM = rpi_hardware_pwm.HardwarePWM(
-            self.PWM_CHANNEL, hz=1000, chip=0
-        )
+        self.pwm: rpi_hardware_pwm.HardwarePWM = rpi_hardware_pwm.HardwarePWM(self.PWM_CHANNEL, hz=1000, chip=0)
         self.pwm.start(0)
 
     def set_brightness(self, brightness: float) -> None:
@@ -34,10 +32,7 @@ class LEDManager:
         """
         duty_cycle = int(brightness * 100)
         self.pwm.change_duty_cycle(duty_cycle)
-        log.info(
-            f'Set LED brightness to {brightness:.2f} '
-            f'(duty cycle: {duty_cycle}%)'
-        )
+        log.info(f'Set LED brightness to {brightness:.2f} (duty cycle: {duty_cycle}%)')
 
     def close(self) -> None:
         """Stop the PWM channel. Idempotent."""

@@ -32,9 +32,7 @@ from polyumi_pi.raspi_driver import IndicatorState, RaspiDriver
 log = logging.getLogger('pi_optitrack')
 
 
-async def await_optitrack_esync(
-    scene: SceneFiles, hat: RaspiDriver
-) -> None:
+async def await_optitrack_esync(scene: SceneFiles, hat: RaspiDriver) -> None:
     """
     Wait for the esync start recording signal to arrive.
 

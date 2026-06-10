@@ -9,8 +9,6 @@ description = "Raspberry Pi streaming client for the PolyUMI multimodal learning
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.135.1",
-    "gpiozero>=2.0",
-    "lgpio>=0.2.2.0",
     "numpy>=2.4.3",
     "open-gopro",
     "opencv-python-headless>=4.12.0.88",
@@ -18,10 +16,20 @@ dependencies = [
     "protobuf>=6,<7",
     "pyzmq>=27.1.0",
     "rich>=14.3.3",
-    "rpi-hardware-pwm>=0.3.1",
     "sounddevice>=0.5.5",
     "typer>=0.24.1",
     "uvicorn>=0.41.0",
+]
+
+[project.optional-dependencies]
+# Raspberry Pi hardware-only dependencies. These are required to run the full
+# polyumi-pi app on the Pi (imported by cam_streamer/led_manager/raspi_driver),
+# but not by the unit tests or the gopro bringup script, and lgpio fails to
+# build off-Pi (needs swig). Install with `polyumi_pi[pi]` on the Pi.
+pi = [
+    "gpiozero>=2.0",
+    "lgpio>=0.2.2.0",
+    "rpi-hardware-pwm>=0.3.1",
 ]
 
 [project.scripts]

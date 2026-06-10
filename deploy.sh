@@ -31,7 +31,7 @@ echo "==> Syncing Pi venv..."
 ssh "${PI_HOST}" '
     set -euo pipefail
     [ -d ~/PolyUMI/pi/.venv ] || ~/.local/bin/uv venv --system-site-packages ~/PolyUMI/pi/.venv
-    cd ~/PolyUMI/pi && ~/.local/bin/uv sync --no-dev --frozen
+    cd ~/PolyUMI/pi && ~/.local/bin/uv sync --no-dev --frozen --extra pi
 '
 
 echo "==> Applying ALSA preset (UCM warnings about 'use case configuration' are harmless)..."

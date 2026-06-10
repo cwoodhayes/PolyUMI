@@ -105,9 +105,7 @@ def test_gripper_width_channel_written(tmp_path: pathlib.Path) -> None:
         topics = {ch.topic for ch in reader.get_summary().channels.values()}  # type: ignore[union-attr]
         assert '/gripper/width' in topics
 
-        messages = [
-            (schema, channel, msg) for schema, channel, msg in reader.iter_messages(topics=['/gripper/width'])
-        ]
+        messages = [(schema, channel, msg) for schema, channel, msg in reader.iter_messages(topics=['/gripper/width'])]
     # Frame 0 has a width, frame 1 is NaN and gets skipped.
     assert len(messages) == 1
     payload = json.loads(messages[0][2].data)

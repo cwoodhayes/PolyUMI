@@ -316,7 +316,6 @@ def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) 
     ann_grp.attrs.update(ann_attrs)
 
 
-
 def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.Path:
     """
     Build scene.zarr inside scene_path from processed session directories.
@@ -343,9 +342,7 @@ def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.P
             'created_at': dt.datetime.now(dt.timezone.utc).isoformat(),
             'alignment_refs': [],
             'pzarr_version': PZARR_VERSION,
-            'optitrack_start_time': (
-                optitrack_start_time.isoformat() if optitrack_start_time is not None else None
-            ),
+            'optitrack_start_time': (optitrack_start_time.isoformat() if optitrack_start_time is not None else None),
         }
     )
 
@@ -371,28 +368,127 @@ def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.P
     return scene.zarr_path
 
 
+def _ts_freq_hz(ts: np.ndarray) -> float | None:
+    """Return median sample rate in Hz from a 1-D timestamp array (seconds)."""
+    if len(ts) < 2:
+        return None
+    median_dt = float(np.median(np.diff(ts)))
+    return 1.0 / median_dt if median_dt > 0 else None
+
+
+@dataclasses.dataclass
+class StreamInfo:
+    """Shape, timestamp range, and sample rate for one data stream."""
+
+    shape: tuple | None  # type: ignore[type-arg]
+    ts_range: tuple[float, float] | None
+    freq_hz: float | None
+
+
+@dataclasses.dataclass
+class OptitrackInfo:
+    """Summary of the scene-level optitrack group."""
+
+    shape: tuple  # type: ignore[type-arg]
+    ts_range: tuple[float, float]
+    freq_hz: float | None
+
+
 @dataclasses.dataclass
 class EpisodeInfo:
     """Summary of one episode's arrays and timestamps extracted from scene.zarr."""
 
     index: int
-    finger_shape: tuple | None  # type: ignore[type-arg]
-    finger_piezo_shape: tuple | None  # type: ignore[type-arg]
-    finger_air_shape: tuple | None  # type: ignore[type-arg]
-    gopro_shape: tuple | None  # type: ignore[type-arg]
-    accl_shape: tuple | None  # type: ignore[type-arg]
-    gyro_shape: tuple | None  # type: ignore[type-arg]
-    gps_shape: tuple | None  # type: ignore[type-arg]
-    gopro_audio_shape: tuple | None  # type: ignore[type-arg]
-    gopro_audio_ts_range: tuple[float, float] | None
-    finger_ts_range: tuple[float, float] | None
-    finger_ts_mean_delta_ms: float | None
-    finger_piezo_ts_range: tuple[float, float] | None
-    finger_air_ts_range: tuple[float, float] | None
-    gopro_ts_range: tuple[float, float] | None
-    gopro_ts_mean_delta_ms: float | None
+    finger: StreamInfo
+    finger_piezo: StreamInfo
+    finger_air: StreamInfo
+    gopro: StreamInfo
+    gopro_accl: StreamInfo
+    gopro_gyro: StreamInfo
+    gopro_gps: StreamInfo
+    gopro_audio: StreamInfo
     episode_start: float | None
     episode_end: float | None
+
+    # Legacy shape/range attributes kept for backward compatibility
+    @property
+    def finger_shape(self) -> tuple | None:  # type: ignore[type-arg]
+        """Shape of finger/frames array."""
+        return self.finger.shape
+
+    @property
+    def finger_piezo_shape(self) -> tuple | None:  # type: ignore[type-arg]
+        """Shape of finger/finger_piezo array."""
+        return self.finger_piezo.shape
+
+    @property
+    def finger_air_shape(self) -> tuple | None:  # type: ignore[type-arg]
+        """Shape of finger/finger_air array."""
+        return self.finger_air.shape
+
+    @property
+    def gopro_shape(self) -> tuple | None:  # type: ignore[type-arg]
+        """Shape of gopro/frames array."""
+        return self.gopro.shape
+
+    @property
+    def accl_shape(self) -> tuple | None:  # type: ignore[type-arg]
+        """Shape of gopro/accl array."""
+        return self.gopro_accl.shape
+
+    @property
+    def gyro_shape(self) -> tuple | None:  # type: ignore[type-arg]
+        """Shape of gopro/gyro array."""
+        return self.gopro_gyro.shape
+
+    @property
+    def gps_shape(self) -> tuple | None:  # type: ignore[type-arg]
+        """Shape of gopro/gps array."""
+        return self.gopro_gps.shape
+
+    @property
+    def gopro_audio_shape(self) -> tuple | None:  # type: ignore[type-arg]
+        """Shape of gopro/audio array."""
+        return self.gopro_audio.shape
+
+    @property
+    def finger_ts_range(self) -> tuple[float, float] | None:
+        """Timestamp range for finger/frames."""
+        return self.finger.ts_range
+
+    @property
+    def finger_ts_mean_delta_ms(self) -> float | None:
+        """Mean inter-frame delta in ms for finger camera."""
+        if self.finger.freq_hz and self.finger.freq_hz > 0:
+            return 1000.0 / self.finger.freq_hz
+        return None
+
+    @property
+    def finger_piezo_ts_range(self) -> tuple[float, float] | None:
+        """Timestamp range for finger/finger_piezo."""
+        return self.finger_piezo.ts_range
+
+    @property
+    def finger_air_ts_range(self) -> tuple[float, float] | None:
+        """Timestamp range for finger/finger_air."""
+        return self.finger_air.ts_range
+
+    @property
+    def gopro_ts_range(self) -> tuple[float, float] | None:
+        """Timestamp range for gopro/frames."""
+        return self.gopro.ts_range
+
+    @property
+    def gopro_ts_mean_delta_ms(self) -> float | None:
+        """Mean inter-frame delta in ms for GoPro."""
+        if self.gopro.freq_hz and self.gopro.freq_hz > 0:
+            return 1000.0 / self.gopro.freq_hz
+        return None
+
+    @property
+    def gopro_audio_ts_range(self) -> tuple[float, float] | None:
+        """Timestamp range for gopro/audio."""
+        return self.gopro_audio.ts_range
 
 
 @dataclasses.dataclass
@@ -401,9 +497,23 @@ class PZarrInfo:
 
     zarr_path: pathlib.Path
     zarr_format: int
+    pzarr_version: int
     tree: object
     attrs: dict  # type: ignore[type-arg]
     episodes: list[EpisodeInfo]
+    optitrack: OptitrackInfo | None
+
+
+def _read_stream_info(ep: zarr.Group, array_path: str, ts_path: str) -> StreamInfo:
+    """Read shape and timestamp stats for one stream from an episode group."""
+    shape = arr(ep, array_path).shape if array_path in ep else None
+    ts_range: tuple[float, float] | None = None
+    freq_hz: float | None = None
+    if ts_path in ep:
+        ts: np.ndarray = arr(ep, ts_path)[:]  # type: ignore[assignment]
+        ts_range = (float(ts[0]), float(ts[-1]))
+        freq_hz = _ts_freq_hz(ts)
+    return StreamInfo(shape=shape, ts_range=ts_range, freq_hz=freq_hz)
 
 
 def inspect_pzarr(scene_path: pathlib.Path) -> PZarrInfo:
@@ -414,6 +524,7 @@ def inspect_pzarr(scene_path: pathlib.Path) -> PZarrInfo:
 
     root = zarr.open_group(str(zarr_path), mode='r')
     n_episodes = int(root.attrs.get('n_episodes', 0))  # type: ignore[arg-type]
+    pzarr_version = int(root.attrs.get('pzarr_version', 1))  # type: ignore[arg-type]
 
     episodes = []
     for i in range(n_episodes):
@@ -422,67 +533,44 @@ def inspect_pzarr(scene_path: pathlib.Path) -> PZarrInfo:
             continue
         ep = zarr.open_group(str(zarr_path / ep_key), mode='r')
 
-        finger_ts_range: tuple[float, float] | None = None
-        finger_mean_delta: float | None = None
-        if 'timestamps/finger' in ep:
-            ts: np.ndarray = arr(ep, 'timestamps/finger')[:]  # type: ignore[assignment]
-            finger_ts_range = (float(ts[0]), float(ts[-1]))
-            finger_mean_delta = float(np.diff(ts).mean() * 1000) if len(ts) > 1 else None
-
-        finger_piezo_ts_range: tuple[float, float] | None = None
-        if 'timestamps/finger_piezo' in ep:
-            ts = arr(ep, 'timestamps/finger_piezo')[:]  # type: ignore[assignment]
-            finger_piezo_ts_range = (float(ts[0]), float(ts[-1]))
-
-        finger_air_ts_range: tuple[float, float] | None = None
-        if 'timestamps/finger_air' in ep:
-            ts = arr(ep, 'timestamps/finger_air')[:]  # type: ignore[assignment]
-            finger_air_ts_range = (float(ts[0]), float(ts[-1]))
-
-        gopro_audio_ts_range: tuple[float, float] | None = None
-        if 'timestamps/gopro_audio' in ep:
-            ts = arr(ep, 'timestamps/gopro_audio')[:]  # type: ignore[assignment]
-            gopro_audio_ts_range = (float(ts[0]), float(ts[-1]))
-
-        gopro_ts_range: tuple[float, float] | None = None
-        gopro_mean_delta: float | None = None
-        if 'timestamps/gopro' in ep:
-            ts = arr(ep, 'timestamps/gopro')[:]  # type: ignore[assignment]
-            gopro_ts_range = (float(ts[0]), float(ts[-1]))
-            gopro_mean_delta = float(np.diff(ts).mean() * 1000) if len(ts) > 1 else None
-
         ann_attrs = ep['annotations'].attrs if 'annotations' in ep else {}
         ep_start = float(ann_attrs['episode_start']) if 'episode_start' in ann_attrs else None
         ep_end = float(ann_attrs['episode_end']) if 'episode_end' in ann_attrs else None
         episodes.append(
             EpisodeInfo(
                 index=i,
-                finger_shape=arr(ep, 'finger/frames').shape if 'finger/frames' in ep else None,
-                finger_piezo_shape=arr(ep, 'finger/finger_piezo').shape if 'finger/finger_piezo' in ep else None,
-                finger_air_shape=arr(ep, 'finger/finger_air').shape if 'finger/finger_air' in ep else None,
-                gopro_shape=arr(ep, 'gopro/frames').shape if 'gopro/frames' in ep else None,
-                accl_shape=arr(ep, 'gopro/accl').shape if 'gopro/accl' in ep else None,
-                gyro_shape=arr(ep, 'gopro/gyro').shape if 'gopro/gyro' in ep else None,
-                gps_shape=arr(ep, 'gopro/gps').shape if 'gopro/gps' in ep else None,
-                gopro_audio_shape=arr(ep, 'gopro/audio').shape if 'gopro/audio' in ep else None,
-                gopro_audio_ts_range=gopro_audio_ts_range,
-                finger_ts_range=finger_ts_range,
-                finger_ts_mean_delta_ms=finger_mean_delta,
-                finger_piezo_ts_range=finger_piezo_ts_range,
-                finger_air_ts_range=finger_air_ts_range,
-                gopro_ts_range=gopro_ts_range,
-                gopro_ts_mean_delta_ms=gopro_mean_delta,
+                finger=_read_stream_info(ep, 'finger/frames', 'timestamps/finger'),
+                finger_piezo=_read_stream_info(ep, 'finger/finger_piezo', 'timestamps/finger_piezo'),
+                finger_air=_read_stream_info(ep, 'finger/finger_air', 'timestamps/finger_air'),
+                gopro=_read_stream_info(ep, 'gopro/frames', 'timestamps/gopro'),
+                gopro_accl=_read_stream_info(ep, 'gopro/accl', 'timestamps/gopro_accl'),
+                gopro_gyro=_read_stream_info(ep, 'gopro/gyro', 'timestamps/gopro_gyro'),
+                gopro_gps=_read_stream_info(ep, 'gopro/gps', 'timestamps/gopro_gps'),
+                gopro_audio=_read_stream_info(ep, 'gopro/audio', 'timestamps/gopro_audio'),
                 episode_start=ep_start,
                 episode_end=ep_end,
             )
         )
 
+    optitrack: OptitrackInfo | None = None
+    if 'optitrack' in root:
+        ot = zarr.open_group(str(zarr_path / 'optitrack'), mode='r')
+        if 'timestamps' in ot and 'pose' in ot:
+            ot_ts: np.ndarray = arr(ot, 'timestamps')[:]  # type: ignore[assignment]
+            optitrack = OptitrackInfo(
+                shape=arr(ot, 'pose').shape,
+                ts_range=(float(ot_ts[0]), float(ot_ts[-1])),
+                freq_hz=_ts_freq_hz(ot_ts),
+            )
+
     return PZarrInfo(
         zarr_path=zarr_path,
         zarr_format=root.metadata.zarr_format,
+        pzarr_version=pzarr_version,
         tree=root.tree(),
         attrs=dict(root.attrs),
         episodes=episodes,
+        optitrack=optitrack,
     )
 
 

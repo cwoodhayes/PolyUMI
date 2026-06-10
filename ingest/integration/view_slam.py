@@ -44,9 +44,7 @@ log = logging.getLogger(__name__)
 
 def main() -> None:
     """Entry point."""
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         'scene',
         type=pathlib.Path,
@@ -78,10 +76,7 @@ def main() -> None:
 
     atlas_path = scene_zarr.parent / f'{scene_zarr.parent.name}.atlas.osa'
     if not atlas_path.exists():
-        log.error(
-            f'No atlas found at {atlas_path}. '
-            f'Run `pingest pp 2` on this scene first to build the map.'
-        )
+        log.error(f'No atlas found at {atlas_path}. Run `pingest pp 2` on this scene first to build the map.')
         sys.exit(1)
 
     kwargs: dict = {}
@@ -102,9 +97,7 @@ def main() -> None:
         log.info(f'Exporting {ep_key} to {tmp}...')
         video_path, json_path, _ = _export_episode(root[ep_key], tmp)
 
-        settings_path = _make_temp_settings_yaml(
-            step.settings_yaml, tmp, load_atlas=atlas_path, viewer=True
-        )
+        settings_path = _make_temp_settings_yaml(step.settings_yaml, tmp, load_atlas=atlas_path, viewer=True)
 
         cmd = [
             str(step.map_builder_bin),

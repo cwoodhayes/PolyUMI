@@ -122,10 +122,13 @@ def test_mapping_episode_skipped_during_localization(tmp_path: pathlib.Path) -> 
         poses = np.zeros((n_frames, 7), dtype=np.float64)
         poses[:, 6] = 1.0  # identity quaternion w=1
         from polyumi_ingest.preproc.slam_step import _write_slam_results
+
         _write_slam_results(ep_grp, poses, settings, atlas_path)
 
-    with mock.patch.object(step, '_build_map', side_effect=_fake_build), \
-         mock.patch.object(step, '_localize_episode', side_effect=_fake_localize):
+    with (
+        mock.patch.object(step, '_build_map', side_effect=_fake_build),
+        mock.patch.object(step, '_localize_episode', side_effect=_fake_localize),
+    ):
         step.run_step(scene_zarr)
 
     assert len(called_build) == 1
@@ -156,10 +159,13 @@ def test_zarr_output_schema(tmp_path: pathlib.Path) -> None:
         _make_euroc_trajectory(traj_path, frame_ts, tracked)
         poses = _parse_and_reconcile_trajectory(traj_path, frame_ts)
         from polyumi_ingest.preproc.slam_step import _write_slam_results
+
         _write_slam_results(ep_grp, poses, settings, atlas_path)
 
-    with mock.patch.object(step, '_build_map', side_effect=_fake_build), \
-         mock.patch.object(step, '_localize_episode', side_effect=_fake_localize):
+    with (
+        mock.patch.object(step, '_build_map', side_effect=_fake_build),
+        mock.patch.object(step, '_localize_episode', side_effect=_fake_localize),
+    ):
         step.run_step(scene_zarr)
 
     ep1 = zarr.open_group(str(scene_zarr / 'episode_1'), mode='r')
@@ -172,8 +178,14 @@ def test_zarr_output_schema(tmp_path: pathlib.Path) -> None:
 
     # Annotation attribute keys
     slam_attrs = ep1['annotations/slam'].attrs
-    for key in ('n_frames_total', 'n_frames_lost', 'tracking_ratio',
-                'n_relocalization_events', 'orb_slam3_settings_path', 'atlas_path'):
+    for key in (
+        'n_frames_total',
+        'n_frames_lost',
+        'tracking_ratio',
+        'n_relocalization_events',
+        'orb_slam3_settings_path',
+        'atlas_path',
+    ):
         assert key in slam_attrs, f'Missing annotation key: {key}'
 
     assert int(slam_attrs['n_frames_total']) == n_frames
@@ -189,9 +201,7 @@ def test_zarr_output_schema(tmp_path: pathlib.Path) -> None:
 def test_placeholder_detection_raises(tmp_path: pathlib.Path) -> None:
     """Settings YAML with placeholder values must raise before any subprocess is called."""
     yaml_with_placeholder = tmp_path / 'bad.yaml'
-    yaml_with_placeholder.write_text(
-        '%YAML:1.0\nCamera.fx: 0.0  # CALIBRATE_ME\n'
-    )
+    yaml_with_placeholder.write_text('%YAML:1.0\nCamera.fx: 0.0  # CALIBRATE_ME\n')
     step = OrbSlam3Step(settings_yaml=yaml_with_placeholder)
     with pytest.raises(RuntimeError, match='CALIBRATE_ME'):
         step.run_step(tmp_path / 'scene.zarr')

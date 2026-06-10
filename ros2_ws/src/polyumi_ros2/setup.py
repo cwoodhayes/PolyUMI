@@ -45,8 +45,7 @@ setup(
     zip_safe=True,
     maintainer='conorbot',
     maintainer_email='cwoodhayes@gmail.com',
-    description='Core ROS2 python nodes for the PolyUMI '
-    'multimodal learning platform',
+    description='Core ROS2 python nodes for the PolyUMI multimodal learning platform',
     license='MIT',
     extras_require={
         'test': [
@@ -56,6 +55,7 @@ setup(
     entry_points={
         'console_scripts': [
             'pi_receiver_node = polyumi_ros2.pi_receiver_node:main',
+            'policy_client_node = polyumi_ros2.policy_client_node:main',
         ],
     },
 )

@@ -4,9 +4,7 @@ import numpy as np
 from scipy.spatial.transform import RigidTransform, Rotation
 
 
-def transform_optitrack_pose(
-    o_pose: np.ndarray, T_gb_rb: RigidTransform, T_gb_gp: RigidTransform
-) -> np.ndarray:
+def transform_optitrack_pose(o_pose: np.ndarray, T_gb_rb: RigidTransform, T_gb_gp: RigidTransform) -> np.ndarray:
     """
     Transform an OptiTrack rigid-body pose to the GoPro frame in optitrack coordinates.
 
