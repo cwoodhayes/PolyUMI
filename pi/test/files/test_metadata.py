@@ -64,6 +64,7 @@ def test_gopro_sync_time_preserves_timezone(tmp_path):
     """gopro_sync_time retains its timezone offset after serialization."""
     path = tmp_path / 'metadata.json'
     from datetime import timedelta
+
     jst = timezone(timedelta(hours=9))
     sync_time = datetime(2024, 6, 1, 12, 0, 0, tzinfo=jst)
     original = SessionMetadata(path=path, gopro_sync_time=sync_time)

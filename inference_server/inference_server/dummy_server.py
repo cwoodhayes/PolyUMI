@@ -58,9 +58,7 @@ async def _lifespan(app: FastAPI):
     raw = os.environ.get('HOME_POSE', '0.4 0.0 0.4 0 0 0 1 0.04')
     vals = [float(v) for v in raw.split()]
     if len(vals) != AGENT_POS_DIM:
-        raise ValueError(
-            f'HOME_POSE must have {AGENT_POS_DIM} values (xyz qxqyqzqw gripper), got {len(vals)}'
-        )
+        raise ValueError(f'HOME_POSE must have {AGENT_POS_DIM} values (xyz qxqyqzqw gripper), got {len(vals)}')
     _home_pose = np.array(vals)
     yield
 

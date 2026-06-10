@@ -43,9 +43,7 @@ class TestSvdAlign:
 
         R_est, t_est = _svd_align(src, dst)
 
-        angle_err = np.degrees(
-            np.arccos(np.clip((np.trace(R_true.T @ R_est) - 1) / 2, -1.0, 1.0))
-        )
+        angle_err = np.degrees(np.arccos(np.clip((np.trace(R_true.T @ R_est) - 1) / 2, -1.0, 1.0)))
         assert angle_err < 1e-4, f'Rotation error {angle_err:.2e} deg'
         assert np.allclose(t_est, t_true, atol=1e-8), f't error {np.linalg.norm(t_est - t_true):.2e}'
 
@@ -68,9 +66,7 @@ class TestSvdAlign:
 
         R_est, t_est = _svd_align(src, dst)
 
-        angle_err = np.degrees(
-            np.arccos(np.clip((np.trace(R_true.T @ R_est) - 1) / 2, -1.0, 1.0))
-        )
+        angle_err = np.degrees(np.arccos(np.clip((np.trace(R_true.T @ R_est) - 1) / 2, -1.0, 1.0)))
         assert angle_err < 0.5, f'Rotation error too large: {angle_err:.2f} deg'
         assert np.linalg.norm(t_est - t_true) < 0.01, f'Translation error too large'
 
@@ -80,8 +76,6 @@ class TestSvdAlign:
         src = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
         dst = _apply(R_true, t_true, src)
         R_est, t_est = _svd_align(src, dst)
-        angle_err = np.degrees(
-            np.arccos(np.clip((np.trace(R_true.T @ R_est) - 1) / 2, -1.0, 1.0))
-        )
+        angle_err = np.degrees(np.arccos(np.clip((np.trace(R_true.T @ R_est) - 1) / 2, -1.0, 1.0)))
         assert angle_err < 1e-5
         assert np.allclose(t_est, t_true, atol=1e-10)

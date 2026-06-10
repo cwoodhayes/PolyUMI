@@ -1,4 +1,5 @@
-"""Export a pzarr scene to a diffusion-policy ReplayBuffer zarr.
+"""
+Export a pzarr scene to a diffusion-policy ReplayBuffer zarr.
 
 Produces the flat layout that diffusion_policy's DexNexDataset expects::
 
@@ -47,6 +48,7 @@ def _nearest_idx(sorted_ts: np.ndarray, query: np.ndarray) -> np.ndarray:
 
 def _decode_resized_frames(frames_arr: zarr.Array, gidx: np.ndarray) -> np.ndarray:
     """Decode the selected gopro frames and resize+normalize to (T,RES,RES,3) float32 [0,1]."""
+
     def one(i: int) -> np.ndarray:
         frame = np.asarray(frames_arr[int(i)])  # (H,W,3) uint8 RGB
         resized = cv2.resize(frame, (RESOLUTION, RESOLUTION), interpolation=cv2.INTER_AREA)

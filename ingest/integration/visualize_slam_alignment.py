@@ -97,8 +97,9 @@ def _plot_split(
         ax.plot(pos[:, 0], pos[:, 1], pos[:, 2], color=color, linewidth=linewidth, alpha=alpha, label=label)
         return
     if not in_window.any():
-        ax.plot(pos[:, 0], pos[:, 1], pos[:, 2], color=color, linewidth=linewidth, alpha=alpha,
-                linestyle=':', label=label)
+        ax.plot(
+            pos[:, 0], pos[:, 1], pos[:, 2], color=color, linewidth=linewidth, alpha=alpha, linestyle=':', label=label
+        )
         return
 
     # Group contiguous runs of in/out-of-window samples and plot each as its own segment.
@@ -120,8 +121,16 @@ def _plot_split(
             seg_label = f'{label} (no overlap)' if not labeled_dotted else None
             labeled_dotted = True
             linestyle = ':'
-        ax.plot(seg[:, 0], seg[:, 1], seg[:, 2], color=color, linewidth=linewidth, alpha=alpha,
-                linestyle=linestyle, label=seg_label)
+        ax.plot(
+            seg[:, 0],
+            seg[:, 1],
+            seg[:, 2],
+            color=color,
+            linewidth=linewidth,
+            alpha=alpha,
+            linestyle=linestyle,
+            label=seg_label,
+        )
 
 
 def _draw_axes(ax: plt.Axes, origin: np.ndarray, R: np.ndarray, scale: float, label: str) -> None:
@@ -131,9 +140,17 @@ def _draw_axes(ax: plt.Axes, origin: np.ndarray, R: np.ndarray, scale: float, la
     for i, (color, lbl) in enumerate(zip(colors, labels)):
         end = origin + scale * R[:, i]
         ax.quiver(
-            origin[0], origin[1], origin[2],
-            R[0, i], R[1, i], R[2, i],
-            length=scale, color=color, linewidth=2, arrow_length_ratio=0.2, label=lbl,
+            origin[0],
+            origin[1],
+            origin[2],
+            R[0, i],
+            R[1, i],
+            R[2, i],
+            length=scale,
+            color=color,
+            linewidth=2,
+            arrow_length_ratio=0.2,
+            label=lbl,
         )
 
 
@@ -148,8 +165,9 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('scene', type=pathlib.Path, help='Scene directory or scene.zarr path.')
-    parser.add_argument('--axis-scale', type=float, default=0.3,
-                        help='Length of drawn coordinate axes (metres, default 0.3).')
+    parser.add_argument(
+        '--axis-scale', type=float, default=0.3, help='Length of drawn coordinate axes (metres, default 0.3).'
+    )
     args = parser.parse_args()
 
     scene_zarr = SceneFiles.resolve_zarr_path(args.scene)
@@ -165,10 +183,10 @@ def main() -> None:
 
     # --- load data ---
     ot_ts, ot_gopro = _load_optitrack_gopro(root)  # (N,7) in optitrack frame
-    slam_ts, slam_pos = _load_slam_poses(root)       # (M,3) in SLAM frame
+    slam_ts, slam_pos = _load_slam_poses(root)  # (M,3) in SLAM frame
 
     tf = root.attrs['optitrack_to_slam_transform']
-    t_vec = np.array(tf['translation'], dtype=np.float64)   # slam frame -> optitrack frame
+    t_vec = np.array(tf['translation'], dtype=np.float64)  # slam frame -> optitrack frame
     R_mat = Rotation.from_quat(tf['rotation']).as_matrix()  # same
 
     # Transform: optitrack_pos = R @ slam_pos + t
@@ -198,14 +216,40 @@ def main() -> None:
     fig = plt.figure(figsize=(13, 9))
     ax = fig.add_subplot(111, projection='3d')
 
-    _plot_split(ax, ot_ts, ot_gopro[:, :3], t_start, t_end,
-                color='royalblue', label='OptiTrack (ground truth)', linewidth=1.2, alpha=0.85)
+    _plot_split(
+        ax,
+        ot_ts,
+        ot_gopro[:, :3],
+        t_start,
+        t_end,
+        color='royalblue',
+        label='OptiTrack (ground truth)',
+        linewidth=1.2,
+        alpha=0.85,
+    )
 
-    _plot_split(ax, slam_ts, slam_pos_aligned, t_start, t_end,
-                color='darkorange', label='SLAM aligned (R·p + t)', linewidth=1.0, alpha=0.85)
+    _plot_split(
+        ax,
+        slam_ts,
+        slam_pos_aligned,
+        t_start,
+        t_end,
+        color='darkorange',
+        label='SLAM aligned (R·p + t)',
+        linewidth=1.0,
+        alpha=0.85,
+    )
 
-    ax.plot(slam_pos_unaligned[:, 0], slam_pos_unaligned[:, 1], slam_pos_unaligned[:, 2],
-            color='gray', linewidth=0.8, alpha=0.5, linestyle='--', label='SLAM unaligned (centroid-shifted)')
+    ax.plot(
+        slam_pos_unaligned[:, 0],
+        slam_pos_unaligned[:, 1],
+        slam_pos_unaligned[:, 2],
+        color='gray',
+        linewidth=0.8,
+        alpha=0.5,
+        linestyle='--',
+        label='SLAM unaligned (centroid-shifted)',
+    )
 
     # Optitrack frame axes at its centroid (origin of optitrack frame shown as identity axes)
     _draw_axes(ax, ot_centroid, np.eye(3), args.axis_scale, 'OT')

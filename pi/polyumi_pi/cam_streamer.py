@@ -127,10 +127,7 @@ class CameraStreamer:
                         video_recorder.write_frame(data.getvalue(), msg.timestamp_ns)
                         n_video_frames += 1
 
-                    log.debug(
-                        f'Captured frame at {msg.timestamp_ns} ns, '
-                        f'size={len(msg.jpeg_data)} bytes'
-                    )
+                    log.debug(f'Captured frame at {msg.timestamp_ns} ns, size={len(msg.jpeg_data)} bytes')
 
                     elapsed = time.monotonic() - t_start
                     sleep_time = interval - elapsed
@@ -233,9 +230,7 @@ class CameraStreamer:
 
     def set_initial_controls(self) -> None:
         """Set initial camera controls for our use-case."""
-        scaler_crop = self.compute_scaler_crop(
-            width=self.VIEW_WIDTH, height=self.VIEW_HEIGHT
-        )
+        scaler_crop = self.compute_scaler_crop(width=self.VIEW_WIDTH, height=self.VIEW_HEIGHT)
         self.cam.set_controls({'ScalerCrop': scaler_crop})
         log.info(
             f'Requested ScalerCrop={scaler_crop}, '

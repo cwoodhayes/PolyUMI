@@ -29,7 +29,7 @@ BEEP_GAP_S = 0.05
 def beep(count: int, sample_rate: int, device: int | str | None = None) -> None:
     """Play `count` short beeps on the given device (blocking)."""
     import sounddevice as sd
-    
+
     n = int(sample_rate * BEEP_DURATION_S)
     t = np.linspace(0, BEEP_DURATION_S, n, endpoint=False)
     mono = (0.5 * np.sin(2 * np.pi * BEEP_FREQ_HZ * t)).astype(np.float32)
@@ -48,7 +48,7 @@ def play(sample_rate: int, device: int | str | None = None) -> int:
     The WM8960 requires stereo output, so the mono chirp is duplicated.
     """
     import sounddevice as sd
-    
+
     mono = generate(sample_rate)
     stereo = np.column_stack([mono, mono])
     ts = time.time_ns()

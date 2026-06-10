@@ -202,9 +202,7 @@ class ChirpTimeSyncStep(PreprocessingStep):
             onset_finger, peak_finger = self._aligner.estimate_lag(
                 finger_air, ref_finger, max_lag_samples=window_finger
             )
-            onset_gopro, peak_gopro = self._aligner.estimate_lag(
-                gopro_audio, ref_gopro, max_lag_samples=window_gopro
-            )
+            onset_gopro, peak_gopro = self._aligner.estimate_lag(gopro_audio, ref_gopro, max_lag_samples=window_gopro)
 
             t_chirp_finger = finger_ts[0] + onset_finger / finger_sr
             t_chirp_gopro = gopro_ts[0] + onset_gopro / gopro_sr

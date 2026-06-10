@@ -232,9 +232,7 @@ class ChirpAligner(AudioAligner):
             offset = 0
 
         if len(window) < len(ref_norm):
-            raise ValueError(
-                f'Search window ({len(window)} samples) shorter than reference ({len(ref_norm)} samples)'
-            )
+            raise ValueError(f'Search window ({len(window)} samples) shorter than reference ({len(ref_norm)} samples)')
 
         # cc[i] = dot(window[i : i+L], ref_norm) — peak is the onset
         cc = fftconvolve(window, ref_norm[::-1], mode='valid')

@@ -375,17 +375,13 @@ def record_episode(
     sample_rate: int = typer.Option(16000, help='Audio sample rate (Hz).'),
     chunk_ms: int = typer.Option(20, help='Audio chunk size (ms).'),
     channels: int = typer.Option(2, help='Number of audio channels.'),
-    robot: str = typer.Option(
-        'polyumi_gripper', help='Name of the robot being recorded.'
-    ),
+    robot: str = typer.Option('polyumi_gripper', help='Name of the robot being recorded.'),
     task: str | None = typer.Option(None, help='Name of the task being recorded.'),
     gopro_identifier: str | None = typer.Option(
         None,
         help='Last four digits of the GoPro serial number. Defaults to saved scan-gopro config.',
     ),
-    no_gopro: bool = typer.Option(
-        False, '--no-gopro', help='Skip GoPro connection (for debugging).'
-    ),
+    no_gopro: bool = typer.Option(False, '--no-gopro', help='Skip GoPro connection (for debugging).'),
 ):
     """
     Record an episode; video and audio data is routed to local files.
@@ -434,9 +430,7 @@ def record_episode(
                 if not no_gopro:
                     if gopro_identifier is None:
                         raise RuntimeError('GoPro identifier was not resolved despite --no-gopro not being set.')
-                    gopro = await stack.enter_async_context(
-                        GoProWrapper(gopro_identifier, mac_address=gopro_mac)
-                    )
+                    gopro = await stack.enter_async_context(GoProWrapper(gopro_identifier, mac_address=gopro_mac))
                     log.info('GoPro connected')
                 else:
                     gopro = None
@@ -454,10 +448,7 @@ def record_episode(
             log.error(f'Unexpected error during recording: {e}', exc_info=True)
         finally:
             session.finalize()
-            log.info(
-                f'Session finalized (t={session.metadata.duration_s}). '
-                f'Data saved to {session.path}'
-            )
+            log.info(f'Session finalized (t={session.metadata.duration_s}). Data saved to {session.path}')
 
     asyncio.run(_run())
 
@@ -508,21 +499,19 @@ def record_gopro(
 def start_scene(
     sample_rate: int = typer.Option(16000, help='Audio sample rate (Hz).'),
     chunk_ms: int = typer.Option(20, help='Audio chunk size (ms).'),
-    robot: str = typer.Option(
-        'polyumi_gripper', help='Name of the robot being recorded.'
-    ),
+    robot: str = typer.Option('polyumi_gripper', help='Name of the robot being recorded.'),
     task: str | None = typer.Option(None, help='Name of the task being recorded.'),
     gopro_identifier: str | None = typer.Option(
         None,
         help='Last four digits of the GoPro serial number. Defaults to saved scan-gopro config.',
     ),
-    no_gopro: bool = typer.Option(
-        False, '--no-gopro', help='Skip GoPro connection (for debugging).'
-    ),
+    no_gopro: bool = typer.Option(False, '--no-gopro', help='Skip GoPro connection (for debugging).'),
     optitrack: bool = typer.Option(
-        False, '--optitrack', help="If true, expect the e-sync signal & gnd to be plugged into pin 37 & 39, and await"
-        " the line to go high before enabling recording sessions (see optitrack.py for details)."
-    )
+        False,
+        '--optitrack',
+        help='If true, expect the e-sync signal & gnd to be plugged into pin 37 & 39, and await'
+        ' the line to go high before enabling recording sessions (see optitrack.py for details).',
+    ),
 ):
     """
     Record sessions triggered by button presses on GPIO23.
@@ -567,9 +556,7 @@ def start_scene(
                 if not no_gopro:
                     if gopro_identifier is None:
                         raise RuntimeError('GoPro identifier was not resolved despite --no-gopro not being set.')
-                    gopro = await stack.enter_async_context(
-                        GoProWrapper(gopro_identifier, mac_address=gopro_mac)
-                    )
+                    gopro = await stack.enter_async_context(GoProWrapper(gopro_identifier, mac_address=gopro_mac))
                     log.info('GoPro connected')
                 else:
                     gopro = None
@@ -587,9 +574,7 @@ def start_scene(
                     session = scene.create_session()
                     session.metadata.robot = robot
                     session.metadata.task = task
-                    session.metadata.session_type = (
-                        SessionType.MAPPING if session_count == 1 else SessionType.EPISODE
-                    )
+                    session.metadata.session_type = SessionType.MAPPING if session_count == 1 else SessionType.EPISODE
                     session.init_audio(
                         sample_rate=sample_rate,
                         channels=CHANNELS,

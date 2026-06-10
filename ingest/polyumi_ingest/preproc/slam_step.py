@@ -35,9 +35,7 @@ _PLACEHOLDER_MARKER = 'CALIBRATE_ME'
 _REPO_ROOT = pathlib.Path(__file__).parent.parent.parent.parent
 _DEFAULT_ORB_SLAM3_DIR = _REPO_ROOT / 'external' / 'ORB_SLAM3_PolyUMI'
 
-_DEFAULT_SETTINGS_YAML = (
-    _DEFAULT_ORB_SLAM3_DIR / 'Examples' / 'Monocular-Inertial' / 'gopro_hero12_slam.yaml'
-)
+_DEFAULT_SETTINGS_YAML = _DEFAULT_ORB_SLAM3_DIR / 'Examples' / 'Monocular-Inertial' / 'gopro_hero12_slam.yaml'
 
 # Maximum acceptable distance (as a fraction of a frame period) between a
 # trajectory entry's timestamp and the nearest frame timestamp when
@@ -107,9 +105,7 @@ def _export_telemetry_json(
     assumes a 1:1 mapping between the two streams.
     """
     assert np.all(np.diff(accl_ts) > 0), 'accl_ts must be strictly monotonically increasing'
-    accl_interp = np.column_stack([
-        np.interp(gyro_ts, accl_ts, accl[:, j]) for j in range(3)
-    ])
+    accl_interp = np.column_stack([np.interp(gyro_ts, accl_ts, accl[:, j]) for j in range(3)])
 
     cts_ms = (gyro_ts - t_ref) * 1000.0
 
@@ -411,10 +407,7 @@ class OrbSlam3Step(PreprocessingStep):
     def _validate_settings_yaml(self) -> None:
         if not self.settings_yaml.exists():
             raise FileNotFoundError(f'ORB-SLAM3 settings YAML not found: {self.settings_yaml}')
-        value_lines = [
-            ln for ln in self.settings_yaml.read_text().splitlines()
-            if not ln.lstrip().startswith('#')
-        ]
+        value_lines = [ln for ln in self.settings_yaml.read_text().splitlines() if not ln.lstrip().startswith('#')]
         if any(_PLACEHOLDER_MARKER in ln for ln in value_lines):
             raise RuntimeError(
                 f'Settings YAML at {self.settings_yaml} still contains uncalibrated placeholder '
@@ -441,8 +434,7 @@ class OrbSlam3Step(PreprocessingStep):
             )
         if result.returncode != 0:
             raise RuntimeError(
-                f'{label} exited with code {result.returncode}. '
-                f'stderr: {stderr_log}  stdout: {stdout_log}'
+                f'{label} exited with code {result.returncode}. stderr: {stderr_log}  stdout: {stdout_log}'
             )
 
     def _build_map(
@@ -457,7 +449,9 @@ class OrbSlam3Step(PreprocessingStep):
         try:
             video_path, json_path, frame_ts = _export_episode(ep_grp, tmp_dir, gopro_mp4)
             settings_path = _make_temp_settings_yaml(
-                self.settings_yaml, tmp_dir, save_atlas=atlas_path,
+                self.settings_yaml,
+                tmp_dir,
+                save_atlas=atlas_path,
             )
             traj_out = log_dir / 'mapping_trajectory.txt'
             cmd = [
@@ -476,9 +470,7 @@ class OrbSlam3Step(PreprocessingStep):
                 cwd=log_dir,
             )
             if not atlas_path.exists():
-                raise RuntimeError(
-                    f'ORB-SLAM3 map builder completed but atlas not found at {atlas_path}'
-                )
+                raise RuntimeError(f'ORB-SLAM3 map builder completed but atlas not found at {atlas_path}')
 
             # Reconcile the mapping trajectory back onto the mapping episode
             # and persist poses next to the localized episodes' data.  Same
@@ -507,7 +499,9 @@ class OrbSlam3Step(PreprocessingStep):
         try:
             video_path, json_path, frame_ts = _export_episode(ep_grp, tmp_dir, gopro_mp4)
             settings_path = _make_temp_settings_yaml(
-                self.settings_yaml, tmp_dir, load_atlas=atlas_path,
+                self.settings_yaml,
+                tmp_dir,
+                load_atlas=atlas_path,
             )
             traj_out = tmp_dir / 'trajectory.txt'
             cmd = [
@@ -526,9 +520,7 @@ class OrbSlam3Step(PreprocessingStep):
                 cwd=log_dir,
             )
             if not traj_out.exists():
-                raise RuntimeError(
-                    f'ORB-SLAM3 localizer completed but trajectory file not found: {traj_out}'
-                )
+                raise RuntimeError(f'ORB-SLAM3 localizer completed but trajectory file not found: {traj_out}')
 
             poses = _parse_and_reconcile_trajectory(traj_out, frame_ts)
             _write_slam_results(ep_grp, poses, self.settings_yaml, atlas_path)

@@ -45,8 +45,7 @@ setup(
     zip_safe=True,
     maintainer='conorbot',
     maintainer_email='cwoodhayes@gmail.com',
-    description='Core ROS2 python nodes for the PolyUMI '
-    'multimodal learning platform',
+    description='Core ROS2 python nodes for the PolyUMI multimodal learning platform',
     license='MIT',
     extras_require={
         'test': [

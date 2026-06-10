@@ -47,7 +47,8 @@ def _get_fast_ble_controller() -> type:
                 import bleak
 
                 device = await bleak.BleakScanner.find_device_by_address(
-                    type(self)._target_mac, timeout=timeout  # type: ignore
+                    type(self)._target_mac,
+                    timeout=timeout,  # type: ignore
                 )
                 if device is not None:
                     return device

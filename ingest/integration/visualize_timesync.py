@@ -75,13 +75,22 @@ def _plot_episode(
         gopro_t_end = finger_align_t + window_s
 
     piezo_ts, piezo = _slice_window(
-        ep['timestamps/finger_piezo'], ep['finger/finger_piezo'], finger_t_start, finger_t_end  # type: ignore[arg-type]
+        ep['timestamps/finger_piezo'],
+        ep['finger/finger_piezo'],
+        finger_t_start,
+        finger_t_end,  # type: ignore[arg-type]
     )
     air_ts, air = _slice_window(
-        ep['timestamps/finger_air'], ep['finger/finger_air'], finger_t_start, finger_t_end  # type: ignore[arg-type]
+        ep['timestamps/finger_air'],
+        ep['finger/finger_air'],
+        finger_t_start,
+        finger_t_end,  # type: ignore[arg-type]
     )
     gopro_ts, gopro_raw = _slice_window(
-        ep['timestamps/gopro_audio'], ep['gopro/audio'], gopro_t_start, gopro_t_end  # type: ignore[arg-type]
+        ep['timestamps/gopro_audio'],
+        ep['gopro/audio'],
+        gopro_t_start,
+        gopro_t_end,  # type: ignore[arg-type]
     )
     gopro = _mono(gopro_raw)
 
@@ -120,8 +129,13 @@ def _plot_episode(
         if not unaligned:
             ax.axvline(0, color='red', linewidth=1.2, label=bar_label if i == 0 else None)
         if chirp_x is not None:
-            ax.axvline(chirp_x, color='green', linewidth=3.0, linestyle='--',
-                       label=f'chirp onset ({chirp_x:.3f}s)' if i == 1 else None)
+            ax.axvline(
+                chirp_x,
+                color='green',
+                linewidth=3.0,
+                linestyle='--',
+                label=f'chirp onset ({chirp_x:.3f}s)' if i == 1 else None,
+            )
         ax.yaxis.set_label_position('right')
         ax.tick_params(axis='x', labelsize=7, labelbottom=True)
         ax.tick_params(axis='y', labelsize=6)
@@ -168,7 +182,7 @@ def main() -> None:
     # step = ChirpTimeSyncStep()
     # print("Running time sync step...")
     # scene_zarr = step.run(args.scene, copy=True, force=True)
-    print("Time sync step completed. Visualizing results...")
+    print('Time sync step completed. Visualizing results...')
     scene_zarr = SceneFiles.resolve_zarr_path(args.scene)
     root = zarr.open_group(str(scene_zarr), mode='r')
     episodes = sorted(k for k in root.keys() if k.startswith('episode_'))

@@ -67,15 +67,10 @@ class AudioStreamer:
         for i, dev in enumerate(devices):
             if name.lower() in dev['name'].lower() and dev['max_input_channels'] > 0:
                 return i
-        raise RuntimeError(
-            f"Could not find input device matching '{name}'. "
-            f'Available devices:\n{sd.query_devices()}'
-        )
+        raise RuntimeError(f"Could not find input device matching '{name}'. Available devices:\n{sd.query_devices()}")
 
     @staticmethod
-    def build_chunk(
-        pcm_bytes: bytes, sample_rate: int, channels: int, timestamp_ns: int
-    ) -> bytes:
+    def build_chunk(pcm_bytes: bytes, sample_rate: int, channels: int, timestamp_ns: int) -> bytes:
         """Serialize an AudioChunk protobuf message."""
         chunk = AudioChunk()
         chunk.timestamp_ns = timestamp_ns
@@ -98,10 +93,7 @@ class AudioStreamer:
                 f'{blocksize} frames/chunk.'
             )
         elif not streaming_enabled:
-            log.warning(
-                'Audio streaming and recording are both disabled. No audio will'
-                ' be captured.'
-            )
+            log.warning('Audio streaming and recording are both disabled. No audio will be captured.')
 
         # ZMQ setup
         sock = None
@@ -162,21 +154,14 @@ class AudioStreamer:
                         total_callback_drops += 1
 
             # write to the file if enabled
-            if (
-                wav_writer is not None
-                and self.session is not None
-                and self.session.audio is not None
-            ):
+            if wav_writer is not None and self.session is not None and self.session.audio is not None:
                 wav_writer.writeframes(pcm_bytes)
                 n_audio_chunks += 1
                 if audio_start_time_ns is None:
                     audio_start_time_ns = ts
 
         device_index = self.find_device_index(self.DEVICE_NAME)
-        log.info(
-            f'Using device index {device_index}: '
-            f'{sd.query_devices(device_index)["name"]}'
-        )
+        log.info(f'Using device index {device_index}: {sd.query_devices(device_index)["name"]}')
         log.info(
             f'Sample rate: {self.sample_rate} Hz '
             f'| Channels: {self.channels} | '
@@ -198,10 +183,7 @@ class AudioStreamer:
                 now = time.monotonic()
                 if now - last_stats >= 1.0:
                     log.info(
-                        'Audio tx stats: '
-                        f'sent={sent_chunks}/s '
-                        f'queue={audio_queue.qsize()} '
-                        f'cb_drops={callback_drops}'
+                        f'Audio tx stats: sent={sent_chunks}/s queue={audio_queue.qsize()} cb_drops={callback_drops}'
                     )
                     sent_chunks = 0
                     callback_drops = 0
@@ -227,9 +209,7 @@ class AudioStreamer:
             ):
                 if self.play_sync_chirp:
                     log.info('Playing sync chirp...')
-                    sync_chirp_play_time_ns = sync_chirp.play(
-                        self.sample_rate, device=self.DEVICE_NAME
-                    )
+                    sync_chirp_play_time_ns = sync_chirp.play(self.sample_rate, device=self.DEVICE_NAME)
                 log.info('Streaming... Ctrl+C to stop.')
                 try:
                     while not stop_event.is_set():

@@ -18,8 +18,8 @@ log = logging.getLogger('pi_metadata')
 class SessionType(str, enum.Enum):
     """Whether a session is used to build a SLAM map or to record a task episode."""
 
-    MAPPING = "MAPPING"
-    EPISODE = "EPISODE"
+    MAPPING = 'MAPPING'
+    EPISODE = 'EPISODE'
 
 
 def _get_git_hash() -> str:
@@ -31,9 +31,7 @@ def _get_git_hash() -> str:
     except ImportError as err:
         try:
             # fall back to this if using the git repo without a deployment (i.e. first boot).
-            return subprocess.check_output(
-                ['git', 'rev-parse', 'HEAD'], text=True
-            ).strip()
+            return subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
         except Exception:
             raise err
 
@@ -90,11 +88,7 @@ class SessionMetadata(base.SessionDataABC):
             'duration_s': self.duration_s,
             'pi_hostname': self.pi_hostname,
             'camera_fps': self.camera_fps,
-            'camera_resolution': (
-                list(self.camera_resolution)
-                if self.camera_resolution is not None
-                else None
-            ),
+            'camera_resolution': (list(self.camera_resolution) if self.camera_resolution is not None else None),
             'audio_start_time_ns': self.audio_start_time_ns,
             'audio_sample_rate': self.audio_sample_rate,
             'audio_channels': self.audio_channels,
@@ -104,9 +98,7 @@ class SessionMetadata(base.SessionDataABC):
             'video_dropped_frames': self.video_dropped_frames,
             'audio_dropped_chunks': self.audio_dropped_chunks,
             'led_brightness': self.led_brightness,
-            'gopro_sync_time': (
-                self.gopro_sync_time.isoformat() if self.gopro_sync_time is not None else None
-            ),
+            'gopro_sync_time': (self.gopro_sync_time.isoformat() if self.gopro_sync_time is not None else None),
             'first_frame_metadata': self.first_frame_metadata,
             'sync_chirp_play_time_ns': self.sync_chirp_play_time_ns,
             'optitrack_start_time': (

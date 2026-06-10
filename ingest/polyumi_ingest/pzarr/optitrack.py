@@ -68,17 +68,15 @@ def parse_optitrack_csv(csv_path: pathlib.Path) -> tuple[np.ndarray, np.ndarray]
                 rb_col_start = col_idx
                 break
         else:
-            raise ValueError(
-                f'No rigid body named "PolyUMI*" found in OptiTrack CSV: {csv_path}'
-            )
+            raise ValueError(f'No rigid body named "PolyUMI*" found in OptiTrack CSV: {csv_path}')
 
     data = np.loadtxt(csv_path, delimiter=',', skiprows=data_start_row, dtype=np.float64)
     if data.ndim == 1:
         data = data[np.newaxis, :]
 
     times_s = data[:, 1]
-    rot_quat = data[:, rb_col_start: rb_col_start + 4]
-    pos_xyz = data[:, rb_col_start + 4: rb_col_start + 7]
+    rot_quat = data[:, rb_col_start : rb_col_start + 4]
+    pos_xyz = data[:, rb_col_start + 4 : rb_col_start + 7]
 
     poses = np.concatenate([pos_xyz, rot_quat], axis=1)
     return times_s, poses

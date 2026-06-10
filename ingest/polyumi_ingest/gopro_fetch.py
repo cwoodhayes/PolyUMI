@@ -161,7 +161,7 @@ def find_gopro_video(
         if mount_point is None:
             raise FileNotFoundError(
                 'No GoPro SD card found under /media, /run/media, or /mnt.\n'
-                'Are you sure you\'ve both inserted AND mounted the SD card? '
+                "Are you sure you've both inserted AND mounted the SD card? "
                 'You can also pass --mount-point explicitly if it is mounted elsewhere.'
             )
         log.info(f'Auto-detected GoPro SD card at {mount_point}')

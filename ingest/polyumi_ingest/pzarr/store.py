@@ -316,7 +316,6 @@ def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) 
     ann_grp.attrs.update(ann_attrs)
 
 
-
 def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.Path:
     """
     Build scene.zarr inside scene_path from processed session directories.
@@ -343,9 +342,7 @@ def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.P
             'created_at': dt.datetime.now(dt.timezone.utc).isoformat(),
             'alignment_refs': [],
             'pzarr_version': PZARR_VERSION,
-            'optitrack_start_time': (
-                optitrack_start_time.isoformat() if optitrack_start_time is not None else None
-            ),
+            'optitrack_start_time': (optitrack_start_time.isoformat() if optitrack_start_time is not None else None),
         }
     )
 

@@ -215,5 +215,5 @@ class SlamToWorldAlignStep(PreprocessingStep):
             'translation': t.tolist(),
             'rotation': rotation_xyzw.tolist(),
             'rms_pos': rms_pos,
-            'rms_rot_deg': rms_rot
+            'rms_rot_deg': rms_rot,
         }

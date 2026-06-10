@@ -112,9 +112,7 @@ class PolicyClientNode(Node):
         # --- 3. Append to history buffer ---
         self._obs_buffer.append((image, agent_pos))
         if len(self._obs_buffer) < self._n_obs_steps:
-            self._warn_throttled(
-                f'Observation buffer filling ({len(self._obs_buffer)}/{self._n_obs_steps})'
-            )
+            self._warn_throttled(f'Observation buffer filling ({len(self._obs_buffer)}/{self._n_obs_steps})')
             return
 
         # --- 4. Serialize and POST ---
@@ -133,9 +131,7 @@ class PolicyClientNode(Node):
     def _lookup_agent_pos(self) -> np.ndarray | None:
         """Look up panda_EE in panda_link0 and return [x,y,z,qx,qy,qz,qw, gripper=0]."""
         try:
-            tf = self._tf_buffer.lookup_transform(
-                'panda_link0', 'panda_EE', self.get_clock().now()
-            )
+            tf = self._tf_buffer.lookup_transform('panda_link0', 'panda_EE', self.get_clock().now())
         except (LookupException, ConnectivityException, ExtrapolationException) as e:
             self._warn_throttled(f'TF lookup failed: {e}')
             return None
@@ -159,10 +155,7 @@ class PolicyClientNode(Node):
             with urllib.request.urlopen(req, timeout=0.5) as resp:
                 result = json.loads(resp.read())
             action = result['actions'][0]
-            self.get_logger().info(
-                f'action x={action[0]:.4f} y={action[1]:.4f} z={action[2]:.4f} '
-                f'grip={action[7]:.3f}'
-            )
+            self.get_logger().info(f'action x={action[0]:.4f} y={action[1]:.4f} z={action[2]:.4f} grip={action[7]:.3f}')
         except urllib.error.URLError as e:
             self.get_logger().error(f'Inference server unreachable: {e}')
         except Exception as e:

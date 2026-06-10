@@ -35,9 +35,7 @@ class SessionFiles(SessionDataABC):
 
         metadata_path = path / 'metadata.json'
         if not metadata_path.is_file():
-            raise ValueError(
-                f'Metadata file not found at expected path: {metadata_path}'
-            )
+            raise ValueError(f'Metadata file not found at expected path: {metadata_path}')
 
         metadata = SessionMetadata.from_file(metadata_path)
 
@@ -65,9 +63,7 @@ class SessionFiles(SessionDataABC):
         metadata = SessionMetadata(path=pathlib.Path('/tmp/metadata.json'))
         # using local tz for folder names since this is a human readable
         # helpful name.
-        folder_name = metadata.created_at.astimezone().strftime(
-            r'session_%Y-%m-%d_%H-%M-%S_' + metadata.session_id[:4]
-        )
+        folder_name = metadata.created_at.astimezone().strftime(r'session_%Y-%m-%d_%H-%M-%S_' + metadata.session_id[:4])
         path = base_dir / folder_name
         if not path.is_dir():
             path.mkdir(parents=True, exist_ok=True)
@@ -135,7 +131,5 @@ class SessionFiles(SessionDataABC):
     def finalize(self):
         """Finalize the session by writing metadata to file."""
         if self.metadata.duration_s is None:
-            self.metadata.duration_s = (
-                datetime.now(timezone.utc) - self.metadata.created_at
-            ).total_seconds()
+            self.metadata.duration_s = (datetime.now(timezone.utc) - self.metadata.created_at).total_seconds()
         self.metadata.to_file()
