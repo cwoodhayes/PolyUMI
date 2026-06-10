@@ -39,6 +39,8 @@ _BLOSC = Blosc(cname='zstd', clevel=5, shuffle=Blosc.SHUFFLE)
 
 def _nearest_idx(sorted_ts: np.ndarray, query: np.ndarray) -> np.ndarray:
     """Index of the nearest value in ascending ``sorted_ts`` for each ``query`` time."""
+    if len(sorted_ts) < 2:
+        raise RuntimeError(f'Need at least 2 timestamps to resample, got {len(sorted_ts)}')
     idx = np.searchsorted(sorted_ts, query)
     idx = np.clip(idx, 1, len(sorted_ts) - 1)
     closer_left = (query - sorted_ts[idx - 1]) <= (sorted_ts[idx] - query)
@@ -59,13 +61,19 @@ def _decode_resized_frames(frames_arr: zarr.Array, gidx: np.ndarray) -> np.ndarr
     return np.stack(frames, axis=0)
 
 
+_TIME_CHUNK = 1024
+
+
 def _append(data_grp: zarr.Group, arrays: dict[str, np.ndarray]) -> None:
     """Append each array along axis 0, creating resizable v2 arrays on first use."""
     for key, value in arrays.items():
         value = np.asarray(value)
         t = value.shape[0]
         if key not in data_grp:
-            chunks = (1,) + value.shape[1:] if value.ndim >= 3 else value.shape
+            if value.ndim >= 3:
+                chunks = (1,) + value.shape[1:]
+            else:
+                chunks = (min(t, _TIME_CHUNK),) + value.shape[1:]
             data_grp.zeros(
                 name=key,
                 shape=value.shape,

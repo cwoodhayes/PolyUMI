@@ -106,7 +106,7 @@ def _plot_episode(
     # In aligned mode GoPro also uses finger_align_t (= gopro_t0 - offset) so the
     # two chirps overlap. In unaligned mode GoPro uses gopro_t0, preserving the
     # raw clock offset between the devices.
-    gopro_ref = finger_align_t if unaligned else gopro_t0
+    gopro_ref = gopro_t0 if unaligned else finger_align_t
 
     finger_chirp_x: float | None = None
     gopro_chirp_x: float | None = None

@@ -86,6 +86,8 @@ class PolicyClientNode(Node):
         """Convert incoming ROS image to float32 numpy array and cache it."""
         if msg.encoding not in ('rgb8', 'bgr8'):
             raise ValueError(f'Unsupported image encoding {msg.encoding!r}; expected rgb8 or bgr8')
+        if msg.step != msg.width * 3:
+            raise ValueError(f'Unsupported row stride: step={msg.step} != width*3={msg.width * 3}')
         img = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
         if msg.encoding == 'bgr8':
             img = img[:, :, ::-1].copy()  # BGR → RGB
@@ -147,7 +149,9 @@ class PolicyClientNode(Node):
     def _lookup_agent_pos(self) -> np.ndarray | None:
         """Look up panda_EE in panda_link0 and return [x,y,z,qx,qy,qz,qw, gripper=0]."""
         try:
-            tf = self._tf_buffer.lookup_transform('panda_link0', 'panda_EE', self.get_clock().now())
+            # rclpy.time.Time() (zero) requests the latest available transform, avoiding
+            # ExtrapolationException when the buffer hasn't caught up to get_clock().now().
+            tf = self._tf_buffer.lookup_transform('panda_link0', 'panda_EE', rclpy.time.Time())
         except (LookupException, ConnectivityException, ExtrapolationException) as e:
             self._warn_throttled(f'TF lookup failed: {e}')
             return None
