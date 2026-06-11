@@ -190,12 +190,12 @@ demo does.)
 source setup_franka_env.sh          # CycloneDDS + domain 0 + bring up the fr3-link NM profile
 cd ros2_ws
 source install/setup.bash           # (build first if needed: colcon build)
-ros2 launch polyumi_ros2 inference_demo.launch.xml
+ros2 launch polyumi_ros2 inference_demo.launch.xml pi_host:=<raspberry pi IP address>
 # default inference_server_url is http://localhost:8000/predict_cartesian/
 ```
 
 Confirm the loop is live: `policy_client_node` logs `action x=… y=… z=… grip=…`
-at ~10 Hz, and Foxglove (`ws://localhost:8765`) shows the GoPro, the Pi
+at ~10 Hz, and Foxglove (`ws://localhost:8765`, using the config in `ros2_ws/src/polyumi_ros2/foxglove/layouts/stream_demo.json`) shows the GoPro, the Pi
 camera/audio, and FR3 TF. If the client warns about TF lookups, re-check the
 [Quick checks](#quick-checks) above — the NUC must be reachable and `fr3-bringup`
 running.
