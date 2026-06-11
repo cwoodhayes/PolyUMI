@@ -7,13 +7,20 @@
   setup_franka_env.sh first. See docs/franka-inference-bringup.md.
 
     ros2 launch polyumi_ros2 inference_demo.launch.xml
+    ros2 launch polyumi_ros2 inference_demo.launch.xml pi_host:=10.106.3.110
     ros2 launch polyumi_ros2 inference_demo.launch.xml \
         inference_server_url:=http://192.168.x.x:8000/predict_cartesian/   # Phase 3: remote GPU box
 -->
 <launch>
   <arg name="inference_server_url" default="http://localhost:8000/predict_cartesian/"/>
+  <!-- Forwarded to stream_demo.launch.xml; defaults mirror that file. -->
+  <arg name="pi_host" default="10.106.10.62"/>
+  <arg name="video_device" default="/dev/video2"/>
 
-  <include file="$(find-pkg-share polyumi_ros2)/launch/stream_demo.launch.xml"/>
+  <include file="$(find-pkg-share polyumi_ros2)/launch/stream_demo.launch.xml">
+    <arg name="pi_host" value="$(var pi_host)"/>
+    <arg name="video_device" value="$(var video_device)"/>
+  </include>
 
   <node pkg="polyumi_ros2" exec="policy_client_node" name="policy_client_node" output="screen">
     <param name="inference_server_url" value="$(var inference_server_url)"/>
