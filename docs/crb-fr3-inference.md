@@ -110,7 +110,22 @@ ros2 node list                                   # NUC nodes appear
 ros2 run tf2_ros tf2_echo fr3_link0 fr3_hand_tcp # live transform
 ```
 
+**Harmless warning:** the laptop's `ros2` commands print, once per discovered
+remote topic:
+
+```
+[WARN] [rmw_cyclonedds_cpp]: Failed to parse type hash for topic '...' ... from USER_DATA '(null)'.
+```
+
+This is a cosmetic CycloneDDS **version-mismatch** artifact: Kilted's newer
+CycloneDDS expects a type hash in DDS discovery `USER_DATA`, and the NUC's older
+Humble CycloneDDS doesn't emit one. Type-hash parsing only feeds an optional
+type-compatibility check — pub/sub, topics, and TF all work fine across the gap
+(the topics list right after the warnings). Nothing to fix on our side; ignore it.
+
 ## Running Demos & Inference
+
+TODO describe setup & connection of devices.
 
 This brings up the **dummy** inference loop (no real checkpoint): the FR3 stack on
 the NUC, the PolyUMI nodes + `policy_client_node` on the laptop, and the dummy
@@ -132,6 +147,11 @@ fr3-arm-controller   # in a second terminal: spawn the joint-trajectory controll
 cd inference_server
 uv run dummy-server   # FastAPI on 0.0.0.0:8000; oscillates X around HOME_POSE
 ```
+
+`inference_server` is its own isolated uv project (not part of the repo
+workspace), so `uv run` here creates/uses a standalone `inference_server/.venv`
+with only fastapi/uvicorn/numpy — no need to source anything. The command is
+`dummy-server` (hyphen), the `[project.scripts]` entry point.
 
 **3. Laptop — PolyUMI ROS2 nodes + policy client** (another terminal):
 

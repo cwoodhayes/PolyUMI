@@ -16,8 +16,11 @@ ignore = [
     "D105",  # missing docstring in magic method
 ]
 
+# inference_server is intentionally NOT a workspace member: it is meant to run
+# isolated on a standalone GPU/inference machine, so it keeps its own
+# inference_server/.venv with a minimal dep set (fastapi/uvicorn/numpy).
 [tool.uv.workspace]
-members = ["ingest", "inference_server"]
+members = ["ingest"]
 
 [tool.uv.sources]
 polyumi_pi = { path = "pi", editable = true }

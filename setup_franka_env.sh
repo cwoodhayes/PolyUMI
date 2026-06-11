@@ -8,6 +8,8 @@
 # old-arm workflow is untouched when not sourced.
 # See docs/crb-fr3-inference.md for the full topology and rationale.
 
+echo "NOTE - SOURCE THIS (do NOT execute; it will not work)"
+
 # --- Resolve repo root (works for bash and zsh) ---
 if [ -n "${BASH_SOURCE:-}" ]; then
   _polyumi_self="${BASH_SOURCE[0]}"

@@ -88,7 +88,7 @@ pingest process-all --force
 ```
 
 ## Package Management
-This is a `uv` workspace. `ingest/` is the only workspace member. `pi/` is referenced as an editable path source (`tool.uv.sources`) so `polyumi_pi` is importable in the workspace venv, but it is not a member — it has its own `pi/.venv` managed separately for the Pi. Run `uv sync` at the root for PC-side dev dependencies. The `pi/` package requires `--system-site-packages` on the Pi for `picamera2`/`sounddevice`.
+This is a `uv` workspace. `ingest/` is the only workspace member. `pi/` is referenced as an editable path source (`tool.uv.sources`) so `polyumi_pi` is importable in the workspace venv, but it is not a member — it has its own `pi/.venv` managed separately for the Pi. `inference_server/` is also deliberately **not** a member: it is meant to run isolated on a standalone GPU/inference machine, so it keeps its own minimal `inference_server/.venv` (just fastapi/uvicorn/numpy) — run it with `cd inference_server && uv run dummy-server`. Run `uv sync` at the root for PC-side dev dependencies. The `pi/` package requires `--system-site-packages` on the Pi for `picamera2`/`sounddevice`.
 
 ## Running Commands in the Right Environment
 
