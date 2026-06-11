@@ -125,6 +125,13 @@ unset VIRTUAL_ENV; bash -c 'cd ros2_ws && source /opt/ros/kilted/setup.bash && c
 # ros2 commands likewise: also source install/setup.bash inside the same bash -c
 ```
 
+If a `rosidl` build (e.g. `franka_msgs`) fails with `ModuleNotFoundError: No
+module named 'em'`, that's the same `VIRTUAL_ENV=pi/.venv` problem: the build is
+using the Pi venv's `python3`, which lacks `empy`. The system `/usr/bin/python3`
+has it (`python3-empy`). Unset `VIRTUAL_ENV` *inside* the `bash -c` (not just
+before it) so it doesn't get re-inherited:
+`bash -c 'unset VIRTUAL_ENV; cd ros2_ws && source /opt/ros/kilted/setup.bash && colcon build ...'`.
+
 ## Testing SLAM
 
 The ORB-SLAM3 step (`OrbSlam3Step`, preprocessing step 2) uses the

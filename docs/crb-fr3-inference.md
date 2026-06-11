@@ -42,7 +42,22 @@ the DDS wire level.
 | RMW | `rmw_cyclonedds_cpp` — `sudo apt install ros-kilted-rmw-cyclonedds-cpp` |
 | `ROS_DOMAIN_ID` | `0` |
 | `CYCLONEDDS_URI` | `ros2_ws/config/cyclonedds_laptop.xml` |
+| `franka_msgs` | built from the `external/franka_ros2` submodule (see below) |
 | Env | `source setup_franka_env.sh` (repo root) sets all of the above |
+
+**`franka_msgs` (FR3 custom message/service types).** The NUC publishes
+`franka_msgs/msg/FrankaRobotState` and `franka_msgs/srv/*`, which we need to build from source in
+the `frankarobotics/franka_ros2` submodule (pinned to **`v0.1.15`**, matching the
+NUC). It's `rosidl`-only — no libfranka — so it builds cleanly on Kilted:
+
+```bash
+git submodule update --init external/franka_ros2     # after a fresh clone
+# ros2_ws/src/franka_msgs is a symlink into the submodule; build just that package:
+unset VIRTUAL_ENV; bash -c 'cd ros2_ws && source /opt/ros/kilted/setup.bash && colcon build --packages-select franka_msgs'
+```
+
+(`VIRTUAL_ENV` must be unset so the build uses system `python3`, which has `empy`;
+`pi/.venv` does not — see CLAUDE.md.)
 
 `setup_franka_env.sh` also brings up the static IP via a **toggleable
 NetworkManager profile** (`fr3-link`, created on first run with `autoconnect no`).
@@ -110,18 +125,23 @@ ros2 node list                                   # NUC nodes appear
 ros2 run tf2_ros tf2_echo fr3_link0 fr3_hand_tcp # live transform
 ```
 
-**Harmless warning:** the laptop's `ros2` commands print, once per discovered
-remote topic:
+**Known harmless rmw version-mismatch noise.** The two sides run different
+`rmw_cyclonedds_cpp` majors — **NUC 1.3.4** (Humble) vs **laptop 4.0.2** (Kilted) —
+though the CycloneDDS core is the same (0.10.5). rmw 4.x encodes a **type hash**
+into DDS discovery `USER_DATA`; rmw 1.3.x predates that and can't parse it. This
+surfaces as two cosmetic-but-loud messages:
 
-```
-[WARN] [rmw_cyclonedds_cpp]: Failed to parse type hash for topic '...' ... from USER_DATA '(null)'.
-```
+- On the **laptop**, once per discovered remote topic:
+  `[WARN] [rmw_cyclonedds_cpp]: Failed to parse type hash for topic '...' from USER_DATA '(null)'.`
+- On the **NUC**'s `fr3-bringup` terminal, when a laptop `ros2` node appears:
+  repeated `'invalid data size'` / `'string data is not null-terminated', at .../serdata.cpp`.
 
-This is a cosmetic CycloneDDS **version-mismatch** artifact: Kilted's newer
-CycloneDDS expects a type hash in DDS discovery `USER_DATA`, and the NUC's older
-Humble CycloneDDS doesn't emit one. Type-hash parsing only feeds an optional
-type-compatibility check — pub/sub, topics, and TF all work fine across the gap
-(the topics list right after the warnings). Nothing to fix on our side; ignore it.
+Both are **non-fatal** — verified: `ros2 topic hz /joint_states` delivers a real
+rate on the laptop (default RELIABLE QoS), and the inference loop reads FR3 TF
+fine. rmw_cyclonedds 4.0.2 has no env switch to suppress the type-hash emission
+(it only reads `CYCLONEDDS_URI`), so we accept the noise rather than work around
+it. If `ros2 topic hz` ever hangs, it's almost certainly **not** this — check
+whether the publisher is actually running (e.g. the Pi stream for `/pi/*`).
 
 ## Running Demos & Inference
 
@@ -132,7 +152,7 @@ the NUC, the PolyUMI nodes + `policy_client_node` on the laptop, and the dummy
 server (currently also on the laptop). At the end the client logs 8-vector actions
 at 10 Hz, pulling the live EEF pose from the NUC's TF over DDS.
 
-Start the three pieces in separate terminals, in this order.
+Start the pieces in separate terminals, in this order.
 
 **1. NUC — bring up the FR3** (enable FCI on the Desk UI first):
 
@@ -153,7 +173,18 @@ workspace), so `uv run` here creates/uses a standalone `inference_server/.venv`
 with only fastapi/uvicorn/numpy — no need to source anything. The command is
 `dummy-server` (hyphen), the `[project.scripts]` entry point.
 
-**3. Laptop — PolyUMI ROS2 nodes + policy client** (another terminal):
+**3. Pi — start the camera/audio stream** (ssh into the Pi):
+
+```bash
+polyumi-pi stream   # ZMQ PUSH: video on :5555, audio on :5556
+```
+
+`pi_receiver_node` (started by the launch in step 4) pulls these over ZMQ and
+republishes them as `/pi/*`. Without this running, Foxglove shows no Pi feed, and `pi_receiver_node`
+logs a warning. (The FR3 inference loop itself doesn't depend on the Pi, but the full
+demo does.)
+
+**4. Laptop — PolyUMI ROS2 nodes + policy client** (another terminal):
 
 ```bash
 source setup_franka_env.sh          # CycloneDDS + domain 0 + bring up the fr3-link NM profile
@@ -164,6 +195,7 @@ ros2 launch polyumi_ros2 inference_demo.launch.xml
 ```
 
 Confirm the loop is live: `policy_client_node` logs `action x=… y=… z=… grip=…`
-at ~10 Hz, and Foxglove (`ws://localhost:8765`) shows the GoPro + FR3 TF. If the
-client warns about TF lookups, re-check the [Quick checks](#quick-checks) above —
-the NUC must be reachable and `fr3-bringup` running.
+at ~10 Hz, and Foxglove (`ws://localhost:8765`) shows the GoPro, the Pi
+camera/audio, and FR3 TF. If the client warns about TF lookups, re-check the
+[Quick checks](#quick-checks) above — the NUC must be reachable and `fr3-bringup`
+running.

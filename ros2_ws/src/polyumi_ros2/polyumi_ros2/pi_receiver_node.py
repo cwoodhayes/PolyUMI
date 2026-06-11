@@ -18,6 +18,7 @@ import logging
 import threading
 
 import rclpy
+import rclpy.time
 import zmq
 from builtin_interfaces.msg import Time
 from foxglove_msgs.msg import RawAudio
@@ -28,6 +29,14 @@ from sensor_msgs.msg import CompressedImage
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger('pi_receiver_node')
+
+# ZMQ recv timeout (ms). On timeout we log a throttled "waiting for the Pi"
+# warning instead of blocking forever — the most common reason no /pi/* messages
+# appear is that the Pi stream (`polyumi-pi stream`) simply isn't running.
+ZMQ_RECV_TIMEOUT_MS = 1000
+
+# Minimum interval between idle warnings, per stream (nanoseconds).
+IDLE_WARN_INTERVAL_NS = 1_000_000_000
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +85,9 @@ class PiReceiverNode(Node):
 
         self._zmq_context = zmq.Context()
 
+        # Per-stream timestamps for throttling the "waiting for the Pi" warning.
+        self._last_idle_warn: dict[str, rclpy.time.Time] = {}
+
         recv_thread = threading.Thread(target=self._camera_recv_loop, daemon=True)
         recv_thread.start()
 
@@ -90,11 +102,15 @@ class PiReceiverNode(Node):
 
     def _camera_recv_loop(self):
         sock = self._zmq_context.socket(zmq.PULL)
+        sock.setsockopt(zmq.RCVTIMEO, ZMQ_RECV_TIMEOUT_MS)
         sock.connect(f'tcp://{self._pi_host}:{self._port}')
 
         while rclpy.ok():
             try:
                 raw = sock.recv()
+            except zmq.Again:
+                self._warn_idle('camera', 'video', self._port)
+                continue
             except zmq.ZMQError as e:
                 log.error(f'ZMQ recv error: {e}')
                 break
@@ -113,6 +129,7 @@ class PiReceiverNode(Node):
 
     def _audio_recv_loop(self):
         sock = self._zmq_context.socket(zmq.PULL)
+        sock.setsockopt(zmq.RCVTIMEO, ZMQ_RECV_TIMEOUT_MS)
         sock.connect(f'tcp://{self._pi_host}:{self._audio_port}')
 
         last_ts_ns = 0
@@ -123,6 +140,9 @@ class PiReceiverNode(Node):
         while rclpy.ok():
             try:
                 raw = sock.recv()
+            except zmq.Again:
+                self._warn_idle('audio', 'audio', self._audio_port)
+                continue
             except zmq.ZMQError as e:
                 log.error(f'ZMQ audio recv error: {e}')
                 break
@@ -162,6 +182,17 @@ class PiReceiverNode(Node):
                 chunks = 0
                 gap_warnings = 0
                 last_stats_t = now_ns
+
+    def _warn_idle(self, stream: str, kind: str, port: int) -> None:
+        """Warn (throttled per stream) that no Pi frames are arriving."""
+        now = self.get_clock().now()
+        last = self._last_idle_warn.get(stream)
+        if last is None or (now - last).nanoseconds >= IDLE_WARN_INTERVAL_NS:
+            self.get_logger().warning(
+                f'No {kind} frames from the Pi at tcp://{self._pi_host}:{port} '
+                f'— is the Pi stream running (`polyumi-pi stream`)?'
+            )
+            self._last_idle_warn[stream] = now
 
     def destroy_node(self):
         """Terminate ZMQ resources before shutting down the ROS2 node."""
