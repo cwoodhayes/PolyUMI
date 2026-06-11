@@ -48,6 +48,17 @@ colcon build && source install/setup.bash
 ros2 launch polyumi_ros2 stream_demo.launch.xml
 ```
 
+#### FR3 arm (split topology)
+The Franka **FR3** is driven from the **NUC** (Ubuntu 22.04, ROS2 Humble, the
+Franka stack); the laptop (Ubuntu 24.04, ROS2 Kilted) runs PolyUMI's nodes,
+camera, Foxglove, and `policy_client_node`. They interoperate over **CycloneDDS**
+(domain 0, `10.0.0.x` link, unicast peers). On the laptop, before launching:
+```bash
+source setup_franka_env.sh   # RMW=cyclonedds, domain 0, CYCLONEDDS_URI, 10.0.0.1 on enp0s31f6
+```
+On the NUC: `fr3-bringup` + `fr3-arm-controller`. Full reference and the exact
+environment assumptions live in [docs/crb-fr3-inference.md](docs/crb-fr3-inference.md).
+
 ### Ingest (host PC)
 ```bash
 pingest --help
@@ -102,6 +113,17 @@ unset VIRTUAL_ENV && uvx ruff check ...
 ```
 
 The root `.venv` already has `polyumi_ingest` and its deps installed; bypassing `uv run` skips dependency resolution (which is what pulls in the unbuildable `lgpio` transitive).
+
+**Running `colcon build` / `ros2` from a non-interactive (or zsh) shell:** sourcing
+`/opt/ros/kilted/setup.bash` directly under zsh can fail with
+`no such file or directory: .../ros2_ws/setup.sh` and exit 127 — the ROS setup
+chain mis-resolves relative paths there. Also `VIRTUAL_ENV` pointing at `pi/.venv`
+interferes. Run the build inside an explicit `bash -c`, with `VIRTUAL_ENV` unset:
+
+```bash
+unset VIRTUAL_ENV; bash -c 'cd ros2_ws && source /opt/ros/kilted/setup.bash && colcon build --packages-select polyumi_ros2'
+# ros2 commands likewise: also source install/setup.bash inside the same bash -c
+```
 
 ## Testing SLAM
 

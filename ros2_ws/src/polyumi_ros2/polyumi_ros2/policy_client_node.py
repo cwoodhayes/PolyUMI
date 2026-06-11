@@ -46,11 +46,17 @@ class PolicyClientNode(Node):
         self.declare_parameter('control_hz', 10.0)
         self.declare_parameter('image_width', 256)
         self.declare_parameter('image_height', 256)
+        # Frame IDs for the EEF pose lookup. Defaults match the FR3 TF tree; on a
+        # different arm override base_frame / eef_frame instead of editing code.
+        self.declare_parameter('base_frame', 'fr3_link0')
+        self.declare_parameter('eef_frame', 'fr3_hand_tcp')
 
         self._url = self.get_parameter('inference_server_url').get_parameter_value().string_value
         self._n_obs_steps = self.get_parameter('n_obs_steps').get_parameter_value().integer_value
         self._image_w = self.get_parameter('image_width').get_parameter_value().integer_value
         self._image_h = self.get_parameter('image_height').get_parameter_value().integer_value
+        self._base_frame = self.get_parameter('base_frame').get_parameter_value().string_value
+        self._eef_frame = self.get_parameter('eef_frame').get_parameter_value().string_value
         control_hz = self.get_parameter('control_hz').get_parameter_value().double_value
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
 
@@ -147,11 +153,11 @@ class PolicyClientNode(Node):
             self._tick_lock.release()
 
     def _lookup_agent_pos(self) -> np.ndarray | None:
-        """Look up panda_EE in panda_link0 and return [x,y,z,qx,qy,qz,qw, gripper=0]."""
+        """Look up eef_frame in base_frame and return [x,y,z,qx,qy,qz,qw, gripper=0]."""
         try:
             # rclpy.time.Time() (zero) requests the latest available transform, avoiding
             # ExtrapolationException when the buffer hasn't caught up to get_clock().now().
-            tf = self._tf_buffer.lookup_transform('panda_link0', 'panda_EE', rclpy.time.Time())
+            tf = self._tf_buffer.lookup_transform(self._base_frame, self._eef_frame, rclpy.time.Time())
         except (LookupException, ConnectivityException, ExtrapolationException) as e:
             self._warn_throttled(f'TF lookup failed: {e}')
             return None

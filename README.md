@@ -164,6 +164,16 @@ Open [Foxglove](https://app.foxglove.dev), connect to `ws://localhost:8765`, and
 
 The launch file accepts two arguments: `pi_host` (default `10.106.10.62`) and `video_device` (default `/dev/video2`) for the GoPro capture device.
 
+### Running on a robot arm
+
+`policy_client_node` drives a robot arm from a diffusion-policy inference server.
+The arm's control stack typically runs on its own machine and is reached over ROS2;
+how you bring that up, network the two machines, and configure DDS depends on your
+robot and lab. [docs/franka-inference-bringup.md](docs/franka-inference-bringup.md)
+describes the general inference architecture and API contract, and
+[docs/crb-fr3-inference.md](docs/crb-fr3-inference.md) is a worked example for one
+specific Franka FR3 setup that you can adapt.
+
 ## Hardware Notes
 
 The Raspberry Pi app in `pi/` also depends upon a custom fork of [OpenGoPro](https://github.com/cwoodhayes/OpenGoPro) with some specific extra capabilities & one bugfix; without these the library cannot connect over BLE on Debian Trixie (and its downsteam RPi fork which we are using.)

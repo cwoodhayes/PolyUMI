@@ -13,7 +13,9 @@
   <test_depend>ament_xmllint</test_depend>
   <test_depend>python3-pytest</test_depend>
 
-  <exec_depend>franka_fer_moveit_config</exec_depend>
+  <!-- The Franka stack (franka_bringup / franka_fr3_moveit_config) runs on the
+       FR3 NUC under ROS2 Humble, NOT in this Kilted workspace. It is reached
+       over DDS, so it is intentionally not a rosdep here. See docs/crb-fr3-inference.md. -->
   <exec_depend>foxglove_bridge</exec_depend>
   <exec_depend>v4l2_camera</exec_depend>
   <depend>polyumi_pi_msgs</depend>
