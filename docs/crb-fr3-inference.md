@@ -161,6 +161,21 @@ fr3-bringup          # franka_bringup, arm_id:=fr3, robot @ 192.168.51.20
 fr3-arm-controller   # in a second terminal: spawn the joint-trajectory controller
 ```
 
+**1b. NUC — start MoveIt `move_group`** (third NUC terminal, **only needed for motion
+execution** — the Phase 2 `execute_motion:=true` path below). The log-only inference
+loop does not need this.
+
+```bash
+ros2 launch franka_fr3_moveit_config move_group.launch.py \
+    robot_ip:=192.168.51.20 use_fake_hardware:=false
+```
+
+This adds the `move_group` planner (exposing `/move_action`, `/execute_trajectory`,
+`/compute_cartesian_path`) alongside the already-running bringup + controllers. The
+laptop's `policy_client_node` talks to it purely over DDS as a `moveit_msgs` client —
+nothing MoveIt-related builds or runs on the Kilted laptop. (Verify the arg names
+against the NUC's installed `franka_fr3_moveit_config`; `robot_ip` has no default.)
+
 **2. Laptop — dummy inference server** (its own terminal):
 
 ```bash
@@ -192,6 +207,8 @@ cd ros2_ws
 source install/setup.bash           # (build first if needed: colcon build)
 ros2 launch polyumi_ros2 inference_demo.launch.xml pi_host:=<raspberry pi IP address>
 # default inference_server_url is http://localhost:8000/predict_cartesian/
+# To actually MOVE the arm (Phase 2), add: execute_motion:=true max_velocity_scaling:=0.05
+# (needs step 1b move_group; start slow, hand on the e-stop). Default is log-only, no motion.
 ```
 
 Confirm the loop is live: `policy_client_node` logs `action x=… y=… z=… grip=…`

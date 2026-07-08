@@ -32,6 +32,8 @@ from sensor_msgs.msg import Image
 import tf2_ros
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException  # type: ignore[attr-defined]
 
+from polyumi_ros2.moveit_client import FR3MoveItClient
+
 
 class PolicyClientNode(Node):
     """Buffer observations and call the remote inference server at a fixed rate."""
@@ -50,6 +52,11 @@ class PolicyClientNode(Node):
         # different arm override base_frame / eef_frame instead of editing code.
         self.declare_parameter('base_frame', 'fr3_link0')
         self.declare_parameter('eef_frame', 'fr3_hand_tcp')
+        # Motion execution (Phase 2). Off by default for safety: the node logs actions
+        # but does NOT move the arm unless execute_motion is explicitly enabled.
+        self.declare_parameter('execute_motion', False)
+        self.declare_parameter('planning_group', 'fr3_manipulator')
+        self.declare_parameter('max_velocity_scaling', 0.1)
 
         self._url = self.get_parameter('inference_server_url').get_parameter_value().string_value
         self._n_obs_steps = self.get_parameter('n_obs_steps').get_parameter_value().integer_value
@@ -57,6 +64,7 @@ class PolicyClientNode(Node):
         self._image_h = self.get_parameter('image_height').get_parameter_value().integer_value
         self._base_frame = self.get_parameter('base_frame').get_parameter_value().string_value
         self._eef_frame = self.get_parameter('eef_frame').get_parameter_value().string_value
+        self._execute_motion = self.get_parameter('execute_motion').get_parameter_value().bool_value
         control_hz = self.get_parameter('control_hz').get_parameter_value().double_value
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
 
@@ -68,6 +76,18 @@ class PolicyClientNode(Node):
         # TF
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+
+        # MoveIt client (Phase 2). Only created when execution is enabled; when off,
+        # the node stays a pure observer that logs actions without commanding the arm.
+        self._moveit: FR3MoveItClient | None = None
+        if self._execute_motion:
+            self._moveit = FR3MoveItClient(
+                self,
+                planning_group=self.get_parameter('planning_group').get_parameter_value().string_value,
+                eef_link=self._eef_frame,
+                base_frame=self._base_frame,
+                max_velocity_scaling=self.get_parameter('max_velocity_scaling').get_parameter_value().double_value,
+            )
 
         # Subscribers
         self.create_subscription(Image, image_topic, self._image_cb, 10)
@@ -82,7 +102,8 @@ class PolicyClientNode(Node):
         # Throttle for "buffer not full" warning
         self._last_warn_t: rclpy.time.Time | None = None
 
-        self.get_logger().info(f'policy_client_node started — server: {self._url}')
+        mode = 'EXECUTE (arm will move)' if self._execute_motion else 'log-only (no motion)'
+        self.get_logger().info(f'policy_client_node started — server: {self._url} — mode: {mode}')
 
     # ------------------------------------------------------------------
     # Subscribers
@@ -148,7 +169,7 @@ class PolicyClientNode(Node):
                     'agent_pos': poses,
                 },
             }
-            self._post_and_log(payload)
+            self._post_and_act(payload)
         finally:
             self._tick_lock.release()
 
@@ -168,8 +189,8 @@ class PolicyClientNode(Node):
         gripper_width = 0.0
         return np.array([t.x, t.y, t.z, r.x, r.y, r.z, r.w, gripper_width], dtype=np.float64)
 
-    def _post_and_log(self, payload: dict) -> None:
-        """POST payload to inference server and log the returned action."""
+    def _post_and_act(self, payload: dict) -> None:
+        """POST payload to the inference server, log the returned action, and optionally execute it."""
         body = json.dumps(payload).encode()
         req = urllib.request.Request(
             self._url,
@@ -184,8 +205,17 @@ class PolicyClientNode(Node):
             self.get_logger().info(f'action x={action[0]:.4f} y={action[1]:.4f} z={action[2]:.4f} grip={action[7]:.3f}')
         except urllib.error.URLError as e:
             self.get_logger().error(f'Inference server unreachable: {e}')
+            return
         except Exception as e:
             self.get_logger().error(f'POST failed: {e}')
+            return
+
+        # Phase 2: execute the target on the arm. This is a blocking plan+execute; the
+        # tick lock (held by the caller) is what enforces skip-while-busy — new ticks are
+        # dropped while a motion is in flight rather than queuing up. Gripper (action[7])
+        # is deferred; only the EEF pose action[:7] is executed for now.
+        if self._moveit is not None:
+            self._moveit.plan_and_execute_cartesian(action[:7])
 
     def _warn_throttled(self, msg: str) -> None:
         """Log a warning at most once per second."""

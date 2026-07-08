@@ -25,6 +25,10 @@
   <depend>std_srvs</depend>
   <depend>foxglove_msgs</depend>
   <depend>tf2_ros</depend>
+  <!-- Phase 2: MoveIt2 Cartesian execution. The node is a pure moveit_msgs client to
+       the NUC's move_group over DDS (no moveit_py / robot_description on this laptop). -->
+  <depend>geometry_msgs</depend>
+  <depend>moveit_msgs</depend>
 
   <export>
     <build_type>ament_python</build_type>
