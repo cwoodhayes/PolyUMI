@@ -135,7 +135,7 @@ New `uv` package at repo root with `pyproject.toml`. Two server files:
 **Run:**
 ```bash
 cd inference_server
-uv run uvicorn dummy_server:app --host 0.0.0.0 --port 8000
+uv run dummy-server   # FastAPI on 0.0.0.0:8000 (the [project.scripts] entry point)
 ```
 
 **Smoke test:**
