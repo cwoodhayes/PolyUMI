@@ -11,11 +11,10 @@ Usage:
 
 import math
 import os
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 import numpy as np
-from contextlib import asynccontextmanager
-
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
@@ -27,6 +26,7 @@ REQUIRED_OBS_KEYS = {'image', 'agent_pos'}
 AGENT_POS_DIM = 8  # [x, y, z, qx, qy, qz, qw, gripper_width]
 OSCILLATION_AMPLITUDE_M = 0.05
 OSCILLATION_PERIOD_STEPS = 20  # full cycle over this many /predict calls
+DEFAULT_HOME_POSE = '0.3 -0.1 0.5 0 1 0 0 0.4'  # xyz qxqyqzqw gripper
 
 
 class PredictRequest(BaseModel):
@@ -49,13 +49,13 @@ class PredictResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 _call_count: int = 0
-_home_pose: np.ndarray = np.array([0.4, 0.0, 0.4, 0.0, 0.0, 0.0, 1.0, 0.04])
+_home_pose: np.ndarray = np.empty(shape=(1,))
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     global _home_pose
-    raw = os.environ.get('HOME_POSE', '0.4 0.0 0.4 0 0 0 1 0.04')
+    raw = os.environ.get('HOME_POSE', DEFAULT_HOME_POSE)
     vals = [float(v) for v in raw.split()]
     if len(vals) != AGENT_POS_DIM:
         raise ValueError(f'HOME_POSE must have {AGENT_POS_DIM} values (xyz qxqyqzqw gripper), got {len(vals)}')

@@ -32,7 +32,7 @@ from sensor_msgs.msg import Image
 import tf2_ros
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException  # type: ignore[attr-defined]
 
-from polyumi_ros2.moveit_client import FR3MoveItClient
+from geometry_msgs.msg import PoseStamped
 
 
 class PolicyClientNode(Node):
@@ -53,10 +53,9 @@ class PolicyClientNode(Node):
         self.declare_parameter('base_frame', 'fr3_link0')
         self.declare_parameter('eef_frame', 'fr3_hand_tcp')
         # Motion execution (Phase 2). Off by default for safety: the node logs actions
-        # but does NOT move the arm unless execute_motion is explicitly enabled.
+        # but does NOT publish target poses unless execute_motion is explicitly enabled.
+        # Planning params (group, velocity scaling) live on the NUC bridge, not here.
         self.declare_parameter('execute_motion', False)
-        self.declare_parameter('planning_group', 'fr3_manipulator')
-        self.declare_parameter('max_velocity_scaling', 0.1)
 
         self._url = self.get_parameter('inference_server_url').get_parameter_value().string_value
         self._n_obs_steps = self.get_parameter('n_obs_steps').get_parameter_value().integer_value
@@ -77,17 +76,14 @@ class PolicyClientNode(Node):
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
 
-        # MoveIt client (Phase 2). Only created when execution is enabled; when off,
-        # the node stays a pure observer that logs actions without commanding the arm.
-        self._moveit: FR3MoveItClient | None = None
+        # Motion execution (Phase 2). The MoveIt calls run in a bridge node ON THE NUC
+        # (fr3_moveit_bridge), not here: the laptop (rmw_cyclonedds 4.x, Kilted) and NUC
+        # (rmw 1.x, Humble) can exchange small messages but corrupt large MoveIt action
+        # goals across the rmw-major boundary. So when execution is enabled we just publish
+        # the target EEF pose; the NUC bridge subscribes and drives move_group locally.
+        self._target_pub = None
         if self._execute_motion:
-            self._moveit = FR3MoveItClient(
-                self,
-                planning_group=self.get_parameter('planning_group').get_parameter_value().string_value,
-                eef_link=self._eef_frame,
-                base_frame=self._base_frame,
-                max_velocity_scaling=self.get_parameter('max_velocity_scaling').get_parameter_value().double_value,
-            )
+            self._target_pub = self.create_publisher(PoseStamped, '/polyumi/target_pose', 10)
 
         # Subscribers
         self.create_subscription(Image, image_topic, self._image_cb, 10)
@@ -210,12 +206,26 @@ class PolicyClientNode(Node):
             self.get_logger().error(f'POST failed: {e}')
             return
 
-        # Phase 2: execute the target on the arm. This is a blocking plan+execute; the
-        # tick lock (held by the caller) is what enforces skip-while-busy — new ticks are
-        # dropped while a motion is in flight rather than queuing up. Gripper (action[7])
-        # is deferred; only the EEF pose action[:7] is executed for now.
-        if self._moveit is not None:
-            self._moveit.plan_and_execute_cartesian(action[:7])
+        # Phase 2: publish the target EEF pose for the NUC bridge to execute via move_group.
+        # Non-blocking (unlike a direct MoveIt call): the NUC bridge does its own
+        # skip-while-busy, so at worst it drops poses that arrive mid-motion. Gripper
+        # (action[7]) is deferred; only the EEF pose action[:7] is published.
+        if self._target_pub is not None:
+            self._target_pub.publish(self._action_to_pose(action))
+
+    def _action_to_pose(self, action) -> PoseStamped:
+        """Build a PoseStamped in base_frame from the 8-vector action [x,y,z,qx,qy,qz,qw,grip]."""
+        msg = PoseStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self._base_frame
+        msg.pose.position.x = float(action[0])
+        msg.pose.position.y = float(action[1])
+        msg.pose.position.z = float(action[2])
+        msg.pose.orientation.x = float(action[3])
+        msg.pose.orientation.y = float(action[4])
+        msg.pose.orientation.z = float(action[5])
+        msg.pose.orientation.w = float(action[6])
+        return msg
 
     def _warn_throttled(self, msg: str) -> None:
         """Log a warning at most once per second."""

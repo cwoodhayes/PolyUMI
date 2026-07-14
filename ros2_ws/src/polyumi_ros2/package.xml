@@ -25,10 +25,11 @@
   <depend>std_srvs</depend>
   <depend>foxglove_msgs</depend>
   <depend>tf2_ros</depend>
-  <!-- Phase 2: MoveIt2 Cartesian execution. The node is a pure moveit_msgs client to
-       the NUC's move_group over DDS (no moveit_py / robot_description on this laptop). -->
+  <!-- Phase 2: when execute_motion is on, the node publishes target EEF poses on
+       /polyumi/target_pose (geometry_msgs/PoseStamped). The NUC-side fr3_moveit_bridge
+       does the actual MoveIt calls — moveit_msgs is NOT needed on the laptop (large
+       MoveIt action goals corrupt across the laptop/NUC rmw-version gap). -->
   <depend>geometry_msgs</depend>
-  <depend>moveit_msgs</depend>
 
   <export>
     <build_type>ament_python</build_type>
