@@ -26,7 +26,7 @@ import threading
 
 from geometry_msgs.msg import Pose, PoseArray
 from moveit_msgs.action import ExecuteTrajectory
-from moveit_msgs.msg import MoveItErrorCodes
+from moveit_msgs.msg import MoveItErrorCodes, RobotTrajectory
 from moveit_msgs.srv import GetCartesianPath
 import rclpy
 from rclpy.action import ActionClient
@@ -91,6 +91,15 @@ class Fr3MoveItBridge(Node):
         else:
             self.get_logger().info('move_group found (compute_cartesian_path ready).')
 
+        if not self._exec.wait_for_server(timeout_sec=10.0):
+            self.get_logger().error(
+                'execute_trajectory action server NOT found after 10s — move_group is probably not '
+                'running on this NUC. Start it first: ros2 launch nuc/launch/fr3_move_group.launch.py '
+                'robot_ip:=192.168.51.20'
+            )
+        else:
+            self.get_logger().info('move_group found (execute_trajectory ready).')
+
         mode = 'EXECUTE (arm will move)' if self._execute else 'plan-only (no motion)'
         self.get_logger().info(f'fr3_moveit_bridge started — listening on {topic} — mode: {mode}')
 
@@ -115,7 +124,7 @@ class Fr3MoveItBridge(Node):
         finally:
             self._busy.release()
 
-    def _plan_cartesian(self, poses: list[Pose], frame_id: str):
+    def _plan_cartesian(self, poses: list[Pose], frame_id: str) -> RobotTrajectory | None:
         """Request a multi-waypoint Cartesian path through poses; return the trajectory or None."""
         req = GetCartesianPath.Request()
         req.header.frame_id = frame_id
@@ -150,7 +159,7 @@ class Fr3MoveItBridge(Node):
             return None
         return resp.solution
 
-    def _slow_trajectory(self, trajectory):
+    def _slow_trajectory(self, trajectory: RobotTrajectory) -> RobotTrajectory:
         """
         Scale a trajectory in time to cap end-effector speed.
 
@@ -170,6 +179,9 @@ class Fr3MoveItBridge(Node):
                 'limits; clamping to 1.0 (already full planned speed).'
             )
         jt = trajectory.joint_trajectory
+        # Track the last point's time while iterating rather than indexing jt.points[-1]
+        # afterward: the rosidl array-field type stub doesn't support __getitem__.
+        last_time = None
         for pt in jt.points:
             total_ns = pt.time_from_start.sec * 1_000_000_000 + pt.time_from_start.nanosec
             total_ns = int(total_ns / scale)
@@ -177,16 +189,25 @@ class Fr3MoveItBridge(Node):
             pt.time_from_start.nanosec = total_ns % 1_000_000_000
             pt.velocities = [v * scale for v in pt.velocities]
             pt.accelerations = [a * scale * scale for a in pt.accelerations]
-        if jt.points:
-            end = jt.points[-1].time_from_start
+            last_time = pt.time_from_start
+        if last_time is not None:
             self.get_logger().info(
-                f'Executing {len(jt.points)} pts over {end.sec + end.nanosec / 1e9:.2f}s '
+                f'Executing {len(jt.points)} pts over {last_time.sec + last_time.nanosec / 1e9:.2f}s '
                 f'(vscale={scale:g}; raise it to go faster, 1.0 = full planned speed)'
             )
         return trajectory
 
-    def _run_execute(self, trajectory) -> bool:
+    def _run_execute(self, trajectory: RobotTrajectory) -> bool:
         """Execute a planned trajectory via ExecuteTrajectory; block until done."""
+        # Same rationale as _plan_cartesian's service_is_ready() check: send_goal_async on a
+        # server that isn't there hangs until PLAN_TIMEOUT_S instead of failing immediately,
+        # holding the busy lock and dropping chunks that arrive in the meantime.
+        if not self._exec.server_is_ready():
+            self.get_logger().error(
+                'execute_trajectory action server is NOT available — is move_group running on this '
+                'NUC? (ros2 launch nuc/launch/fr3_move_group.launch.py robot_ip:=192.168.51.20)'
+            )
+            return False
         goal = ExecuteTrajectory.Goal()
         goal.trajectory = self._slow_trajectory(trajectory)
         gf = self._exec.send_goal_async(goal)

@@ -8,6 +8,31 @@
 # old-arm workflow is untouched when not sourced.
 # See docs/crb-fr3-inference.md for the full topology and rationale.
 
+# Abort if executed instead of sourced, before nmcli makes any changes — if we let execution
+# continue, the NM profile side effect would run but the exported env vars would be discarded
+# with the subshell, silently leaving the caller's shell unconfigured.
+#   - zsh: `return` at the top level of a script behaves like `exit` (always "succeeds"), so
+#     it can't be used to detect sourcing there. Check ZSH_EVAL_CONTEXT instead — it ends in
+#     ":file" when sourced, and is exactly "toplevel" when executed directly (verified).
+#   - bash/sh: `return` outside a function only succeeds when the script is sourced.
+if [ -n "${ZSH_VERSION:-}" ]; then
+  case $ZSH_EVAL_CONTEXT in
+    *:file) _polyumi_sourced=1 ;;
+    *) _polyumi_sourced=0 ;;
+  esac
+elif (return 0 2>/dev/null); then
+  _polyumi_sourced=1
+else
+  _polyumi_sourced=0
+fi
+if [ "$_polyumi_sourced" != "1" ]; then
+  echo "ERROR: setup_franka_env.sh must be sourced, not executed — its exported env vars" >&2
+  echo "  would otherwise be discarded when the script's subshell exits." >&2
+  echo "  Run:  source setup_franka_env.sh" >&2
+  exit 1
+fi
+unset _polyumi_sourced
+
 echo "NOTE - SOURCE THIS (do NOT execute; it will not work)"
 
 # --- Resolve repo root (works for bash and zsh) ---

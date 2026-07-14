@@ -25,8 +25,8 @@
   <depend>std_srvs</depend>
   <depend>foxglove_msgs</depend>
   <depend>tf2_ros</depend>
-  <!-- Phase 2: when execute_motion is on, the node publishes target EEF poses on
-       /polyumi/target_pose (geometry_msgs/PoseStamped). The NUC-side fr3_moveit_bridge
+  <!-- Phase 2: when execute_motion is on, the node publishes each action chunk as a
+       geometry_msgs/PoseArray on /polyumi/target_poses. The NUC-side fr3_moveit_bridge
        does the actual MoveIt calls — moveit_msgs is NOT needed on the laptop (large
        MoveIt action goals corrupt across the laptop/NUC rmw-version gap). -->
   <depend>geometry_msgs</depend>

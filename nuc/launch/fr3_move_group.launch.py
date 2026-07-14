@@ -54,6 +54,17 @@ def load_yaml(package_name, file_path):
         return None
 
 
+def load_required_yaml(package_name, file_path):
+    """Load a YAML config file, raising a clear error instead of silently passing None downstream."""
+    data = load_yaml(package_name, file_path)
+    if data is None:
+        raise RuntimeError(
+            f"Could not load required config '{file_path}' from package '{package_name}' — "
+            'file missing, unreadable, or empty. Is franka_fr3_moveit_config installed and sourced?'
+        )
+    return data
+
+
 def generate_launch_description():
     """Build the launch description: declare args and start the move_group node."""
     robot_ip_parameter_name = 'robot_ip'
@@ -118,7 +129,7 @@ def generate_launch_description():
         'robot_description_semantic': ParameterValue(robot_description_semantic_command, value_type=str)
     }
 
-    kinematics_yaml = load_yaml('franka_fr3_moveit_config', 'config/kinematics.yaml')
+    kinematics_yaml = load_required_yaml('franka_fr3_moveit_config', 'config/kinematics.yaml')
 
     # --- PolyUMI: the move_group params upstream move_group.launch.py omits ---
     # OMPL planning pipeline (upstream defaults to CHOMP without this).
@@ -134,12 +145,12 @@ def generate_launch_description():
             'start_state_max_bounds_error': 0.1,
         }
     }
-    ompl_planning_yaml = load_yaml('franka_fr3_moveit_config', 'config/ompl_planning.yaml')
+    ompl_planning_yaml = load_required_yaml('franka_fr3_moveit_config', 'config/ompl_planning.yaml')
     ompl_planning_pipeline_config['move_group'].update(ompl_planning_yaml)
 
     # Trajectory execution: map MoveIt to the fr3_arm_controller that fr3-bringup runs
     # (fixes "No controller_names specified" -> /execute_trajectory can actually move).
-    moveit_simple_controllers_yaml = load_yaml('franka_fr3_moveit_config', 'config/fr3_controllers.yaml')
+    moveit_simple_controllers_yaml = load_required_yaml('franka_fr3_moveit_config', 'config/fr3_controllers.yaml')
     moveit_controllers = {
         'moveit_simple_controller_manager': moveit_simple_controllers_yaml,
         'moveit_controller_manager': 'moveit_simple_controller_manager/MoveItSimpleControllerManager',
