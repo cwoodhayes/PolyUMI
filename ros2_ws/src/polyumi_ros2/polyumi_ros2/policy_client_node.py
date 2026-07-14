@@ -66,6 +66,14 @@ class PolicyClientNode(Node):
         # bridge's skip-while-busy would drop almost every tick. A full chunk lets move_group
         # plan one smooth path instead. Must be <= the model's n_action_steps (dummy: 8).
         self.declare_parameter('n_action_steps', 8)
+        # Per-component system latencies (seconds), as measured by calibration scripts.
+        # Loaded from config/latency.yaml via the inference launch file; not yet consumed
+        # for compensation, just plumbed through and logged.
+        self.declare_parameter('latency.gopro_s', 0.0)
+        self.declare_parameter('latency.finger_cam', 0.0)
+        self.declare_parameter('latency.piezo_mic', 0.0)
+        self.declare_parameter('latency.proprio', 0.0)
+        self.declare_parameter('latency.arm_exec', 0.0)
 
         self._url = self.get_parameter('inference_server_url').get_parameter_value().string_value
         self._n_obs_steps = self.get_parameter('n_obs_steps').get_parameter_value().integer_value
@@ -77,6 +85,13 @@ class PolicyClientNode(Node):
         self._n_action_steps = self.get_parameter('n_action_steps').get_parameter_value().integer_value
         control_hz = self.get_parameter('control_hz').get_parameter_value().double_value
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
+        self._latency = {
+            'gopro_s': self.get_parameter('latency.gopro_s').get_parameter_value().double_value,
+            'finger_cam': self.get_parameter('latency.finger_cam').get_parameter_value().double_value,
+            'piezo_mic': self.get_parameter('latency.piezo_mic').get_parameter_value().double_value,
+            'proprio': self.get_parameter('latency.proprio').get_parameter_value().double_value,
+            'arm_exec': self.get_parameter('latency.arm_exec').get_parameter_value().double_value,
+        }
 
         # History buffers — each entry: (image_float32 [H,W,C], agent_pos [8])
         self._obs_buffer: deque = deque(maxlen=self._n_obs_steps)
@@ -112,6 +127,8 @@ class PolicyClientNode(Node):
 
         mode = 'EXECUTE (arm will move)' if self._execute_motion else 'log-only (no motion)'
         self.get_logger().info(f'policy_client_node started — server: {self._url} — mode: {mode}')
+        latency_str = ' '.join(f'{name}={seconds}s' for name, seconds in self._latency.items())
+        self.get_logger().info(f'latency config — {latency_str}')
 
     # ------------------------------------------------------------------
     # Subscribers
