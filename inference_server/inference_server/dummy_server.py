@@ -9,6 +9,7 @@ Usage:
     HOME_POSE="0.4 0.0 0.4 0 0 0 1 0.04" uv run uvicorn inference_server.dummy_server:app --host 0.0.0.0 --port 8000
 """
 
+import base64
 import math
 import os
 from contextlib import asynccontextmanager
@@ -80,6 +81,21 @@ def predict_cartesian(req: PredictRequest) -> PredictResponse:
     missing = REQUIRED_OBS_KEYS - req.observations.keys()
     if missing:
         raise HTTPException(status_code=422, detail=f'Missing observation keys: {missing}')
+
+    # Validate image: base64-encoded raw bytes + dtype/shape (see policy_client_node._control_tick)
+    image = req.observations.get('image')
+    if not isinstance(image, dict) or not {'dtype', 'shape', 'data'} <= image.keys():
+        raise HTTPException(status_code=422, detail="image must be a dict with 'dtype', 'shape', 'data'")
+    try:
+        image_bytes = base64.b64decode(image['data'])
+        image_arr = np.frombuffer(image_bytes, dtype=np.dtype(image['dtype'])).reshape(image['shape'])
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f'Failed to decode image: {e}') from e
+    if image_arr.shape[0] != req.n_obs_steps:
+        raise HTTPException(
+            status_code=422,
+            detail=f'image leading dim must be n_obs_steps={req.n_obs_steps}, got {image_arr.shape[0]}',
+        )
 
     # Validate agent_pos shape: [n_obs_steps, AGENT_POS_DIM]
     agent_pos = req.observations.get('agent_pos')

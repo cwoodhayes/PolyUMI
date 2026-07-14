@@ -16,6 +16,7 @@ Usage:
         -p inference_server_url:=http://192.168.1.10:8000/predict_cartesian/
 """
 
+import base64
 import json
 import threading
 
@@ -164,15 +165,20 @@ class PolicyClientNode(Node):
                 return
 
             # --- 4. Serialize and POST ---
-            # TODO(Phase 2): images as nested-list JSON is ~1.5MB+ per frame and slow to
-            # encode/decode at 10 Hz. Switch to base64-encoded raw bytes or msgpack.
-            images = [obs[0].tolist() for obs in self._obs_buffer]
+            # Images go as base64-encoded raw bytes (+ dtype/shape) rather than nested-list
+            # JSON, which is ~1.5MB+ per frame and slow to encode/decode at 10 Hz.
+            # agent_pos is tiny (n_obs_steps x 8 floats) so it stays a plain list.
+            image_stack = np.stack([obs[0] for obs in self._obs_buffer])
             poses = [obs[1].tolist() for obs in self._obs_buffer]
             payload = {
                 'n_obs_steps': self._n_obs_steps,
                 'n_action_steps': self._n_action_steps,
                 'observations': {
-                    'image': images,
+                    'image': {
+                        'dtype': str(image_stack.dtype),
+                        'shape': list(image_stack.shape),
+                        'data': base64.b64encode(image_stack.tobytes()).decode('ascii'),
+                    },
                     'agent_pos': poses,
                 },
             }
