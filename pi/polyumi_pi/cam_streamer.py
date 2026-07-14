@@ -84,6 +84,12 @@ class CameraStreamer:
         n_video_frames = 0
         n_video_dropped_frames = 0
 
+        # Per-second tx stats (mirrors audio_streamer). sent/dropped are reset each
+        # window; the running totals above are reported once at shutdown.
+        sent_this_window = 0
+        dropped_this_window = 0
+        last_stats = time.monotonic()
+
         def handle_shutdown(signum, _frame):
             nonlocal stop_requested
             log.info(f'Received {signal.Signals(signum).name}. shutting down.')
@@ -119,15 +125,27 @@ class CameraStreamer:
                     if socket is not None:
                         try:
                             socket.send(msg.SerializeToString(), zmq.NOBLOCK)
+                            sent_this_window += 1
                         except zmq.Again:
                             log.debug('Dropped frame: receiver not ready.')
                             n_video_dropped_frames += 1
+                            dropped_this_window += 1
 
                     if video_recorder is not None:
                         video_recorder.write_frame(data.getvalue(), msg.timestamp_ns)
                         n_video_frames += 1
 
                     log.debug(f'Captured frame at {msg.timestamp_ns} ns, size={len(msg.jpeg_data)} bytes')
+
+                    now = time.monotonic()
+                    if socket is not None and now - last_stats >= 1.0:
+                        log.info(
+                            f'Video tx stats: sent={sent_this_window}/s dropped={dropped_this_window} '
+                            f'jpeg_size={len(msg.jpeg_data)}B'
+                        )
+                        sent_this_window = 0
+                        dropped_this_window = 0
+                        last_stats = now
 
                     elapsed = time.monotonic() - t_start
                     sleep_time = interval - elapsed

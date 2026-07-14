@@ -4,8 +4,11 @@ ROS2 node that drives the Franka arm using a remote diffusion policy inference s
 At each control tick the node:
   1. Reads the latest wrist camera image and end-effector pose.
   2. Maintains a short history window (n_obs_steps).
-  3. POSTs observations to /predict_cartesian/ on the inference server.
-  4. Logs the returned action (Phase 1). Motion execution is added in Phase 2.
+  3. POSTs observations to /predict_cartesian/ on the inference server, requesting an
+     n_action_steps-length action chunk.
+  4. Logs the chunk. If execute_motion is set, publishes the whole chunk as a PoseArray
+     on /polyumi/target_poses for the NUC-side fr3_moveit_bridge to plan+execute as one
+     Cartesian path (receding-horizon control) — see docs/crb-fr3-inference.md.
 
 Usage:
     ros2 run polyumi_ros2 policy_client_node
@@ -32,6 +35,8 @@ from sensor_msgs.msg import Image
 import tf2_ros
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException  # type: ignore[attr-defined]
 
+from geometry_msgs.msg import Pose, PoseArray
+
 
 class PolicyClientNode(Node):
     """Buffer observations and call the remote inference server at a fixed rate."""
@@ -46,11 +51,29 @@ class PolicyClientNode(Node):
         self.declare_parameter('control_hz', 10.0)
         self.declare_parameter('image_width', 256)
         self.declare_parameter('image_height', 256)
+        # Frame IDs for the EEF pose lookup. Defaults match the FR3 TF tree; on a
+        # different arm override base_frame / eef_frame instead of editing code.
+        self.declare_parameter('base_frame', 'fr3_link0')
+        self.declare_parameter('eef_frame', 'fr3_hand_tcp')
+        # Motion execution (Phase 2). Off by default for safety: the node logs actions
+        # but does NOT publish target poses unless execute_motion is explicitly enabled.
+        # Planning params (group, velocity scaling) live on the NUC bridge, not here.
+        self.declare_parameter('execute_motion', False)
+        # Action-chunk size requested from the server and published for execution as one
+        # multi-waypoint Cartesian path. UMI/DP-style receding-horizon control: 1 would mean
+        # a discrete hop every control tick, which the arm can't track in real time — the
+        # bridge's skip-while-busy would drop almost every tick. A full chunk lets move_group
+        # plan one smooth path instead. Must be <= the model's n_action_steps (dummy: 8).
+        self.declare_parameter('n_action_steps', 8)
 
         self._url = self.get_parameter('inference_server_url').get_parameter_value().string_value
         self._n_obs_steps = self.get_parameter('n_obs_steps').get_parameter_value().integer_value
         self._image_w = self.get_parameter('image_width').get_parameter_value().integer_value
         self._image_h = self.get_parameter('image_height').get_parameter_value().integer_value
+        self._base_frame = self.get_parameter('base_frame').get_parameter_value().string_value
+        self._eef_frame = self.get_parameter('eef_frame').get_parameter_value().string_value
+        self._execute_motion = self.get_parameter('execute_motion').get_parameter_value().bool_value
+        self._n_action_steps = self.get_parameter('n_action_steps').get_parameter_value().integer_value
         control_hz = self.get_parameter('control_hz').get_parameter_value().double_value
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
 
@@ -62,6 +85,16 @@ class PolicyClientNode(Node):
         # TF
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+
+        # Motion execution (Phase 2). The MoveIt calls run in a bridge node ON THE NUC
+        # (fr3_moveit_bridge), not here: the laptop (rmw_cyclonedds 4.x, Kilted) and NUC
+        # (rmw 1.x, Humble) can exchange small messages but corrupt large MoveIt action
+        # goals across the rmw-major boundary. So when execution is enabled we just publish
+        # the target EEF pose chunk (PoseArray); the NUC bridge subscribes and plans+executes
+        # the whole chunk as one Cartesian path via its local move_group.
+        self._target_pub = None
+        if self._execute_motion:
+            self._target_pub = self.create_publisher(PoseArray, '/polyumi/target_poses', 10)
 
         # Subscribers
         self.create_subscription(Image, image_topic, self._image_cb, 10)
@@ -76,7 +109,8 @@ class PolicyClientNode(Node):
         # Throttle for "buffer not full" warning
         self._last_warn_t: rclpy.time.Time | None = None
 
-        self.get_logger().info(f'policy_client_node started — server: {self._url}')
+        mode = 'EXECUTE (arm will move)' if self._execute_motion else 'log-only (no motion)'
+        self.get_logger().info(f'policy_client_node started — server: {self._url} — mode: {mode}')
 
     # ------------------------------------------------------------------
     # Subscribers
@@ -136,22 +170,22 @@ class PolicyClientNode(Node):
             poses = [obs[1].tolist() for obs in self._obs_buffer]
             payload = {
                 'n_obs_steps': self._n_obs_steps,
-                'n_action_steps': 1,
+                'n_action_steps': self._n_action_steps,
                 'observations': {
                     'image': images,
                     'agent_pos': poses,
                 },
             }
-            self._post_and_log(payload)
+            self._post_and_act(payload)
         finally:
             self._tick_lock.release()
 
     def _lookup_agent_pos(self) -> np.ndarray | None:
-        """Look up panda_EE in panda_link0 and return [x,y,z,qx,qy,qz,qw, gripper=0]."""
+        """Look up eef_frame in base_frame and return [x,y,z,qx,qy,qz,qw, gripper=0]."""
         try:
             # rclpy.time.Time() (zero) requests the latest available transform, avoiding
             # ExtrapolationException when the buffer hasn't caught up to get_clock().now().
-            tf = self._tf_buffer.lookup_transform('panda_link0', 'panda_EE', rclpy.time.Time())
+            tf = self._tf_buffer.lookup_transform(self._base_frame, self._eef_frame, rclpy.time.Time())
         except (LookupException, ConnectivityException, ExtrapolationException) as e:
             self._warn_throttled(f'TF lookup failed: {e}')
             return None
@@ -162,8 +196,8 @@ class PolicyClientNode(Node):
         gripper_width = 0.0
         return np.array([t.x, t.y, t.z, r.x, r.y, r.z, r.w, gripper_width], dtype=np.float64)
 
-    def _post_and_log(self, payload: dict) -> None:
-        """POST payload to inference server and log the returned action."""
+    def _post_and_act(self, payload: dict) -> None:
+        """POST payload to the inference server, log the returned action, and optionally execute it."""
         body = json.dumps(payload).encode()
         req = urllib.request.Request(
             self._url,
@@ -174,12 +208,45 @@ class PolicyClientNode(Node):
         try:
             with urllib.request.urlopen(req, timeout=0.5) as resp:
                 result = json.loads(resp.read())
-            action = result['actions'][0]
-            self.get_logger().info(f'action x={action[0]:.4f} y={action[1]:.4f} z={action[2]:.4f} grip={action[7]:.3f}')
+            actions = result['actions']
+            first = actions[0]
+            self.get_logger().info(
+                f'action chunk n={len(actions)} first: x={first[0]:.4f} y={first[1]:.4f} '
+                f'z={first[2]:.4f} grip={first[7]:.3f}'
+            )
         except urllib.error.URLError as e:
             self.get_logger().error(f'Inference server unreachable: {e}')
+            return
         except Exception as e:
             self.get_logger().error(f'POST failed: {e}')
+            return
+
+        # Phase 2: publish the whole action chunk for the NUC bridge to plan+execute as one
+        # Cartesian path (receding-horizon control). Non-blocking (unlike a direct MoveIt
+        # call): the NUC bridge does its own skip-while-busy, so at worst it drops chunks
+        # that arrive mid-motion. Gripper (action[7]) is deferred; only xyz+quat is published.
+        if self._target_pub is not None:
+            self._target_pub.publish(self._actions_to_pose_array(actions))
+
+    def _actions_to_pose_array(self, actions) -> PoseArray:
+        """Build a PoseArray in base_frame from a list of 8-vector actions [x,y,z,qx,qy,qz,qw,grip]."""
+        poses = []
+        for action in actions:
+            pose = Pose()
+            pose.position.x = float(action[0])
+            pose.position.y = float(action[1])
+            pose.position.z = float(action[2])
+            pose.orientation.x = float(action[3])
+            pose.orientation.y = float(action[4])
+            pose.orientation.z = float(action[5])
+            pose.orientation.w = float(action[6])
+            poses.append(pose)
+
+        msg = PoseArray()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self._base_frame
+        msg.poses = poses
+        return msg
 
     def _warn_throttled(self, msg: str) -> None:
         """Log a warning at most once per second."""

@@ -24,11 +24,15 @@ dependencies = [
 [project.optional-dependencies]
 # Raspberry Pi hardware-only dependencies. These are required to run the full
 # polyumi-pi app on the Pi (imported by cam_streamer/led_manager/raspi_driver),
-# but not by the unit tests or the gopro bringup script, and lgpio fails to
-# build off-Pi (needs swig). Install with `polyumi_pi[pi]` on the Pi.
+# but not by the unit tests or the gopro bringup script. Install with
+# `polyumi_pi[pi]` on the Pi.
+#
+# NOTE: gpiozero and lgpio are deliberately NOT listed here. On the Pi they are
+# provided by apt (python3-gpiozero / python3-lgpio) and picked up through the
+# venv's --system-site-packages. Listing lgpio as a pip dep forces uv to build
+# it from its sdist (there is no binary wheel), which needs swig and fails on the
+# Pi. Only rpi-hardware-pwm is pip-installed, since it has no apt package.
 pi = [
-    "gpiozero>=2.0",
-    "lgpio>=0.2.2.0",
     "rpi-hardware-pwm>=0.3.1",
 ]
 

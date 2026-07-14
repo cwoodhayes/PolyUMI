@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  CycloneDDS config for the PolyUMI laptop (Kilted) side of the FR3 link.
+
+  Mirrors the NUC's /home/franka/franka_ws/config/cyclonedds.xml so the two
+  machines discover each other. Discovery is UNICAST ONLY (multicast disabled),
+  so the peer list must contain both endpoints and the laptop must actually hold
+  the 10.0.0.1 address. See docs/crb-fr3-inference.md.
+
+  Pinned to the laptop's wired NIC enp0s31f6 (direct cable to the NUC). If your
+  interface name differs, update <NetworkInterface name="..."/> below.
+-->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain Id="any">
+    <General>
+      <Interfaces>
+        <NetworkInterface name="enp0s31f6" multicast="false" />
+      </Interfaces>
+      <AllowMulticast>false</AllowMulticast>
+    </General>
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>32</MaxAutoParticipantIndex>
+      <Peers>
+        <Peer address="10.0.0.1" />
+        <Peer address="10.0.0.2" />
+      </Peers>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

@@ -1,3 +1,6 @@
 [submodule "external/ORB_SLAM3_PolyUMI"]
 	path = external/ORB_SLAM3_PolyUMI
 	url = git@github.com:cwoodhayes/ORB_SLAM3_PolyUMI.git
+[submodule "external/franka_ros2"]
+	path = external/franka_ros2
+	url = https://github.com/frankarobotics/franka_ros2.git

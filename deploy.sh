@@ -25,6 +25,8 @@ rsync -av --delete --mkpath \
 echo "==> Deploying polyumi_pi_msgs to ${PI_HOST}..."
 rsync -av --delete --mkpath \
     --exclude='.venv/' \
+    --exclude='*.egg-info/' \
+    --exclude='__pycache__/' \
     ros2_ws/src/polyumi_pi_msgs "${PI_HOST}":~/PolyUMI/ros2_ws/src/
 
 echo "==> Syncing Pi venv..."

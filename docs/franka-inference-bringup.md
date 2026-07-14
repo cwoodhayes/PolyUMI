@@ -26,7 +26,14 @@ inference_server/ (uv, Python 3.12)        ROS2 (Kilted)
 
 **Action space:** EEF Cartesian pose + gripper — `[x, y, z, qx, qy, qz, qw, gripper_width]` (8-vector).  
 **Control frequency:** 10 Hz.  
-**Inference location:** separate GPU machine, called over LAN via HTTP.
+**Inference location:** Phase 0–2 the (dummy) server runs on the laptop at
+`localhost:8000`; Phase 3 moves it to a separate GPU machine called over LAN via HTTP.
+
+> **Machine layout (FR3).** The "Robot PC" above is split: the **laptop** (Kilted)
+> runs `policy_client_node`, MoveIt clients, camera, and Foxglove; the **FR3 NUC**
+> (Humble) runs the Franka control stack and publishes `fr3_*` TF + joint states.
+> They interoperate over CycloneDDS. See [Phase 0](#phase-0--fr3-nuc-bringup-distro--dds)
+> and [crb-fr3-inference.md](crb-fr3-inference.md).
 
 ---
 
@@ -79,6 +86,34 @@ so the server can pass them through without remapping.
 
 ---
 
+## Phase 0 — FR3 NUC bringup (distro + DDS)
+
+Goal: get the Kilted laptop talking to the **FR3** NUC (Humble) over DDS so the
+stream/inference demos run against the new arm. Full environment reference:
+[crb-fr3-inference.md](crb-fr3-inference.md).
+
+**Split topology:** PolyUMI's ROS2 nodes are distro-agnostic and run on the laptop
+under Kilted; the Franka stack is Humble-only and stays on the NUC. They
+interoperate at the DDS wire level — CycloneDDS, `ROS_DOMAIN_ID=0`, the `10.0.0.x`
+link, and a matching **unicast** peer list (the NUC disables multicast). This phase
+runs everything (including the dummy inference server) on the laptop; the move to a
+separate GPU machine is Phase 3.
+
+This replaces the earlier panda/"fer" assumptions:
+- TF frames `panda_link0` / `panda_EE` → **`fr3_link0`** / **`fr3_hand_tcp`**
+  (now `policy_client_node` params `base_frame` / `eef_frame`).
+- `franka_fer_moveit_config` → the NUC's `franka_bringup` + `franka_fr3_moveit_config`
+  (launched on the NUC, removed as a laptop rosdep).
+
+- [ ] `sudo apt install ros-kilted-rmw-cyclonedds-cpp` on the laptop
+- [ ] `ros2_ws/config/cyclonedds_laptop.xml` present (mirrors NUC peers/interface)
+- [ ] `source setup_franka_env.sh` sets RMW/domain/URI and brings up `10.0.0.1/24`
+- [ ] NUC `fr3-bringup` + `fr3-arm-controller` running
+- [ ] laptop `ros2 node list` sees NUC nodes; `tf2_echo fr3_link0 fr3_hand_tcp` streams
+- [ ] `rosdep install --rosdistro kilted` clean (no `franka_fer_moveit_config`)
+
+---
+
 ## Phase 1 — Dummy server + policy client node
 
 Goal: validate the full ROS2 ↔ server round-trip without a real checkpoint.
@@ -100,7 +135,7 @@ New `uv` package at repo root with `pyproject.toml`. Two server files:
 **Run:**
 ```bash
 cd inference_server
-uv run uvicorn dummy_server:app --host 0.0.0.0 --port 8000
+uv run dummy-server   # FastAPI on 0.0.0.0:8000 (the [project.scripts] entry point)
 ```
 
 **Smoke test:**
@@ -131,8 +166,8 @@ curl -s -X POST http://localhost:8000/predict_cartesian/ \
 | Topic | Type | Purpose |
 |---|---|---|
 | `/gopro/image_raw` | `sensor_msgs/Image` | wrist camera (256×256 after resize) |
-| TF `panda_EE` → `panda_link0` | via `tf2_ros.Buffer` | absolute EEF pose (xyz + quat) |
-| `/franka_gripper/joint_states` (TBD) | `sensor_msgs/JointState` | gripper width (metres) |
+| TF `fr3_hand_tcp` → `fr3_link0` | via `tf2_ros.Buffer` (params `eef_frame`/`base_frame`) | absolute EEF pose (xyz + quat) |
+| `/fr3_gripper/joint_states` (Phase 2) | `sensor_msgs/JointState` | gripper width (metres) |
 
 **Timer:** 10 Hz.
 
@@ -157,6 +192,8 @@ curl -s -X POST http://localhost:8000/predict_cartesian/ \
 | `control_hz` | `10.0` | Timer rate |
 | `image_width` | `256` | Resize width (matches `shape_meta image: [3, 256, 256]`) |
 | `image_height` | `256` | Resize height |
+| `base_frame` | `fr3_link0` | TF base frame for the EEF lookup |
+| `eef_frame` | `fr3_hand_tcp` | TF EEF/tool frame for the EEF lookup |
 
 **`package.xml` additions:** `tf2_ros`  
 **`setup.py` addition:** `policy_client_node = polyumi_ros2.policy_client_node:main`
@@ -183,58 +220,66 @@ curl -s -X POST http://localhost:8000/predict_cartesian/ \
 </launch>
 ```
 
-- [ ] `inference_demo.launch.xml` created
-- [ ] launches cleanly against remote dummy server:
-  `ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=http://192.168.x.x:8000/predict_cartesian/`
+- [x] `inference_demo.launch.xml` created
+- [ ] launches cleanly against the dummy server (Phase 0: local `localhost:8000`):
+  `ros2 launch polyumi_ros2 inference_demo.launch.xml`
 
 ---
 
-## Phase 2 — MoveIt2 Cartesian execution
+## Phase 2 — MoveIt2 Cartesian execution — DONE, verified on hardware
 
-Goal: wire returned EEF targets into actual robot motion. Test in **demo/simulation mode first**.
+**This section is historical planning; it predates implementation and got some things
+wrong.** The as-built design, the reasons it differs from the plan below, and how to run
+it live in [crb-fr3-inference.md](crb-fr3-inference.md#action-chunk-execution) — that's
+the authoritative reference now, not this section.
 
-### 2.1 — Prerequisites
+What changed vs. the original plan, and why:
 
-- [ ] `franka_ros2` installed on robot PC
-- [ ] `libfranka` version matches robot firmware
-- [ ] `ros-kilted-moveit` installed
-- [ ] `panda_EE` TF frame published: `ros2 run tf2_ros tf2_echo panda_link0 panda_EE`
+- **No `moveit_py`.** It can't run as a thin client to the NUC's move_group (it needs
+  `robot_description`/SRDF loaded in-process, which requires the Humble-only
+  `franka_description` — not available on the Kilted laptop). Superseded by raw
+  `moveit_msgs` calls, matching a pattern already proven on this PC in a prior project.
+- **MoveIt calls don't run in `policy_client_node` (laptop).** A `MoveGroup.Goal` /
+  `GetCartesianPath.Request` sent laptop→NUC gets corrupted by the rmw-version gap
+  (laptop rmw_cyclonedds 4.x vs NUC 1.x) — move_group logs `Catastrophic failure`. The
+  MoveIt calls run in a separate node, `nuc/fr3_moveit_bridge.py`, **on the NUC**
+  (same rmw as move_group, no corruption). `policy_client_node` publishes the target
+  pose chunk as a `geometry_msgs/PoseArray` on `/polyumi/target_poses`; small messages
+  cross the rmw gap fine.
+- **Executes the whole action chunk, not just `actions[0]`.** A single-waypoint target at
+  10 Hz is a discrete hop the arm can't track; the client requests `n_action_steps` (8)
+  and publishes/executes it as one multi-waypoint Cartesian path (receding-horizon
+  control).
+- **Plan against SRDF group `fr3_arm`, not `fr3_manipulator`.** Only `fr3_arm` has an IK
+  solver entry in `kinematics.yaml`; `fr3_manipulator` returns `fraction=0.0` for every
+  Cartesian request on this Humble MoveIt version. `fr3_arm` still accepts
+  `fr3_hand_tcp` as `link_name`.
+- **No velocity-scaling field on Humble's `GetCartesianPath`** (added in a later MoveIt);
+  the bridge time-scales the planned trajectory instead.
+- **`franka_fr3_moveit_config/launch/move_group.launch.py` doesn't work as shipped** — it
+  references launch args without declaring them, and omits the OMPL/controller/planning-
+  scene-monitor params move_group needs to actually execute. `nuc/launch/fr3_move_group.launch.py`
+  is a fixed, enriched copy.
 
-### 2.2 — Cartesian execution in `policy_client_node`
-
-Add `MoveGroupInterface` (via `moveit_py`) to the node. Per tick, after step 7 above:
-
-```python
-# pseudocode
-def _execute_eef_target(self, action_8):
-    target = PoseStamped()
-    target.header.frame_id = 'panda_link0'
-    target.pose = array_to_pose(action_8[:7])   # xyz + quat
-    plan, fraction = move_group.compute_cartesian_path([target.pose], eef_step=0.01)
-    if fraction > 0.9:
-        move_group.execute(plan, wait=True)
-    else:
-        self.get_logger().warn(f'Cartesian plan only {fraction:.0%} complete, skipping')
-    # gripper width: action_8[7] → send to gripper controller (TBD)
-```
-
-`wait=True` keeps it simple at 10 Hz; each execution should fit within 100 ms at moderate speeds.
-
-- [ ] `moveit_py` importable in ROS2 node
-- [ ] EEF target execution tested in demo mode
-- [ ] back-and-forth motion from dummy server visible in RViz
-
-### 2.3 — Real robot bringup
-
-- [ ] FCI enabled on Desk UI
-- [ ] `ros2 launch franka_fer_moveit_config moveit.launch.py robot_ip:=<IP>` starts cleanly
-- [ ] joint states visible on `/franka_robot_state_broadcaster/...`
-- [ ] `panda_EE` TF frame updating live
-- [ ] dummy server back-and-forth runs on real robot (reduce amplitude first)
+- [x] `franka_ros2` / `franka_bringup` on the NUC (`fr3-bringup`)
+- [x] MoveIt (`move_group`) running on the NUC via `nuc/launch/fr3_move_group.launch.py`
+- [x] `fr3_hand_tcp` TF frame published and live on the laptop over DDS
+- [x] `nuc/fr3_moveit_bridge.py` implemented: plans+executes chunks via local move_group
+- [x] EEF target execution tested and verified moving the **real** robot (reduced velocity)
+- [ ] full 10 Hz dummy-sine loop run end-to-end (single chunks verified; continuous loop not yet)
 
 ---
 
 ## Phase 3 — Real inference server
+
+**Move to a dedicated GPU machine.** Through Phase 2 the (dummy) server runs on the
+laptop at `localhost:8000`. Here it moves to a separate GPU box reached over LAN:
+- Laptop gains a **second wired NIC** (USB-to-Ethernet) on its own subnet to the GPU
+  machine — distinct from the `10.0.0.x` NUC link. Verify the adapter enumerates
+  (`ip link` shows a second `enx*`) and that the two subnets / default route don't
+  collide. The NUC ↔ laptop CycloneDDS link is unaffected (different interface).
+- Point the client at it: `inference_demo.launch.xml inference_server_url:=http://<gpu-ip>:8000/predict_cartesian/`.
+- DDS stays laptop↔NUC only; the GPU link is plain HTTP, so no Cyclone changes.
 
 **Architecture decision:** subprocess isolation vs. direct import.
 
@@ -267,8 +312,8 @@ routes requests to it.
 
 | # | Question | Status |
 |---|---|---|
-| 1 | `franka_ros2` vs `franka_fer_moveit_config`: which package provides FCI control? | TBD |
+| 1 | Which package provides FCI control? | **Resolved:** NUC `franka_bringup` (`franka.launch.py arm_id:=fr3`) + `franka_fr3_moveit_config` controllers, run on the NUC. |
 | 2 | Does DP receive `agent_pos` as absolute or relative to first obs frame? | Assuming absolute (UMI convention) — confirm in dataset |
-| 3 | `moveit_py` availability in Kilted? | TBD |
-| 4 | Gripper width topic on Franka: `/franka_gripper/joint_states`? | TBD |
+| 3 | `moveit_py` availability — and on which machine (Phase 2)? | **Resolved:** not used at all. Raw `moveit_msgs` calls from a small node (`nuc/fr3_moveit_bridge.py`) running on the NUC, same-rmw as move_group — see Phase 2 / crb-fr3-inference.md. |
+| 4 | Gripper width topic on Franka? | **Resolved:** `/fr3_gripper/joint_states`; actions `/fr3_gripper/{grasp,move,gripper_action,homing}`. |
 | 5 | Subprocess vs direct import for Phase 3 | TBD |
