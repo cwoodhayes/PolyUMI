@@ -267,7 +267,7 @@ robot_state_publisher and collides with `fr3-bringup`.)
 **1c. NUC — start the MoveIt bridge** (fourth NUC terminal):
 
 ```bash
-python3 <repo>/nuc/fr3_moveit_bridge.py --ros-args -p execute:=true -p max_velocity_scaling:=0.05
+python3 <repo>/nuc/fr3_moveit_bridge.py --ros-args -p execute:=true -p max_velocity_scaling:=0.8
 ```
 
 Subscribes `/polyumi/target_poses` (a `PoseArray` — one action chunk) and drives the local
@@ -329,7 +329,7 @@ is a valid (trivial) chunk:
 ros2 run tf2_ros tf2_echo fr3_link0 fr3_hand_tcp     # note x,y,z + quat, then Ctrl-C
 ros2 topic pub -1 /polyumi/target_poses geometry_msgs/msg/PoseArray \
   "{header: {frame_id: fr3_link0}, poses: [{position: {x: 0.322, y: -0.001, z: 0.446}, \
-    orientation: {x: 0.999, y: -0.010, z: -0.054, w: 0.002}}]}"
+    orientation: {x: -1, y: 0, z: 0, w: 0}}]}"
 ```
 
 Use your measured pose with ~2 cm added to one axis (`-1` publishes once). The bridge
