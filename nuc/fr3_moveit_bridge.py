@@ -2,13 +2,15 @@
 """
 FR3 MoveIt bridge — runs ON THE NUC (ROS 2 Humble).
 
-Subscribes to target EEF poses on /polyumi/target_pose (published by the laptop's
-policy_client_node over DDS) and drives the arm via the LOCAL move_group. This node must
-run on the NUC, not the laptop: the laptop (rmw_cyclonedds 4.0.2, Kilted) and the NUC
-(rmw_cyclonedds 1.3.4, Humble) can exchange small messages like PoseStamped fine, but the
-large nested MoveIt action goals (MoveGroup.Goal / GetCartesianPath.Request) get corrupted
-across the rmw-major boundary ("invalid data size, at serdata.cpp:384" -> move_group
-"Catastrophic failure"). Keeping the move_group calls same-rmw (NUC-local) avoids that.
+Subscribes to target EEF pose chunks on /polyumi/target_poses (a PoseArray published by
+the laptop's policy_client_node over DDS — one action chunk from the inference server) and
+drives the arm via the LOCAL move_group, planning the whole chunk as a single multi-waypoint
+Cartesian path. This node must run on the NUC, not the laptop: the laptop (rmw_cyclonedds
+4.0.2, Kilted) and the NUC (rmw_cyclonedds 1.3.4, Humble) can exchange small messages like
+PoseArray fine, but the large nested MoveIt action goals (MoveGroup.Goal /
+GetCartesianPath.Request) get corrupted across the rmw-major boundary ("invalid data size,
+at serdata.cpp:384" -> move_group "Catastrophic failure"). Keeping the move_group calls
+same-rmw (NUC-local) avoids that.
 
 Self-contained (no PolyUMI package deps) so it runs from a plain clone on the NUC:
     source /opt/ros/humble/setup.bash
@@ -22,7 +24,7 @@ Set execute:=true to actually move the arm. Default is false (plan only) for saf
 
 import threading
 
-from geometry_msgs.msg import Pose, PoseStamped
+from geometry_msgs.msg import Pose, PoseArray
 from moveit_msgs.action import ExecuteTrajectory
 from moveit_msgs.msg import MoveItErrorCodes
 from moveit_msgs.srv import GetCartesianPath
@@ -43,11 +45,13 @@ DEFAULT_BASE = 'fr3_link0'
 
 MIN_CARTESIAN_FRACTION = 0.9
 PLAN_TIMEOUT_S = 5.0
-EXECUTE_TIMEOUT_S = 15.0
+# Chunks can be several waypoints at a low velocity scaling, so give execution more room
+# than a single-waypoint move would need.
+EXECUTE_TIMEOUT_S = 30.0
 
 
 class Fr3MoveItBridge(Node):
-    """Receive target EEF poses and drive the FR3 via the local move_group."""
+    """Receive target EEF pose chunks and drive the FR3 via the local move_group."""
 
     def __init__(self):
         """Declare params, create the target-pose subscription and move_group clients."""
@@ -58,7 +62,7 @@ class Fr3MoveItBridge(Node):
         self.declare_parameter('eef_link', DEFAULT_LINK)
         self.declare_parameter('base_frame', DEFAULT_BASE)
         self.declare_parameter('max_velocity_scaling', 0.1)
-        self.declare_parameter('target_topic', '/polyumi/target_pose')
+        self.declare_parameter('target_topic', '/polyumi/target_poses')
 
         self._execute = self.get_parameter('execute').get_parameter_value().bool_value
         self._group = self.get_parameter('planning_group').get_parameter_value().string_value
@@ -75,7 +79,7 @@ class Fr3MoveItBridge(Node):
         # flight so we always act on the freshest target without queuing up stale ones.
         self._busy = threading.Lock()
 
-        self.create_subscription(PoseStamped, topic, self._on_target, 10, callback_group=self._cbgroup)
+        self.create_subscription(PoseArray, topic, self._on_target, 10, callback_group=self._cbgroup)
 
         # Fail loudly at startup rather than on the first target pose.
         if not self._cartesian.wait_for_service(timeout_sec=10.0):
@@ -90,34 +94,38 @@ class Fr3MoveItBridge(Node):
         mode = 'EXECUTE (arm will move)' if self._execute else 'plan-only (no motion)'
         self.get_logger().info(f'fr3_moveit_bridge started — listening on {topic} — mode: {mode}')
 
-    def _on_target(self, msg: PoseStamped) -> None:
-        """Plan (and optionally execute) a Cartesian move to the received target pose."""
+    def _on_target(self, msg: PoseArray) -> None:
+        """Plan (and optionally execute) a multi-waypoint Cartesian path through the chunk."""
+        if not msg.poses:
+            self.get_logger().warn('Received empty target pose chunk, ignoring.')
+            return
         if not self._busy.acquire(blocking=False):
-            self.get_logger().warn('Dropped target pose: previous plan/execute still in flight')
+            self.get_logger().warn(f'Dropped target chunk ({len(msg.poses)} poses): previous plan/execute in flight')
             return
         try:
-            trajectory = self._plan_cartesian(msg.pose)
+            frame_id = msg.header.frame_id or self._base
+            trajectory = self._plan_cartesian(list(msg.poses), frame_id)
             if trajectory is None:
                 return
             if not self._execute:
-                self.get_logger().info('Plan OK (plan-only mode, not executing).')
+                self.get_logger().info(f'Plan OK ({len(msg.poses)} waypoints, plan-only mode, not executing).')
                 return
             if self._run_execute(trajectory):
-                self.get_logger().info('Executed target pose.')
+                self.get_logger().info(f'Executed chunk ({len(msg.poses)} waypoints).')
         finally:
             self._busy.release()
 
-    def _plan_cartesian(self, pose: Pose):
-        """Request a one-waypoint Cartesian path to pose; return the trajectory or None."""
+    def _plan_cartesian(self, poses: list[Pose], frame_id: str):
+        """Request a multi-waypoint Cartesian path through poses; return the trajectory or None."""
         req = GetCartesianPath.Request()
-        req.header.frame_id = self._base
+        req.header.frame_id = frame_id
         req.group_name = self._group
         req.link_name = self._link
         req.max_step = 0.01
         # NOTE: Humble's GetCartesianPath.Request has NO max_velocity/acceleration_scaling_factor
         # fields (added in a later MoveIt). Speed is limited via the trajectory time
         # parameterization instead — see _slow_trajectory() applied before execution.
-        req.waypoints = [pose]
+        req.waypoints = poses
 
         # Check the service is actually there first: call_async on a missing service never
         # completes, which would surface as a mystifying "planning timed out".

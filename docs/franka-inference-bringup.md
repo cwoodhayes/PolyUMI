@@ -226,48 +226,47 @@ curl -s -X POST http://localhost:8000/predict_cartesian/ \
 
 ---
 
-## Phase 2 — MoveIt2 Cartesian execution
+## Phase 2 — MoveIt2 Cartesian execution — DONE, verified on hardware
 
-Goal: wire returned EEF targets into actual robot motion. Test in **demo/simulation mode first**.
+**This section is historical planning; it predates implementation and got some things
+wrong.** The as-built design, the reasons it differs from the plan below, and how to run
+it live in [crb-fr3-inference.md](crb-fr3-inference.md#action-chunk-execution) — that's
+the authoritative reference now, not this section.
 
-### 2.1 — Prerequisites
+What changed vs. the original plan, and why:
 
-- [ ] `franka_ros2` / `franka_bringup` installed on the NUC (already present — `fr3-bringup`)
-- [ ] `libfranka` version matches robot firmware
-- [ ] MoveIt installed where `move_group` runs (NUC Humble vs laptop Kilted — see OQ #3)
-- [ ] `fr3_hand_tcp` TF frame published: `ros2 run tf2_ros tf2_echo fr3_link0 fr3_hand_tcp`
+- **No `moveit_py`.** It can't run as a thin client to the NUC's move_group (it needs
+  `robot_description`/SRDF loaded in-process, which requires the Humble-only
+  `franka_description` — not available on the Kilted laptop). Superseded by raw
+  `moveit_msgs` calls, matching a pattern already proven on this PC in a prior project.
+- **MoveIt calls don't run in `policy_client_node` (laptop).** A `MoveGroup.Goal` /
+  `GetCartesianPath.Request` sent laptop→NUC gets corrupted by the rmw-version gap
+  (laptop rmw_cyclonedds 4.x vs NUC 1.x) — move_group logs `Catastrophic failure`. The
+  MoveIt calls run in a separate node, `nuc/fr3_moveit_bridge.py`, **on the NUC**
+  (same rmw as move_group, no corruption). `policy_client_node` publishes the target
+  pose chunk as a `geometry_msgs/PoseArray` on `/polyumi/target_poses`; small messages
+  cross the rmw gap fine.
+- **Executes the whole action chunk, not just `actions[0]`.** A single-waypoint target at
+  10 Hz is a discrete hop the arm can't track; the client requests `n_action_steps` (8)
+  and publishes/executes it as one multi-waypoint Cartesian path (receding-horizon
+  control).
+- **Plan against SRDF group `fr3_arm`, not `fr3_manipulator`.** Only `fr3_arm` has an IK
+  solver entry in `kinematics.yaml`; `fr3_manipulator` returns `fraction=0.0` for every
+  Cartesian request on this Humble MoveIt version. `fr3_arm` still accepts
+  `fr3_hand_tcp` as `link_name`.
+- **No velocity-scaling field on Humble's `GetCartesianPath`** (added in a later MoveIt);
+  the bridge time-scales the planned trajectory instead.
+- **`franka_fr3_moveit_config/launch/move_group.launch.py` doesn't work as shipped** — it
+  references launch args without declaring them, and omits the OMPL/controller/planning-
+  scene-monitor params move_group needs to actually execute. `nuc/launch/fr3_move_group.launch.py`
+  is a fixed, enriched copy.
 
-### 2.2 — Cartesian execution in `policy_client_node`
-
-Add `MoveGroupInterface` (via `moveit_py`) to the node. Per tick, after step 7 above:
-
-```python
-# pseudocode
-def _execute_eef_target(self, action_8):
-    target = PoseStamped()
-    target.header.frame_id = 'fr3_link0'
-    target.pose = array_to_pose(action_8[:7])   # xyz + quat
-    plan, fraction = move_group.compute_cartesian_path([target.pose], eef_step=0.01)
-    if fraction > 0.9:
-        move_group.execute(plan, wait=True)
-    else:
-        self.get_logger().warn(f'Cartesian plan only {fraction:.0%} complete, skipping')
-    # gripper width: action_8[7] → send to gripper controller (TBD)
-```
-
-`wait=True` keeps it simple at 10 Hz; each execution should fit within 100 ms at moderate speeds.
-
-- [ ] `moveit_py` importable in ROS2 node
-- [ ] EEF target execution tested in demo mode
-- [ ] back-and-forth motion from dummy server visible in RViz
-
-### 2.3 — Real robot bringup
-
-- [ ] FCI enabled on Desk UI
-- [ ] NUC `fr3-bringup` (`franka_bringup`, `arm_id:=fr3`) + `fr3-arm-controller` start cleanly
-- [ ] joint states visible on `/franka_robot_state_broadcaster/...`
-- [ ] `fr3_hand_tcp` TF frame updating live (over DDS, on the laptop)
-- [ ] dummy server back-and-forth runs on real robot (reduce amplitude first)
+- [x] `franka_ros2` / `franka_bringup` on the NUC (`fr3-bringup`)
+- [x] MoveIt (`move_group`) running on the NUC via `nuc/launch/fr3_move_group.launch.py`
+- [x] `fr3_hand_tcp` TF frame published and live on the laptop over DDS
+- [x] `nuc/fr3_moveit_bridge.py` implemented: plans+executes chunks via local move_group
+- [x] EEF target execution tested and verified moving the **real** robot (reduced velocity)
+- [ ] full 10 Hz dummy-sine loop run end-to-end (single chunks verified; continuous loop not yet)
 
 ---
 
@@ -315,6 +314,6 @@ routes requests to it.
 |---|---|---|
 | 1 | Which package provides FCI control? | **Resolved:** NUC `franka_bringup` (`franka.launch.py arm_id:=fr3`) + `franka_fr3_moveit_config` controllers, run on the NUC. |
 | 2 | Does DP receive `agent_pos` as absolute or relative to first obs frame? | Assuming absolute (UMI convention) — confirm in dataset |
-| 3 | `moveit_py` availability — and on which machine (Phase 2)? | TBD. Now a **Humble** (NUC) vs **Kilted** (laptop) question — see Phase 2 / crb-fr3-inference.md. |
+| 3 | `moveit_py` availability — and on which machine (Phase 2)? | **Resolved:** not used at all. Raw `moveit_msgs` calls from a small node (`nuc/fr3_moveit_bridge.py`) running on the NUC, same-rmw as move_group — see Phase 2 / crb-fr3-inference.md. |
 | 4 | Gripper width topic on Franka? | **Resolved:** `/fr3_gripper/joint_states`; actions `/fr3_gripper/{grasp,move,gripper_action,homing}`. |
 | 5 | Subprocess vs direct import for Phase 3 | TBD |

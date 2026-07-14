@@ -26,7 +26,7 @@ REQUIRED_OBS_KEYS = {'image', 'agent_pos'}
 AGENT_POS_DIM = 8  # [x, y, z, qx, qy, qz, qw, gripper_width]
 OSCILLATION_AMPLITUDE_M = 0.05
 OSCILLATION_PERIOD_STEPS = 20  # full cycle over this many /predict calls
-DEFAULT_HOME_POSE = '0.3 -0.1 0.5 0 1 0 0 0.4'  # xyz qxqyqzqw gripper
+DEFAULT_HOME_POSE = '0.56 0.13 0.25 -1 0 0 0 0.4'  # xyz qxqyqzqw gripper
 
 
 class PredictRequest(BaseModel):
@@ -73,7 +73,7 @@ app = FastAPI(title='PolyUMI Dummy Inference Server', lifespan=_lifespan)
 
 @app.post('/predict_cartesian/', response_model=PredictResponse)
 def predict_cartesian(req: PredictRequest) -> PredictResponse:
-    """Return a sinusoidally oscillating EEF pose for bringup testing."""
+    """Return an n_action_steps-long chunk of a sinusoidally oscillating EEF pose."""
     global _call_count
 
     # Validate observation keys
@@ -93,17 +93,23 @@ def predict_cartesian(req: PredictRequest) -> PredictResponse:
             detail=f'agent_pos must have shape [{req.n_obs_steps}, {AGENT_POS_DIM}]',
         )
 
-    # Oscillate X around the fixed home pose (set via HOME_POSE env var at startup)
-    phase = 2 * math.pi * _call_count / OSCILLATION_PERIOD_STEPS
-    delta_x = OSCILLATION_AMPLITUDE_M * math.sin(phase)
-    _call_count += 1
-
-    target = _home_pose.copy()
-    target[0] += delta_x
-
+    # Oscillate X around the fixed home pose (set via HOME_POSE env var at startup).
+    # Return a genuine forward-looking chunk — one pose per step, phase advancing by one
+    # OSCILLATION_PERIOD_STEPS-th per step — rather than n_return copies of a single pose,
+    # so the client has an actual multi-waypoint path to plan+execute (not n identical
+    # points). _call_count advances by the full chunk length so consecutive calls continue
+    # the sine smoothly instead of restarting from the same phase.
     model_n_action_steps = 8  # matches training config n_action_steps
     n_return = min(req.n_action_steps, model_n_action_steps)
-    actions = [target.tolist() for _ in range(n_return)]
+
+    actions = []
+    for i in range(n_return):
+        phase = 2 * math.pi * (_call_count + i) / OSCILLATION_PERIOD_STEPS
+        delta_x = OSCILLATION_AMPLITUDE_M * math.sin(phase)
+        target = _home_pose.copy()
+        target[0] += delta_x
+        actions.append(target.tolist())
+    _call_count += n_return
 
     return PredictResponse(actions=actions, n_action_steps=n_return)
 

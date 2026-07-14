@@ -26,7 +26,7 @@ enp0s31f6 = 10.0.0.1/24            10.0.0.x      enx00249b860356 = 10.0.0.2/24
   - policy_client_node ──HTTP──┐                  - fr3_moveit_bridge  (nuc/fr3_moveit_bridge.py)
   - dummy_server (localhost:8000) ◄┘              - publishes fr3_* TF + joint states
         │                                         - enp89s0 = 192.168.51.10 → robot @ .20
-        └── /polyumi/target_pose (PoseStamped) ──────────► fr3_moveit_bridge ──► move_group
+        └── /polyumi/target_poses (PoseArray) ──────────► fr3_moveit_bridge ──► move_group
 ```
 
 The PolyUMI ROS2 nodes use only distro-agnostic APIs (`rclpy`, `sensor_msgs`,
@@ -35,11 +35,27 @@ stack is Humble-only and stays on the NUC; the two machines interoperate purely 
 the DDS wire level.
 
 **Motion execution is split deliberately.** The laptop does *not* call MoveIt — it
-publishes a target EEF pose (`geometry_msgs/PoseStamped`) on `/polyumi/target_pose`,
-and the NUC-side `fr3_moveit_bridge` does all the MoveIt calls against its **local**
-move_group. This is not a style choice: large nested MoveIt action goals get corrupted
-across the laptop/NUC rmw-version gap (see [rmw mismatch](#rmw-version-mismatch--what-is-and-isnt-harmless)).
-Small messages like `PoseStamped` cross fine, so the pose is the interop boundary.
+publishes the returned inference **action chunk** as a `geometry_msgs/PoseArray` on
+`/polyumi/target_poses` (one waypoint per action step, `n_action_steps` long — see
+[chunk execution](#action-chunk-execution) below), and the NUC-side `fr3_moveit_bridge`
+does all the MoveIt calls against its **local** move_group, planning the whole chunk as
+one multi-waypoint Cartesian path. This is not a style choice: large nested MoveIt
+action goals get corrupted across the laptop/NUC rmw-version gap (see
+[rmw mismatch](#rmw-version-mismatch--what-is-and-isnt-harmless)). Small messages like
+`PoseArray` cross fine, so the pose chunk is the interop boundary.
+
+### Action-chunk execution
+
+`policy_client_node` requests an `n_action_steps`-long chunk from the inference server
+each tick (param `n_action_steps`, default **8**) and publishes the *whole chunk* as one
+`PoseArray`, rather than just `actions[0]`. This is deliberate, not incidental: at
+10 Hz a single-waypoint target is a discrete ~2 cm hop the arm cannot track in real
+time, and `fr3_moveit_bridge`'s skip-while-busy would drop nearly every tick. Publishing
+the full chunk lets `move_group` plan one smooth multi-waypoint Cartesian path per chunk
+(receding-horizon control, the standard UMI/DP execution pattern) instead of stuttering
+between unreachable single-step goals. The bridge still applies skip-while-busy at the
+*chunk* level — if a chunk is still executing when the next one is published, the new
+one is dropped and picked up on the next available tick.
 
 ### User PC (i.e. my personal Ubuntu laptop)
 
@@ -254,10 +270,13 @@ robot_state_publisher and collides with `fr3-bringup`.)
 python3 <repo>/nuc/fr3_moveit_bridge.py --ros-args -p execute:=true -p max_velocity_scaling:=0.05
 ```
 
-Subscribes `/polyumi/target_pose` and drives the local move_group. **`execute` defaults
-to `false`** (plan-only, no motion) — pass `execute:=true` to actually move the arm.
-`max_velocity_scaling` (default `0.1`) time-scales the trajectory; **start at `0.05`**
-with a hand on the e-stop. It logs `move_group found (compute_cartesian_path ready).` at
+Subscribes `/polyumi/target_poses` (a `PoseArray` — one action chunk) and drives the local
+move_group, planning the whole chunk as a single multi-waypoint Cartesian path.
+**`execute` defaults to `false`** (plan-only, no motion) — pass `execute:=true` to
+actually move the arm. `max_velocity_scaling` (default `0.1`, max `1.0` = the full speed
+move_group already planned at) time-scales the trajectory; **start low** (e.g. `0.1`–`0.3`)
+with a hand on the e-stop, then raise it once you trust the motion. It logs
+`move_group found (compute_cartesian_path ready).` at
 startup — if it instead says `NOT found after 10s`, step 1b isn't running.
 
 **2. Laptop — dummy inference server** (its own terminal):
@@ -292,24 +311,29 @@ source install/setup.bash           # (build first if needed: colcon build)
 ros2 launch polyumi_ros2 inference_demo.launch.xml pi_host:=<raspberry pi IP address>
 # default inference_server_url is http://localhost:8000/predict_cartesian/
 # To MOVE the arm (Phase 2), add: execute_motion:=true
-#   -> publishes targets on /polyumi/target_pose; needs steps 1b + 1c on the NUC.
+#   -> publishes each action chunk on /polyumi/target_poses; needs steps 1b + 1c on the NUC.
 #   Speed is set on the BRIDGE (step 1c max_velocity_scaling), not here.
+#   Chunk size is n_action_steps (default 8) -- see "Action-chunk execution" above.
 # Default is log-only: actions are logged, no pose published, arm does not move.
+# To iterate on FR3 motion alone without the Pi running, add: motion_only:=true
+#   -> skips pi_receiver_node (no ZMQ connection attempt to the Pi). GoPro + foxglove
+#   still run (policy_client_node needs the GoPro image to fill its observation buffer).
 ```
 
-**Testing motion without the full loop.** To move the arm one step at a time (rather than
-the 10 Hz dummy oscillation), skip step 4 and publish a single pose by hand from the
-laptop — read the current pose, then target a small offset:
+**Testing motion without the full loop.** To move the arm through one chunk by hand
+(rather than the 10 Hz dummy oscillation), skip step 4 and publish a `PoseArray` directly
+from the laptop — read the current pose, then target a small offset. A single-pose array
+is a valid (trivial) chunk:
 
 ```bash
 ros2 run tf2_ros tf2_echo fr3_link0 fr3_hand_tcp     # note x,y,z + quat, then Ctrl-C
-ros2 topic pub -1 /polyumi/target_pose geometry_msgs/msg/PoseStamped \
-  "{header: {frame_id: fr3_link0}, pose: {position: {x: 0.322, y: -0.001, z: 0.446}, \
-    orientation: {x: 0.999, y: -0.010, z: -0.054, w: 0.002}}}"
+ros2 topic pub -1 /polyumi/target_poses geometry_msgs/msg/PoseArray \
+  "{header: {frame_id: fr3_link0}, poses: [{position: {x: 0.322, y: -0.001, z: 0.446}, \
+    orientation: {x: 0.999, y: -0.010, z: -0.054, w: 0.002}}]}"
 ```
 
 Use your measured pose with ~2 cm added to one axis (`-1` publishes once). The bridge
-should log `Executed target pose.` and the arm should creep to it.
+should log `Executed chunk (1 waypoints).` and the arm should creep to it.
 
 Confirm the loop is live: `policy_client_node` logs `action x=… y=… z=… grip=…`
 at ~10 Hz, and Foxglove (`ws://localhost:8765`, using the config in `ros2_ws/src/polyumi_ros2/foxglove/layouts/stream_demo.json`) shows the GoPro, the Pi

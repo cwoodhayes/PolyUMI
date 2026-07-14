@@ -10,21 +10,27 @@
     ros2 launch polyumi_ros2 inference_demo.launch.xml pi_host:=10.106.3.110
     ros2 launch polyumi_ros2 inference_demo.launch.xml \
         inference_server_url:=http://192.168.x.x:8000/predict_cartesian/   # Phase 3: remote GPU box
+    ros2 launch polyumi_ros2 inference_demo.launch.xml \
+        execute_motion:=true motion_only:=true   # FR3 motion only, no Pi needed
 -->
 <launch>
   <arg name="inference_server_url" default="http://localhost:8000/predict_cartesian/"/>
   <!-- Phase 2 motion execution. Off by default: the arm does NOT move until this is
-       true. When true, publishes target EEF poses on /polyumi/target_pose; the NUC-side
-       fr3_moveit_bridge drives move_group. Requires move_group + the bridge running on
-       the FR3 NUC (see docs/crb-fr3-inference.md). -->
+       true. When true, publishes each action chunk as a PoseArray on /polyumi/target_poses;
+       the NUC-side fr3_moveit_bridge drives move_group. Requires move_group + the bridge
+       running on the FR3 NUC (see docs/crb-fr3-inference.md). -->
   <arg name="execute_motion" default="false"/>
   <!-- Forwarded to stream_demo.launch.xml; defaults mirror that file. -->
   <arg name="pi_host" default="10.106.10.62"/>
   <arg name="video_device" default="/dev/video2"/>
+  <!-- Skip pi_receiver_node (no ZMQ connection to the Pi) for FR3-motion-only testing when
+       the Pi isn't running / isn't needed — e.g. iterating on chunk execution at the arm. -->
+  <arg name="motion_only" default="false"/>
 
   <include file="$(find-pkg-share polyumi_ros2)/launch/stream_demo.launch.xml">
     <arg name="pi_host" value="$(var pi_host)"/>
     <arg name="video_device" value="$(var video_device)"/>
+    <arg name="motion_only" value="$(var motion_only)"/>
   </include>
 
   <node pkg="polyumi_ros2" exec="policy_client_node" name="policy_client_node" output="screen">

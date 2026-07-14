@@ -3,6 +3,8 @@
   <arg name="pi_host" description="IP address or dns name of the Raspberry Pi"
     default="10.106.10.62"/>
   <arg name="video_device" description="Video device to use for the camera node" default="/dev/video2"/>
+  <arg name="motion_only" description="Skip pi_receiver_node (don't connect to the Pi's ZMQ video/audio streams)"
+    default="false"/>
 
   <include file="$(find-pkg-share foxglove_bridge)/launch/foxglove_bridge_launch.xml">
     <arg name="port" value="8765"/>
@@ -20,8 +22,8 @@
            value="['image_transport/raw', 'image_transport/compressed']"/>
   </node>
 
-  <node pkg="polyumi_ros2" exec="pi_receiver_node" 
-    name="pi_receiver" output="screen" namespace="pi">
+  <node pkg="polyumi_ros2" exec="pi_receiver_node"
+    name="pi_receiver" output="screen" namespace="pi" unless="$(var motion_only)">
     <param name="pi_host" value="$(var pi_host)"/>
   </node>
 
