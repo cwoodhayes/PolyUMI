@@ -2,7 +2,8 @@ r"""
 ROS2 node that drives the Franka arm using a remote diffusion policy inference server.
 
 At each control tick the node:
-  1. Reads the latest wrist camera image and end-effector pose.
+  1. Reads the latest wrist camera image and a latency-compensated end-effector pose (looked
+     up in TF at now - latency.gopro, to align with when the image was actually captured).
   2. Maintains a short history window (n_obs_steps).
   3. POSTs observations to /predict_cartesian/ on the inference server, requesting an
      n_action_steps-length action chunk.
@@ -19,24 +20,22 @@ Usage:
 import base64
 import json
 import threading
-
+import urllib.error
+import urllib.request
 from collections import deque
 
 import cv2
 import numpy as np
 import rclpy
 import rclpy.time
-import urllib.request
-import urllib.error
+import tf2_ros
+from geometry_msgs.msg import Pose, PoseArray
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import Image
-
-import tf2_ros
-from tf2_ros import LookupException, ConnectivityException, ExtrapolationException  # type: ignore[attr-defined]
-
-from geometry_msgs.msg import Pose, PoseArray
+from tf2_ros import ConnectivityException, ExtrapolationException, LookupException  # type: ignore[attr-defined]
 
 
 class PolicyClientNode(Node):
@@ -66,14 +65,17 @@ class PolicyClientNode(Node):
         # bridge's skip-while-busy would drop almost every tick. A full chunk lets move_group
         # plan one smooth path instead. Must be <= the model's n_action_steps (dummy: 8).
         self.declare_parameter('n_action_steps', 8)
-        # Per-component system latencies (seconds), as measured by calibration scripts.
-        # Loaded from config/latency.yaml via the inference launch file; not yet consumed
-        # for compensation, just plumbed through and logged.
-        self.declare_parameter('latency.gopro_s', 0.0)
+        # Per-component system latencies (seconds), as measured by calibration scripts and
+        # loaded from config/latency.yaml via the inference launch file. Only gopro is
+        # currently consumed (see _lookup_agent_pos); the rest are logged for now.
+        self.declare_parameter('latency.gopro', 0.0)
         self.declare_parameter('latency.finger_cam', 0.0)
         self.declare_parameter('latency.piezo_mic', 0.0)
         self.declare_parameter('latency.proprio', 0.0)
         self.declare_parameter('latency.arm_exec', 0.0)
+        # How far back (seconds) the EE-pose TF buffer retains history — must be >= the
+        # largest latency being compensated for (see _lookup_agent_pos).
+        self.declare_parameter('buffers.ee_pose_s', 1.0)
 
         self._url = self.get_parameter('inference_server_url').get_parameter_value().string_value
         self._n_obs_steps = self.get_parameter('n_obs_steps').get_parameter_value().integer_value
@@ -86,20 +88,25 @@ class PolicyClientNode(Node):
         control_hz = self.get_parameter('control_hz').get_parameter_value().double_value
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
         self._latency = {
-            'gopro_s': self.get_parameter('latency.gopro_s').get_parameter_value().double_value,
+            'gopro': self.get_parameter('latency.gopro').get_parameter_value().double_value,
             'finger_cam': self.get_parameter('latency.finger_cam').get_parameter_value().double_value,
             'piezo_mic': self.get_parameter('latency.piezo_mic').get_parameter_value().double_value,
             'proprio': self.get_parameter('latency.proprio').get_parameter_value().double_value,
             'arm_exec': self.get_parameter('latency.arm_exec').get_parameter_value().double_value,
         }
+        self._ee_pose_buffer_s = self.get_parameter('buffers.ee_pose_s').get_parameter_value().double_value
 
         # History buffers — each entry: (image_float32 [H,W,C], agent_pos [8])
         self._obs_buffer: deque = deque(maxlen=self._n_obs_steps)
         self._latest_image: np.ndarray | None = None
         self._latest_image_lock = threading.Lock()
 
-        # TF
-        self._tf_buffer = tf2_ros.Buffer()
+        # TF — cache_time sized from buffers.ee_pose_s so a pose from up to that far back can
+        # still be looked up (needed to time-align with the delayed gopro frame; see
+        # _lookup_agent_pos). tf2's buffer already interpolates (linear + slerp) between the
+        # two nearest cached transforms for a historical lookup_transform() call, so there's
+        # no need for a separate hand-rolled pose buffer.
+        self._tf_buffer = tf2_ros.Buffer(cache_time=Duration(seconds=self._ee_pose_buffer_s))
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
 
         # Motion execution (Phase 2). The MoveIt calls run in a bridge node ON THE NUC
@@ -128,7 +135,7 @@ class PolicyClientNode(Node):
         mode = 'EXECUTE (arm will move)' if self._execute_motion else 'log-only (no motion)'
         self.get_logger().info(f'policy_client_node started — server: {self._url} — mode: {mode}')
         latency_str = ' '.join(f'{name}={seconds}s' for name, seconds in self._latency.items())
-        self.get_logger().info(f'latency config — {latency_str}')
+        self.get_logger().info(f'latency config — {latency_str} (ee_pose buffer: {self._ee_pose_buffer_s}s)')
 
     # ------------------------------------------------------------------
     # Subscribers
@@ -204,11 +211,20 @@ class PolicyClientNode(Node):
             self._tick_lock.release()
 
     def _lookup_agent_pos(self) -> np.ndarray | None:
-        """Look up eef_frame in base_frame and return [x,y,z,qx,qy,qz,qw, gripper=0]."""
+        """
+        Look up eef_frame in base_frame, time-aligned to the gopro frame, and return the pose.
+
+        The gopro image being paired with this pose in the current observation was captured
+        ~latency.gopro seconds ago (capture + encode + wifi delay), so we look up the EE pose
+        as of that same past instant — not the current one — to keep image and proprio in
+        sync. tf2's Buffer interpolates (linear + slerp) between the two nearest cached
+        transforms automatically; buffers.ee_pose_s sizes the buffer's cache_time so that
+        lookup stays in range.
+        """
+        target_time = self.get_clock().now() - Duration(seconds=self._latency['gopro']) + \
+            Duration(seconds=self._latency['proprio'])
         try:
-            # rclpy.time.Time() (zero) requests the latest available transform, avoiding
-            # ExtrapolationException when the buffer hasn't caught up to get_clock().now().
-            tf = self._tf_buffer.lookup_transform(self._base_frame, self._eef_frame, rclpy.time.Time())
+            tf = self._tf_buffer.lookup_transform(self._base_frame, self._eef_frame, target_time)
         except (LookupException, ConnectivityException, ExtrapolationException) as e:
             self._warn_throttled(f'TF lookup failed: {e}')
             return None

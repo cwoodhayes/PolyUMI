@@ -4,7 +4,7 @@
   ros__parameters:
     latency:
       # The latency of the gopro->ROS2 policy client node, in seconds.
-      gopro_s: 0.05
+      gopro: 0.05
       # Finger camera latency, in seconds, as above.
       finger_cam: 0.1
       # Piezo mic latency, in seconds, as above.
@@ -13,3 +13,8 @@
       proprio: 0.01
       # execution latency of the arm, in seconds, as above
       arm_exec: 0.01
+    buffers:
+      # How far back (seconds) the EE-pose TF buffer retains history, so a past pose can
+      # still be looked up/interpolated to align with a delayed observation (e.g. the gopro
+      # frame). Must be >= the largest latency above that gets compensated for.
+      ee_pose_s: 1.0
