@@ -6,9 +6,9 @@
       # The latency of the gopro->ROS2 policy client node, in seconds.
       gopro: 0.05
       # Finger camera latency, in seconds, as above.
-      finger_cam: 0.1
+      finger_cam: 0.0
       # Piezo mic latency, in seconds, as above.
-      piezo_mic: 0.1
+      piezo_mic: 0.0
       # latency of the EE position measurements from the arm, in seconds, as above.
       proprio: 0.01
       # execution latency of the arm, in seconds, as above

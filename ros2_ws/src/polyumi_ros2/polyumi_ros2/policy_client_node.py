@@ -7,7 +7,9 @@ At each control tick the node:
   2. Maintains a short history window (n_obs_steps).
   3. POSTs observations to /predict_cartesian/ on the inference server, requesting an
      n_action_steps-length action chunk.
-  4. Logs the chunk. If execute_motion is set, publishes the whole chunk as a PoseArray
+  4. Drops the leading actions of the returned chunk that are already stale by the time the
+     arm could act on them (observation + inference + arm-execution latency).
+  5. Logs the chunk. If execute_motion is set, publishes the remaining chunk as a PoseArray
      on /polyumi/target_poses for the NUC-side fr3_moveit_bridge to plan+execute as one
      Cartesian path (receding-horizon control) — see docs/crb-fr3-inference.md.
 
@@ -19,7 +21,9 @@ Usage:
 
 import base64
 import json
+import math
 import threading
+import time
 import urllib.error
 import urllib.request
 from collections import deque
@@ -96,6 +100,19 @@ class PolicyClientNode(Node):
         }
         self._ee_pose_buffer_s = self.get_parameter('buffers.ee_pose_s').get_parameter_value().double_value
 
+        # Aggregate latencies used to drop stale actions (see _n_stale_actions).
+        # latency_obs — how old an observation already is by the time the server sees it.
+        # Hardcoded to the gopro path for now since the image is the only delayed modality the
+        # policy consumes; once finger_cam/piezo_mic feed the policy too this becomes the max
+        # over all of them, as the observation is only as fresh as its slowest stream.
+        self._latency_obs = self._latency['gopro']
+        # latency_act — delay between publishing a target and the arm actually moving.
+        self._latency_act = self._latency['arm_exec']
+        # Spacing between consecutive actions within a chunk. Assumes the policy's action
+        # horizon runs at the observation/control rate (standard for UMI/diffusion policy);
+        # if a model is ever trained at a different action rate this needs its own parameter.
+        self._action_dt = 1.0 / control_hz
+
         # History buffers — each entry: (image_float32 [H,W,C], agent_pos [8])
         self._obs_buffer: deque = deque(maxlen=self._n_obs_steps)
         self._latest_image: np.ndarray | None = None
@@ -136,6 +153,10 @@ class PolicyClientNode(Node):
         self.get_logger().info(f'policy_client_node started — server: {self._url} — mode: {mode}')
         latency_str = ' '.join(f'{name}={seconds}s' for name, seconds in self._latency.items())
         self.get_logger().info(f'latency config — {latency_str} (ee_pose buffer: {self._ee_pose_buffer_s}s)')
+        self.get_logger().info(
+            f'latency budget — obs={self._latency_obs}s act={self._latency_act}s '
+            f'(+ measured inference RTT) vs action_dt={self._action_dt}s'
+        )
 
     # ------------------------------------------------------------------
     # Subscribers
@@ -235,6 +256,24 @@ class PolicyClientNode(Node):
         gripper_width = 0.0
         return np.array([t.x, t.y, t.z, r.x, r.y, r.z, r.w, gripper_width], dtype=np.float64)
 
+    def _n_stale_actions(self, latency_inference: float) -> int:
+        """
+        Count the leading actions in a chunk that are already in the past by execution time.
+
+        Action i in a chunk is the policy's target for t_obs + i * action_dt, where t_obs is
+        the instant the observation was captured. Three delays sit between that instant and
+        the arm actually moving: the observation was already latency_obs old when it was sent,
+        the server took latency_inference (measured round-trip) to answer, and the arm needs
+        latency_act to start moving. Actions whose target instant falls inside that window have
+        already elapsed — executing them would drag the arm backwards through the trajectory —
+        so skip to the first one that is still in the future.
+
+        :param latency_inference: measured round-trip time of the /predict_cartesian/ POST.
+        :return: number of actions to drop from the front of the chunk.
+        """
+        total_latency = self._latency_obs + latency_inference + self._latency_act
+        return math.ceil(total_latency / self._action_dt)
+
     def _post_and_act(self, payload: dict) -> None:
         """POST payload to the inference server, log the returned action, and optionally execute it."""
         body = json.dumps(payload).encode()
@@ -245,20 +284,38 @@ class PolicyClientNode(Node):
             method='POST',
         )
         try:
+            t_sent = time.monotonic()
             with urllib.request.urlopen(req, timeout=0.5) as resp:
                 result = json.loads(resp.read())
+            latency_inference = time.monotonic() - t_sent
             actions = result['actions']
-            first = actions[0]
-            self.get_logger().info(
-                f'action chunk n={len(actions)} first: x={first[0]:.4f} y={first[1]:.4f} '
-                f'z={first[2]:.4f} grip={first[7]:.3f}'
-            )
         except urllib.error.URLError as e:
             self.get_logger().error(f'Inference server unreachable: {e}')
             return
         except Exception as e:
             self.get_logger().error(f'POST failed: {e}')
             return
+
+        # Drop the leading actions that refer to instants already elapsed by the time the arm
+        # can act on them, so execution starts from the first still-future waypoint.
+        n_stale = self._n_stale_actions(latency_inference)
+        n_received = len(actions)
+        actions = actions[n_stale:]
+        if not actions:
+            self._warn_throttled(
+                f'Whole action chunk stale: dropped all {n_received} actions '
+                f'(latency obs={self._latency_obs:.3f}s + inference={latency_inference:.3f}s + '
+                f'act={self._latency_act:.3f}s exceeds chunk span {n_received * self._action_dt:.3f}s). '
+                f'Raise n_action_steps or reduce latency.'
+            )
+            return
+
+        first = actions[0]
+        self.get_logger().info(
+            f'action chunk n={len(actions)} (dropped {n_stale}/{n_received} stale, '
+            f'inference={latency_inference * 1000:.0f}ms) first: x={first[0]:.4f} y={first[1]:.4f} '
+            f'z={first[2]:.4f} grip={first[7]:.3f}'
+        )
 
         # Phase 2: publish the whole action chunk for the NUC bridge to plan+execute as one
         # Cartesian path (receding-horizon control). Non-blocking (unlike a direct MoveIt
