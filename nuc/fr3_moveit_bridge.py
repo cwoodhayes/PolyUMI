@@ -149,8 +149,18 @@ class Fr3MoveItBridge(Node):
         Humble's GetCartesianPath has no velocity_scaling field, so we stretch
         time_from_start by 1/vscale and scale velocities/accelerations down — the same
         path, run proportionally slower.
+
+        move_group already time-parameterizes the Cartesian path at full speed against the
+        URDF joint limits, so scale=1.0 means "as fast as MoveIt planned" and is the
+        ceiling: scaling above 1.0 would compress time below the planned profile and
+        exceed those limits, so it is clamped.
         """
-        scale = max(self._vscale, 1e-3)
+        scale = min(max(self._vscale, 1e-3), 1.0)
+        if self._vscale > 1.0:
+            self.get_logger().warn(
+                f'max_velocity_scaling={self._vscale} > 1.0 would exceed the planned joint '
+                'limits; clamping to 1.0 (already full planned speed).'
+            )
         jt = trajectory.joint_trajectory
         for pt in jt.points:
             total_ns = pt.time_from_start.sec * 1_000_000_000 + pt.time_from_start.nanosec
@@ -159,6 +169,12 @@ class Fr3MoveItBridge(Node):
             pt.time_from_start.nanosec = total_ns % 1_000_000_000
             pt.velocities = [v * scale for v in pt.velocities]
             pt.accelerations = [a * scale * scale for a in pt.accelerations]
+        if jt.points:
+            end = jt.points[-1].time_from_start
+            self.get_logger().info(
+                f'Executing {len(jt.points)} pts over {end.sec + end.nanosec / 1e9:.2f}s '
+                f'(vscale={scale:g}; raise it to go faster, 1.0 = full planned speed)'
+            )
         return trajectory
 
     def _run_execute(self, trajectory) -> bool:
