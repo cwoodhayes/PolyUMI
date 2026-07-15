@@ -100,6 +100,7 @@ class PolicyClientNode(Node):
             'arm_exec': self.get_parameter('latency.arm_exec').get_parameter_value().double_value,
         }
         self._ee_pose_buffer_s = self.get_parameter('buffers.ee_pose_s').get_parameter_value().double_value
+        self._validate_params(control_hz)
 
         # Observation age is no longer summed from constants — it's measured from the frame's
         # own stamp (see _n_stale_actions). latency.gopro still converts that stamp to a true
@@ -163,6 +164,42 @@ class PolicyClientNode(Node):
             f'latency budget — measured observation age (capture→response) + '
             f'act={self._latency_act}s vs action_dt={self._action_dt}s'
         )
+
+    def _validate_params(self, control_hz: float) -> None:
+        """
+        Fail fast on parameter values that would corrupt the time math rather than error.
+
+        These all feed divisions and instant arithmetic, where a bad value degrades quietly
+        instead of raising: a negative latency puts t_obs in the future and makes the
+        stale-action count negative; a non-positive ee_pose buffer leaves TF with no history,
+        so every time-aligned lookup fails and the node just logs TF errors forever. A config
+        typo should say so at startup, not surface as a mystery three layers down.
+
+        :raises ValueError: on any non-positive rate/buffer or negative latency.
+        """
+        errors = []
+        if control_hz <= 0:
+            errors.append(f'control_hz must be > 0, got {control_hz}')
+        if self._ee_pose_buffer_s <= 0:
+            errors.append(f'buffers.ee_pose_s must be > 0, got {self._ee_pose_buffer_s}')
+        if self._n_obs_steps < 1:
+            errors.append(f'n_obs_steps must be >= 1, got {self._n_obs_steps}')
+        if self._n_action_steps < 1:
+            errors.append(f'n_action_steps must be >= 1, got {self._n_action_steps}')
+        for name, seconds in self._latency.items():
+            if seconds < 0:
+                errors.append(f'latency.{name} must be >= 0, got {seconds}')
+        # The TF buffer must reach back at least as far as the instant we look poses up at,
+        # or _lookup_agent_pos asks for a transform the buffer has already dropped.
+        compensated = self._latency['gopro'] - self._latency['proprio']
+        if compensated > self._ee_pose_buffer_s:
+            errors.append(
+                f'buffers.ee_pose_s ({self._ee_pose_buffer_s}s) must be >= the compensated '
+                f'lookup offset (latency.gopro - latency.proprio = {compensated}s), or the '
+                f'pose lookup will fall outside the TF buffer'
+            )
+        if errors:
+            raise ValueError('Invalid policy_client_node configuration: ' + '; '.join(errors))
 
     # ------------------------------------------------------------------
     # Subscribers
@@ -306,12 +343,18 @@ class PolicyClientNode(Node):
         point directly (capture pipeline + tick + inference round trip) instead of summing
         assumed constants for them; only latency_act is still in the future and must be added.
 
+        Clamped at 0: if t_obs somehow lands in the future (clock skew between the camera
+        driver's stamps and this node), a negative count would slice from the *end* of the
+        chunk — `actions[-3:]` keeps the last three, jumping the arm ahead to the far-future
+        tail of the trajectory instead of dropping anything. No upper clamp is needed: a count
+        at or past the chunk length yields an empty slice, which the caller already reports.
+
         :param t_obs: instant the observation was captured (image stamp - latency.gopro).
-        :return: number of actions to drop from the front of the chunk.
+        :return: number of actions to drop from the front of the chunk, >= 0.
         """
         elapsed_since_obs = (self.get_clock().now() - t_obs).nanoseconds * 1e-9
         total_latency = elapsed_since_obs + self._latency_act
-        return math.ceil(total_latency / self._action_dt)
+        return max(0, math.ceil(total_latency / self._action_dt))
 
     def _post_and_act(self, payload: dict, t_obs: rclpy.time.Time) -> None:
         """
