@@ -8,6 +8,11 @@ Produces the flat layout that diffusion_policy's DexNexDataset expects::
       data/img      (T,256,256,3)  float32 in [0,1], gopro frames at 10 Hz
       data/state    (T,8)          float32  [x,y,z,qx,qy,qz,qw, gripper_m]
       data/action   (T,8)          float32  (copy of state; training computes relative traj)
+
+``state``/``action`` poses are the **gripper-base** frame, read from each episode's
+``eef/pose`` (preprocessing step 5). The world frame they sit in is whatever the pose source
+used (optitrack or slam) and is deliberately not normalized — it cancels out of the relative
+trajectory training computes, whereas the body frame does not.
       data/reward   (T,)           float32  zeros
       data/not_done (T,)           float32  1.0, last step of each episode 0.0
 
@@ -95,7 +100,6 @@ def _export_episode(
     root: zarr.Group,
     data_grp: zarr.Group,
     episode_key: str,
-    pose_source: str,
 ) -> int:
     """Resample one episode to HZ and append it to ``data_grp``. Returns the step count T."""
     # GoPro runs on its own clock; bring it into the finger (Pi) clock domain.
@@ -112,7 +116,7 @@ def _export_episode(
     target_ts = np.arange(t_start, t_end, 1.0 / HZ)
     t = len(target_ts)
 
-    # img, gripper width, and slam poses all live on the gopro frame grid → one index.
+    # img, gripper width, and eef pose all live on the gopro frame grid → one index.
     gidx = _nearest_idx(gopro_ts, target_ts)
     if np.any(np.diff(gidx) < 0):
         raise RuntimeError(
@@ -121,19 +125,23 @@ def _export_episode(
         )
     img = _decode_resized_frames(arr(ep, 'gopro/frames'), gidx)
 
-    if pose_source == 'optitrack':
-        pose = arr(root, 'optitrack/pose')[:][_nearest_idx(opti_ts, target_ts)]
-    elif pose_source == 'slam':
-        pose = arr(ep, 'gopro/slam_poses')[:][gidx]
-    else:
-        raise ValueError(f"pose_source must be 'optitrack' or 'slam', got {pose_source!r}")
-    pose = np.asarray(pose, dtype=np.float32)
+    # eef/pose is written by preprocessing step 5 and is already on the canonical gripper-base
+    # body frame. Reading the raw optitrack/slam poses here instead would put state in the
+    # marker-centroid or GoPro optical frame, neither of which is what the robot reports at
+    # inference — see EefPoseStep.
+    if 'eef/pose' not in ep:
+        raise RuntimeError(
+            f'{episode_key}: no eef/pose — run preprocessing step 5 (eef-pose) before exporting.'
+        )
+    pose_grp = grp(ep, 'eef')
+    pose = np.asarray(arr(ep, 'eef/pose')[:][gidx], dtype=np.float32)
+    pose_source = pose_grp.attrs.get('source', 'unknown')
 
     gripper = arr(ep, 'annotations/gripper_width/width_m')[:][gidx].astype(np.float32)
 
     if np.isnan(pose).any():
         raise RuntimeError(
-            f'{episode_key}: pose source {pose_source!r} contains NaN over the window '
+            f'{episode_key}: eef/pose (source {pose_source!r}) contains NaN over the window '
             f'({int(np.isnan(pose[:, 0]).sum())}/{t} steps). Refusing to write.'
         )
     if np.isnan(gripper).any():
@@ -162,10 +170,12 @@ def _export_episode(
 def export_scene_to_dp(
     scene_path: pathlib.Path,
     output_path: pathlib.Path,
-    pose_source: str = 'optitrack',
 ) -> int:
     """
     Export EPISODE sessions of a pzarr scene to a diffusion-policy ReplayBuffer zarr.
+
+    Poses come from ``eef/pose`` (preprocessing step 5), which has already resolved the
+    optitrack-vs-slam source choice and put the trajectory on the gripper-base frame.
 
     Returns the number of episodes written. MAPPING sessions are skipped.
     """
@@ -191,7 +201,7 @@ def export_scene_to_dp(
         if ep.attrs.get('session_type') == 'MAPPING':
             log.info(f'  {ep_key}: MAPPING session, skipping.')
             continue
-        total += _export_episode(ep, root, data, ep_key, pose_source)
+        total += _export_episode(ep, root, data, ep_key)
         episode_ends.append(total)
 
     meta.create_array('episode_ends', data=np.array(episode_ends, dtype=np.int64), compressor=_BLOSC)

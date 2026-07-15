@@ -4,6 +4,7 @@ ingest/main.py - PolyUMI ingest scripts to deal with pi's file & build pzarr sto
 See docs/data-format.md for an overview of the pzarr format.
 """
 
+import inspect
 import logging
 import os
 import pathlib
@@ -16,7 +17,11 @@ from rich.prompt import Confirm
 
 from polyumi_ingest.gopro_fetch import DEFAULT_THRESHOLD_MS, find_gopro_video
 from polyumi_ingest.pi_fetch import PiFetch
-from polyumi_ingest.preproc import run_preprocessing, run_preprocessing_on_recordings
+from polyumi_ingest.preproc import (
+    available_preprocessing_steps,
+    run_preprocessing,
+    run_preprocessing_on_recordings,
+)
 from polyumi_ingest.pzarr import FINGER_MP4, GOPRO_MP4
 from polyumi_ingest.video_helpers import encode_session_video
 
@@ -479,8 +484,18 @@ def preprocessing_pipeline(
         '--skip-gopro',
         help='Skip GoPro frame ingestion when auto-building missing pzarr stores.',
     ),
+    list_steps: bool = typer.Option(
+        False,
+        '--list',
+        '-l',
+        help='List the available preprocessing steps and exit, without touching any scene.',
+    ),
 ):
     """Run a preprocessing step, or the full preprocessing pipeline, on scene zarr stores."""
+    if list_steps:
+        _print_preprocessing_steps()
+        return
+
     # When no step is specified, auto-build scene.zarr for scenes that don't have one yet,
     # so `pingest pp` works end-to-end on a freshly fetched scene directory.
     auto_build = step is None
@@ -638,21 +653,49 @@ def export_dp(
         '-o',
         help='Output ReplayBuffer zarr path.',
     ),
-    pose_source: str = typer.Option(
-        'optitrack',
-        help="Pose source for state/action: 'optitrack' or 'slam'.",
-    ),
 ):
-    """Export a pzarr scene to a diffusion-policy ReplayBuffer zarr."""
+    """
+    Export a pzarr scene to a diffusion-policy ReplayBuffer zarr.
+
+    Poses come from eef/pose, so run preprocessing step 5 (eef-pose) first; that step also
+    picks the optitrack-vs-slam source.
+    """
     from polyumi_ingest.export.dp import export_scene_to_dp
 
     try:
-        n = export_scene_to_dp(scene_path, output_path, pose_source=pose_source)
+        n = export_scene_to_dp(scene_path, output_path)
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         log.error(str(e))
         raise typer.Exit(1)
 
     log.info(f'Exported {n} episode(s) → {output_path}')
+
+
+def _step_summary(step_cls: type) -> str:
+    """First line of a step class's docstring, with RST inline markup flattened for a terminal."""
+    doc = inspect.getdoc(step_cls)
+    if not doc:
+        return '(no description)'
+    return doc.splitlines()[0].replace('``', '')
+
+
+def _print_preprocessing_steps() -> None:
+    """Print the registered preprocessing steps, in execution order, with their summaries."""
+    from rich.console import Console
+    from rich.table import Table
+
+    table = Table(title='Preprocessing steps', title_justify='left', header_style='bold')
+    table.add_column('#', justify='right')
+    table.add_column('Name', style='bold')
+    table.add_column('What it does')
+    for step_cls in available_preprocessing_steps():
+        table.add_row(str(step_cls.step_number), step_cls.step_name, _step_summary(step_cls))
+
+    console = Console()
+    console.print()
+    console.print(table)
+    console.print('\nRun one:  [bold]pingest pp <#> --scene <scene>[/bold]')
+    console.print('Run all:  [bold]pingest pp --scene <scene>[/bold]\n')
 
 
 def _build_pzarr(scene_dir: pathlib.Path, skip_gopro: bool) -> None:

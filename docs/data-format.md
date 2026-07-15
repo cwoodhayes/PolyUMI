@@ -41,6 +41,9 @@ scene.zarr/
 │   │   ├── gyro                    (N_gyro, 3) float64 — [z, x, y] rad/s
 │   │   ├── gps                     (N_gps, 3) float64 — [lat, lon, alt]
 │   │   └── slam_poses              (N_gopro, 7) float64 — [x, y, z, qx, qy, qz, qw], NaN when tracking lost
+│   ├── eef/                        populated by step 5
+│   │   └── pose                    (N_gopro, 7) float64 — [x, y, z, qx, qy, qz, qw] on the
+│   │                               gripper-base body frame, gopro grid; NaN where unsolved
 │   ├── timestamps/
 │   │   ├── finger                  (N_finger,) float64 — UTC seconds
 │   │   ├── finger_piezo            (N_audio,) float64
@@ -117,6 +120,7 @@ Steps are tracked in `preprocessing_steps` (list of completed step numbers) in t
 | 2 | `orb-slam3` | gopro/frames, gopro/accl, gopro/gyro, timestamps | `gopro/slam_poses`, `annotations/slam/`, `.osa` atlas sidecar |
 | 3 | `slam-optitrack-align` | gopro/slam_poses, optitrack/pose, timestamps | `optitrack_to_slam_transform` in root `.zattrs` |
 | 4 | `aruco-gripper-width` | finger/frames, timestamps/finger | `annotations/gripper_width/` |
+| 5 | `eef-pose` | optitrack/pose or gopro/slam_poses, timestamps, `gripper_calib.yaml` | `eef/pose` |
 
 ## SLAM is a swappable step
 
@@ -131,7 +135,27 @@ If using ORB-SLAM3 specifically, its persistent atlas (keyframes + map points + 
 - `optitrack/pose` at the scene level: when external mocap is available for a scene, this is populated at ingest time and aligned to the SLAM frame via step 3
 - Future additional pose sources just become new arrays with their own timestamp arrays
 
-You can have multiple sources for the same scene and decide downstream which to use (or fuse them). The DP export step accepts a `pose_source` argument (`'optitrack'` or `'slam'`) to select which to use.
+You can have multiple sources for the same scene and decide downstream which to use (or fuse them).
+
+### `eef/pose` — the canonical trajectory
+
+**Raw pose sources are not directly usable by a policy, and they are not interchangeable.** Each reports a *different body frame*:
+
+| Source | Body frame it reports | Why that's wrong for a policy |
+|---|---|---|
+| `optitrack/pose` | the marker **rigid body** | Motive puts the origin at the marker centroid — an arbitrary point that moves whenever markers are re-stuck |
+| `gopro/slam_poses` | the GoPro **optical frame** | ~22 cm from the gripper, and not what the robot reports at inference |
+
+Step 5 (`eef-pose`) resolves this: it picks a source (OptiTrack preferred, SLAM as fallback), converts it onto the **gripper-base** body frame via the `config/gripper_calib.yaml` chain, resamples onto the GoPro frame grid, and writes `episode_N/eef/pose`. Downstream consumers read `eef/pose` and never the raw sources.
+
+The **world** frame is deliberately left as the source's own (OptiTrack frame or SLAM frame), recorded in the `world_frame` attr. That asymmetry is the whole point:
+
+- A shared **world** frame *cancels* out of the relative pose representation policies train on — `inv(T_0)·T_k` is invariant to a global re-frame. So normalizing it buys nothing.
+- A **body** offset does *not* cancel. It conjugates the relative transform: `inv(T_0·X)·(T_k·X) = inv(X)·(inv(T_0)·T_k)·X`, leaking a `(R − I)·x` error into the relative translation. With the real ~22 cm offset, a 30° wrist rotation injects **11 cm** of phantom translation. That is why this step is not optional.
+
+Attrs on the `eef` group record provenance: `source` (`optitrack`/`slam`), `world_frame`, `body_frame` (`gripper_base`), `grid` (`gopro`), and `n_nan`.
+
+> **At inference**, the robot must report this same physical point — the policy compares like with like or not at all. That means a mounting calibration between the PolyUMI gripper and the arm's flange, and an `eef_frame` on the ROS side that resolves to the gripper base rather than the stock tool frame. See [franka-inference-bringup.md](franka-inference-bringup.md).
 
 ## Gripper width from fiducials
 
@@ -160,7 +184,7 @@ These live alongside the zarr, not inside it:
 
 `pzarr` is the source of truth; downstream formats are exports produced on demand.
 
-- **Diffusion Policy ReplayBuffer zarr** (`pingest export-dp`): flat zarr layout with `data/{img,state,action,reward,not_done}` arrays resampled to 10 Hz on the GoPro frame grid, plus `meta/episode_ends`. State/action is an 8-vector `[x, y, z, qx, qy, qz, qw, gripper_m]`. Only `EPISODE`-typed sessions are exported; `MAPPING` sessions are skipped.
+- **Diffusion Policy ReplayBuffer zarr** (`pingest export-dp`): flat zarr layout with `data/{img,state,action,reward,not_done}` arrays resampled to 10 Hz on the GoPro frame grid, plus `meta/episode_ends`. State/action is an 8-vector `[x, y, z, qx, qy, qz, qw, gripper_m]`, read from `eef/pose` (so step 5 must have run) and therefore on the gripper-base frame. Only `EPISODE`-typed sessions are exported; `MAPPING` sessions are skipped.
 
 - **MCAP** (`pingest export-mcap`): one `.mcap` file per episode, with channels for finger image, GoPro image, both audio streams, IMU, GPS, SLAM pose, OptiTrack pose, ArUco annotations, and gripper width. Uses Foxglove JSON schemas; audio is chunked at 4096 samples per message.
 

@@ -304,7 +304,7 @@ def _write_slam_results(
 @register_preprocessing_step(step_number=2, step_name='orb-slam3')
 class OrbSlam3Step(PreprocessingStep):
     """
-    ORB-SLAM3 Monocular-Inertial SLAM preprocessing step.
+    Estimate per-frame GoPro poses from video + IMU via monocular-inertial ORB-SLAM3.
 
     Phase 1 (map building): exports the MAPPING episode as an mp4 video plus
     GoPro-style telemetry JSON, invokes the map-building binary, saves the
