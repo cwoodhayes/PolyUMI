@@ -8,13 +8,13 @@ Produces the flat layout that diffusion_policy's DexNexDataset expects::
       data/img      (T,256,256,3)  float32 in [0,1], gopro frames at 10 Hz
       data/state    (T,8)          float32  [x,y,z,qx,qy,qz,qw, gripper_m]
       data/action   (T,8)          float32  (copy of state; training computes relative traj)
+      data/reward   (T,)           float32  zeros
+      data/not_done (T,)           float32  1.0, last step of each episode 0.0
 
-``state``/``action`` poses are the **gripper-base** frame, read from each episode's
+``state``/``action`` poses are on the canonical **hand** frame, read from each episode's
 ``eef/pose`` (preprocessing step 5). The world frame they sit in is whatever the pose source
 used (optitrack or slam) and is deliberately not normalized — it cancels out of the relative
 trajectory training computes, whereas the body frame does not.
-      data/reward   (T,)           float32  zeros
-      data/not_done (T,)           float32  1.0, last step of each episode 0.0
 
 The store is written ``zarr_format=2`` (as the rest of pzarr is) so diffusion_policy,
 which is pinned to the zarr v2 API, can read it without importing anything from here.
@@ -125,7 +125,7 @@ def _export_episode(
         )
     img = _decode_resized_frames(arr(ep, 'gopro/frames'), gidx)
 
-    # eef/pose is written by preprocessing step 5 and is already on the canonical gripper-base
+    # eef/pose is written by preprocessing step 5 and is already on the canonical hand
     # body frame. Reading the raw optitrack/slam poses here instead would put state in the
     # marker-centroid or GoPro optical frame, neither of which is what the robot reports at
     # inference — see EefPoseStep.
@@ -175,7 +175,7 @@ def export_scene_to_dp(
     Export EPISODE sessions of a pzarr scene to a diffusion-policy ReplayBuffer zarr.
 
     Poses come from ``eef/pose`` (preprocessing step 5), which has already resolved the
-    optitrack-vs-slam source choice and put the trajectory on the gripper-base frame.
+    optitrack-vs-slam source choice and put the trajectory on the hand frame.
 
     Returns the number of episodes written. MAPPING sessions are skipped.
     """
