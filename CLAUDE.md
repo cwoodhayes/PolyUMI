@@ -27,6 +27,19 @@ When running ingest-side pytest commands in this workspace, disable pytest plugi
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest ingest/test/test_preproc.py
 ```
 
+**ROS2 tests** need ROS's interpreter (they import `rclpy`), so `uv run` is wrong here — use
+`/usr/bin/python3` with the workspace sourced and `VIRTUAL_ENV` unset:
+```bash
+bash -c 'unset VIRTUAL_ENV; cd ros2_ws && source /opt/ros/kilted/setup.bash \
+  && source install/setup.bash && cd src/polyumi_ros2 \
+  && /usr/bin/python3 -m pytest test/test_policy_client_node.py -q'
+```
+`colcon test --packages-select polyumi_ros2` also runs them, but **it currently reports failure
+regardless**: the `ament_flake8` / `ament_pep257` boilerplate enforces ROS defaults (99 cols, its
+own import order) that conflict with this repo's ruff config (120 cols, single quotes), and has
+never passed. Treat a `colcon test` failure as uninformative until that is resolved — either
+point the ament linters at the ruff config or drop them in favour of `ruff check`.
+
 ### Deploy to Pi
 ```bash
 ./deploy.sh <ssh_hostname>   # rsync pi/ + polyumi_pi_msgs to Pi, embeds git hash in _version.py

@@ -16,7 +16,7 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
 | FR3 NUC ↔ laptop over DDS | **done** — Phase 0 |
 | Dummy server + client round trip | **done** — Phase 1 |
 | Action-chunk execution on real hardware | **done** (single chunks); continuous 10 Hz loop unverified |
-| Latency compensation, gopro + proprio | **done** — matches UMI's scheme |
+| Latency compensation, gopro + proprio | **done** — matches UMI's scheme; unit-tested |
 | Latency compensation, finger cam + piezo | **not started** — params declared, never consumed |
 | Pose body frame (training ↔ inference) | **half** — ingest emits `hand`; robot still reports `fr3_hand_tcp` |
 | Gripper — observation | **not started** — hardcoded `0.0` |

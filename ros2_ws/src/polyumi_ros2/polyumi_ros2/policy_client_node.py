@@ -46,9 +46,14 @@ from tf2_ros import ConnectivityException, ExtrapolationException, LookupExcepti
 class PolicyClientNode(Node):
     """Buffer observations and call the remote inference server at a fixed rate."""
 
-    def __init__(self):
-        """Declare parameters, create subscribers, TF buffer, and control timer."""
-        super().__init__('policy_client_node')
+    def __init__(self, **kwargs):
+        """
+        Declare parameters, create subscribers, TF buffer, and control timer.
+
+        :param kwargs: forwarded to rclpy's Node — notably ``parameter_overrides``, which lets
+            tests construct the node with specific values without going through a launch file.
+        """
+        super().__init__('policy_client_node', **kwargs)
 
         self.declare_parameter('inference_server_url', 'http://localhost:8000/predict_cartesian/')
         self.declare_parameter('n_obs_steps', 2)
@@ -70,9 +75,11 @@ class PolicyClientNode(Node):
         # bridge's skip-while-busy would drop almost every tick. A full chunk lets move_group
         # plan one smooth path instead. Must be <= the model's n_action_steps (dummy: 8).
         self.declare_parameter('n_action_steps', 8)
-        # Per-component system latencies (seconds), as measured by calibration scripts and
-        # loaded from config/latency.yaml via the inference launch file. Only gopro is
-        # currently consumed (see _lookup_agent_pos); the rest are logged for now.
+        # Per-component system latencies (seconds), loaded from config/latency.yaml via the
+        # inference launch file. NONE of them have been measured yet — see that file and
+        # blocking issue 2 in docs/franka-inference-bringup.md. gopro and proprio are consumed
+        # by _lookup_agent_pos, arm_exec by _n_stale_actions; finger_cam and piezo_mic are
+        # declared but unused until the policy takes tactile input.
         self.declare_parameter('latency.gopro', 0.0)
         self.declare_parameter('latency.finger_cam', 0.0)
         self.declare_parameter('latency.piezo_mic', 0.0)
