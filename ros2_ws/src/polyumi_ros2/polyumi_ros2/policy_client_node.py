@@ -3,7 +3,8 @@ ROS2 node that drives the Franka arm using a remote diffusion policy inference s
 
 At each control tick the node:
   1. Reads the latest wrist camera image and a latency-compensated end-effector pose (looked
-     up in TF at now - latency.gopro, to align with when the image was actually captured).
+     up in TF at the frame's own stamp - latency.gopro, to align with when that image was
+     actually captured).
   2. Maintains a short history window (n_obs_steps).
   3. POSTs observations to /predict_cartesian/ on the inference server, requesting an
      n_action_steps-length action chunk.
@@ -100,12 +101,11 @@ class PolicyClientNode(Node):
         }
         self._ee_pose_buffer_s = self.get_parameter('buffers.ee_pose_s').get_parameter_value().double_value
 
-        # Aggregate latencies used to drop stale actions (see _n_stale_actions).
-        # latency_obs — how old an observation already is by the time the server sees it.
-        # Hardcoded to the gopro path for now since the image is the only delayed modality the
-        # policy consumes; once finger_cam/piezo_mic feed the policy too this becomes the max
-        # over all of them, as the observation is only as fresh as its slowest stream.
-        self._latency_obs = self._latency['gopro']
+        # Observation age is no longer summed from constants — it's measured from the frame's
+        # own stamp (see _n_stale_actions). latency.gopro still converts that stamp to a true
+        # capture instant, and is the only delayed modality the policy consumes; once
+        # finger_cam/piezo_mic feed it too, the capture instant becomes the oldest across them,
+        # since an observation is only as fresh as its slowest stream.
         # latency_act — delay between publishing a target and the arm actually moving.
         self._latency_act = self._latency['arm_exec']
         # Spacing between consecutive actions within a chunk. Assumes the policy's action
@@ -116,7 +116,13 @@ class PolicyClientNode(Node):
         # History buffers — each entry: (image_float32 [H,W,C], agent_pos [8])
         self._obs_buffer: deque = deque(maxlen=self._n_obs_steps)
         self._latest_image: np.ndarray | None = None
+        self._latest_image_stamp: rclpy.time.Time | None = None
         self._latest_image_lock = threading.Lock()
+        # Reject a cached frame older than this at tick time. Sized to two camera periods at
+        # the 60 Hz v4l2 rate, floored so a slow tick doesn't trip it; a frame older than this
+        # means the capture pipeline stalled, and pairing it with a fresh pose would silently
+        # feed the policy a mismatched observation.
+        self._max_image_age_s = max(2.0 / 60.0, 0.5 / control_hz)
 
         # TF — cache_time sized from buffers.ee_pose_s so a pose from up to that far back can
         # still be looked up (needed to time-align with the delayed gopro frame; see
@@ -154,8 +160,8 @@ class PolicyClientNode(Node):
         latency_str = ' '.join(f'{name}={seconds}s' for name, seconds in self._latency.items())
         self.get_logger().info(f'latency config — {latency_str} (ee_pose buffer: {self._ee_pose_buffer_s}s)')
         self.get_logger().info(
-            f'latency budget — obs={self._latency_obs}s act={self._latency_act}s '
-            f'(+ measured inference RTT) vs action_dt={self._action_dt}s'
+            f'latency budget — measured observation age (capture→response) + '
+            f'act={self._latency_act}s vs action_dt={self._action_dt}s'
         )
 
     # ------------------------------------------------------------------
@@ -163,7 +169,7 @@ class PolicyClientNode(Node):
     # ------------------------------------------------------------------
 
     def _image_cb(self, msg: Image) -> None:
-        """Convert incoming ROS image to float32 numpy array and cache it."""
+        """Convert incoming ROS image to float32 numpy array and cache it with its stamp."""
         if msg.encoding not in ('rgb8', 'bgr8'):
             raise ValueError(f'Unsupported image encoding {msg.encoding!r}; expected rgb8 or bgr8')
         if msg.step != msg.width * 3:
@@ -175,6 +181,12 @@ class PolicyClientNode(Node):
         float_img = resized.astype(np.float32) / 255.0
         with self._latest_image_lock:
             self._latest_image = float_img
+            # Keep the frame's own stamp: the pose lookup must align to when THIS frame was
+            # captured, not to when the control tick happens to run. The camera publishes at
+            # 60 Hz while the tick runs at control_hz, so a cached frame is already up to one
+            # camera period old before the tick even fires — and if the v4l2 pipeline stalls,
+            # unboundedly older, with no way to notice. See _lookup_agent_pos.
+            self._latest_image_stamp = rclpy.time.Time.from_msg(msg.header.stamp)
 
     # ------------------------------------------------------------------
     # Control loop
@@ -194,12 +206,22 @@ class PolicyClientNode(Node):
             # --- 1. Get latest image ---
             with self._latest_image_lock:
                 image = self._latest_image
-            if image is None:
+                image_stamp = self._latest_image_stamp
+            if image is None or image_stamp is None:
                 self._warn_throttled('Waiting for first camera image')
                 return
 
-            # --- 2. Get EEF pose from TF ---
-            agent_pos = self._lookup_agent_pos()
+            # Guard against pairing a stale frame with a fresh pose (see _max_image_age_s).
+            image_age_s = (self.get_clock().now() - image_stamp).nanoseconds * 1e-9
+            if image_age_s > self._max_image_age_s:
+                self._warn_throttled(
+                    f'Dropped control tick: newest camera frame is {image_age_s * 1e3:.0f} ms old '
+                    f'(limit {self._max_image_age_s * 1e3:.0f} ms) — capture pipeline stalled?'
+                )
+                return
+
+            # --- 2. Get EEF pose from TF, aligned to this frame's capture instant ---
+            agent_pos = self._lookup_agent_pos(image_stamp)
             if agent_pos is None:
                 return  # warning already logged inside
 
@@ -227,22 +249,34 @@ class PolicyClientNode(Node):
                     'agent_pos': poses,
                 },
             }
-            self._post_and_act(payload)
+            # t_obs: when this frame was actually captured, i.e. the instant action[0] targets.
+            self._post_and_act(payload, image_stamp - Duration(seconds=self._latency['gopro']))
         finally:
             self._tick_lock.release()
 
-    def _lookup_agent_pos(self) -> np.ndarray | None:
+    def _lookup_agent_pos(self, image_stamp: rclpy.time.Time) -> np.ndarray | None:
         """
         Look up eef_frame in base_frame, time-aligned to the gopro frame, and return the pose.
 
-        The gopro image being paired with this pose in the current observation was captured
-        ~latency.gopro seconds ago (capture + encode + wifi delay), so we look up the EE pose
-        as of that same past instant — not the current one — to keep image and proprio in
-        sync. tf2's Buffer interpolates (linear + slerp) between the two nearest cached
-        transforms automatically; buffers.ee_pose_s sizes the buffer's cache_time so that
-        lookup stays in range.
+        The gopro image being paired with this pose was captured ~latency.gopro seconds before
+        ``image_stamp`` (the v4l2 driver stamps a frame when it dequeues the buffer, which is
+        already downstream of GoPro encode + HDMI out + capture card + USB transfer), so we
+        look up the EE pose as of that same past instant — not the current one — to keep image
+        and proprio in sync. This mirrors UMI's scheme, where each sensor's receive timestamp
+        is corrected back to true capture time and the low-dim streams are then interpolated
+        onto the camera's corrected clock.
+
+        Anchoring on the frame's own stamp rather than the tick's wall clock matters because
+        the two are decoupled: the camera runs at 60 Hz and the tick at control_hz, so
+        `now()` overstates the frame's freshness by a jittering 0–1 camera periods.
+
+        tf2's Buffer interpolates (linear + slerp) between the two nearest cached transforms
+        automatically; buffers.ee_pose_s sizes the buffer's cache_time so the lookup stays in
+        range.
+
+        :param image_stamp: header stamp of the camera frame this pose will be paired with.
         """
-        target_time = self.get_clock().now() - Duration(seconds=self._latency['gopro']) + \
+        target_time = image_stamp - Duration(seconds=self._latency['gopro']) + \
             Duration(seconds=self._latency['proprio'])
         try:
             tf = self._tf_buffer.lookup_transform(self._base_frame, self._eef_frame, target_time)
@@ -256,26 +290,36 @@ class PolicyClientNode(Node):
         gripper_width = 0.0
         return np.array([t.x, t.y, t.z, r.x, r.y, r.z, r.w, gripper_width], dtype=np.float64)
 
-    def _n_stale_actions(self, latency_inference: float) -> int:
+    def _n_stale_actions(self, t_obs: rclpy.time.Time) -> int:
         """
         Count the leading actions in a chunk that are already in the past by execution time.
 
         Action i in a chunk is the policy's target for t_obs + i * action_dt, where t_obs is
-        the instant the observation was captured. Three delays sit between that instant and
-        the arm actually moving: the observation was already latency_obs old when it was sent,
-        the server took latency_inference (measured round-trip) to answer, and the arm needs
-        latency_act to start moving. Actions whose target instant falls inside that window have
-        already elapsed — executing them would drag the arm backwards through the trajectory —
-        so skip to the first one that is still in the future.
+        the instant the observation was captured. Everything between that instant and the arm
+        actually moving makes the leading actions stale: the frame's transit through the
+        capture pipeline, the tick's own serialization work, the server's round trip, and
+        latency_act before the arm starts moving. Actions whose target instant falls inside
+        that window have already elapsed — executing them would drag the arm backwards through
+        the trajectory — so skip to the first one still in the future.
 
-        :param latency_inference: measured round-trip time of the /predict_cartesian/ POST.
+        Called after the server responds, so ``now() - t_obs`` measures every delay up to this
+        point directly (capture pipeline + tick + inference round trip) instead of summing
+        assumed constants for them; only latency_act is still in the future and must be added.
+
+        :param t_obs: instant the observation was captured (image stamp - latency.gopro).
         :return: number of actions to drop from the front of the chunk.
         """
-        total_latency = self._latency_obs + latency_inference + self._latency_act
+        elapsed_since_obs = (self.get_clock().now() - t_obs).nanoseconds * 1e-9
+        total_latency = elapsed_since_obs + self._latency_act
         return math.ceil(total_latency / self._action_dt)
 
-    def _post_and_act(self, payload: dict) -> None:
-        """POST payload to the inference server, log the returned action, and optionally execute it."""
+    def _post_and_act(self, payload: dict, t_obs: rclpy.time.Time) -> None:
+        """
+        POST payload to the inference server, log the returned action, and optionally execute it.
+
+        :param payload: request body for /predict_cartesian/.
+        :param t_obs: instant the observation was captured, used to drop stale actions.
+        """
         body = json.dumps(payload).encode()
         req = urllib.request.Request(
             self._url,
@@ -298,15 +342,16 @@ class PolicyClientNode(Node):
 
         # Drop the leading actions that refer to instants already elapsed by the time the arm
         # can act on them, so execution starts from the first still-future waypoint.
-        n_stale = self._n_stale_actions(latency_inference)
+        n_stale = self._n_stale_actions(t_obs)
         n_received = len(actions)
         actions = actions[n_stale:]
         if not actions:
+            age_s = (self.get_clock().now() - t_obs).nanoseconds * 1e-9
             self._warn_throttled(
                 f'Whole action chunk stale: dropped all {n_received} actions '
-                f'(latency obs={self._latency_obs:.3f}s + inference={latency_inference:.3f}s + '
-                f'act={self._latency_act:.3f}s exceeds chunk span {n_received * self._action_dt:.3f}s). '
-                f'Raise n_action_steps or reduce latency.'
+                f'(observation is {age_s:.3f}s old, of which inference={latency_inference:.3f}s; '
+                f'plus act={self._latency_act:.3f}s exceeds chunk span '
+                f'{n_received * self._action_dt:.3f}s). Raise n_action_steps or reduce latency.'
             )
             return
 
