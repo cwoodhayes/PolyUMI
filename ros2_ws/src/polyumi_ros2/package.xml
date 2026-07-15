@@ -7,9 +7,10 @@
   <maintainer email="cwoodhayes@gmail.com">conorbot</maintainer>
   <license>MIT</license>
 
-  <test_depend>ament_copyright</test_depend>
-  <test_depend>ament_flake8</test_depend>
-  <test_depend>ament_pep257</test_depend>
+  <!-- ament_copyright / ament_flake8 / ament_pep257 were dropped: this repo lints Python with
+       ruff (see pyproject.toml), and the ament defaults contradict it on line length and import
+       order, so `colcon test` failed regardless of whether real tests passed. ament_xmllint
+       stays — it validates package.xml against the ROS schema, which ruff does not do. -->
   <test_depend>ament_xmllint</test_depend>
   <test_depend>python3-pytest</test_depend>
 

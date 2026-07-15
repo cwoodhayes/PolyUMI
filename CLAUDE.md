@@ -34,11 +34,17 @@ bash -c 'unset VIRTUAL_ENV; cd ros2_ws && source /opt/ros/kilted/setup.bash \
   && source install/setup.bash && cd src/polyumi_ros2 \
   && /usr/bin/python3 -m pytest test/test_policy_client_node.py -q'
 ```
-`colcon test --packages-select polyumi_ros2` also runs them, but **it currently reports failure
-regardless**: the `ament_flake8` / `ament_pep257` boilerplate enforces ROS defaults (99 cols, its
-own import order) that conflict with this repo's ruff config (120 cols, single quotes), and has
-never passed. Treat a `colcon test` failure as uninformative until that is resolved — either
-point the ament linters at the ruff config or drop them in favour of `ruff check`.
+`colcon test --packages-select polyumi_ros2` also runs them, and is expected to pass clean:
+```bash
+bash -c 'unset VIRTUAL_ENV; cd ros2_ws && source /opt/ros/kilted/setup.bash \
+  && colcon test --packages-select polyumi_ros2 \
+  && colcon test-result --test-result-base build/polyumi_ros2'
+```
+The generated `ament_copyright` / `ament_flake8` / `ament_pep257` linter tests were **deleted** —
+their ROS defaults (99 cols, ament import order) contradicted this repo's ruff config, so
+`colcon test` failed regardless of whether real tests passed. Python style is ruff's job alone;
+`ruff check ros2_ws/` is expected to be clean. Only `ament_xmllint` remains, since nothing else
+validates `package.xml`. Don't re-add the others when generating new ROS packages.
 
 ### Deploy to Pi
 ```bash
