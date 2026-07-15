@@ -21,7 +21,7 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
 | Pose body frame (training ↔ inference) | **half** — ingest emits `hand`; robot still reports `fr3_hand_tcp` |
 | Gripper — observation | **not started** — hardcoded `0.0` |
 | Gripper — command | **not started** — `action[7]` dropped before publish |
-| DP export | **exists** for pose+image+gripper; no tactile; wrong schema for UMI |
+| DP export | **exists** for pose+image+gripper; no tactile; wrong schema for UMI; untested |
 | Real inference server | **not started** — Phase 3 |
 
 ### Blocking issues
@@ -46,7 +46,31 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
    `_actions_to_pose_array` drops `action[7]`, so a commanded width goes nowhere. A
    `PoseArray` cannot carry the width — the chunk topic needs a type that can, or a parallel one.
 
-4. **Training stack not chosen in this doc yet.** The decision (recorded in conversation, not
+4. **The DP exporter needs a rework, and has no tests at all.** Deliberately deferred to one
+   chunk of work rather than patched piecemeal, since the UMI migration rewrites this file
+   anyway. Four things to fix together in `ingest/polyumi_ingest/export/dp/buffer.py`:
+   - **It hard-requires OptiTrack even for SLAM-sourced poses.** `_export_episode` reads
+     `optitrack/timestamps` unconditionally to clip the overlap window, so a SLAM-only scene
+     raises `KeyError` *after* step 5 has written a perfectly good `eef/pose`. Predates the
+     step-5 work (`--pose-source slam` failed the same way), but step 5 advertises a SLAM
+     fallback the exporter silently contradicts. The window should clip to the sources the
+     episode actually uses.
+   - **Schema is Toby's, not UMI's.** A flat 8-vector `state`/`action`. `UmiDataset`
+     name-matches its keys (`camera0_rgb`, `robot0_eef_pos`, `robot0_eef_rot_axis_angle`,
+     `robot0_gripper_width`) and raises on anything it can't match; actions become 10-vectors
+     (`pos(3) + rot6d(6) + gripper(1)`).
+   - **No tactile.** Piezo audio and finger-camera frames aren't exported at all — the
+     exporter touches `timestamps/finger` only to compute the window.
+   - **The GoPro→finger clock shift is duplicated** between here (inline) and
+     `eef_pose_step._gopro_ts_in_finger_clock`, and the two disagree on strictness: the
+     exporter requires `annotations/time_sync`, the step defaults the offset to `0.0`. Not
+     unified yet because picking one strictness is a behaviour change that belongs with this
+     rework. (`nearest_idx` was the other duplicate; it now lives in `polyumi_ingest/timebase.py`.)
+
+   No tests cover this file, which is how the OptiTrack coupling survived a contract change.
+   Write them as part of the rework.
+
+5. **Training stack not chosen in this doc yet.** The decision (recorded in conversation, not
    here) is to build on a fork of `universal_manipulation_interface` rather than base
    diffusion_policy, since UMI already has rot6d actions, relative pose frames, per-sensor
    latency in `shape_meta`, a `_target_`-swappable timm vision encoder, and — relevant to

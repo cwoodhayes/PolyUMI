@@ -1,4 +1,4 @@
-"""End-effector (gripper-base) pose preprocessing step."""
+"""End-effector pose preprocessing step: puts both pose sources on the canonical hand frame."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from numcodecs import Blosc
 from polyumi_ingest.config import load_gripper_calib
 from polyumi_ingest.preproc.step_base import PreprocessingStep, register_preprocessing_step
 from polyumi_ingest.pzarr.store import arr, grp
+from polyumi_ingest.timebase import nearest_idx
 from polyumi_ingest.transforms import (
     gopro_to_hand_transform,
     gripper_calib_transforms,
@@ -25,17 +26,6 @@ _BLOSC = Blosc(cname='zstd', clevel=5, shuffle=Blosc.SHUFFLE)
 #: Preference order when a scene carries more than one pose source. OptiTrack is mocap ground
 #: truth and beats SLAM wherever the volume covers the demo.
 _SOURCE_PREFERENCE = ('optitrack', 'slam')
-
-
-def _nearest_idx(sorted_ts: np.ndarray, query: np.ndarray) -> np.ndarray:
-    """Index of the nearest value in ascending ``sorted_ts`` for each ``query`` time."""
-    if len(sorted_ts) < 2:
-        raise RuntimeError(f'Need at least 2 timestamps to resample, got {len(sorted_ts)}')
-    idx = np.searchsorted(sorted_ts, query)
-    idx = np.clip(idx, 1, len(sorted_ts) - 1)
-    closer_left = (query - sorted_ts[idx - 1]) <= (sorted_ts[idx] - query)
-    idx = idx - closer_left
-    return np.clip(idx, 0, len(sorted_ts) - 1)
 
 
 def _gopro_ts_in_finger_clock(ep: zarr.Group) -> np.ndarray:
@@ -147,7 +137,7 @@ class EefPoseStep(PreprocessingStep):
             # so eef/pose shares one index with the frames and the gripper width.
             opti_ts = np.asarray(arr(root, 'optitrack/timestamps')[:], dtype=np.float64)
             opti_poses = np.asarray(arr(root, 'optitrack/pose')[:], dtype=np.float64)
-            raw = opti_poses[_nearest_idx(opti_ts, gopro_ts)]
+            raw = opti_poses[nearest_idx(opti_ts, gopro_ts)]
             world_frame = 'optitrack'
         else:
             raw = np.asarray(arr(ep, 'gopro/slam_poses')[:], dtype=np.float64)

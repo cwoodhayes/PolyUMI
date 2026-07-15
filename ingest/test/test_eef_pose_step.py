@@ -21,18 +21,14 @@ _T_X_TARGET = RigidTransform.from_components(
 
 def _pose_array(tf: RigidTransform) -> np.ndarray:
     """Flatten a (possibly stacked) RigidTransform to (N,7) [x y z qx qy qz qw]."""
-    return np.concatenate(
-        [np.atleast_2d(tf.translation), np.atleast_2d(tf.rotation.as_quat())], axis=1
-    )
+    return np.concatenate([np.atleast_2d(tf.translation), np.atleast_2d(tf.rotation.as_quat())], axis=1)
 
 
 def test_retarget_body_frame_round_trip() -> None:
     """Re-targeting a sensor trajectory onto a body frame, then back, must be exact."""
     rng = np.random.default_rng(0)
     n = 16
-    T_w_x = RigidTransform.from_components(
-        translation=rng.normal(size=(n, 3)), rotation=Rotation.random(n, rng=rng)
-    )
+    T_w_x = RigidTransform.from_components(translation=rng.normal(size=(n, 3)), rotation=Rotation.random(n, rng=rng))
     sensor = _pose_array(T_w_x)
 
     target = retarget_body_frame(sensor, _T_X_TARGET)
@@ -47,9 +43,7 @@ def test_retarget_body_frame_matches_composition() -> None:
     """The output is exactly T_w_x · T_x_target, not merely self-consistent."""
     rng = np.random.default_rng(1)
     n = 8
-    T_w_x = RigidTransform.from_components(
-        translation=rng.normal(size=(n, 3)), rotation=Rotation.random(n, rng=rng)
-    )
+    T_w_x = RigidTransform.from_components(translation=rng.normal(size=(n, 3)), rotation=Rotation.random(n, rng=rng))
     expected = T_w_x * _T_X_TARGET
 
     out = retarget_body_frame(_pose_array(T_w_x), _T_X_TARGET)
@@ -61,11 +55,7 @@ def test_retarget_body_frame_matches_composition() -> None:
 
 def test_retarget_body_frame_preserves_nan() -> None:
     """Rows the pose source could not solve (SLAM tracking loss) stay NaN instead of raising."""
-    sensor = _pose_array(
-        RigidTransform.from_components(
-            translation=np.zeros((4, 3)), rotation=Rotation.identity(4)
-        )
-    )
+    sensor = _pose_array(RigidTransform.from_components(translation=np.zeros((4, 3)), rotation=Rotation.identity(4)))
     sensor[2] = np.nan
 
     out = retarget_body_frame(sensor, _T_X_TARGET)
@@ -105,9 +95,7 @@ def test_body_frame_offset_does_not_cancel_under_relative_pose() -> None:
     so nobody "simplifies" the step away.
     """
     # A pure 30-degree wrist rotation, no translation of the hand frame itself.
-    T_w_hand_0 = RigidTransform.from_components(
-        translation=np.zeros(3), rotation=Rotation.identity()
-    )
+    T_w_hand_0 = RigidTransform.from_components(translation=np.zeros(3), rotation=Rotation.identity())
     T_w_hand_k = RigidTransform.from_components(
         translation=np.zeros(3), rotation=Rotation.from_rotvec(np.radians(30) * np.array([0, 0, 1.0]))
     )
@@ -147,9 +135,7 @@ def _build_scene(tmp_path: pathlib.Path, *, with_optitrack: bool, with_slam: boo
         opti.create_array(
             'pose',
             data=_pose_array(
-                RigidTransform.from_components(
-                    translation=np.zeros((2 * n, 3)), rotation=Rotation.identity(2 * n)
-                )
+                RigidTransform.from_components(translation=np.zeros((2 * n, 3)), rotation=Rotation.identity(2 * n))
             ),
         )
     return scene_zarr

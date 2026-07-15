@@ -34,23 +34,13 @@ from numcodecs import Blosc
 
 from polyumi_ingest.pzarr.scene_files import SceneFiles
 from polyumi_ingest.pzarr.store import arr, grp
+from polyumi_ingest.timebase import nearest_idx
 
 log = logging.getLogger('export.dp')
 
 HZ = 10
 RESOLUTION = 256
 _BLOSC = Blosc(cname='zstd', clevel=5, shuffle=Blosc.SHUFFLE)
-
-
-def _nearest_idx(sorted_ts: np.ndarray, query: np.ndarray) -> np.ndarray:
-    """Index of the nearest value in ascending ``sorted_ts`` for each ``query`` time."""
-    if len(sorted_ts) < 2:
-        raise RuntimeError(f'Need at least 2 timestamps to resample, got {len(sorted_ts)}')
-    idx = np.searchsorted(sorted_ts, query)
-    idx = np.clip(idx, 1, len(sorted_ts) - 1)
-    closer_left = (query - sorted_ts[idx - 1]) <= (sorted_ts[idx] - query)
-    idx = idx - closer_left
-    return np.clip(idx, 0, len(sorted_ts) - 1)
 
 
 def _decode_resized_frames(frames_arr: zarr.Array, gidx: np.ndarray) -> np.ndarray:
@@ -117,7 +107,7 @@ def _export_episode(
     t = len(target_ts)
 
     # img, gripper width, and eef pose all live on the gopro frame grid → one index.
-    gidx = _nearest_idx(gopro_ts, target_ts)
+    gidx = nearest_idx(gopro_ts, target_ts)
     if np.any(np.diff(gidx) < 0):
         raise RuntimeError(
             f'{episode_key}: gopro frame indices are non-monotonic after resampling to {HZ} Hz '
@@ -130,9 +120,7 @@ def _export_episode(
     # marker-centroid or GoPro optical frame, neither of which is what the robot reports at
     # inference — see EefPoseStep.
     if 'eef/pose' not in ep:
-        raise RuntimeError(
-            f'{episode_key}: no eef/pose — run preprocessing step 5 (eef-pose) before exporting.'
-        )
+        raise RuntimeError(f'{episode_key}: no eef/pose — run preprocessing step 5 (eef-pose) before exporting.')
     pose_grp = grp(ep, 'eef')
     pose = np.asarray(arr(ep, 'eef/pose')[:][gidx], dtype=np.float32)
     pose_source = pose_grp.attrs.get('source', 'unknown')
