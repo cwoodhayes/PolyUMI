@@ -11,6 +11,11 @@ Produces the flat layout that diffusion_policy's DexNexDataset expects::
       data/reward   (T,)           float32  zeros
       data/not_done (T,)           float32  1.0, last step of each episode 0.0
 
+``state``/``action`` poses are on the canonical **hand** frame, read from each episode's
+``eef/pose`` (preprocessing step 5). The world frame they sit in is whatever the pose source
+used (optitrack or slam) and is deliberately not normalized — it cancels out of the relative
+trajectory training computes, whereas the body frame does not.
+
 The store is written ``zarr_format=2`` (as the rest of pzarr is) so diffusion_policy,
 which is pinned to the zarr v2 API, can read it without importing anything from here.
 """
@@ -29,23 +34,13 @@ from numcodecs import Blosc
 
 from polyumi_ingest.pzarr.scene_files import SceneFiles
 from polyumi_ingest.pzarr.store import arr, grp
+from polyumi_ingest.timebase import nearest_idx
 
 log = logging.getLogger('export.dp')
 
 HZ = 10
 RESOLUTION = 256
 _BLOSC = Blosc(cname='zstd', clevel=5, shuffle=Blosc.SHUFFLE)
-
-
-def _nearest_idx(sorted_ts: np.ndarray, query: np.ndarray) -> np.ndarray:
-    """Index of the nearest value in ascending ``sorted_ts`` for each ``query`` time."""
-    if len(sorted_ts) < 2:
-        raise RuntimeError(f'Need at least 2 timestamps to resample, got {len(sorted_ts)}')
-    idx = np.searchsorted(sorted_ts, query)
-    idx = np.clip(idx, 1, len(sorted_ts) - 1)
-    closer_left = (query - sorted_ts[idx - 1]) <= (sorted_ts[idx] - query)
-    idx = idx - closer_left
-    return np.clip(idx, 0, len(sorted_ts) - 1)
 
 
 def _decode_resized_frames(frames_arr: zarr.Array, gidx: np.ndarray) -> np.ndarray:
@@ -95,7 +90,6 @@ def _export_episode(
     root: zarr.Group,
     data_grp: zarr.Group,
     episode_key: str,
-    pose_source: str,
 ) -> int:
     """Resample one episode to HZ and append it to ``data_grp``. Returns the step count T."""
     # GoPro runs on its own clock; bring it into the finger (Pi) clock domain.
@@ -112,8 +106,8 @@ def _export_episode(
     target_ts = np.arange(t_start, t_end, 1.0 / HZ)
     t = len(target_ts)
 
-    # img, gripper width, and slam poses all live on the gopro frame grid → one index.
-    gidx = _nearest_idx(gopro_ts, target_ts)
+    # img, gripper width, and eef pose all live on the gopro frame grid → one index.
+    gidx = nearest_idx(gopro_ts, target_ts)
     if np.any(np.diff(gidx) < 0):
         raise RuntimeError(
             f'{episode_key}: gopro frame indices are non-monotonic after resampling to {HZ} Hz '
@@ -121,19 +115,21 @@ def _export_episode(
         )
     img = _decode_resized_frames(arr(ep, 'gopro/frames'), gidx)
 
-    if pose_source == 'optitrack':
-        pose = arr(root, 'optitrack/pose')[:][_nearest_idx(opti_ts, target_ts)]
-    elif pose_source == 'slam':
-        pose = arr(ep, 'gopro/slam_poses')[:][gidx]
-    else:
-        raise ValueError(f"pose_source must be 'optitrack' or 'slam', got {pose_source!r}")
-    pose = np.asarray(pose, dtype=np.float32)
+    # eef/pose is written by preprocessing step 5 and is already on the canonical hand
+    # body frame. Reading the raw optitrack/slam poses here instead would put state in the
+    # marker-centroid or GoPro optical frame, neither of which is what the robot reports at
+    # inference — see EefPoseStep.
+    if 'eef/pose' not in ep:
+        raise RuntimeError(f'{episode_key}: no eef/pose — run preprocessing step 5 (eef-pose) before exporting.')
+    pose_grp = grp(ep, 'eef')
+    pose = np.asarray(arr(ep, 'eef/pose')[:][gidx], dtype=np.float32)
+    pose_source = pose_grp.attrs.get('source', 'unknown')
 
     gripper = arr(ep, 'annotations/gripper_width/width_m')[:][gidx].astype(np.float32)
 
     if np.isnan(pose).any():
         raise RuntimeError(
-            f'{episode_key}: pose source {pose_source!r} contains NaN over the window '
+            f'{episode_key}: eef/pose (source {pose_source!r}) contains NaN over the window '
             f'({int(np.isnan(pose[:, 0]).sum())}/{t} steps). Refusing to write.'
         )
     if np.isnan(gripper).any():
@@ -162,10 +158,12 @@ def _export_episode(
 def export_scene_to_dp(
     scene_path: pathlib.Path,
     output_path: pathlib.Path,
-    pose_source: str = 'optitrack',
 ) -> int:
     """
     Export EPISODE sessions of a pzarr scene to a diffusion-policy ReplayBuffer zarr.
+
+    Poses come from ``eef/pose`` (preprocessing step 5), which has already resolved the
+    optitrack-vs-slam source choice and put the trajectory on the hand frame.
 
     Returns the number of episodes written. MAPPING sessions are skipped.
     """
@@ -191,7 +189,7 @@ def export_scene_to_dp(
         if ep.attrs.get('session_type') == 'MAPPING':
             log.info(f'  {ep_key}: MAPPING session, skipping.')
             continue
-        total += _export_episode(ep, root, data, ep_key, pose_source)
+        total += _export_episode(ep, root, data, ep_key)
         episode_ends.append(total)
 
     meta.create_array('episode_ends', data=np.array(episode_ends, dtype=np.int64), compressor=_BLOSC)

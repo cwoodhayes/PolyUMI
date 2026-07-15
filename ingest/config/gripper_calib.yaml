@@ -32,6 +32,26 @@ T_gripper_base_to_gopro:
   # rotation: [ 0.5, -0.5, 0.5, -0.5 ]
   rotation: [ 0.7071068, 0, 0.7071068, 0 ]
 
+# The canonical body frame every exported pose is expressed at (preprocessing step 5).
+#
+# Defined against the GoPro rather than the gripper base on purpose: the gripper base is a
+# mechanical part of the *handheld* gripper that the Franka end-effector does not have, so a
+# frame anchored to it cannot be reproduced on the robot. The GoPro-to-fingers geometry is
+# identical on both embodiments, so a frame anchored to the GoPro can be. Whatever this
+# resolves to must be the same physical point the robot reports as `eef_frame` at inference,
+# or training and deployment are in different frames and the policy cannot transfer.
+#
+# !!! PLACEHOLDER — NOT MEASURED. DO NOT TRAIN ON THIS. !!!
+# The translation is a guess: aruco_finger_tags.nominal_z_m says the finger tags sit ~72mm
+# along the GoPro's +z (forward), so the fingertips are roughly there. The rotation is a bare
+# identity and has not been checked against anything at all. Step 5 puts this on the critical
+# path for every exported pose, and a body-frame error of x leaks (R - I)*x into every
+# relative action — at this ~7cm scale a 30deg wrist rotation is already ~4cm of error.
+# Replace both with a real calibration before any training run.
+T_gopro_to_hand:
+  translation: [0.0, 0.0, 0.072] # meters — gopro frame: x right, y down, z forward
+  rotation: [ 0.0, 0.0, 0.0, 1.0 ] # quaternion (xyzw)
+
 
 T_optitrack_to_world:
   translation: [0.0, 0.0, 0.0] # meters

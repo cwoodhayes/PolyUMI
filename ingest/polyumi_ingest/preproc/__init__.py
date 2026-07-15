@@ -8,6 +8,7 @@ from polyumi_ingest.preproc.step_base import (
     run_preprocessing_on_recordings,
 )
 from polyumi_ingest.preproc.aruco_step import ArucoGripperWidthStep
+from polyumi_ingest.preproc.eef_pose_step import EefPoseStep
 from polyumi_ingest.preproc.so_align_step import SlamToWorldAlignStep
 from polyumi_ingest.preproc.slam_step import OrbSlam3Step
 from polyumi_ingest.preproc.time_sync import ChirpTimeSyncStep, TimeSyncStep
@@ -15,6 +16,7 @@ from polyumi_ingest.preproc.time_sync import ChirpTimeSyncStep, TimeSyncStep
 __all__ = [
     'ArucoGripperWidthStep',
     'ChirpTimeSyncStep',
+    'EefPoseStep',
     'OrbSlam3Step',
     'PreprocessingStep',
     'SlamToWorldAlignStep',

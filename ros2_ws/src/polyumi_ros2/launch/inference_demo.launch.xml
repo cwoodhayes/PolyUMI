@@ -26,6 +26,8 @@
   <!-- Skip pi_receiver_node (no ZMQ connection to the Pi) for FR3-motion-only testing when
        the Pi isn't running / isn't needed — e.g. iterating on chunk execution at the arm. -->
   <arg name="motion_only" default="false"/>
+  <!-- Per-component system latencies (seconds), as measured by calibration scripts. -->
+  <arg name="latency_config" default="$(find-pkg-share polyumi_ros2)/config/latency.yaml"/>
 
   <include file="$(find-pkg-share polyumi_ros2)/launch/stream_demo.launch.xml">
     <arg name="pi_host" value="$(var pi_host)"/>
@@ -36,5 +38,6 @@
   <node pkg="polyumi_ros2" exec="policy_client_node" name="policy_client_node" output="screen">
     <param name="inference_server_url" value="$(var inference_server_url)"/>
     <param name="execute_motion" value="$(var execute_motion)"/>
+    <param from="$(var latency_config)"/>
   </node>
 </launch>

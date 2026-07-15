@@ -1,0 +1,30 @@
+# Per-component latencies of the system, in seconds.
+#
+# !!! NONE OF THESE HAVE BEEN MEASURED — they are plausible guesses. !!!
+# There is no calibration script for them yet; writing one is tracked as blocking issue 2
+# in docs/franka-inference-bringup.md. They are live on the inference critical path
+# regardless of whether they are right, so treat every value below as provisional.
+
+/**:
+  ros__parameters:
+    latency:
+      # Delay from a photon hitting the GoPro sensor to the frame's ROS header stamp:
+      # GoPro encode + HDMI out + capture card + USB + v4l2 dequeue. Sets both the TF lookup
+      # instant and t_obs for chunk truncation, so it is the most load-bearing value here.
+      # 0.05 is a guess and probably low — UMI measured 0.125-0.17s for a plain UVC webcam,
+      # and this path is longer than that.
+      gopro: 0.05
+      # Finger camera latency. Declared but never consumed — the policy has no tactile input
+      # yet (blocking issue 4). Left at 0 so it cannot skew anything until it is wired.
+      finger_cam: 0.0
+      # Piezo mic latency. Declared but never consumed, as above.
+      piezo_mic: 0.0
+      # Delay from the arm's true EE pose to its measurement appearing on TF.
+      proprio: 0.01
+      # Delay from publishing a target pose to the arm actually starting to move.
+      arm_exec: 0.01
+    buffers:
+      # How far back (seconds) the EE-pose TF buffer retains history, so a past pose can
+      # still be looked up/interpolated to align with a delayed observation (e.g. the gopro
+      # frame). Must be >= the largest latency above that gets compensated for.
+      ee_pose_s: 1.0

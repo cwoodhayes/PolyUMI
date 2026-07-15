@@ -27,6 +27,25 @@ When running ingest-side pytest commands in this workspace, disable pytest plugi
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest ingest/test/test_preproc.py
 ```
 
+**ROS2 tests** need ROS's interpreter (they import `rclpy`), so `uv run` is wrong here — use
+`/usr/bin/python3` with the workspace sourced and `VIRTUAL_ENV` unset:
+```bash
+bash -c 'unset VIRTUAL_ENV; cd ros2_ws && source /opt/ros/kilted/setup.bash \
+  && source install/setup.bash && cd src/polyumi_ros2 \
+  && /usr/bin/python3 -m pytest test/test_policy_client_node.py -q'
+```
+`colcon test --packages-select polyumi_ros2` also runs them, and is expected to pass clean:
+```bash
+bash -c 'unset VIRTUAL_ENV; cd ros2_ws && source /opt/ros/kilted/setup.bash \
+  && colcon test --packages-select polyumi_ros2 \
+  && colcon test-result --test-result-base build/polyumi_ros2'
+```
+The generated `ament_copyright` / `ament_flake8` / `ament_pep257` linter tests were **deleted** —
+their ROS defaults (99 cols, ament import order) contradicted this repo's ruff config, so
+`colcon test` failed regardless of whether real tests passed. Python style is ruff's job alone;
+`ruff check ros2_ws/` is expected to be clean. Only `ament_xmllint` remains, since nothing else
+validates `package.xml`. Don't re-add the others when generating new ROS packages.
+
 ### Deploy to Pi
 ```bash
 ./deploy.sh <ssh_hostname>   # rsync pi/ + polyumi_pi_msgs to Pi, embeds git hash in _version.py
