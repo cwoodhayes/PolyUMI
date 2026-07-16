@@ -4,3 +4,6 @@
 [submodule "external/franka_ros2"]
 	path = external/franka_ros2
 	url = https://github.com/frankarobotics/franka_ros2.git
+[submodule "external/polyumi_diffusion_policy"]
+	path = external/polyumi_diffusion_policy
+	url = git@github.com:cwoodhayes/polyumi_diffusion_policy.git
