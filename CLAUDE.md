@@ -85,6 +85,15 @@ pingest fetch --host <hostname> --latest
 pingest process-all --force
 ```
 
+### Training the diffusion policy (GPU workstation, Docker)
+Training runs the UMI fork (`external/polyumi_diffusion_policy`) in a Docker image built from
+its conda env via micromamba — **not** bare conda (which fights ROS) and **not** the uv
+workspace. One image serves both training and inference. Run it with `./train_policy.sh`
+(builds the fork image + mounts dataset/output with rootless-safe flags). Full walkthrough,
+including rootless-Docker gotchas, is in
+[docs/training-instructions.md](docs/training-instructions.md). This is the step after `pingest
+export-dp`.
+
 ## Key Modules
 
 - **`pi/polyumi_pi/main.py`** — Typer CLI; entry point for all Pi operations (`polyumi-pi`)
