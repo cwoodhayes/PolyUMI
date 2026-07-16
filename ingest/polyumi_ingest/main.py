@@ -651,14 +651,15 @@ def export_dp(
         ...,
         '--output',
         '-o',
-        help='Output ReplayBuffer zarr path.',
+        help='Output UMI ReplayBuffer path (a .zarr.zip file).',
     ),
 ):
     """
-    Export a pzarr scene to a diffusion-policy ReplayBuffer zarr.
+    Export a pzarr scene to a UMI-format ReplayBuffer (.zarr.zip).
 
     Poses come from eef/pose, so run preprocessing step 5 (eef-pose) first; that step also
-    picks the optitrack-vs-slam source.
+    picks the optitrack-vs-slam source. Frames are exported at the native GoPro rate; the
+    training config sets the observation rate via obs_down_sample_steps.
     """
     from polyumi_ingest.export.dp import export_scene_to_dp
 
