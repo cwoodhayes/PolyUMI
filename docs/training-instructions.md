@@ -20,7 +20,9 @@ checkpoints are dill-pickled and unpickle against the exact dependency tree.
   gotchas below.
 - An **exported dataset**: `pingest export-dp <scene> --output <name>.zarr.zip`. Copy the
   `.zarr.zip` to the workstation.
-- A **Weights & Biases** API key (`WANDB_API_KEY`) if you want online logging.
+- A **Weights & Biases** API key (`WANDB_API_KEY`) if you want online logging. `WANDB_ENTITY`
+  and `WANDB_PROJECT` are optional — unset, they default to your wandb login's default entity
+  and the `polyumi` project.
 
 ## Quick start
 
@@ -32,14 +34,23 @@ DATASET=/abs/path/to/your.zarr.zip \
 WANDB_API_KEY=... \
 ./train_policy.sh training.num_epochs=3 task.dataset.val_ratio=0 logging.mode=offline
 
-# Full run:
-DATASET=/abs/path/to/your.zarr.zip WANDB_API_KEY=... ./train_policy.sh
+# Full run, logging to a specific entity/project instead of the defaults:
+DATASET=/abs/path/to/your.zarr.zip \
+WANDB_API_KEY=... \
+WANDB_ENTITY=my-team \
+WANDB_PROJECT=my-project \
+./train_policy.sh
 ```
 
 `train_policy.sh` builds `external/polyumi_diffusion_policy` and runs it with the rootless-safe
 flags and the dataset/output mounts. Any extra arguments pass straight through to `train.py` as
 **Hydra overrides** (`training.num_epochs=...`, `logging.mode=offline`, `task.dataset_path=...`,
 etc). Outputs (checkpoints, hydra logs) land in `data/dp_outputs/` by default (`OUTPUT_DIR`).
+
+`WANDB_ENTITY`/`WANDB_PROJECT` are forwarded to the container only if set in the calling shell
+(the config resolves them via `${oc.env:WANDB_ENTITY,null}` / `${oc.env:WANDB_PROJECT,polyumi}`),
+so leaving them unset falls back to your wandb login's default entity and the `polyumi` project
+— it does not fall back to a hard-coded team.
 
 ## The two entrypoints
 

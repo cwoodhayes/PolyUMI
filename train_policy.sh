@@ -58,6 +58,8 @@ exec docker run --rm -i ${TTY_FLAG} \
     ${USER_FLAG} \
     --shm-size="${SHM_SIZE}" \
     -e WANDB_API_KEY="${WANDB_API_KEY:-}" \
+    -e WANDB_ENTITY \
+    -e WANDB_PROJECT \
     -e HOME=/tmp \
     -e MPLCONFIGDIR=/tmp/mpl \
     -e NUMBA_CACHE_DIR=/tmp/numba \
