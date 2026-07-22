@@ -400,7 +400,8 @@ What changed vs. the original plan, and why:
 - [x] `fr3_hand_tcp` TF frame published and live on the laptop over DDS
 - [x] `nuc/fr3_moveit_bridge.py` implemented: plans+executes chunks via local move_group
 - [x] EEF target execution tested and verified moving the **real** robot (reduced velocity)
-- [ ] full 10 Hz dummy-sine loop run end-to-end (single chunks verified; continuous loop not yet)
+- [X] full 10 Hz dummy-sine loop run end-to-end (single chunks verified; continuous loop not yet)
+- [ ] executing gripper control in addition to pose.
 
 ---
 
