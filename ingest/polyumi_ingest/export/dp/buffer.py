@@ -8,7 +8,7 @@ and ``get_normalizer`` raises on any low-dim key it can't name-match)::
 
     <output>.zarr.zip
       meta/episode_ends                 (n_episodes,) int64, cumulative step counts
-      data/camera0_rgb                  (T,224,224,3) uint8  JpegXl, chunks (1,224,224,3)
+      data/camera0_rgb                  (T,224,224,3) uint8  Blosc(zstd), chunks (1,224,224,3)
       data/robot0_eef_pos               (T,3)  float32  hand-frame position
       data/robot0_eef_rot_axis_angle    (T,3)  float32  hand-frame rotation as a rotvec
       data/robot0_gripper_width         (T,1)  float32  metres
@@ -34,6 +34,14 @@ Frames are exported at the **native GoPro rate** (~59.94 Hz), not down-sampled h
 dataset assumes uniform Δt and sets the effective observation rate itself via
 ``obs_down_sample_steps`` in the task config, so storing raw keeps that knob meaningful and
 lets the obs rate change without re-exporting.
+
+Images use **Blosc**, not JpegXl, on purpose. The training container pins Python 3.9 with
+``imagecodecs==2023.9.18``, whose JpegXl codec cannot parse the config that our Python-3.13
+``imagecodecs`` (2026.x) writes (``bitspersample``, ``squeeze``, ``usecontainer``, …), and no
+single ``imagecodecs`` release supports both interpreters. Blosc is in ``numcodecs`` core, so
+its config is byte-identical across both stacks; it is lossless, decodes faster than JpegXl,
+and only costs disk. (``imagecodecs`` is still needed here to *read* the source
+``gopro/frames``, which the pzarr stored as JpegXl.)
 
 The store is written ``zarr_format=2`` so the (v2-pinned) UMI zarr can read it, then packed
 into a ``.zarr.zip`` because ``UmiDataset`` opens its dataset through ``zarr.ZipStore``.
@@ -63,14 +71,11 @@ log = logging.getLogger('export.dp')
 
 #: Output image resolution, matching UMI's ``camera0_rgb`` shape ``[3, 224, 224]``.
 RESOLUTION = 224
-#: JpegXl compression level; 99 is UMI's default (near-lossless) in 07_generate_replay_buffer.
-_JPEGXL_LEVEL = 99
 #: Single robot arm; UMI's multi-robot keying still applies with one ``robot0``.
 _ROBOT = 'robot0'
 _CAMERA = 'camera0_rgb'
 
 _BLOSC = Blosc(cname='zstd', clevel=5, shuffle=Blosc.SHUFFLE)
-_JPEGXL = imagecodecs.numcodecs.Jpegxl(level=_JPEGXL_LEVEL, numthreads=1)
 _TIME_CHUNK = 1024
 
 #: Warn if the largest inter-frame gap in the exported span exceeds this multiple of the
@@ -128,7 +133,6 @@ def _append(data_grp: zarr.Group, arrays: dict[str, np.ndarray]) -> None:
     for key, value in arrays.items():
         value = np.asarray(value)
         t = value.shape[0]
-        compressor = _JPEGXL if key == _CAMERA else _BLOSC
         if key not in data_grp:
             if value.ndim >= 3:
                 chunks = (1,) + value.shape[1:]
@@ -139,7 +143,7 @@ def _append(data_grp: zarr.Group, arrays: dict[str, np.ndarray]) -> None:
                 shape=value.shape,
                 chunks=chunks,
                 dtype=value.dtype,
-                compressor=compressor,
+                compressor=_BLOSC,
                 zarr_format=2,
             )
             arr(data_grp, key)[:] = value
