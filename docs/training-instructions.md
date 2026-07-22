@@ -90,10 +90,11 @@ docker run --rm -v /abs/path/to/your.zarr.zip:/data/dataset.zarr.zip:ro polyumi-
 from omegaconf import OmegaConf
 OmegaConf.register_new_resolver('eval', eval, replace=True)  # as train.py does, for latency_steps
 from diffusion_policy.dataset.umi_dataset import UmiDataset
-cfg = OmegaConf.load('diffusion_policy/config/task/polyumi.yaml')
-ds = UmiDataset(shape_meta=cfg.shape_meta, dataset_path='/data/dataset.zarr.zip',
-                pose_repr=cfg.pose_repr, cache_dir=None)
-print('episodes:', ds.replay_buffer.n_episodes, 'sample keys:', list(ds[0].keys()))
+# Nest under 'task' so the \${task.*} interpolations in the config resolve.
+cfg = OmegaConf.create({'task': OmegaConf.load('diffusion_policy/config/task/polyumi.yaml')})
+ds = UmiDataset(shape_meta=cfg.task.shape_meta, dataset_path='/data/dataset.zarr.zip',
+                pose_repr=cfg.task.pose_repr, cache_dir=None)
+print('episodes:', ds.replay_buffer.n_episodes, 'obs keys:', sorted(ds[0]['obs'].keys()))
 "
 
 # 3. Overfit smoke — loss must descend:
