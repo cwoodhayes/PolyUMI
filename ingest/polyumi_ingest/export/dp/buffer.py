@@ -1,62 +1,131 @@
 """
-Export a pzarr scene to a diffusion-policy ReplayBuffer zarr.
+Export a pzarr scene to a UMI-format ReplayBuffer (``.zarr.zip``).
 
-Produces the flat layout that diffusion_policy's DexNexDataset expects::
+The layout matches ``universal_manipulation_interface``'s ``ReplayBuffer`` so that
+``UmiDataset`` reads it directly — the key *names* are load-bearing (the sampler counts
+robots via ``key.endswith('eef_pos')``, picks Slerp vs linear interp via ``'rot' in key``,
+and ``get_normalizer`` raises on any low-dim key it can't name-match)::
 
-    <output>.zarr/
-      meta/episode_ends            (n_episodes,) int64, cumulative step counts
-      data/img      (T,256,256,3)  float32 in [0,1], gopro frames at 10 Hz
-      data/state    (T,8)          float32  [x,y,z,qx,qy,qz,qw, gripper_m]
-      data/action   (T,8)          float32  (copy of state; training computes relative traj)
-      data/reward   (T,)           float32  zeros
-      data/not_done (T,)           float32  1.0, last step of each episode 0.0
+    <output>.zarr.zip
+      meta/episode_ends                 (n_episodes,) int64, cumulative step counts
+      data/camera0_rgb                  (T,224,224,3) uint8  Blosc(zstd), chunks (1,224,224,3)
+      data/robot0_eef_pos               (T,3)  float32  hand-frame position
+      data/robot0_eef_rot_axis_angle    (T,3)  float32  hand-frame rotation as a rotvec
+      data/robot0_gripper_width         (T,1)  float32  metres
+      data/robot0_demo_start_pose       (T,6)  float32  episode's first [pos, rotvec], repeated
+      data/robot0_demo_end_pose         (T,6)  float32  episode's last  [pos, rotvec], repeated
 
-``state``/``action`` poses are on the canonical **hand** frame, read from each episode's
-``eef/pose`` (preprocessing step 5). The world frame they sit in is whatever the pose source
-used (optitrack or slam) and is deliberately not normalized — it cancels out of the relative
-trajectory training computes, whereas the body frame does not.
+Deliberately absent:
 
-The store is written ``zarr_format=2`` (as the rest of pzarr is) so diffusion_policy,
-which is pinned to the zarr v2 API, can read it without importing anything from here.
+* ``action`` — ``sampler.py`` synthesises it from
+  ``[eef_pos, eef_rot_axis_angle, gripper_width]`` when the key is missing, so writing it
+  would be redundant (and would have to be kept in lock-step with the obs keys).
+* ``robot0_eef_rot_axis_angle_wrt_start`` — ``UmiDataset`` derives it at load time from
+  ``demo_start_pose``. It is in ``shape_meta`` but must *not* be in the store.
+* tactile (piezo / finger camera) — out of scope for the visuomotor policy.
+
+Poses come from each episode's ``eef/pose`` (preprocessing step 5), already on the canonical
+**hand** body frame and on the GoPro frame grid. Quaternion → rotvec is the only pose
+transform here. The world frame is left as-is: it cancels out of the relative trajectory the
+policy trains on, whereas the body frame does not — which is why step 5 exists. See
+``EefPoseStep`` and ``transforms.retarget_body_frame``.
+
+Frames are exported at the **native GoPro rate** (~59.94 Hz), not down-sampled here. UMI's
+dataset assumes uniform Δt and sets the effective observation rate itself via
+``obs_down_sample_steps`` in the task config, so storing raw keeps that knob meaningful and
+lets the obs rate change without re-exporting.
+
+Images use **Blosc**, not JpegXl, on purpose. The training container pins Python 3.9 with
+``imagecodecs==2023.9.18``, whose JpegXl codec cannot parse the config that our Python-3.13
+``imagecodecs`` (2026.x) writes (``bitspersample``, ``squeeze``, ``usecontainer``, …), and no
+single ``imagecodecs`` release supports both interpreters. Blosc is in ``numcodecs`` core, so
+its config is byte-identical across both stacks; it is lossless, decodes faster than JpegXl,
+and only costs disk. (``imagecodecs`` is still needed here to *read* the source
+``gopro/frames``, which the pzarr stored as JpegXl.)
+
+The store is written ``zarr_format=2`` so the (v2-pinned) UMI zarr can read it, then packed
+into a ``.zarr.zip`` because ``UmiDataset`` opens its dataset through ``zarr.ZipStore``.
 """
 
 from __future__ import annotations
 
 import logging
 import pathlib
+import tempfile
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2
-import imagecodecs.numcodecs  # noqa: F401 — registers imagecodecs_jpegxl with numcodecs
+import imagecodecs.numcodecs
 import numpy as np
 import zarr
 from numcodecs import Blosc
+from scipy.spatial.transform import Rotation
 
 from polyumi_ingest.pzarr.scene_files import SceneFiles
 from polyumi_ingest.pzarr.store import arr, grp
-from polyumi_ingest.timebase import nearest_idx
+
+imagecodecs.numcodecs.register_codecs()
 
 log = logging.getLogger('export.dp')
 
-HZ = 10
-RESOLUTION = 256
+#: Output image resolution, matching UMI's ``camera0_rgb`` shape ``[3, 224, 224]``.
+RESOLUTION = 224
+#: Single robot arm; UMI's multi-robot keying still applies with one ``robot0``.
+_ROBOT = 'robot0'
+_CAMERA = 'camera0_rgb'
+
 _BLOSC = Blosc(cname='zstd', clevel=5, shuffle=Blosc.SHUFFLE)
+_TIME_CHUNK = 1024
+
+#: Warn if the largest inter-frame gap in the exported span exceeds this multiple of the
+#: median frame period. Frames are stored as-is (no resampling), so a dropped frame becomes a
+#: single step that silently violates UMI's uniform-Δt assumption. One is tolerable; many
+#: suggests a recording problem.
+_GAP_WARN_FACTOR = 5.0
+
+
+def _measure_rate(gopro_ts: np.ndarray) -> float:
+    """Native frame rate (Hz) from the median inter-frame period of GoPro timestamps."""
+    if len(gopro_ts) < 2:
+        raise RuntimeError(f'Need at least 2 GoPro timestamps to measure rate, got {len(gopro_ts)}')
+    return 1.0 / float(np.median(np.diff(gopro_ts)))
+
+
+def _longest_valid_span(valid: np.ndarray) -> tuple[int, int]:
+    """
+    Return the inclusive [start, end] index range of the longest run of True in ``valid``.
+
+    An episode can lose its pose source mid-way (SLAM tracking loss shows up as NaN rows in
+    ``eef/pose``). Dropping scattered rows would break the temporal continuity UMI's fixed-rate
+    sampler assumes, so we export the single longest gap-free stretch instead.
+    """
+    best_start, best_len = 0, 0
+    run_start = None
+    for i, ok in enumerate(valid):
+        if ok and run_start is None:
+            run_start = i
+        elif not ok and run_start is not None:
+            if i - run_start > best_len:
+                best_start, best_len = run_start, i - run_start
+            run_start = None
+    if run_start is not None and len(valid) - run_start > best_len:
+        best_start, best_len = run_start, len(valid) - run_start
+    if best_len == 0:
+        raise RuntimeError('no valid (non-NaN) pose/gripper rows in episode')
+    return best_start, best_start + best_len - 1
 
 
 def _decode_resized_frames(frames_arr: zarr.Array, gidx: np.ndarray) -> np.ndarray:
-    """Decode the selected gopro frames and resize+normalize to (T,RES,RES,3) float32 [0,1]."""
+    """Decode the selected GoPro frames and resize to (T,RES,RES,3) uint8 (channel-last)."""
 
     def one(i: int) -> np.ndarray:
         frame = np.asarray(frames_arr[int(i)])  # (H,W,3) uint8 RGB
-        resized = cv2.resize(frame, (RESOLUTION, RESOLUTION), interpolation=cv2.INTER_AREA)
-        return resized.astype(np.float32) / 255.0
+        return cv2.resize(frame, (RESOLUTION, RESOLUTION), interpolation=cv2.INTER_AREA)
 
     with ThreadPoolExecutor() as executor:
         frames = list(executor.map(one, gidx))
-    return np.stack(frames, axis=0)
-
-
-_TIME_CHUNK = 1024
+    return np.stack(frames, axis=0).astype(np.uint8)
 
 
 def _append(data_grp: zarr.Group, arrays: dict[str, np.ndarray]) -> None:
@@ -85,82 +154,83 @@ def _append(data_grp: zarr.Group, arrays: dict[str, np.ndarray]) -> None:
             a[old:] = value
 
 
-def _export_episode(
-    ep: zarr.Group,
-    root: zarr.Group,
-    data_grp: zarr.Group,
-    episode_key: str,
-) -> int:
-    """Resample one episode to HZ and append it to ``data_grp``. Returns the step count T."""
-    # GoPro runs on its own clock; bring it into the finger (Pi) clock domain.
-    offset = float(grp(ep, 'annotations/time_sync').attrs['gopro_to_finger_offset_s'])
-    gopro_ts = arr(ep, 'timestamps/gopro')[:] - offset
-    finger_ts = arr(ep, 'timestamps/finger')[:]
-    opti_ts = arr(root, 'optitrack/timestamps')[:]
-
-    # Window: start when the last stream comes online, end when the first drops out.
-    t_start = max(gopro_ts[0], finger_ts[0], opti_ts[0])
-    t_end = min(gopro_ts[-1], finger_ts[-1], opti_ts[-1])
-    if t_end <= t_start:
-        raise RuntimeError(f'{episode_key}: empty overlap window [{t_start}, {t_end}]')
-    target_ts = np.arange(t_start, t_end, 1.0 / HZ)
-    t = len(target_ts)
-
-    # img, gripper width, and eef pose all live on the gopro frame grid → one index.
-    gidx = nearest_idx(gopro_ts, target_ts)
-    if np.any(np.diff(gidx) < 0):
-        raise RuntimeError(
-            f'{episode_key}: gopro frame indices are non-monotonic after resampling to {HZ} Hz '
-            f'(gopro_ts has gaps larger than 1/{HZ}s). Refusing to write.'
-        )
-    img = _decode_resized_frames(arr(ep, 'gopro/frames'), gidx)
-
-    # eef/pose is written by preprocessing step 5 and is already on the canonical hand
-    # body frame. Reading the raw optitrack/slam poses here instead would put state in the
-    # marker-centroid or GoPro optical frame, neither of which is what the robot reports at
-    # inference — see EefPoseStep.
+def _export_episode(ep: zarr.Group, data_grp: zarr.Group, episode_key: str) -> int:
+    """Export one episode's longest valid span at native rate and append it. Returns step count T."""
     if 'eef/pose' not in ep:
         raise RuntimeError(f'{episode_key}: no eef/pose — run preprocessing step 5 (eef-pose) before exporting.')
-    pose_grp = grp(ep, 'eef')
-    pose = np.asarray(arr(ep, 'eef/pose')[:][gidx], dtype=np.float32)
-    pose_source = pose_grp.attrs.get('source', 'unknown')
+    gopro_ts = np.asarray(arr(ep, 'timestamps/gopro')[:], dtype=np.float64)
+    pose = np.asarray(arr(ep, 'eef/pose')[:], dtype=np.float64)  # (N,7) [xyz, quat] hand frame
+    gripper = np.asarray(arr(ep, 'annotations/gripper_width/width_m')[:], dtype=np.float64)
+    frames = arr(ep, 'gopro/frames')
 
-    gripper = arr(ep, 'annotations/gripper_width/width_m')[:][gidx].astype(np.float32)
-
-    if np.isnan(pose).any():
+    n = len(gopro_ts)
+    if not (len(pose) == len(gripper) == frames.shape[0] == n):
         raise RuntimeError(
-            f'{episode_key}: eef/pose (source {pose_source!r}) contains NaN over the window '
-            f'({int(np.isnan(pose[:, 0]).sum())}/{t} steps). Refusing to write.'
-        )
-    if np.isnan(gripper).any():
-        raise RuntimeError(
-            f'{episode_key}: gripper width contains NaN over the window '
-            f'({int(np.isnan(gripper).sum())}/{t} steps). Refusing to write.'
+            f'{episode_key}: GoPro-grid arrays disagree in length — '
+            f'gopro_ts={n}, eef/pose={len(pose)}, gripper={len(gripper)}, frames={frames.shape[0]}. '
+            f'eef/pose and gripper_width must be on the GoPro grid (steps 4 and 5).'
         )
 
-    state = np.concatenate([pose, gripper[:, None]], axis=1).astype(np.float32)
-    not_done = np.ones(t, dtype=np.float32)
-    not_done[-1] = 0.0
+    # Valid window: the longest gap-free run where both pose and gripper are non-NaN. This is
+    # what replaces the old cross-stream overlap window — no finger/optitrack clock needed,
+    # since frames, pose, and gripper already share the GoPro grid.
+    valid = ~np.isnan(pose).any(axis=1) & ~np.isnan(gripper)
+    i0, i1 = _longest_valid_span(valid)
+    n_dropped = n - (i1 - i0 + 1)
+    if n_dropped:
+        log.warning(
+            f'  {episode_key}: kept longest valid span [{i0}, {i1}] of {n} frames '
+            f'({n_dropped} dropped as NaN/outside span).'
+        )
+
+    # Export the frames as recorded — no resampling. UMI's dataset assumes uniform Δt and sets
+    # the observation rate itself via obs_down_sample_steps, so the exporter's job is just to
+    # hand over the raw native-rate stream. GoPro records at a steady ~59.94 Hz locally; a large
+    # inter-frame gap means a dropped frame, which would be treated as a single step, so warn.
+    span_ts = gopro_ts[i0 : i1 + 1]
+    rate = _measure_rate(span_ts)
+    max_gap = float(np.max(np.diff(span_ts)))
+    if max_gap > _GAP_WARN_FACTOR / rate:
+        log.warning(
+            f'  {episode_key}: largest inter-frame gap {max_gap * 1e3:.0f} ms is '
+            f'>{_GAP_WARN_FACTOR:g}x the {1e3 / rate:.1f} ms median — a dropped frame is stored '
+            f'as one step, breaking the uniform-rate assumption there.'
+        )
+
+    gidx = np.arange(i0, i1 + 1)
+    t = len(gidx)
+
+    pos = pose[gidx, :3].astype(np.float32)
+    rotvec = Rotation.from_quat(pose[gidx, 3:]).as_rotvec().astype(np.float32)
+    tcp6 = np.concatenate([pos, rotvec], axis=1)  # (T,6) [pos, rotvec] — UMI's tcp_pose
+
     _append(
         data_grp,
         {
-            'img': img,
-            'state': state,
-            'action': state.copy(),
-            'reward': np.zeros(t, dtype=np.float32),
-            'not_done': not_done,
+            _CAMERA: _decode_resized_frames(frames, gidx),
+            f'{_ROBOT}_eef_pos': pos,
+            f'{_ROBOT}_eef_rot_axis_angle': rotvec,
+            f'{_ROBOT}_gripper_width': gripper[gidx, None].astype(np.float32),
+            f'{_ROBOT}_demo_start_pose': np.broadcast_to(tcp6[0], (t, 6)).copy(),
+            f'{_ROBOT}_demo_end_pose': np.broadcast_to(tcp6[-1], (t, 6)).copy(),
         },
     )
-    log.info(f'  {episode_key}: {t} steps @ {HZ} Hz (pose={pose_source})')
+    source = grp(ep, 'eef').attrs.get('source', 'unknown')
+    log.info(f'  {episode_key}: {t} steps @ {rate:.2f} Hz (pose={source})')
     return t
 
 
-def export_scene_to_dp(
-    scene_path: pathlib.Path,
-    output_path: pathlib.Path,
-) -> int:
+def _zip_zarr_dir(zarr_dir: pathlib.Path, out_path: pathlib.Path) -> None:
+    """Pack the *contents* of a directory zarr into a ``.zarr.zip`` readable by zarr.ZipStore."""
+    with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_STORED) as zf:
+        for path in sorted(zarr_dir.rglob('*')):
+            if path.is_file():
+                zf.write(path, path.relative_to(zarr_dir).as_posix())
+
+
+def export_scene_to_dp(scene_path: pathlib.Path, output_path: pathlib.Path) -> int:
     """
-    Export EPISODE sessions of a pzarr scene to a diffusion-policy ReplayBuffer zarr.
+    Export EPISODE sessions of a pzarr scene to a UMI-format ``.zarr.zip`` ReplayBuffer.
 
     Poses come from ``eef/pose`` (preprocessing step 5), which has already resolved the
     optitrack-vs-slam source choice and put the trajectory on the hand frame.
@@ -174,24 +244,32 @@ def export_scene_to_dp(
     root = zarr.open_group(str(zarr_path), mode='r')
     n_episodes = int(root.attrs.get('n_episodes', 0))
 
-    out = zarr.open_group(str(output_path), mode='w', zarr_format=2)
-    meta = out.create_group('meta')
-    data = out.create_group('data')
+    with tempfile.TemporaryDirectory(prefix='dp_export_') as tmp:
+        build_dir = pathlib.Path(tmp) / 'buffer.zarr'
+        out = zarr.open_group(str(build_dir), mode='w', zarr_format=2)
+        meta = out.create_group('meta')
+        data = out.create_group('data')
 
-    episode_ends: list[int] = []
-    total = 0
-    for i in range(n_episodes):
-        ep_key = f'episode_{i}'
-        if ep_key not in root:
-            log.warning(f'{ep_key} not found in {zarr_path.name}, skipping.')
-            continue
-        ep = zarr.open_group(str(zarr_path / ep_key), mode='r')
-        if ep.attrs.get('session_type') == 'MAPPING':
-            log.info(f'  {ep_key}: MAPPING session, skipping.')
-            continue
-        total += _export_episode(ep, root, data, ep_key)
-        episode_ends.append(total)
+        episode_ends: list[int] = []
+        total = 0
+        for i in range(n_episodes):
+            ep_key = f'episode_{i}'
+            if ep_key not in root:
+                log.warning(f'{ep_key} not found in {zarr_path.name}, skipping.')
+                continue
+            ep = zarr.open_group(str(zarr_path / ep_key), mode='r')
+            if ep.attrs.get('session_type') == 'MAPPING':
+                log.info(f'  {ep_key}: MAPPING session, skipping.')
+                continue
+            total += _export_episode(ep, data, ep_key)
+            episode_ends.append(total)
 
-    meta.create_array('episode_ends', data=np.array(episode_ends, dtype=np.int64), compressor=_BLOSC)
+        if not episode_ends:
+            raise RuntimeError(f'{zarr_path.name}: no EPISODE sessions to export.')
+
+        meta.create_array('episode_ends', data=np.array(episode_ends, dtype=np.int64), compressor=_BLOSC)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        _zip_zarr_dir(build_dir, output_path)
+
     log.info(f'Wrote {len(episode_ends)} episode(s), {total} steps → {output_path}')
     return len(episode_ends)

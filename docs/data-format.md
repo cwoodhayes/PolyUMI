@@ -195,7 +195,7 @@ These live alongside the zarr, not inside it:
 
 `pzarr` is the source of truth; downstream formats are exports produced on demand.
 
-- **Diffusion Policy ReplayBuffer zarr** (`pingest export-dp`): flat zarr layout with `data/{img,state,action,reward,not_done}` arrays resampled to 10 Hz on the GoPro frame grid, plus `meta/episode_ends`. State/action is an 8-vector `[x, y, z, qx, qy, qz, qw, gripper_m]`, read from `eef/pose` (so step 5 must have run) and therefore on the hand frame. Only `EPISODE`-typed sessions are exported; `MAPPING` sessions are skipped.
+- **UMI ReplayBuffer** (`pingest export-dp`): a `.zarr.zip` matching `universal_manipulation_interface`'s `ReplayBuffer` so `UmiDataset` reads it directly. `meta/episode_ends` plus `data/` keys `camera0_rgb` (T,224,224,3 uint8, JpegXl), `robot0_eef_pos` (T,3), `robot0_eef_rot_axis_angle` (T,3, rotvec), `robot0_gripper_width` (T,1), and `robot0_demo_start_pose`/`robot0_demo_end_pose` (T,6, the episode's first/last `[pos, rotvec]` broadcast). The key *names* are load-bearing — `UmiDataset` name-matches them. Poses are read from `eef/pose` (so step 5 must have run) and are on the hand frame; the `action` key is deliberately omitted (the sampler synthesises it from `[eef_pos, eef_rot_axis_angle, gripper_width]`). Frames are exported at the native GoPro rate (~59.94 Hz); the training config sets the observation rate via `obs_down_sample_steps`. Only `EPISODE`-typed sessions are exported; `MAPPING` sessions are skipped.
 
 - **MCAP** (`pingest export-mcap`): one `.mcap` file per episode, with channels for finger image, GoPro image, both audio streams, IMU, GPS, SLAM pose, OptiTrack pose, ArUco annotations, and gripper width. Uses Foxglove JSON schemas; audio is chunked at 4096 samples per message.
 

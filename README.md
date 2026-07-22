@@ -136,12 +136,19 @@ pingest pp <scene_directory>
 # export a single session to MCAP for easy visualization in foxglove (use the foxglove config 
 # in ingest/foxglove)
 pingest export-mcap <scene_directory> <session_number>
-# export a scene's EPISODE sessions to a diffusion-policy ReplayBuffer zarr:
-pingest export-dp <scene_directory> --output <output.zarr>
+# export a scene's EPISODE sessions to a UMI-format ReplayBuffer (.zarr.zip) for training:
+pingest export-dp <scene_directory> --output <output.zarr.zip>
 ```
 
 The at-rest data format used during the preprocessing stage managed by `pingest` is a
 zarr-based format stored in `scene.zarr` in each scene directory, referred to in these docs as `pzarr`. See [docs/data-format.md](docs/data-format.md) for details on the format & the rationale behind it. The GoPro camera calibration shared by SLAM and the ArUco gripper-width step is documented in [docs/camera-calibration.md](docs/camera-calibration.md).
+
+## Training
+
+Once a scene is preprocessed and exported (`pingest export-dp`, above), train the visuomotor
+diffusion policy in Docker on a GPU workstation. See
+[docs/training-instructions.md](docs/training-instructions.md) for the build/run walkthrough,
+the rootless-Docker notes, and how the trained policy is served back to the ROS inference node.
 
 ## Streaming / Demos
 

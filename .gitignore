@@ -4,6 +4,8 @@
 # generated files
 pi/polyumi_pi/_version.py
 cohn_db.json
+*.zarr.zip
+*.zarr
 
 # matt doesn't like ide config stuff :(
 .idea
