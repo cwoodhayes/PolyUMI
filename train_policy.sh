@@ -26,10 +26,17 @@ GPU_FLAG="${GPU_FLAG:---gpus all}"
 # Shared memory for the PyTorch DataLoader. Docker's 64 MB default crashes workers.
 SHM_SIZE="${SHM_SIZE:-8g}"
 
-# Run-as-user override. Left empty by default because the correct value under rootless Docker
-# depends on your uid mapping (see training-instructions.md § "output file ownership"). Set
-# e.g. USER_FLAG="--user $(id -u):$(id -g)" if that is right for your setup.
-USER_FLAG="${USER_FLAG:-}"
+# Run-as-user. Defaults to container root, which under rootless Docker maps back to the host
+# user — so the bind-mounted output dir is writable and the checkpoints it writes come back
+# owned by you (running as the image's default mambauser instead maps to a subuid and can't
+# write your dir). On a rootful Docker host set USER_FLAG="--user $(id -u):$(id -g)" instead.
+# See training-instructions.md § "output file ownership".
+USER_FLAG="${USER_FLAG:---user 0:0}"
+
+# Allocate a TTY only when stdin is one, so the script also works over non-interactive SSH
+# (docker run -t against a non-TTY errors with "the input device is not a TTY").
+TTY_FLAG=""
+[ -t 0 ] && TTY_FLAG="-t"
 
 if [ ! -f "${DATASET}" ]; then
     echo "error: DATASET '${DATASET}' not found" >&2
@@ -46,7 +53,7 @@ echo ">> training (dataset: ${DATASET}, output: ${OUTPUT_DIR})"
 # the container ends up running as under rootless. The dataset mounts to the path the polyumi
 # task config defaults to (/data/dataset.zarr.zip); outputs land in the bind-mounted dir.
 # shellcheck disable=SC2086
-exec docker run --rm -it \
+exec docker run --rm -i ${TTY_FLAG} \
     ${GPU_FLAG} \
     ${USER_FLAG} \
     --shm-size="${SHM_SIZE}" \

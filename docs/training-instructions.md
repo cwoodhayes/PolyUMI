@@ -58,11 +58,13 @@ handles the ones it can and exposes the rest as env vars.
 1. **GPU flag.** The script defaults to `--gpus all`. If that fails under rootless, use the CDI
    form: `GPU_FLAG="--device nvidia.com/gpu=all" ./train_policy.sh ...`. **Verify GPU visibility
    first** (below) — this is the most common snag.
-2. **Output file ownership.** Rootless remaps container UIDs, so bind-mounted files the container
-   writes can come back owned by a subuid on the host rather than by you. If that bites, set
-   `USER_FLAG` to whatever maps correctly on your setup (often `USER_FLAG="--user $(id -u):$(id
-   -g)"`, sometimes running as container root). The script sets `HOME=/tmp` and cache dirs so
-   nothing needs to write to a home directory regardless.
+2. **Output file ownership.** Rootless remaps container UIDs. The script defaults to
+   `USER_FLAG="--user 0:0"` (container root), which under rootless Docker maps back to *your*
+   host user — so the bind-mounted output dir is writable and checkpoints come back owned by
+   you. (Running as the image's default `mambauser` instead maps to a subuid that can't write
+   your dir — the failure you'd otherwise hit.) On a **rootful** Docker host, override with
+   `USER_FLAG="--user $(id -u):$(id -g)"`. The script also sets `HOME=/tmp` and cache dirs so
+   nothing needs a writable home regardless.
 3. **Shared memory.** The PyTorch DataLoader needs more than Docker's 64 MB default `/dev/shm`
    or workers crash with a bus error. The script sets `--shm-size=8g` (override with `SHM_SIZE`).
    Do **not** use `--ipc=host` under rootless.
@@ -86,6 +88,7 @@ docker run --rm --gpus all polyumi-dp \
 docker run --rm -v /abs/path/to/your.zarr.zip:/data/dataset.zarr.zip:ro polyumi-dp \
     micromamba run -n umi python -c "
 from omegaconf import OmegaConf
+OmegaConf.register_new_resolver('eval', eval, replace=True)  # as train.py does, for latency_steps
 from diffusion_policy.dataset.umi_dataset import UmiDataset
 cfg = OmegaConf.load('diffusion_policy/config/task/polyumi.yaml')
 ds = UmiDataset(shape_meta=cfg.shape_meta, dataset_path='/data/dataset.zarr.zip',
