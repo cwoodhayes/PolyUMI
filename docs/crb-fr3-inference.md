@@ -205,10 +205,13 @@ publisher is actually running (e.g. the Pi stream for `/pi/*`).
 
 TODO describe setup & connection of devices.
 
-This brings up the **dummy** inference loop (no real checkpoint): the FR3 stack on
-the NUC, the PolyUMI nodes + `policy_client_node` on the laptop, and the dummy
-server (currently also on the laptop). At the end the client logs 8-vector actions
-at 10 Hz, pulling the live EEF pose from the NUC's TF over DDS.
+This brings up the inference loop: the FR3 stack on the NUC, the PolyUMI nodes +
+`policy_client_node` on the laptop, and an inference server. The server is either the **real**
+trained policy (`serve_policy.sh` on the GPU box — step 2) or the **dummy** oscillator
+(`dummy-server` on the laptop — step 2, alternative). The client pulls the live EEF pose from the
+NUC's TF over DDS, POSTs observations to the server, logs the returned 8-vector action chunk, and
+publishes it to `/polyumi/target_poses_preview` for Foxglove (always) and — only with
+`execute_motion:=true` — to `/polyumi/target_poses` for the NUC bridge to execute.
 
 Start the pieces in separate terminals, in this order.
 
@@ -279,7 +282,25 @@ with a hand on the e-stop, then raise it once you trust the motion. It logs
 `move_group found (compute_cartesian_path ready).` at
 startup — if it instead says `NOT found after 10s`, step 1b isn't running.
 
-**2. Laptop — dummy inference server** (its own terminal):
+**2. Inference server — real (GPU box) or dummy (laptop).**
+
+*Real policy* — on the GPU workstation (`sheep`), serve a trained checkpoint. `serve_policy.sh`
+builds the image and wires the rootless-Docker flags + checkpoint/HF-cache mounts (see
+[training-instructions.md](training-instructions.md)):
+
+```bash
+# on the GPU box:
+CKPT=/abs/path/to/epoch=0070-train_loss=0.021.ckpt ./serve_policy.sh
+# from the laptop, confirm it's reachable:
+curl http://<gpu-host>:8000/health           # -> {"status":"ready", ...}
+```
+
+The laptop reaches it over LAN; pass its URL to the launch in step 4
+(`inference_server_url:=http://<gpu-host>:8000/predict_cartesian/`). Do **not** run
+`external/polyumi_diffusion_policy/docker/serve.sh` on the host — it is the in-container
+entrypoint and fails with `exec: uvicorn: not found`.
+
+*Dummy oscillator* — alternative for wiring/CI with no GPU or checkpoint (its own laptop terminal):
 
 ```bash
 cd inference_server
@@ -289,7 +310,8 @@ uv run dummy-server   # FastAPI on 0.0.0.0:8000; oscillates X around HOME_POSE
 `inference_server` is its own isolated uv project (not part of the repo
 workspace), so `uv run` here creates/uses a standalone `inference_server/.venv`
 with only fastapi/uvicorn/numpy — no need to source anything. The command is
-`dummy-server` (hyphen), the `[project.scripts]` entry point.
+`dummy-server` (hyphen), the `[project.scripts]` entry point. Leave
+`inference_server_url` at its default (`http://localhost:8000/predict_cartesian/`) in step 4.
 
 **3. Pi — start the camera/audio stream** (ssh into the Pi):
 
@@ -320,6 +342,22 @@ ros2 launch polyumi_ros2 inference_demo.launch.xml pi_host:=<raspberry pi IP add
 #   still run (policy_client_node needs the GoPro image to fill its observation buffer).
 ```
 
+**Real-policy dry run (recommended first pass on the arm — no motion, just watch the commanded
+chunk in Foxglove):**
+
+```bash
+ros2 launch polyumi_ros2 inference_demo.launch.xml motion_only:=true \
+    inference_server_url:=http://<gpu-host>:8000/predict_cartesian/ \
+    max_image_age_s:=0.3 \      # tolerate the Elgato's ~200 ms 1080p convert latency
+    tf_use_latest:=true         # ONLY if the laptop<->NUC clocks are skewed; static arm only
+```
+
+`execute_motion` stays false, so nothing moves; the commanded chunk is published to
+`/polyumi/target_poses_preview` (add it in Foxglove — pose arrows in `fr3_link0`). Sane output sits
+near the current EEF with small step-to-step deltas. `tf_use_latest` and `max_image_age_s` are
+workarounds — see [Troubleshooting](#troubleshooting); drop them once the clock is synced and a
+faster camera path is in place, which are prerequisites for `execute_motion:=true`.
+
 **Testing motion without the full loop.** To move the arm through one chunk by hand
 (rather than the 10 Hz dummy oscillation), skip step 4 and publish a `PoseArray` directly
 from the laptop — read the current pose, then target a small offset. A single-pose array
@@ -335,8 +373,61 @@ ros2 topic pub -1 /polyumi/target_poses geometry_msgs/msg/PoseArray \
 Use your measured pose with ~2 cm added to one axis (`-1` publishes once). The bridge
 should log `Executed chunk (1 waypoints).` and the arm should creep to it.
 
-Confirm the loop is live: `policy_client_node` logs `action x=… y=… z=… grip=…`
-at ~10 Hz, and Foxglove (`ws://localhost:8765`, using the config in `ros2_ws/src/polyumi_ros2/foxglove/layouts/stream_demo.json`) shows the GoPro, the Pi
-camera/audio, and FR3 TF. If the client warns about TF lookups, re-check the
+## Troubleshooting
+
+### Nothing publishes / Foxglove shows nothing — a duplicate or leftover launch (most common)
+Symptoms: `foxglove_bridge` aborts at startup with
+`terminate called ... Couldn't initialize websocket server: Bind Error`, and/or the GoPro frames
+stall a few seconds in — `Dropped control tick: newest camera frame is N ms old` with **N climbing
+without bound** — so `policy_client_node` stops posting and the preview topic goes quiet. Cause:
+another (or leftover) launch already holds port **8765** (foxglove) and **`/dev/video2`** (the
+camera); two processes can't share either, so the second foxglove aborts and the two camera nodes
+starve each other. Clear leftovers and confirm a single stack before relaunching:
+
+```bash
+pkill -f "ros2 launch"; pkill -f foxglove_bridge; pkill -f v4l2_camera
+ros2 node list      # expect only NUC nodes (or nothing) on the laptop before you launch
+```
+
+### TF lookup fails: "extrapolation into the past" — laptop↔NUC clock skew
+`policy_client_node` logs `TF lookup failed: Lookup would require extrapolation into the past`, with
+the "earliest data" time far *ahead* of the requested time. The NUC's wall clock is ahead of the
+laptop's, so NUC-stamped TF lands outside the buffer. (This is the first path that reads NUC TF *on
+the laptop* — Phase 2 execution runs entirely in the NUC's own time domain, so it never exposed the
+skew.) Two fixes:
+- **Proper (required before execution):** sync the clocks. The NUC is on the isolated `10.0.0.x`
+  link, usually with no internet NTP — point its chrony at the laptop (`server 10.0.0.1 iburst`,
+  with `allow 10.0.0.0/24` on the laptop's chrony) or set it manually.
+- **Dry run only:** `tf_use_latest:=true` looks up the latest EEF transform (tf2 time=0) instead of
+  the latency-aligned instant. Valid only while the arm is **stationary** (`execute_motion:=false`);
+  do NOT use it for execution — a moving arm needs the time-aligned pose.
+
+### TF lookup fails: "fr3_link0 ... does not exist" / no TF at all — fr3-bringup crashed
+If `ros2 topic info /tf_static` shows `Publisher count: 0` and `tf2_echo fr3_link0 fr3_hand_tcp`
+reports the frame doesn't exist, the NUC's `fr3-bringup` has died (it can crash mid-session).
+Restart `fr3-bringup` (and `fr3-arm-controller`) on the NUC; TF returns within a second or two.
+
+### Every tick dropped: "capture pipeline stalled" — camera latency, not a stall
+The Elgato HD60 X presents the GoPro feed as **1080p YUYV**, and `v4l2_camera` does a *software*
+YUYV→RGB conversion (it logs "possibly slow conversion") into a ~6 MB `rgb8` message — adding
+~200 ms of stamp-to-usable latency, past the default ~50 ms freshness limit. Raise it with
+`max_image_age_s:=0.3`. This only tolerates older frames; image and pose stay aligned to the
+frame's capture stamp, so it's safe for the dry run. For **execution**, prefer a genuinely faster
+camera path (lower published resolution, or the compressed transport) so the policy isn't acting on
+200 ms-old vision.
+
+### First inference times out, then recovers; many actions dropped as stale
+The first `/predict_cartesian/` after the server starts includes GPU/model warmup and can exceed
+the POST timeout (`POST ... failed: timed out`). It self-recovers next tick; raise `post_timeout_s`
+if it persists. Real diffusion inference is ~200–500 ms/call, so the stale-drop logic discards most
+of each 8-step chunk (`dropped 5/8 …`, occasionally `dropped all 8`). Fine for a dry run; before
+execution, cut latency (fewer diffusion steps, compressed image transport, or a larger
+`n_action_steps`).
+
+Confirm the loop is live: `policy_client_node` logs one `episode /reset sent` line, then
+`action chunk n=… (dropped …/… stale, inference=…ms) first: x=… y=… z=… grip=…` each tick, and
+Foxglove (`ws://localhost:8765`, using the config in `ros2_ws/src/polyumi_ros2/foxglove/layouts/stream_demo.json`)
+shows the GoPro, the Pi camera/audio, FR3 TF, and the commanded chunk on
+`/polyumi/target_poses_preview`. If the client warns about TF lookups, re-check the
 [Quick checks](#quick-checks) above — the NUC must be reachable and `fr3-bringup`
-running.
+running — and see [Troubleshooting](#troubleshooting).

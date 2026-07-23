@@ -78,6 +78,16 @@ source setup_franka_env.sh   # RMW=cyclonedds, domain 0, CYCLONEDDS_URI, 10.0.0.
 On the NUC: `fr3-bringup` + `fr3-arm-controller`. Full reference and the exact
 environment assumptions live in [docs/crb-fr3-inference.md](docs/crb-fr3-inference.md).
 
+**When debugging FR3 inference on the arm — read [docs/crb-fr3-inference.md](docs/crb-fr3-inference.md)
+FIRST, especially its Troubleshooting section, before re-diagnosing.** The common failure modes and
+their fixes are documented there: nothing publishing / Foxglove blank (a duplicate or leftover
+launch grabbing port 8765 + `/dev/video2` — `pkill` leftovers and confirm a single stack); TF
+"extrapolation into the past" (laptop↔NUC clock skew — sync clocks, or `tf_use_latest:=true` for a
+stationary dry run only); TF "fr3_link0 does not exist" (NUC `fr3-bringup` crashed — restart it);
+"capture pipeline stalled" (the Elgato's ~200 ms 1080p convert latency — `max_image_age_s:=0.3`).
+The **dry-run** pattern (validate commanded motion without moving the arm) is `execute_motion:=false`
+(default) + watch `/polyumi/target_poses_preview` in Foxglove.
+
 ### Ingest (host PC)
 ```bash
 pingest --help
@@ -93,6 +103,15 @@ workspace. One image serves both training and inference. Run it with `./train_po
 including rootless-Docker gotchas, is in
 [docs/training-instructions.md](docs/training-instructions.md). This is the step after `pingest
 export-dp`.
+
+**Serving a trained checkpoint** (the real inference server) uses the same image via
+`CKPT=/abs/path/to/<name>.ckpt ./serve_policy.sh` at the repo root (the inference counterpart of
+`train_policy.sh`). It runs `serve_policy.py` in-container and direct-imports the policy — there is
+**no** subprocess/`conda run`. Do **not** run the fork's `external/polyumi_diffusion_policy/docker/serve.sh`
+on the host; it is the in-container entrypoint and fails with `exec: uvicorn: not found`. The wire
+contract matches `dummy_server` (`POST /predict_cartesian/` + `POST /reset` for the episode-start
+pose); the ROS-side `policy_client_node` derives the `/reset` URL from the predict URL. Serving and
+training must use the same image because checkpoints are dill-pickled against the exact dep tree.
 
 ## Key Modules
 
