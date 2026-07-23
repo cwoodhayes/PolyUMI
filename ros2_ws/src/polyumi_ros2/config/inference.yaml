@@ -1,12 +1,21 @@
-# Per-component latencies of the system, in seconds.
-#
-# !!! NONE OF THESE HAVE BEEN MEASURED — they are plausible guesses. !!!
-# There is no calibration script for them yet; writing one is tracked as blocking issue 2
-# in docs/franka-inference-bringup.md. They are live on the inference critical path
-# regardless of whether they are right, so treat every value below as provisional.
+# policy_client_node inference config: control cadence + per-component system latencies.
+# Loaded by inference_demo.launch.xml via `<param from="...">`. This is the single place to
+# tune how the on-arm inference loop runs; the node's own declared defaults mirror these.
 
 /**:
   ros__parameters:
+    # Receding-horizon stride: run inference once per this many control ticks, NOT every tick.
+    # The obs window still updates every tick (stays dt-spaced); a new action chunk is only
+    # requested/published every steps_per_inference ticks, while the arm executes the previous
+    # one. This is UMI's scheme (re-infer every ~steps_per_inference*dt) and it stops the
+    # per-tick POST/publish storm. 1 = infer every tick. Should be <= n_action_steps.
+    steps_per_inference: 6
+
+    # --- Per-component latencies, in seconds. ---
+    # !!! NONE OF THESE HAVE BEEN MEASURED — they are plausible guesses. !!!
+    # There is no calibration script for them yet; writing one is tracked as blocking issue 2
+    # in docs/franka-inference-bringup.md. They are live on the inference critical path
+    # regardless of whether they are right, so treat every value below as provisional.
     latency:
       # Delay from a photon hitting the GoPro sensor to the frame's ROS header stamp:
       # GoPro encode + HDMI out + capture card + USB + v4l2 dequeue. Sets both the TF lookup

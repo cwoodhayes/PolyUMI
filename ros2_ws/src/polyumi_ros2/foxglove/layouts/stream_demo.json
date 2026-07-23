@@ -43,10 +43,123 @@
         "poseEstimateYDeviation": 0.5,
         "poseEstimateThetaDeviation": 0.26179939
       },
-      "foxglovePanelTitle": "Wrist Camera"
+      "foxglovePanelTitle": "Wrist Camera",
+      "synchronize": false
     },
     "RawMessages!29pqw16": {
-      "topicPath": "/gopro/camera_info"
+      "topicPath": "/gopro/camera_info",
+      "defaultExpanded": false
+    },
+    "3D!2sy03nw": {
+      "cameraState": {
+        "distance": 3.3216676797518208,
+        "perspective": true,
+        "phi": 60.0000000000026,
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOffset": [
+          0.6096747460899009,
+          0.09649498132275064,
+          -2.5847736039516347e-17
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "thetaOffset": 60.000000000004704,
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followMode": "follow-pose",
+      "scene": {},
+      "transforms": {
+        "frame:fr3_hand": {
+          "visible": false
+        },
+        "frame:fr3_link8": {
+          "visible": false
+        },
+        "frame:fr3_link7": {
+          "visible": false
+        },
+        "frame:fr3_link6": {
+          "visible": false
+        },
+        "frame:fr3_link5": {
+          "visible": false
+        },
+        "frame:fr3_link4": {
+          "visible": false
+        },
+        "frame:fr3_link3": {
+          "visible": false
+        },
+        "frame:fr3_link2": {
+          "visible": false
+        },
+        "frame:fr3_link1": {
+          "visible": false
+        },
+        "frame:fr3_link0": {
+          "visible": false
+        },
+        "frame:fr3_leftfinger": {
+          "visible": false
+        },
+        "frame:fr3_rightfinger": {
+          "visible": false
+        }
+      },
+      "topics": {
+        "/polyumi/target_poses": {
+          "visible": true
+        },
+        "/robot_description": {
+          "visible": false
+        },
+        "/polyumi/target_poses_preview": {
+          "visible": true
+        }
+      },
+      "layers": {
+        "grid": {
+          "visible": true,
+          "drawBehind": false,
+          "instanceId": "4de0cf7a-13de-48ba-b386-a4ac5ebde0c3",
+          "layerId": "foxglove.Grid",
+          "size": 10,
+          "divisions": 10,
+          "lineWidth": 1,
+          "color": "#248eff",
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "publish": {
+        "type": "point",
+        "poseTopic": "/move_base_simple/goal",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "synchronize": false,
+      "imageMode": {}
     },
     "Image!2gdeq90": {
       "cameraState": {
@@ -90,18 +203,11 @@
       },
       "imageMode": {
         "imageTopic": "/pi/camera/image/compressed",
-        "calibrationTopic": "/gopro/camera_info",
         "flipHorizontal": false,
         "rotation": 0
       },
-      "foxglovePanelTitle": "Touch Sensor"
-    },
-    "Audio!1ops55o": {
-      "volume": 1,
-      "slidingViewWidth": 10,
-      "topic": "/pi/audio/raw",
-      "muted": true,
-      "foxglovePanelTitle": "Fingertip Mic"
+      "foxglovePanelTitle": "Touch Sensor",
+      "synchronize": false
     },
     "Tab!2xvuj86": {
       "activeTabIdx": 0,
@@ -116,17 +222,29 @@
           }
         }
       ]
+    },
+    "Audio!1ops55o": {
+      "volume": 0.68,
+      "slidingViewWidth": 10,
+      "topic": "/pi/audio/raw",
+      "muted": false,
+      "foxglovePanelTitle": "Fingertip Mic"
     }
   },
   "layout": {
-    "direction": "row",
     "first": {
-      "first": "Image!2gdeq90",
-      "second": "Audio!1ops55o",
-      "direction": "column",
-      "splitPercentage": 75.68995186456033
+      "first": "3D!2sy03nw",
+      "second": {
+        "first": "Image!2gdeq90",
+        "second": "Tab!2xvuj86",
+        "direction": "row"
+      },
+      "direction": "row",
+      "splitPercentage": 43.78513429106808
     },
-    "second": "Tab!2xvuj86"
+    "second": "Audio!1ops55o",
+    "direction": "column",
+    "splitPercentage": 67.49246735855372
   },
   "globalVariables": {},
   "playbackConfig": {

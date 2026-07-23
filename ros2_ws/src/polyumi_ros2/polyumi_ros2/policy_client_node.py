@@ -5,9 +5,12 @@ At each control tick the node:
   1. Reads the latest wrist camera image and a latency-compensated end-effector pose (looked
      up in TF at the frame's own stamp - latency.gopro, to align with when that image was
      actually captured).
-  2. Maintains a short history window (n_obs_steps).
-  3. POSTs observations to /predict_cartesian/ on the inference server, requesting an
-     n_action_steps-length action chunk.
+  2. Maintains a short history window (n_obs_steps), appended every tick so the window stays
+     dt-spaced regardless of how often inference runs.
+  3. Once per ``steps_per_inference`` ticks (a receding-horizon stride — NOT every tick), POSTs
+     observations to /predict_cartesian/ on the inference server, requesting an
+     n_action_steps-length action chunk. Between inferences the arm keeps executing the
+     previously published chunk, matching UMI (infer once per ~steps_per_inference*dt).
   4. Drops the leading actions of the returned chunk that are already stale by the time the
      arm could act on them (observation + inference + arm-execution latency).
   5. Logs the chunk. If execute_motion is set, publishes the remaining chunk as a PoseArray
@@ -99,7 +102,17 @@ class PolicyClientNode(Node):
         # bridge's skip-while-busy would drop almost every tick. A full chunk lets move_group
         # plan one smooth path instead. Must be <= the model's n_action_steps (dummy: 8).
         self.declare_parameter('n_action_steps', 8)
-        # Per-component system latencies (seconds), loaded from config/latency.yaml via the
+        # Receding-horizon stride: run inference once per this many control ticks, not every
+        # tick. The obs window still updates every tick (so it stays dt-spaced), but a new
+        # chunk is only requested/published every steps_per_inference ticks — while the arm
+        # executes the previous chunk. This is UMI's scheme (eval_real.py re-infers every
+        # steps_per_inference steps, default 6) and it stops the per-tick POST/publish storm
+        # that otherwise swamps the NUC bridge. 1 = infer every tick (the old behaviour).
+        # Should be <= n_action_steps so each chunk covers the stride; a larger value just
+        # means the arm runs out of fresh waypoints before the next chunk lands. The launch
+        # default lives in config/inference.yaml (loaded via <param from>); this is the fallback.
+        self.declare_parameter('steps_per_inference', 6)
+        # Per-component system latencies (seconds), loaded from config/inference.yaml via the
         # inference launch file. NONE of them have been measured yet — see that file and
         # blocking issue 2 in docs/franka-inference-bringup.md. gopro and proprio are consumed
         # by _lookup_agent_pos, arm_exec by _n_stale_actions; finger_cam and piezo_mic are
@@ -125,6 +138,7 @@ class PolicyClientNode(Node):
         self._publish_preview = self.get_parameter('publish_preview').get_parameter_value().bool_value
         self._post_timeout_s = self.get_parameter('post_timeout_s').get_parameter_value().double_value
         self._n_action_steps = self.get_parameter('n_action_steps').get_parameter_value().integer_value
+        self._steps_per_inference = self.get_parameter('steps_per_inference').get_parameter_value().integer_value
         control_hz = self.get_parameter('control_hz').get_parameter_value().double_value
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
         self._latency = {
@@ -151,6 +165,10 @@ class PolicyClientNode(Node):
 
         # History buffers — each entry: (image_float32 [H,W,C], agent_pos [8])
         self._obs_buffer: deque = deque(maxlen=self._n_obs_steps)
+        # Receding-horizon stride counter: inference runs on the tick where this is 0, then
+        # every steps_per_inference ticks after. Kept in [0, steps_per_inference) so it never
+        # grows. Starts at 0 so the first full-buffer tick infers immediately.
+        self._inference_phase = 0
         self._latest_image: np.ndarray | None = None
         self._latest_image_stamp: rclpy.time.Time | None = None
         self._latest_image_lock = threading.Lock()
@@ -211,6 +229,11 @@ class PolicyClientNode(Node):
         self.get_logger().info(
             f'policy_client_node started — server: {self._url} — mode: {mode} — preview: {preview}'
         )
+        stride_interval = self._steps_per_inference * self._action_dt
+        self.get_logger().info(
+            f'receding-horizon stride — inference every {self._steps_per_inference} ticks '
+            f'({stride_interval * 1e3:.0f}ms @ {control_hz:g}Hz), chunk n_action_steps={self._n_action_steps}'
+        )
         latency_str = ' '.join(f'{name}={seconds}s' for name, seconds in self._latency.items())
         tf_mode = 'LATEST (clock-skew workaround; not time-aligned)' if self._tf_use_latest else 'time-aligned'
         self.get_logger().info(
@@ -243,6 +266,16 @@ class PolicyClientNode(Node):
             errors.append(f'n_obs_steps must be >= 1, got {self._n_obs_steps}')
         if self._n_action_steps < 1:
             errors.append(f'n_action_steps must be >= 1, got {self._n_action_steps}')
+        if self._steps_per_inference < 1:
+            errors.append(f'steps_per_inference must be >= 1, got {self._steps_per_inference}')
+        elif self._steps_per_inference > self._n_action_steps:
+            # Not fatal — the arm just runs out of fresh waypoints before the next chunk — but
+            # almost always a misconfiguration, so warn loudly rather than fail.
+            self.get_logger().warn(
+                f'steps_per_inference ({self._steps_per_inference}) > n_action_steps '
+                f'({self._n_action_steps}): each chunk is shorter than the re-inference stride, '
+                'so the arm will stall between chunks. Lower steps_per_inference or raise n_action_steps.'
+            )
         if self._post_timeout_s <= 0:
             errors.append(f'post_timeout_s must be > 0, got {self._post_timeout_s}')
         for name, seconds in self._latency.items():
@@ -331,6 +364,15 @@ class PolicyClientNode(Node):
             # (used for robot0_eef_rot_axis_angle_wrt_start). Retried on failure until it lands.
             if not self._episode_reset_done:
                 self._reset_episode(agent_pos)
+
+            # Receding-horizon stride: only the every-steps_per_inference-th tick actually runs
+            # inference. The obs buffer was still appended above, so the next inference sees a
+            # fresh dt-spaced window; we just don't re-POST/publish a chunk every tick (which
+            # swamps the NUC bridge). Advance the phase AFTER deciding, kept in [0, stride).
+            infer_now = self._inference_phase == 0
+            self._inference_phase = (self._inference_phase + 1) % self._steps_per_inference
+            if not infer_now:
+                return
 
             # --- 4. Serialize and POST ---
             # Images go as base64-encoded raw bytes (+ dtype/shape) rather than nested-list

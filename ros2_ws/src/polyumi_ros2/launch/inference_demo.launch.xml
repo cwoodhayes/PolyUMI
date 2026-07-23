@@ -48,8 +48,8 @@
   <!-- Skip pi_receiver_node (no ZMQ connection to the Pi) for FR3-motion-only testing when
        the Pi isn't running / isn't needed — e.g. iterating on chunk execution at the arm. -->
   <arg name="motion_only" default="false"/>
-  <!-- Per-component system latencies (seconds), as measured by calibration scripts. -->
-  <arg name="latency_config" default="$(find-pkg-share polyumi_ros2)/config/latency.yaml"/>
+  <!-- Inference-loop config: receding-horizon stride + per-component system latencies. -->
+  <arg name="inference_config" default="$(find-pkg-share polyumi_ros2)/config/inference.yaml"/>
 
   <include file="$(find-pkg-share polyumi_ros2)/launch/stream_demo.launch.xml">
     <arg name="pi_host" value="$(var pi_host)"/>
@@ -66,6 +66,6 @@
     <param name="max_image_age_s" value="$(var max_image_age_s)"/>
     <param name="post_timeout_s" value="$(var post_timeout_s)"/>
     <param name="tf_use_latest" value="$(var tf_use_latest)"/>
-    <param from="$(var latency_config)"/>
+    <param from="$(var inference_config)"/>
   </node>
 </launch>

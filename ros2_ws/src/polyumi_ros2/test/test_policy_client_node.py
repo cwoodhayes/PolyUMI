@@ -69,7 +69,7 @@ class _FakeClock:
 
 
 def test_valid_config_constructs(make_node):
-    """The values actually shipped in config/latency.yaml must pass validation."""
+    """The values actually shipped in config/inference.yaml must pass validation."""
     node = make_node(
         control_hz=10.0,
         **{'latency.gopro': 0.05, 'latency.proprio': 0.01, 'latency.arm_exec': 0.01, 'buffers.ee_pose_s': 1.0},
@@ -85,6 +85,7 @@ def test_valid_config_constructs(make_node):
         ({'buffers.ee_pose_s': 0.0}, 'buffers.ee_pose_s must be > 0'),
         ({'n_obs_steps': 0}, 'n_obs_steps must be >= 1'),
         ({'n_action_steps': 0}, 'n_action_steps must be >= 1'),
+        ({'steps_per_inference': 0}, 'steps_per_inference must be >= 1'),
         ({'latency.gopro': -0.1}, 'latency.gopro must be >= 0'),
         ({'latency.arm_exec': -0.1}, 'latency.arm_exec must be >= 0'),
     ],
@@ -348,6 +349,56 @@ def test_max_image_age_override(make_node):
     """A positive max_image_age_s wins over the auto formula (for slow camera paths)."""
     node = make_node(control_hz=10.0, max_image_age_s=0.3)
     assert node._max_image_age_s == pytest.approx(0.3)
+
+
+# ----------------------------------------------------------------------
+# Receding-horizon stride (inference cadence)
+# ----------------------------------------------------------------------
+
+
+def _drive_ticks(node, n_ticks: int) -> int:
+    """
+    Run n_ticks control ticks with a full obs buffer, returning how many ran inference.
+
+    Bypasses the camera/TF plumbing (image cached, pose mocked, buffer pre-filled, reset
+    latched) so the test isolates the stride gate alone: the only thing that varies tick to
+    tick is _inference_phase, so the count of _post_and_act calls is the inference cadence.
+    """
+    now = _t(100.0)
+    node._latest_image = np.zeros((4, 4, 3), dtype=np.float32)
+    node._latest_image_stamp = now
+    # Pre-fill the obs buffer so every tick is a full-buffer tick (skips the fill-up ramp),
+    # and latch the reset so the episode-start POST doesn't interfere.
+    fixed_pose = np.zeros(8)
+    for _ in range(node._n_obs_steps):
+        node._obs_buffer.append((node._latest_image, fixed_pose))
+    node._episode_reset_done = True
+
+    infer_calls = []
+    with patch.object(node, 'get_clock', return_value=_FakeClock(now)), \
+            patch.object(node, '_lookup_agent_pos', return_value=fixed_pose), \
+            patch.object(node, '_post_and_act', side_effect=lambda *a, **k: infer_calls.append(1)):
+        for _ in range(n_ticks):
+            node._control_tick()
+    return len(infer_calls)
+
+
+def test_stride_runs_inference_every_n_ticks(make_node):
+    """With steps_per_inference=3, inference fires on ticks 1, 4, 7, 10 — not every tick."""
+    node = make_node(control_hz=10.0, n_obs_steps=2, steps_per_inference=3)
+    assert _drive_ticks(node, 10) == 4
+
+
+def test_stride_one_infers_every_tick(make_node):
+    """steps_per_inference=1 is the old behaviour: an inference on every tick."""
+    node = make_node(control_hz=10.0, n_obs_steps=2, steps_per_inference=1)
+    assert _drive_ticks(node, 10) == 10
+
+
+def test_stride_first_full_tick_infers_immediately(make_node):
+    """The very first full-buffer tick infers (phase starts at 0), not after a stride delay."""
+    node = make_node(control_hz=10.0, n_obs_steps=2, steps_per_inference=6)
+    assert _drive_ticks(node, 1) == 1
 
 
 def test_tf_use_latest_ignores_stamp(make_node):

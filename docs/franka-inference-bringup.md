@@ -34,7 +34,7 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
 
 2. **Two placeholder constants sit on critical paths**, both currently claiming more rigour
    than they have:
-   - `latency.gopro: 0.05` in `config/latency.yaml`, commented "as measured by calibration
+   - `latency.gopro: 0.05` in `config/inference.yaml`, commented "as measured by calibration
      scripts" — **no such script exists**. UMI measured 0.125–0.17 s for a plain UVC webcam;
      the GoPro→HDMI→capture-card→v4l2 path is longer, so 50 ms is likely well short. This now
      sets both the TF lookup instant *and* `t_obs` for chunk truncation.
@@ -321,7 +321,7 @@ pose with a stale image against a model trained on same-instant pairs.
 | `latency.arm_exec` | `0.0` | Publish→arm-moves delay; used for chunk truncation |
 | `buffers.ee_pose_s` | `1.0` | TF buffer `cache_time`; must exceed the largest compensated latency |
 
-Defaults above are the node's own; the live values come from `config/latency.yaml` via
+Defaults above are the node's own; the live values come from `config/inference.yaml` via
 `inference_demo.launch.xml`.
 
 **`package.xml` additions:** `tf2_ros`  
@@ -341,7 +341,7 @@ Defaults above are the node's own; the live values come from `config/latency.yam
 
 Includes `stream_demo.launch.xml` (Foxglove bridge, `v4l2_camera_node` on the GoPro capture
 card, and `pi_receiver_node` unless `motion_only`) and starts `policy_client_node` with
-`config/latency.yaml` loaded via `<param from="..."/>`. See the file itself for the current
+`config/inference.yaml` loaded via `<param from="..."/>`. See the file itself for the current
 args — the ones you'll reach for:
 
 ```bash
