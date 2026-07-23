@@ -120,23 +120,44 @@ Watch `train_action_mse_error` (and `train_loss`) descend in the console or in W
 ## Inference (after you have a checkpoint)
 
 The same image serves the policy over the exact HTTP contract the ROS-side
-`policy_client_node` already speaks to `inference_server/dummy_server.py`:
+`policy_client_node` already speaks to `inference_server/dummy_server.py`. Use the
+`serve_policy.sh` wrapper (the inference counterpart of `train_policy.sh` — it builds the image
+and wires the rootless-safe flags, checkpoint mount, and HF cache):
 
 ```bash
-docker run --rm -it -p 8000:8000 \
-    -e CKPT_PATH=/data/checkpoints/latest.ckpt \
-    -v /abs/path/to/checkpoints:/data/checkpoints:ro \
+CKPT=/abs/path/to/epoch=0070-train_loss=0.021.ckpt ./serve_policy.sh
+# CKPT=... PORT=8001 ./serve_policy.sh    # override the published port
+```
+
+> **Do not run `external/polyumi_diffusion_policy/docker/serve.sh` on the host** — it is the
+> *in-container* entrypoint (`exec uvicorn …`) and fails with `exec: uvicorn: not found` because
+> the `umi` conda env only exists inside the image. `serve_policy.sh` runs it via `docker run`.
+
+The equivalent raw command, if you'd rather not use the wrapper:
+
+```bash
+docker run --rm -it --gpus all --user 0:0 -p 8000:8000 \
+    -e HOME=/tmp -e HF_HOME=/hf_cache \
+    -e CKPT_PATH=/data/model.ckpt \
+    -v /abs/path/to/epoch=0070-train_loss=0.021.ckpt:/data/model.ckpt:ro \
+    -v "${HOME}/.cache/huggingface:/hf_cache:rw" \
     polyumi-dp bash docker/serve.sh
 ```
+
+The `-v ...huggingface:/hf_cache` mount + `HF_HOME=/hf_cache` persist the timm ViT encoder
+weights (~600 MB) so the server doesn't re-download them on every start — the same cache
+`train_policy.sh` uses. `--gpus all` and `--user 0:0` mirror the training flags (GPU access;
+rootless-safe uid). Mounting the checkpoint *file* to a clean path sidesteps the `=` in its name.
 
 `policy_client_node` then POSTs to `http://<workstation>:8000/predict_cartesian/` — the same
 call it makes to the dummy server today, so nothing changes on the ROS side but the URL.
 
-> **`serve_policy.py` is currently a scaffold.** The transport and contract are real (it returns
-> HTTP 501 until filled in), but model loading, the wire-obs → UMI-obs-key translation, and the
-> relative→absolute action conversion are deferred to the post-training inference step. Use
-> `dummy-server` for ROS bringup until then. See `serve_policy.py` and
-> [franka-inference-bringup.md](franka-inference-bringup.md).
+> **`serve_policy.py` is implemented** (loads `ema_model`, translates the wire obs to UMI's keys,
+> converts the relative action chunk back to absolute EEF poses). One extra endpoint: the client
+> must `POST /reset {agent_pos: [8]}` at the start of each rollout to set the episode-start pose
+> (used by `robot0_eef_rot_axis_angle_wrt_start`); absent a reset it falls back to the current
+> pose with a warning. Wiring `policy_client_node` to it (image→224, URL, calling `/reset`) is the
+> remaining step — see [franka-inference-bringup.md](franka-inference-bringup.md) Phase 3.
 
 ## What is out of scope here
 

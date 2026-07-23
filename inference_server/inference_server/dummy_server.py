@@ -68,8 +68,20 @@ app = FastAPI(title='PolyUMI Dummy Inference Server', lifespan=_lifespan)
 
 
 # ---------------------------------------------------------------------------
-# Endpoint
+# Endpoints
 # ---------------------------------------------------------------------------
+
+
+@app.post('/reset')
+def reset(body: dict | None = None) -> dict:
+    """
+    No-op reset for contract parity with the real serve_policy server.
+
+    The real server caches the episode-start pose here; the dummy oscillator is stateless and
+    ignores the pose, but the endpoint must exist so policy_client_node's per-episode /reset call
+    doesn't 404 against the dummy.
+    """
+    return {'status': 'ok'}
 
 
 @app.post('/predict_cartesian/', response_model=PredictResponse)

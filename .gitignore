@@ -1,4 +1,5 @@
 **/recordings/
+data/
 *.tmp
 
 # generated files

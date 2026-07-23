@@ -5,9 +5,12 @@ At each control tick the node:
   1. Reads the latest wrist camera image and a latency-compensated end-effector pose (looked
      up in TF at the frame's own stamp - latency.gopro, to align with when that image was
      actually captured).
-  2. Maintains a short history window (n_obs_steps).
-  3. POSTs observations to /predict_cartesian/ on the inference server, requesting an
-     n_action_steps-length action chunk.
+  2. Maintains a short history window (n_obs_steps), appended every tick so the window stays
+     dt-spaced regardless of how often inference runs.
+  3. Once per ``steps_per_inference`` ticks (a receding-horizon stride — NOT every tick), POSTs
+     observations to /predict_cartesian/ on the inference server, requesting an
+     n_action_steps-length action chunk. Between inferences the arm keeps executing the
+     previously published chunk, matching UMI (infer once per ~steps_per_inference*dt).
   4. Drops the leading actions of the returned chunk that are already stale by the time the
      arm could act on them (observation + inference + arm-execution latency).
   5. Logs the chunk. If execute_motion is set, publishes the remaining chunk as a PoseArray
@@ -59,23 +62,57 @@ class PolicyClientNode(Node):
         self.declare_parameter('n_obs_steps', 2)
         self.declare_parameter('image_topic', '/gopro/image_raw')
         self.declare_parameter('control_hz', 10.0)
-        self.declare_parameter('image_width', 256)
-        self.declare_parameter('image_height', 256)
+        # 224 matches the model's shape_meta (camera0_rgb [3,224,224]); the DP exporter squashes
+        # frames to 224 too, so the client's resize reproduces training's aspect handling.
+        self.declare_parameter('image_width', 224)
+        self.declare_parameter('image_height', 224)
+        # Max age (s) of the newest cached camera frame before a tick is dropped as a stalled
+        # capture pipeline. 0.0 = auto: max(2 camera periods @ 60 Hz, half a control period). The
+        # auto value assumes a ~60 Hz camera; a slower path (e.g. an Elgato capture card doing a
+        # 1080p software YUYV→RGB conversion, which adds ~200 ms of stamp-to-usable latency) needs
+        # a larger value. Raising it only tolerates older frames — image and pose stay aligned to
+        # the frame's own capture stamp regardless (see _lookup_agent_pos).
+        self.declare_parameter('max_image_age_s', 0.0)
         # Frame IDs for the EEF pose lookup. Defaults match the FR3 TF tree; on a
         # different arm override base_frame / eef_frame instead of editing code.
         self.declare_parameter('base_frame', 'fr3_link0')
         self.declare_parameter('eef_frame', 'fr3_hand_tcp')
+        # Look up the LATEST available EEF transform (tf2 time=0) instead of the latency-aligned
+        # historical instant. For a stationary dry-run arm this sidesteps a laptop↔NUC clock skew
+        # (TF stamps from another machine landing outside our buffer) at the cost of the
+        # image/pose time-alignment — which only matters once the arm moves. Do NOT enable for
+        # execution; fix the clock sync instead. Off by default.
+        self.declare_parameter('tf_use_latest', False)
         # Motion execution (Phase 2). Off by default for safety: the node logs actions
         # but does NOT publish target poses unless execute_motion is explicitly enabled.
         # Planning params (group, velocity scaling) live on the NUC bridge, not here.
         self.declare_parameter('execute_motion', False)
+        # Viz-only preview: publish every commanded chunk as a PoseArray on
+        # /polyumi/target_poses_preview regardless of execute_motion, so the motion can be seen in
+        # Foxglove/RViz without the arm moving (the NUC bridge subscribes only to the execution
+        # topic /polyumi/target_poses, never this one). On by default — it moves nothing.
+        self.declare_parameter('publish_preview', True)
+        # HTTP timeout (s) for the inference POST. Real diffusion inference over LAN is slower
+        # than the trivial dummy server; 0.5 s was fine for the dummy but risks timing out every
+        # tick against the real model. An overrun just skips the tick (see the tick lock).
+        self.declare_parameter('post_timeout_s', 1.0)
         # Action-chunk size requested from the server and published for execution as one
         # multi-waypoint Cartesian path. UMI/DP-style receding-horizon control: 1 would mean
         # a discrete hop every control tick, which the arm can't track in real time — the
         # bridge's skip-while-busy would drop almost every tick. A full chunk lets move_group
         # plan one smooth path instead. Must be <= the model's n_action_steps (dummy: 8).
         self.declare_parameter('n_action_steps', 8)
-        # Per-component system latencies (seconds), loaded from config/latency.yaml via the
+        # Receding-horizon stride: run inference once per this many control ticks, not every
+        # tick. The obs window still updates every tick (so it stays dt-spaced), but a new
+        # chunk is only requested/published every steps_per_inference ticks — while the arm
+        # executes the previous chunk. This is UMI's scheme (eval_real.py re-infers every
+        # steps_per_inference steps, default 6) and it stops the per-tick POST/publish storm
+        # that otherwise swamps the NUC bridge. 1 = infer every tick (the old behaviour).
+        # Should be <= n_action_steps so each chunk covers the stride; a larger value just
+        # means the arm runs out of fresh waypoints before the next chunk lands. The launch
+        # default lives in config/inference.yaml (loaded via <param from>); this is the fallback.
+        self.declare_parameter('steps_per_inference', 6)
+        # Per-component system latencies (seconds), loaded from config/inference.yaml via the
         # inference launch file. NONE of them have been measured yet — see that file and
         # blocking issue 2 in docs/franka-inference-bringup.md. gopro and proprio are consumed
         # by _lookup_agent_pos, arm_exec by _n_stale_actions; finger_cam and piezo_mic are
@@ -93,10 +130,15 @@ class PolicyClientNode(Node):
         self._n_obs_steps = self.get_parameter('n_obs_steps').get_parameter_value().integer_value
         self._image_w = self.get_parameter('image_width').get_parameter_value().integer_value
         self._image_h = self.get_parameter('image_height').get_parameter_value().integer_value
+        max_image_age_s = self.get_parameter('max_image_age_s').get_parameter_value().double_value
         self._base_frame = self.get_parameter('base_frame').get_parameter_value().string_value
         self._eef_frame = self.get_parameter('eef_frame').get_parameter_value().string_value
+        self._tf_use_latest = self.get_parameter('tf_use_latest').get_parameter_value().bool_value
         self._execute_motion = self.get_parameter('execute_motion').get_parameter_value().bool_value
+        self._publish_preview = self.get_parameter('publish_preview').get_parameter_value().bool_value
+        self._post_timeout_s = self.get_parameter('post_timeout_s').get_parameter_value().double_value
         self._n_action_steps = self.get_parameter('n_action_steps').get_parameter_value().integer_value
+        self._steps_per_inference = self.get_parameter('steps_per_inference').get_parameter_value().integer_value
         control_hz = self.get_parameter('control_hz').get_parameter_value().double_value
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
         self._latency = {
@@ -123,14 +165,20 @@ class PolicyClientNode(Node):
 
         # History buffers — each entry: (image_float32 [H,W,C], agent_pos [8])
         self._obs_buffer: deque = deque(maxlen=self._n_obs_steps)
+        # Receding-horizon stride counter: inference runs on the tick where this is 0, then
+        # every steps_per_inference ticks after. Kept in [0, steps_per_inference) so it never
+        # grows. Starts at 0 so the first full-buffer tick infers immediately.
+        self._inference_phase = 0
         self._latest_image: np.ndarray | None = None
         self._latest_image_stamp: rclpy.time.Time | None = None
         self._latest_image_lock = threading.Lock()
-        # Reject a cached frame older than this at tick time. Sized to two camera periods at
-        # the 60 Hz v4l2 rate, floored so a slow tick doesn't trip it; a frame older than this
-        # means the capture pipeline stalled, and pairing it with a fresh pose would silently
-        # feed the policy a mismatched observation.
-        self._max_image_age_s = max(2.0 / 60.0, 0.5 / control_hz)
+        # Reject a cached frame older than this at tick time; a frame older than this means the
+        # capture pipeline stalled. The auto default (max_image_age_s <= 0) is two camera periods
+        # at the 60 Hz v4l2 rate, floored at half a control period so a slow tick doesn't trip it;
+        # override the param for slower camera paths (see the param declaration).
+        self._max_image_age_s = (
+            max_image_age_s if max_image_age_s > 0 else max(2.0 / 60.0, 0.5 / control_hz)
+        )
 
         # TF — cache_time sized from buffers.ee_pose_s so a pose from up to that far back can
         # still be looked up (needed to time-align with the delayed gopro frame; see
@@ -150,6 +198,19 @@ class PolicyClientNode(Node):
         if self._execute_motion:
             self._target_pub = self.create_publisher(PoseArray, '/polyumi/target_poses', 10)
 
+        # Viz-only preview publisher (always on when publish_preview). Shows every commanded chunk
+        # in Foxglove/RViz without moving the arm: the NUC bridge subscribes only to the execution
+        # topic /polyumi/target_poses, never this one.
+        self._preview_pub = None
+        if self._publish_preview:
+            self._preview_pub = self.create_publisher(PoseArray, '/polyumi/target_poses_preview', 10)
+
+        # Episode-start /reset. The server needs the episode-start EEF pose for
+        # robot0_eef_rot_axis_angle_wrt_start; sent once on the first full-buffer tick. The reset
+        # URL is derived from the predict URL's base so one param configures both endpoints.
+        self._reset_url = self._url.split('/predict_cartesian')[0] + '/reset'
+        self._episode_reset_done = False
+
         # Subscribers
         self.create_subscription(Image, image_topic, self._image_cb, 10)
 
@@ -164,9 +225,21 @@ class PolicyClientNode(Node):
         self._last_warn_t: rclpy.time.Time | None = None
 
         mode = 'EXECUTE (arm will move)' if self._execute_motion else 'log-only (no motion)'
-        self.get_logger().info(f'policy_client_node started — server: {self._url} — mode: {mode}')
+        preview = 'on (/polyumi/target_poses_preview)' if self._publish_preview else 'off'
+        self.get_logger().info(
+            f'policy_client_node started — server: {self._url} — mode: {mode} — preview: {preview}'
+        )
+        stride_interval = self._steps_per_inference * self._action_dt
+        self.get_logger().info(
+            f'receding-horizon stride — inference every {self._steps_per_inference} ticks '
+            f'({stride_interval * 1e3:.0f}ms @ {control_hz:g}Hz), chunk n_action_steps={self._n_action_steps}'
+        )
         latency_str = ' '.join(f'{name}={seconds}s' for name, seconds in self._latency.items())
-        self.get_logger().info(f'latency config — {latency_str} (ee_pose buffer: {self._ee_pose_buffer_s}s)')
+        tf_mode = 'LATEST (clock-skew workaround; not time-aligned)' if self._tf_use_latest else 'time-aligned'
+        self.get_logger().info(
+            f'latency config — {latency_str} (ee_pose buffer: {self._ee_pose_buffer_s}s, '
+            f'max_image_age: {self._max_image_age_s * 1e3:.0f}ms, tf lookup: {tf_mode})'
+        )
         self.get_logger().info(
             f'latency budget — measured observation age (capture→response) + '
             f'act={self._latency_act}s vs action_dt={self._action_dt}s'
@@ -193,6 +266,18 @@ class PolicyClientNode(Node):
             errors.append(f'n_obs_steps must be >= 1, got {self._n_obs_steps}')
         if self._n_action_steps < 1:
             errors.append(f'n_action_steps must be >= 1, got {self._n_action_steps}')
+        if self._steps_per_inference < 1:
+            errors.append(f'steps_per_inference must be >= 1, got {self._steps_per_inference}')
+        elif self._steps_per_inference > self._n_action_steps:
+            # Not fatal — the arm just runs out of fresh waypoints before the next chunk — but
+            # almost always a misconfiguration, so warn loudly rather than fail.
+            self.get_logger().warn(
+                f'steps_per_inference ({self._steps_per_inference}) > n_action_steps '
+                f'({self._n_action_steps}): each chunk is shorter than the re-inference stride, '
+                'so the arm will stall between chunks. Lower steps_per_inference or raise n_action_steps.'
+            )
+        if self._post_timeout_s <= 0:
+            errors.append(f'post_timeout_s must be > 0, got {self._post_timeout_s}')
         for name, seconds in self._latency.items():
             if seconds < 0:
                 errors.append(f'latency.{name} must be >= 0, got {seconds}')
@@ -275,6 +360,20 @@ class PolicyClientNode(Node):
                 self._warn_throttled(f'Observation buffer filling ({len(self._obs_buffer)}/{self._n_obs_steps})')
                 return
 
+            # First full observation marks the episode start: tell the server the start pose once
+            # (used for robot0_eef_rot_axis_angle_wrt_start). Retried on failure until it lands.
+            if not self._episode_reset_done:
+                self._reset_episode(agent_pos)
+
+            # Receding-horizon stride: only the every-steps_per_inference-th tick actually runs
+            # inference. The obs buffer was still appended above, so the next inference sees a
+            # fresh dt-spaced window; we just don't re-POST/publish a chunk every tick (which
+            # swamps the NUC bridge). Advance the phase AFTER deciding, kept in [0, stride).
+            infer_now = self._inference_phase == 0
+            self._inference_phase = (self._inference_phase + 1) % self._steps_per_inference
+            if not infer_now:
+                return
+
             # --- 4. Serialize and POST ---
             # Images go as base64-encoded raw bytes (+ dtype/shape) rather than nested-list
             # JSON, which is ~1.5MB+ per frame and slow to encode/decode at 10 Hz.
@@ -320,8 +419,11 @@ class PolicyClientNode(Node):
 
         :param image_stamp: header stamp of the camera frame this pose will be paired with.
         """
-        target_time = image_stamp - Duration(seconds=self._latency['gopro']) + \
-            Duration(seconds=self._latency['proprio'])
+        # tf2 time=0 means "latest available" — used for the dry-run clock-skew workaround.
+        target_time = rclpy.time.Time() if self._tf_use_latest else (
+            image_stamp - Duration(seconds=self._latency['gopro'])
+            + Duration(seconds=self._latency['proprio'])
+        )
         try:
             tf = self._tf_buffer.lookup_transform(self._base_frame, self._eef_frame, target_time)
         except (LookupException, ConnectivityException, ExtrapolationException) as e:
@@ -363,6 +465,32 @@ class PolicyClientNode(Node):
         total_latency = elapsed_since_obs + self._latency_act
         return max(0, math.ceil(total_latency / self._action_dt))
 
+    def _http_post_json(self, url: str, payload: dict) -> dict | None:
+        """POST payload as JSON to url and return the parsed response, or None on failure (logged)."""
+        body = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            url, data=body, headers={'Content-Type': 'application/json'}, method='POST'
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self._post_timeout_s) as resp:
+                return json.loads(resp.read())
+        except urllib.error.URLError as e:
+            self.get_logger().error(f'POST {url} unreachable: {e}')
+        except Exception as e:
+            self.get_logger().error(f'POST {url} failed: {e}')
+        return None
+
+    def _reset_episode(self, agent_pos: np.ndarray) -> None:
+        """Send the episode-start pose to the server's /reset once; retried each tick until it lands."""
+        result = self._http_post_json(self._reset_url, {'agent_pos': agent_pos.tolist()})
+        if result is not None:
+            self._episode_reset_done = True
+            self.get_logger().info(f'episode /reset sent (start pose set): {self._reset_url}')
+        else:
+            self._warn_throttled(
+                'episode /reset failed; server will approximate wrt_start with the current pose'
+            )
+
     def _post_and_act(self, payload: dict, t_obs: rclpy.time.Time) -> None:
         """
         POST payload to the inference server, log the returned action, and optionally execute it.
@@ -370,25 +498,18 @@ class PolicyClientNode(Node):
         :param payload: request body for /predict_cartesian/.
         :param t_obs: instant the observation was captured, used to drop stale actions.
         """
-        body = json.dumps(payload).encode()
-        req = urllib.request.Request(
-            self._url,
-            data=body,
-            headers={'Content-Type': 'application/json'},
-            method='POST',
-        )
-        try:
-            t_sent = time.monotonic()
-            with urllib.request.urlopen(req, timeout=0.5) as resp:
-                result = json.loads(resp.read())
-            latency_inference = time.monotonic() - t_sent
-            actions = result['actions']
-        except urllib.error.URLError as e:
-            self.get_logger().error(f'Inference server unreachable: {e}')
+        t_sent = time.monotonic()
+        result = self._http_post_json(self._url, payload)
+        if result is None:
             return
-        except Exception as e:
-            self.get_logger().error(f'POST failed: {e}')
-            return
+        latency_inference = time.monotonic() - t_sent
+        actions = result['actions']
+
+        # Viz-only preview: publish the full commanded chunk (before the stale-drop below) so the
+        # motion is visible in Foxglove/RViz even when execute_motion is off or the whole chunk is
+        # stale. The NUC bridge never subscribes to this topic, so nothing moves.
+        if self._preview_pub is not None:
+            self._preview_pub.publish(self._actions_to_pose_array(actions))
 
         # Drop the leading actions that refer to instants already elapsed by the time the arm
         # can act on them, so execution starts from the first still-future waypoint.

@@ -69,7 +69,7 @@ class _FakeClock:
 
 
 def test_valid_config_constructs(make_node):
-    """The values actually shipped in config/latency.yaml must pass validation."""
+    """The values actually shipped in config/inference.yaml must pass validation."""
     node = make_node(
         control_hz=10.0,
         **{'latency.gopro': 0.05, 'latency.proprio': 0.01, 'latency.arm_exec': 0.01, 'buffers.ee_pose_s': 1.0},
@@ -85,6 +85,7 @@ def test_valid_config_constructs(make_node):
         ({'buffers.ee_pose_s': 0.0}, 'buffers.ee_pose_s must be > 0'),
         ({'n_obs_steps': 0}, 'n_obs_steps must be >= 1'),
         ({'n_action_steps': 0}, 'n_action_steps must be >= 1'),
+        ({'steps_per_inference': 0}, 'steps_per_inference must be >= 1'),
         ({'latency.gopro': -0.1}, 'latency.gopro must be >= 0'),
         ({'latency.arm_exec': -0.1}, 'latency.arm_exec must be >= 0'),
     ],
@@ -268,3 +269,145 @@ def test_lookup_agent_pos_shape_and_orientation(make_node):
     assert agent_pos.shape == (8,)
     assert agent_pos.dtype == np.float64
     np.testing.assert_allclose(agent_pos[3:7], [0.0, 0.0, 0.0, 1.0], atol=1e-9)
+
+
+# ----------------------------------------------------------------------
+# Episode /reset and viz-only preview (arm dry-run wiring)
+# ----------------------------------------------------------------------
+
+
+def test_reset_url_derives_from_predict_url(make_node):
+    """The /reset URL is derived from the predict URL's base, with or without a trailing slash."""
+    node = make_node(inference_server_url='http://sheep:8000/predict_cartesian/')
+    assert node._reset_url == 'http://sheep:8000/reset'
+
+    node2 = make_node(inference_server_url='http://sheep:8000/predict_cartesian')
+    assert node2._reset_url == 'http://sheep:8000/reset'
+
+
+def test_reset_episode_posts_start_pose_once(make_node):
+    """_reset_episode POSTs the given pose to the reset URL and latches _episode_reset_done."""
+    node = make_node(inference_server_url='http://sheep:8000/predict_cartesian/')
+    agent_pos = np.array([0.4, 0.0, 0.3, 0.0, 0.0, 0.0, 1.0, 0.0])
+
+    with patch.object(node, '_http_post_json', return_value={'status': 'ok'}) as post:
+        node._reset_episode(agent_pos)
+
+    assert node._episode_reset_done is True
+    post.assert_called_once()
+    url, body = post.call_args[0]
+    assert url == 'http://sheep:8000/reset'
+    assert body == {'agent_pos': agent_pos.tolist()}
+
+
+def test_reset_episode_not_latched_on_failure(make_node):
+    """A failed /reset leaves the flag unset so the next tick retries."""
+    node = make_node()
+    with patch.object(node, '_http_post_json', return_value=None):
+        node._reset_episode(np.zeros(8))
+    assert node._episode_reset_done is False
+
+
+def test_preview_published_full_chunk_without_execution(make_node):
+    """
+    The preview publishes the FULL commanded chunk even with execute_motion off and all-stale.
+
+    This is the eyeball for the arm dry-run: the whole policy output must reach Foxglove
+    regardless of execution or staleness, while nothing is published to the execution topic.
+    """
+    node = make_node(publish_preview=True)  # execute_motion defaults to False
+    assert node._target_pub is None  # nothing can drive the arm
+    assert node._preview_pub is not None
+
+    actions = [[float(i), 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0] for i in range(8)]
+    now = _t(100.0)
+    t_obs = _t(98.0)  # 2s old -> every action is stale, so the chunk is dropped for execution
+    with patch.object(node, '_http_post_json', return_value={'actions': actions}), \
+            patch.object(node, 'get_clock', return_value=_FakeClock(now)), \
+            patch.object(node._preview_pub, 'publish') as preview_pub:
+        node._post_and_act(payload={}, t_obs=t_obs)
+
+    preview_pub.assert_called_once()
+    msg = preview_pub.call_args[0][0]
+    assert len(msg.poses) == 8  # full chunk, not the post-stale-drop subset
+    assert msg.header.frame_id == node._base_frame
+
+
+def test_preview_disabled_creates_no_publisher(make_node):
+    """publish_preview=false suppresses the preview publisher entirely."""
+    node = make_node(publish_preview=False)
+    assert node._preview_pub is None
+
+
+def test_max_image_age_auto_default(make_node):
+    """max_image_age_s=0 resolves to the auto value: half a control period at 10 Hz."""
+    node = make_node(control_hz=10.0)
+    assert node._max_image_age_s == pytest.approx(0.05)  # max(2/60, 0.5/10) = 0.05
+
+
+def test_max_image_age_override(make_node):
+    """A positive max_image_age_s wins over the auto formula (for slow camera paths)."""
+    node = make_node(control_hz=10.0, max_image_age_s=0.3)
+    assert node._max_image_age_s == pytest.approx(0.3)
+
+
+# ----------------------------------------------------------------------
+# Receding-horizon stride (inference cadence)
+# ----------------------------------------------------------------------
+
+
+def _drive_ticks(node, n_ticks: int) -> int:
+    """
+    Run n_ticks control ticks with a full obs buffer, returning how many ran inference.
+
+    Bypasses the camera/TF plumbing (image cached, pose mocked, buffer pre-filled, reset
+    latched) so the test isolates the stride gate alone: the only thing that varies tick to
+    tick is _inference_phase, so the count of _post_and_act calls is the inference cadence.
+    """
+    now = _t(100.0)
+    node._latest_image = np.zeros((4, 4, 3), dtype=np.float32)
+    node._latest_image_stamp = now
+    # Pre-fill the obs buffer so every tick is a full-buffer tick (skips the fill-up ramp),
+    # and latch the reset so the episode-start POST doesn't interfere.
+    fixed_pose = np.zeros(8)
+    for _ in range(node._n_obs_steps):
+        node._obs_buffer.append((node._latest_image, fixed_pose))
+    node._episode_reset_done = True
+
+    infer_calls = []
+    with patch.object(node, 'get_clock', return_value=_FakeClock(now)), \
+            patch.object(node, '_lookup_agent_pos', return_value=fixed_pose), \
+            patch.object(node, '_post_and_act', side_effect=lambda *a, **k: infer_calls.append(1)):
+        for _ in range(n_ticks):
+            node._control_tick()
+    return len(infer_calls)
+
+
+def test_stride_runs_inference_every_n_ticks(make_node):
+    """With steps_per_inference=3, inference fires on ticks 1, 4, 7, 10 — not every tick."""
+    node = make_node(control_hz=10.0, n_obs_steps=2, steps_per_inference=3)
+    assert _drive_ticks(node, 10) == 4
+
+
+def test_stride_one_infers_every_tick(make_node):
+    """steps_per_inference=1 is the old behaviour: an inference on every tick."""
+    node = make_node(control_hz=10.0, n_obs_steps=2, steps_per_inference=1)
+    assert _drive_ticks(node, 10) == 10
+
+
+def test_stride_first_full_tick_infers_immediately(make_node):
+    """The very first full-buffer tick infers (phase starts at 0), not after a stride delay."""
+    node = make_node(control_hz=10.0, n_obs_steps=2, steps_per_inference=6)
+    assert _drive_ticks(node, 1) == 1
+
+
+def test_tf_use_latest_ignores_stamp(make_node):
+    """tf_use_latest looks up the newest transform regardless of the requested image stamp."""
+    node = make_node(tf_use_latest=True, **{'latency.gopro': 0.05, 'buffers.ee_pose_s': 1.0})
+    _push_ramp_tf(node)  # ramp x==timestamp over [0.6, 1.4]
+
+    # A stamp well before the ramp would extrapolate-into-past in time-aligned mode; with
+    # tf_use_latest it returns the newest sample (x == 1.4) instead.
+    agent_pos = node._lookup_agent_pos(image_stamp=_t(0.1))
+    assert agent_pos is not None
+    assert agent_pos[0] == pytest.approx(1.4, abs=1e-6)

@@ -15,14 +15,14 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
 |---|---|
 | FR3 NUC ↔ laptop over DDS | **done** — Phase 0 |
 | Dummy server + client round trip | **done** — Phase 1 |
-| Action-chunk execution on real hardware | **done** (single chunks); continuous 10 Hz loop unverified |
+| Action-chunk execution on real hardware | **done** (single chunks); continuous 10 Hz loop unverified. **Executor redesign planned — Phase 4** (plan-then-execute → UMI-style 1 kHz streaming Cartesian servo) |
 | Latency compensation, gopro + proprio | **done** — matches UMI's scheme; unit-tested |
 | Latency compensation, finger cam + piezo | **not started** — params declared, never consumed |
 | Pose body frame (training ↔ inference) | **half** — ingest emits `hand`; robot still reports `fr3_hand_tcp` |
 | Gripper — observation | **not started** — hardcoded `0.0` |
 | Gripper — command | **not started** — `action[7]` dropped before publish |
 | DP export | **exists** for pose+image+gripper; no tactile; wrong schema for UMI; untested |
-| Real inference server | **not started** — Phase 3 |
+| Real inference server | **in progress** — Phase 3: `serve_policy.py` verified standalone on sheep; client dry-run wiring done + unit-tested (image 224, viz preview, `/reset`); on-arm dry-run pending hardware |
 
 ### Blocking issues
 
@@ -34,7 +34,7 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
 
 2. **Two placeholder constants sit on critical paths**, both currently claiming more rigour
    than they have:
-   - `latency.gopro: 0.05` in `config/latency.yaml`, commented "as measured by calibration
+   - `latency.gopro: 0.05` in `config/inference.yaml`, commented "as measured by calibration
      scripts" — **no such script exists**. UMI measured 0.125–0.17 s for a plain UVC webcam;
      the GoPro→HDMI→capture-card→v4l2 path is longer, so 50 ms is likely well short. This now
      sets both the TF lookup instant *and* `t_obs` for chunk truncation.
@@ -321,7 +321,7 @@ pose with a stale image against a model trained on same-instant pairs.
 | `latency.arm_exec` | `0.0` | Publish→arm-moves delay; used for chunk truncation |
 | `buffers.ee_pose_s` | `1.0` | TF buffer `cache_time`; must exceed the largest compensated latency |
 
-Defaults above are the node's own; the live values come from `config/latency.yaml` via
+Defaults above are the node's own; the live values come from `config/inference.yaml` via
 `inference_demo.launch.xml`.
 
 **`package.xml` additions:** `tf2_ros`  
@@ -341,7 +341,7 @@ Defaults above are the node's own; the live values come from `config/latency.yam
 
 Includes `stream_demo.launch.xml` (Foxglove bridge, `v4l2_camera_node` on the GoPro capture
 card, and `pi_receiver_node` unless `motion_only`) and starts `policy_client_node` with
-`config/latency.yaml` loaded via `<param from="..."/>`. See the file itself for the current
+`config/inference.yaml` loaded via `<param from="..."/>`. See the file itself for the current
 args — the ones you'll reach for:
 
 ```bash
@@ -416,64 +416,221 @@ laptop at `localhost:8000`. Here it moves to a separate GPU box reached over LAN
 - Point the client at it: `inference_demo.launch.xml inference_server_url:=http://<gpu-ip>:8000/predict_cartesian/`.
 - DDS stays laptop↔NUC only; the GPU link is plain HTTP, so no Cyclone changes.
 
-**Architecture decision:** subprocess isolation vs. direct import.
+**Architecture decision — RESOLVED, and the original recommendation is superseded.** This doc
+first recommended *subprocess* isolation (a `dp_worker.py` run via `conda run -n umi`, speaking
+JSON over stdin/stdout) because `inference_server` was a uv/3.12 env and DP a separate conda/3.9
+env. **The training work changed the premise:** it produced a single Docker image whose `umi`
+conda env contains *both* `diffusion_policy`/torch *and* fastapi/uvicorn. So `serve_policy.py` (run
+by `docker/serve.sh`) runs **inside that env and direct-imports the policy** — no subprocess, no
+`dp_worker.py`, no `conda run`. The container already *is* the isolation boundary the subprocess
+bought. `dummy_server.py` stays as the no-GPU mock for ROS-side dev/CI.
 
-| | Subprocess (recommended) | Direct import |
-|---|---|---|
-| Python version | Server: 3.12 via uv; DP: 3.9 conda | Stuck with DP's 3.9 + conda |
-| Interface | stdin/stdout or local ZMQ JSON between processes | Simple function call |
-| Startup | Manages DP child process lifecycle | Single process |
-| Deps | `inference_server` env stays minimal | Inherits all DP deps (torch, hydra, etc.) |
-
-**Recommended approach:** subprocess, with a `dp_worker.py` that loads the checkpoint and
-speaks newline-delimited JSON on stdin/stdout. The FastAPI server launches it at startup and
-routes requests to it.
-
-The deciding argument is that a DP/UMI checkpoint is **self-describing and dill-pickled**:
-`base_workspace.save_checkpoint` writes `{'cfg', 'state_dicts', 'pickles'}`, and `load_payload`
-un-pickles arbitrary objects — so whatever process loads it needs `diffusion_policy` and its
-exact-ish deps importable. Merging that into FastAPI means inheriting torch + hydra +
-robomimic + numba into a service deliberately kept at fastapi/uvicorn/numpy. Keep them apart.
-
-The upside of self-describing checkpoints: the worker needs only a *path*. Loading is ~6 lines
-(cf. `eval.py` in either repo):
+A DP/UMI checkpoint is **self-describing and dill-pickled** (`base_workspace.save_checkpoint`
+writes `{'cfg', 'state_dicts', 'pickles'}`; `load_payload` un-pickles arbitrary objects), so the
+serving env must match training — which the single image guarantees. Loading needs only a *path*
+(~6 lines, cf. `base_workspace.load_payload`):
 
 ```python
-payload   = torch.load(open(ckpt, 'rb'), pickle_module=dill)
+payload   = torch.load(open(ckpt, 'rb'), pickle_module=dill, map_location='cpu')
 cfg       = payload['cfg']                      # config travels IN the checkpoint
 workspace = hydra.utils.get_class(cfg._target_)(cfg)
 workspace.load_payload(payload)
-policy    = workspace.ema_model                 # NOT .model — see below
+policy    = workspace.ema_model                 # NOT .model — EMA is what eval uses
 policy.to(device); policy.eval()
 ```
 
-Then per request: `policy.predict_action(obs_dict)['action']`, where `obs_dict` is **batched,
-channel-first torch tensors on device** — so the worker owns JSON → np → `moveaxis(-1, 1)` →
-`from_numpy` → `unsqueeze(0)` → `.to(device)`, the mirror of the dataset's `__getitem__`.
+Then per request `policy.predict_action(obs_dict)['action_pred']`, where `obs_dict` is **batched,
+channel-first torch tensors on device**. The wire↔UMI translation lives in `serve_obs.py`
+(`wire_to_obs_dict`, `actions_rel_to_abs`), unit-tested without a checkpoint in
+`test/test_serve_obs.py`.
 
 Notes that will cost time if missed:
-- **Use `ema_model`, not `model`.** The EMA weights are what `eval.py` uses and what the
-  paper's numbers come from. Loading `.model` runs fine and is silently worse.
-- **Normalization ships inside the checkpoint** (the dataset's `get_normalizer()` is baked into
-  the policy's state dict), so the server needs no stats — but a wrong action parameterization
-  is likewise baked in permanently.
+- **Use `ema_model`, not `model`.** The EMA weights are what eval uses; `.model` runs but is worse.
+- **Normalization ships inside the checkpoint** (baked into the policy's state dict), so the server
+  needs no stats — but a wrong action parameterization is likewise baked in permanently.
 - **UMI's policy returns the full horizon with no offset** (`diffusion_unet_timm_policy` has no
-  `n_action_steps`; `eval_real.py` reads `result['action_pred'][0]`), because its sampler is
-  now-anchored. Truncation is the *client's* job — which is what `policy_client_node` already does.
-- **Rel→abs already exists in UMI:** `convert_pose_mat_rep(..., backward=True)` with
-  `pose_rep='relative'` is exactly `base_pose_mat @ pose_mat`. Don't re-derive it.
+  `n_action_steps`; read `result['action_pred'][0]`); truncation is the client's job.
+- **Rel→abs is `convert_pose_mat_rep(..., backward=True)`** with `pose_rep='relative'`, i.e.
+  `base_pose_mat @ pose_mat`. Don't re-derive it.
+- **Image is 224×224, float32 [0,1]** (client already `/255`s); obs keys are the UMI names
+  (`camera0_rgb`, `robot0_eef_pos`, `robot0_eef_rot_axis_angle`, `..._wrt_start`,
+  `robot0_gripper_width`); the action is a 10-vec `[pos(3), rot6d(6), gripper(1)]`.
 
-`server.py` additions over `dummy_server.py`:
-- On startup: `subprocess.Popen(["conda", "run", "-n", "umi", "python", "dp_worker.py", ckpt_path])`
-- `dp_worker.py`: loads checkpoint, reads JSON requests from stdin, writes JSON responses to stdout
-- `GET /health` → `{"status": "ready", "checkpoint": "..."}`
-- Server handles relative→absolute action conversion (model outputs relative; client expects absolute)
+**Episode-start pose (`/reset`).** The policy consumes `robot0_eef_rot_axis_angle_wrt_start` —
+orientation relative to where the *episode* began — but the wire `agent_pos` carries only the
+*current* pose. `serve_policy.py` adds `POST /reset {agent_pos: [8]}` that caches the start pose;
+`predict_cartesian` uses it, falling back to the current pose (with a warning) if `/reset` hasn't
+run. **Follow-up:** once the client calls `/reset` at episode start, `dummy_server.py` needs a
+matching **no-op `/reset`**, or dummy-based ROS bringup/CI breaks.
 
-- [x] subprocess vs. direct import confirmed → **subprocess** (see reasoning above)
-- [ ] `dp_worker.py` implemented and tested standalone
-- [ ] `server.py` wrapping `dp_worker.py` implemented
-- [ ] smoke test with a real checkpoint
-- [ ] end-to-end: `policy_client_node` → real server → real robot
+`serve_policy.py` over `dummy_server.py`:
+- Startup (lifespan): validate `CKPT_PATH`, load `ema_model` into the process (direct import).
+- `POST /reset` caches the episode-start pose; `GET /health` → `{status, checkpoint, device, ...}`.
+- `POST /predict_cartesian/`: decode wire obs → `wire_to_obs_dict` → `predict_action` →
+  `actions_rel_to_abs` → absolute EEF chunk.
+
+- [x] subprocess vs. direct import → **single Docker image, direct import** (subprocess plan retired)
+- [x] `serve_obs.py` translation helpers + `test/test_serve_obs.py` (no-checkpoint unit tests)
+- [x] `serve_policy.py` body (load + `/reset` + `/predict_cartesian/`)
+- [x] standalone smoke test with the 70-epoch checkpoint (health + synthetic predict) — green on sheep
+- [x] `dummy_server.py` no-op `/reset` (contract parity)
+- [x] client wiring: image→224, viz-only preview `PoseArray`, `/reset` at episode start,
+      `post_timeout_s` param (unit-tested; `colcon test` clean)
+- [ ] **arm dry-run** (`execute_motion:=false`): watch `/polyumi/target_poses_preview` in Foxglove
+      — pending GoPro/arm hardware access
+- [ ] end-to-end WITH execution (`execute_motion:=true`) — after the dry-run looks sane
+
+### Arm dry-run procedure (no execution)
+
+Validates the full pipeline and the *sanity* of commanded motion without moving the arm:
+`execute_motion` stays `false`, so the node computes obs → POSTs → logs, and publishes the
+commanded chunk **only** to the viz-only `/polyumi/target_poses_preview` (the NUC bridge never
+subscribes to it). Accuracy is not the goal here — `eef_frame` is still `fr3_hand_tcp` (Q6), so
+poses are structurally real but not spatially calibrated.
+
+1. **Server on sheep**: `CKPT=/abs/path/to/epoch=0070-….ckpt ./serve_policy.sh` (builds the image,
+   wires the checkpoint + HF cache; see [training-instructions.md](training-instructions.md)). From
+   the laptop: `curl http://<sheep-ip>:8000/health` → `ready`.
+2. **Laptop**: `source setup_franka_env.sh`; NUC publishing `fr3_*` TF; GoPro streaming.
+   `ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=http://<sheep-ip>:8000/predict_cartesian/`
+3. **Watch**: node logs `mode: log-only (no motion)`, one `/reset` line, then per-tick chunk logs.
+   Server `/health` shows `episode_start_set: true`. In **Foxglove** (`:8765`) add
+   `/polyumi/target_poses_preview` — the chunk shows as pose arrows in `fr3_link0`, and should sit
+   near the current EEF and step smoothly. Wild jumps / NaNs / off-workspace poses are the finding.
+
+---
+
+## Phase 4 — Match UMI's execution architecture (receding-horizon streaming control)
+
+**Status: designed, not started. This is the plan of record for closing the inference-latency /
+jerky-motion gap.** Written 2026-07-22 after tracing the real UMI repo
+(`../universal_manipulation_interface`, a sibling clone) and live-probing the FR3 NUC. Pick up here.
+
+### Why: the core mismatch is plan-then-execute vs. continuous interpolated servo
+
+Our current on-arm path treats camera + inference latency as a *failure* (drop the tick / drop the
+chunk) and drives the arm with **plan-then-execute**. UMI treats that latency as an *expected,
+compensated quantity* and drives the arm with a **continuous 1 kHz interpolated Cartesian servo**.
+The second is why UMI is smooth and latency-tolerant; the first is why ours stale-drops and would
+be stop-and-go. This is architectural, not a tuning constant.
+
+**UMI's executor** (`umi/real_world/franka_interpolation_controller.py:277-355`) is a 1 kHz loop
+around a `PoseTrajectoryInterpolator` (`umi/common/pose_trajectory_interpolator.py`, pure numpy):
+- Every 1 ms: `tip_pose = pose_interp(t_now)` → `robot.update_desired_ee_pose(...)`. The arm always
+  chases a smoothly-interpolated moving target (Cartesian impedance).
+- New chunks arrive as `schedule_waypoint(pose, target_time)` — the interpolator **splices each
+  future waypoint in at its absolute time**, blending from the current trajectory with no stop
+  (`last_waypoint_time` prevents discontinuity). Global→monotonic time is translated on receipt
+  (`franka_interpolation_controller.py:343`).
+- Inference runs once per `steps_per_inference` (default **6** → ~0.6 s at 10 Hz), NOT per tick
+  (`eval_real.py:460-568`). While inference computes chunk N+1, the servo is still streaming the
+  tail of chunk N. Action chunks are timestamped in absolute wall-clock time anchored to the
+  observation: `action_timestamps = arange(len)*dt + obs_timestamps[-1]` (`eval_real.py:503`);
+  in-past waypoints are dropped, future ones kept (`eval_real.py:508-519`).
+- Camera latency is folded into the frame timestamp, not treated as staleness: the UVC capture
+  process stamps each frame `t_cal = t_recv - receive_latency` with `receive_latency = 0.17 s`
+  for the same GoPro→HDMI→capture-card path we use (`uvc_camera.py:241`, `eval_real.py:186`).
+
+### The three gaps (UMI vs. ours)
+
+| # | Gap | UMI | Ours today | Fix |
+|---|-----|-----|------------|-----|
+| 1 | **Executor model** | 1 kHz interpolated Cartesian servo; splices successive chunks | `fr3_moveit_bridge` `compute_cartesian_path` + blocking `ExecuteTrajectory` (up to 30 s), skip-while-busy drops overlaps, runs at MoveIt's own timing then 10× slowed | Replace with a streaming Cartesian-pose controller around a ported `PoseTrajectoryInterpolator` |
+| 2 | **Action timing** | absolute wall-clock per-waypoint | `PoseArray`, no per-waypoint time; NUC re-times the whole chunk | Carry per-waypoint absolute times; NUC schedules on them |
+| 3 | **Inference cadence** | once per `steps_per_inference` (~0.6 s) | every 10 Hz control tick; bombards the bridge, which drops most chunks | Receding-horizon **stride** on the laptop |
+
+Plan-then-execute (`nuc/fr3_moveit_bridge.py`) fundamentally **starts each chunk from rest and stops
+at its end**, and discards the policy's intended `dt` timeline — so no amount of tuning makes it
+match UMI. The continuous interpolator *is* the smoothness.
+
+Tie-in: gap 2 needs the two machines to agree on wall-clock time — **now true** after the chrony
+sync (see CLAUDE.md "Clock sync (this setup)"). Absolute action timestamps from the laptop are now
+meaningful on the NUC.
+
+### NUC capability findings (live probe, 2026-07-22, fr3-bringup up)
+
+Determines that the UMI-faithful executor is achievable natively. Introspected over DDS
+(`ros2 control list_hardware_interfaces`, `list_controllers`; reset the ros2 CLI daemon first —
+a stale daemon throws `!rclpy.ok()`):
+
+- **`controller_manager` `update_rate: 1000 Hz`** (`franka_bringup/config/controllers.yaml`).
+- **`franka_hardware` exposes a native Cartesian-pose command interface**:
+  `0/cartesian_pose … 15/cartesian_pose` — 16 doubles = column-major 4×4 `O_T_EE`, driven by
+  libfranka's Cartesian pose motion generator. This is the direct `ros2_control` analog of UMI's
+  `update_desired_ee_pose`. Seed state interface `0..15/initial_cartesian_pose` gives the pose at
+  activation.
+- Also available: `vx..wz/cartesian_velocity` (6-dof), `fr3_jointN/{position,velocity,effort}`
+  (N=1-7), elbow command interfaces; state `fr3/robot_model`, `fr3/robot_state`, per-joint states.
+- **Currently active controllers: only `franka_robot_state_broadcaster` + `joint_state_broadcaster`**
+  (no motion controller claimed until one is launched).
+- **`moveit_servo` is NOT installed.** So the ROS-native servo shortcut is out unless we add it.
+- **`franka_example_controllers` is NOT built** on this NUC, even though `controllers.yaml`
+  references `cartesian_pose_example_controller` etc. Its `CartesianPoseExampleController` is the
+  natural *template* for our controller, but it must be built first (or we vendor the pieces).
+- `joint_trajectory_controller` (from `ros2_controllers`) IS available — the fallback route, but
+  joint-space (needs IK) and its trajectory-replacement semantics aren't as smooth as a continuous
+  interpolator. Not recommended; noted for completeness.
+
+Franka package set present: `franka_bringup`, `franka_description`, `franka_fr3_moveit_config`,
+`franka_gripper`, `franka_hardware`, `franka_msgs`, `franka_robot_state_broadcaster`,
+`franka_semantic_components`.
+
+### Recommended design (staged)
+
+**Stage 1 — laptop (`policy_client_node`), low-risk, do first.** Improves even the current dry-run.
+- Add a receding-horizon **stride** param (`steps_per_inference`, e.g. 6): re-infer only when the
+  published horizon is ~consumed, not every tick. Kills the overlapping-chunk drop storm by itself.
+- Publish a **timestamped trajectory** instead of a bare `PoseArray`. Use
+  `trajectory_msgs/MultiDOFJointTrajectory`: per-point `transform` + `time_from_start`, with
+  `header.stamp = t_obs`. It's flat/small, so it should cross the rmw-major boundary that corrupts
+  MoveIt goals (like `PoseArray` does) — **confirm empirically**. Carries UMI's
+  `(poses, action_timestamps)` exactly. Keep the client-side coarse stale-drop; the NUC does fine
+  scheduling.
+
+**Stage 2 — NUC: a streaming Cartesian-pose controller (the real work).**
+- Port UMI's `PoseTrajectoryInterpolator` (pure numpy; if the controller is C++, port the math or
+  wrap it — it's small).
+- Write a `ros2_control` controller (C++, templated on franka's `CartesianPoseExampleController`)
+  that: claims `<i>/cartesian_pose`; on activation seeds the interpolator from
+  `initial_cartesian_pose`; subscribes to the Stage-1 trajectory topic and `schedule_waypoint`s each
+  future pose (wall→monotonic translated, as UMI does); in `update()` (1 kHz) writes
+  `pose_interp(now)` → `O_T_EE`. Runs on the NUC (same rmw as the hardware).
+- This **retires `fr3_moveit_bridge` for inference** (keep it for point-to-point moves/homing if
+  useful). No planning, no IK service, no plan-then-execute.
+
+**Stage 3 — match UMI's latency model + tune.** Adopt `camera_obs_latency ≈ 0.17` as our measured
+`latency.gopro` (blocker 2 / Q9); tune stiffness, `steps_per_inference`.
+
+### Open decisions / risks to resolve when picking this up
+
+- **libfranka continuity limits (critical).** The Cartesian-pose motion generator rejects
+  discontinuous commands (velocity/accel/jerk) → `cartesian_reflex` / communication errors. The
+  interpolator is mandatory (never step the target), and activation MUST seed from
+  `initial_cartesian_pose` so the first command matches the current pose. This is the #1
+  implementation hazard.
+- **Stiff position vs. impedance.** The `cartesian_pose` interface is position-controlled (stiff),
+  not the compliant Cartesian impedance UMI used via polymetis. Acceptable and arguably more
+  accurate; if compliance is needed later, a custom Cartesian-impedance (effort) controller or
+  `joint_impedance_with_ik` is the fallback (more work).
+- **Build `franka_example_controllers`** on the NUC to use `CartesianPoseExampleController` as the
+  template (or vendor just the interface-claiming + write loop).
+- **Confirm `MultiDOFJointTrajectory` crosses the rmw gap** (laptop Kilted 4.x ↔ NUC Humble 1.x)
+  intact, like `PoseArray` does and MoveIt goals don't.
+- **Gripper** still rides separately (Q7) — the trajectory message carries pose; width needs its own
+  channel + a gripper action on the NUC.
+
+### Checklist
+
+- [ ] Stage 1a: `steps_per_inference` stride in `policy_client_node` (infer per-stride, not per-tick)
+- [ ] Stage 1b: publish `MultiDOFJointTrajectory` (header.stamp=`t_obs`, per-point `time_from_start`)
+- [ ] Stage 1c: verify the message crosses laptop↔NUC DDS intact
+- [ ] Stage 2a: port `PoseTrajectoryInterpolator`
+- [ ] Stage 2b: build `franka_example_controllers` on the NUC (template)
+- [ ] Stage 2c: write the streaming Cartesian-pose `ros2_control` controller (claim `cartesian_pose`,
+      seed from `initial_cartesian_pose`, subscribe + `schedule_waypoint`, 1 kHz `update()` write)
+- [ ] Stage 2d: dry-run the controller with a synthetic slow trajectory (no policy) — smooth, no reflex
+- [ ] Stage 2e: end-to-end with the policy; retire `fr3_moveit_bridge` from the inference path
+- [ ] Stage 3: measure `latency.gopro` (~0.17 target), tune stiffness + `steps_per_inference`
 
 ---
 
@@ -485,8 +642,10 @@ Notes that will cost time if missed:
 | 2 | Does DP receive `agent_pos` as absolute or relative to first obs frame? | **Resolved — and the original assumption was backwards.** UMI's convention is *relative*, not absolute: `umi_dataset.__getitem__` re-expresses obs relative to `pose_mat[-1]` (the latest obs), which is what makes the policy translation-invariant. Toby's `PolyUMIImageDataset` passes `agent_pos` through *absolute*, and fits one normalizer across all 8 dims incl. the quaternion. The transform is dataset-side either way, so this wire stays absolute — but "UMI convention = absolute" was wrong. |
 | 3 | `moveit_py` availability — and on which machine (Phase 2)? | **Resolved:** not used at all. Raw `moveit_msgs` calls from a small node (`nuc/fr3_moveit_bridge.py`) running on the NUC, same-rmw as move_group — see Phase 2 / crb-fr3-inference.md. |
 | 4 | Gripper width topic on Franka? | **Resolved:** `/fr3_gripper/joint_states`; actions `/fr3_gripper/{grasp,move,gripper_action,homing}`. |
-| 5 | Subprocess vs direct import for Phase 3 | **Resolved: subprocess.** Checkpoints are dill-pickled and self-describing, so the loading process needs `diffusion_policy` + torch/hydra/robomimic importable. Keeps `inference_server` at fastapi/uvicorn/numpy. See Phase 3. |
+| 5 | Subprocess vs direct import for Phase 3 | **Resolved — direct import (subprocess retired).** The original answer was subprocess, but the training work produced a single Docker image whose `umi` env has both `diffusion_policy`/torch and fastapi/uvicorn, so `serve_policy.py` direct-imports the policy and the container is the isolation boundary. See Phase 3. |
 | 6 | Which physical point is the canonical `hand` frame, and what publishes it on the FR3? | **Open — blocking.** Ingest step 5 emits poses on a `hand` frame defined by `T_gopro_to_hand` (itself an unmeasured placeholder). The FR3 must report that same point as `eef_frame`; today it reports `fr3_hand_tcp`. Needs a mounting calibration + a static TF. |
 | 7 | How do gripper width (obs) and gripper command (action) get wired? | **Open.** Obs: subscribe `/fr3_gripper/joint_states` and fill `agent_pos[7]` (currently `0.0`). Action: `PoseArray` can't carry width — either change the chunk message type or publish a parallel one, then drive `/fr3_gripper/{grasp,move}` from the NUC bridge. |
 | 8 | Do finger cam / piezo feed the policy, and at what latency? | **Open.** Params exist and are unconsumed. If they become obs, the capture instant becomes the *oldest* across streams (an observation is only as fresh as its slowest signal), and they must also be added to the DP export, which carries none of them today. |
 | 9 | What is `latency.gopro` actually? | **Open — needs measurement, not a guess.** See Status blocker 2. |
+| 10 | How is the arm driven for smooth latency-tolerant control? | **Decided (Phase 4), not built.** Plan-then-execute (`fr3_moveit_bridge`) is the wrong model. Move to a UMI-style 1 kHz streaming Cartesian-pose `ros2_control` controller around a `PoseTrajectoryInterpolator`, using `franka_hardware`'s native `cartesian_pose` command interface (confirmed present, 1 kHz). See Phase 4. |
+| 11 | Message type for the action chunk laptop→NUC? | **Proposed (Phase 4):** `trajectory_msgs/MultiDOFJointTrajectory` (per-point transform + `time_from_start`, header stamp = `t_obs`), replacing `PoseArray` so absolute per-waypoint timing crosses. Must verify it survives the rmw-major gap. |

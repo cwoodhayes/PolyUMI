@@ -12,6 +12,11 @@
         inference_server_url:=http://192.168.x.x:8000/predict_cartesian/   # Phase 3: remote GPU box
     ros2 launch polyumi_ros2 inference_demo.launch.xml \
         execute_motion:=true motion_only:=true   # FR3 motion only, no Pi needed
+
+  Arm dry-run (real server on the GPU box, NO execution — watch the commanded chunk in Foxglove
+  on /polyumi/target_poses_preview):
+    ros2 launch polyumi_ros2 inference_demo.launch.xml \
+        inference_server_url:=http://<sheep-ip>:8000/predict_cartesian/   # execute_motion stays false
 -->
 <launch>
   <arg name="inference_server_url" default="http://localhost:8000/predict_cartesian/"/>
@@ -20,14 +25,31 @@
        the NUC-side fr3_moveit_bridge drives move_group. Requires move_group + the bridge
        running on the FR3 NUC (see docs/crb-fr3-inference.md). -->
   <arg name="execute_motion" default="false"/>
+  <!-- Viz-only preview of the commanded chunk on /polyumi/target_poses_preview (Foxglove/RViz).
+       On by default; the NUC bridge ignores it, so it never moves the arm. This is how the arm
+       dry-run (execute_motion:=false) is observed. -->
+  <arg name="publish_preview" default="true"/>
+  <!-- Camera resize target fed to the policy. 224 matches the trained model. -->
+  <arg name="image_width" default="224"/>
+  <arg name="image_height" default="224"/>
+  <!-- Max age (s) of the newest camera frame before a tick is dropped (0 = auto ~50 ms, which
+       assumes a 60 Hz camera). Raise for a slow capture path, e.g. an Elgato card doing a 1080p
+       software YUYV->RGB convert (~200 ms stamp-to-usable): max_image_age_s:=0.3 -->
+  <arg name="max_image_age_s" default="0.0"/>
+  <!-- HTTP timeout (s) for the inference POST; raise if real inference over LAN is slow. -->
+  <arg name="post_timeout_s" default="1.0"/>
+  <!-- Dry-run only: look up the LATEST EEF TF instead of the latency-aligned instant, to work
+       around a laptop<->NUC clock skew while the arm is stationary. Do NOT use for execution;
+       fix clock sync instead. tf_use_latest:=true -->
+  <arg name="tf_use_latest" default="false"/>
   <!-- Forwarded to stream_demo.launch.xml; defaults mirror that file. -->
   <arg name="pi_host" default="10.106.10.62"/>
   <arg name="video_device" default="/dev/video2"/>
   <!-- Skip pi_receiver_node (no ZMQ connection to the Pi) for FR3-motion-only testing when
        the Pi isn't running / isn't needed — e.g. iterating on chunk execution at the arm. -->
   <arg name="motion_only" default="false"/>
-  <!-- Per-component system latencies (seconds), as measured by calibration scripts. -->
-  <arg name="latency_config" default="$(find-pkg-share polyumi_ros2)/config/latency.yaml"/>
+  <!-- Inference-loop config: receding-horizon stride + per-component system latencies. -->
+  <arg name="inference_config" default="$(find-pkg-share polyumi_ros2)/config/inference.yaml"/>
 
   <include file="$(find-pkg-share polyumi_ros2)/launch/stream_demo.launch.xml">
     <arg name="pi_host" value="$(var pi_host)"/>
@@ -38,6 +60,12 @@
   <node pkg="polyumi_ros2" exec="policy_client_node" name="policy_client_node" output="screen">
     <param name="inference_server_url" value="$(var inference_server_url)"/>
     <param name="execute_motion" value="$(var execute_motion)"/>
-    <param from="$(var latency_config)"/>
+    <param name="publish_preview" value="$(var publish_preview)"/>
+    <param name="image_width" value="$(var image_width)"/>
+    <param name="image_height" value="$(var image_height)"/>
+    <param name="max_image_age_s" value="$(var max_image_age_s)"/>
+    <param name="post_timeout_s" value="$(var post_timeout_s)"/>
+    <param name="tf_use_latest" value="$(var tf_use_latest)"/>
+    <param from="$(var inference_config)"/>
   </node>
 </launch>
