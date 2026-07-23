@@ -74,6 +74,12 @@ class PolicyClientNode(Node):
         # different arm override base_frame / eef_frame instead of editing code.
         self.declare_parameter('base_frame', 'fr3_link0')
         self.declare_parameter('eef_frame', 'fr3_hand_tcp')
+        # Look up the LATEST available EEF transform (tf2 time=0) instead of the latency-aligned
+        # historical instant. For a stationary dry-run arm this sidesteps a laptop↔NUC clock skew
+        # (TF stamps from another machine landing outside our buffer) at the cost of the
+        # image/pose time-alignment — which only matters once the arm moves. Do NOT enable for
+        # execution; fix the clock sync instead. Off by default.
+        self.declare_parameter('tf_use_latest', False)
         # Motion execution (Phase 2). Off by default for safety: the node logs actions
         # but does NOT publish target poses unless execute_motion is explicitly enabled.
         # Planning params (group, velocity scaling) live on the NUC bridge, not here.
@@ -114,6 +120,7 @@ class PolicyClientNode(Node):
         max_image_age_s = self.get_parameter('max_image_age_s').get_parameter_value().double_value
         self._base_frame = self.get_parameter('base_frame').get_parameter_value().string_value
         self._eef_frame = self.get_parameter('eef_frame').get_parameter_value().string_value
+        self._tf_use_latest = self.get_parameter('tf_use_latest').get_parameter_value().bool_value
         self._execute_motion = self.get_parameter('execute_motion').get_parameter_value().bool_value
         self._publish_preview = self.get_parameter('publish_preview').get_parameter_value().bool_value
         self._post_timeout_s = self.get_parameter('post_timeout_s').get_parameter_value().double_value
@@ -205,9 +212,10 @@ class PolicyClientNode(Node):
             f'policy_client_node started — server: {self._url} — mode: {mode} — preview: {preview}'
         )
         latency_str = ' '.join(f'{name}={seconds}s' for name, seconds in self._latency.items())
+        tf_mode = 'LATEST (clock-skew workaround; not time-aligned)' if self._tf_use_latest else 'time-aligned'
         self.get_logger().info(
             f'latency config — {latency_str} (ee_pose buffer: {self._ee_pose_buffer_s}s, '
-            f'max_image_age: {self._max_image_age_s * 1e3:.0f}ms)'
+            f'max_image_age: {self._max_image_age_s * 1e3:.0f}ms, tf lookup: {tf_mode})'
         )
         self.get_logger().info(
             f'latency budget — measured observation age (capture→response) + '
@@ -369,8 +377,11 @@ class PolicyClientNode(Node):
 
         :param image_stamp: header stamp of the camera frame this pose will be paired with.
         """
-        target_time = image_stamp - Duration(seconds=self._latency['gopro']) + \
-            Duration(seconds=self._latency['proprio'])
+        # tf2 time=0 means "latest available" — used for the dry-run clock-skew workaround.
+        target_time = rclpy.time.Time() if self._tf_use_latest else (
+            image_stamp - Duration(seconds=self._latency['gopro'])
+            + Duration(seconds=self._latency['proprio'])
+        )
         try:
             tf = self._tf_buffer.lookup_transform(self._base_frame, self._eef_frame, target_time)
         except (LookupException, ConnectivityException, ExtrapolationException) as e:

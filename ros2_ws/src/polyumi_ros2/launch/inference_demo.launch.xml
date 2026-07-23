@@ -38,6 +38,10 @@
   <arg name="max_image_age_s" default="0.0"/>
   <!-- HTTP timeout (s) for the inference POST; raise if real inference over LAN is slow. -->
   <arg name="post_timeout_s" default="1.0"/>
+  <!-- Dry-run only: look up the LATEST EEF TF instead of the latency-aligned instant, to work
+       around a laptop<->NUC clock skew while the arm is stationary. Do NOT use for execution;
+       fix clock sync instead. tf_use_latest:=true -->
+  <arg name="tf_use_latest" default="false"/>
   <!-- Forwarded to stream_demo.launch.xml; defaults mirror that file. -->
   <arg name="pi_host" default="10.106.10.62"/>
   <arg name="video_device" default="/dev/video2"/>
@@ -61,6 +65,7 @@
     <param name="image_height" value="$(var image_height)"/>
     <param name="max_image_age_s" value="$(var max_image_age_s)"/>
     <param name="post_timeout_s" value="$(var post_timeout_s)"/>
+    <param name="tf_use_latest" value="$(var tf_use_latest)"/>
     <param from="$(var latency_config)"/>
   </node>
 </launch>

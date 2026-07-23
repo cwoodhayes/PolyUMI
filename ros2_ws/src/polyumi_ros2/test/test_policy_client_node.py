@@ -348,3 +348,15 @@ def test_max_image_age_override(make_node):
     """A positive max_image_age_s wins over the auto formula (for slow camera paths)."""
     node = make_node(control_hz=10.0, max_image_age_s=0.3)
     assert node._max_image_age_s == pytest.approx(0.3)
+
+
+def test_tf_use_latest_ignores_stamp(make_node):
+    """tf_use_latest looks up the newest transform regardless of the requested image stamp."""
+    node = make_node(tf_use_latest=True, **{'latency.gopro': 0.05, 'buffers.ee_pose_s': 1.0})
+    _push_ramp_tf(node)  # ramp x==timestamp over [0.6, 1.4]
+
+    # A stamp well before the ramp would extrapolate-into-past in time-aligned mode; with
+    # tf_use_latest it returns the newest sample (x == 1.4) instead.
+    agent_pos = node._lookup_agent_pos(image_stamp=_t(0.1))
+    assert agent_pos is not None
+    assert agent_pos[0] == pytest.approx(1.4, abs=1e-6)
