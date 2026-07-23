@@ -22,7 +22,7 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
 | Gripper — observation | **not started** — hardcoded `0.0` |
 | Gripper — command | **not started** — `action[7]` dropped before publish |
 | DP export | **exists** for pose+image+gripper; no tactile; wrong schema for UMI; untested |
-| Real inference server | **not started** — Phase 3 |
+| Real inference server | **in progress** — Phase 3: `serve_policy.py` + `serve_obs.py` implemented (single-image direct import), standalone smoke test pending |
 
 ### Blocking issues
 
@@ -416,63 +416,65 @@ laptop at `localhost:8000`. Here it moves to a separate GPU box reached over LAN
 - Point the client at it: `inference_demo.launch.xml inference_server_url:=http://<gpu-ip>:8000/predict_cartesian/`.
 - DDS stays laptop↔NUC only; the GPU link is plain HTTP, so no Cyclone changes.
 
-**Architecture decision:** subprocess isolation vs. direct import.
+**Architecture decision — RESOLVED, and the original recommendation is superseded.** This doc
+first recommended *subprocess* isolation (a `dp_worker.py` run via `conda run -n umi`, speaking
+JSON over stdin/stdout) because `inference_server` was a uv/3.12 env and DP a separate conda/3.9
+env. **The training work changed the premise:** it produced a single Docker image whose `umi`
+conda env contains *both* `diffusion_policy`/torch *and* fastapi/uvicorn. So `serve_policy.py` (run
+by `docker/serve.sh`) runs **inside that env and direct-imports the policy** — no subprocess, no
+`dp_worker.py`, no `conda run`. The container already *is* the isolation boundary the subprocess
+bought. `dummy_server.py` stays as the no-GPU mock for ROS-side dev/CI.
 
-| | Subprocess (recommended) | Direct import |
-|---|---|---|
-| Python version | Server: 3.12 via uv; DP: 3.9 conda | Stuck with DP's 3.9 + conda |
-| Interface | stdin/stdout or local ZMQ JSON between processes | Simple function call |
-| Startup | Manages DP child process lifecycle | Single process |
-| Deps | `inference_server` env stays minimal | Inherits all DP deps (torch, hydra, etc.) |
-
-**Recommended approach:** subprocess, with a `dp_worker.py` that loads the checkpoint and
-speaks newline-delimited JSON on stdin/stdout. The FastAPI server launches it at startup and
-routes requests to it.
-
-The deciding argument is that a DP/UMI checkpoint is **self-describing and dill-pickled**:
-`base_workspace.save_checkpoint` writes `{'cfg', 'state_dicts', 'pickles'}`, and `load_payload`
-un-pickles arbitrary objects — so whatever process loads it needs `diffusion_policy` and its
-exact-ish deps importable. Merging that into FastAPI means inheriting torch + hydra +
-robomimic + numba into a service deliberately kept at fastapi/uvicorn/numpy. Keep them apart.
-
-The upside of self-describing checkpoints: the worker needs only a *path*. Loading is ~6 lines
-(cf. `eval.py` in either repo):
+A DP/UMI checkpoint is **self-describing and dill-pickled** (`base_workspace.save_checkpoint`
+writes `{'cfg', 'state_dicts', 'pickles'}`; `load_payload` un-pickles arbitrary objects), so the
+serving env must match training — which the single image guarantees. Loading needs only a *path*
+(~6 lines, cf. `base_workspace.load_payload`):
 
 ```python
-payload   = torch.load(open(ckpt, 'rb'), pickle_module=dill)
+payload   = torch.load(open(ckpt, 'rb'), pickle_module=dill, map_location='cpu')
 cfg       = payload['cfg']                      # config travels IN the checkpoint
 workspace = hydra.utils.get_class(cfg._target_)(cfg)
 workspace.load_payload(payload)
-policy    = workspace.ema_model                 # NOT .model — see below
+policy    = workspace.ema_model                 # NOT .model — EMA is what eval uses
 policy.to(device); policy.eval()
 ```
 
-Then per request: `policy.predict_action(obs_dict)['action']`, where `obs_dict` is **batched,
-channel-first torch tensors on device** — so the worker owns JSON → np → `moveaxis(-1, 1)` →
-`from_numpy` → `unsqueeze(0)` → `.to(device)`, the mirror of the dataset's `__getitem__`.
+Then per request `policy.predict_action(obs_dict)['action_pred']`, where `obs_dict` is **batched,
+channel-first torch tensors on device**. The wire↔UMI translation lives in `serve_obs.py`
+(`wire_to_obs_dict`, `actions_rel_to_abs`), unit-tested without a checkpoint in
+`test/test_serve_obs.py`.
 
 Notes that will cost time if missed:
-- **Use `ema_model`, not `model`.** The EMA weights are what `eval.py` uses and what the
-  paper's numbers come from. Loading `.model` runs fine and is silently worse.
-- **Normalization ships inside the checkpoint** (the dataset's `get_normalizer()` is baked into
-  the policy's state dict), so the server needs no stats — but a wrong action parameterization
-  is likewise baked in permanently.
+- **Use `ema_model`, not `model`.** The EMA weights are what eval uses; `.model` runs but is worse.
+- **Normalization ships inside the checkpoint** (baked into the policy's state dict), so the server
+  needs no stats — but a wrong action parameterization is likewise baked in permanently.
 - **UMI's policy returns the full horizon with no offset** (`diffusion_unet_timm_policy` has no
-  `n_action_steps`; `eval_real.py` reads `result['action_pred'][0]`), because its sampler is
-  now-anchored. Truncation is the *client's* job — which is what `policy_client_node` already does.
-- **Rel→abs already exists in UMI:** `convert_pose_mat_rep(..., backward=True)` with
-  `pose_rep='relative'` is exactly `base_pose_mat @ pose_mat`. Don't re-derive it.
+  `n_action_steps`; read `result['action_pred'][0]`); truncation is the client's job.
+- **Rel→abs is `convert_pose_mat_rep(..., backward=True)`** with `pose_rep='relative'`, i.e.
+  `base_pose_mat @ pose_mat`. Don't re-derive it.
+- **Image is 224×224, float32 [0,1]** (client already `/255`s); obs keys are the UMI names
+  (`camera0_rgb`, `robot0_eef_pos`, `robot0_eef_rot_axis_angle`, `..._wrt_start`,
+  `robot0_gripper_width`); the action is a 10-vec `[pos(3), rot6d(6), gripper(1)]`.
 
-`server.py` additions over `dummy_server.py`:
-- On startup: `subprocess.Popen(["conda", "run", "-n", "umi", "python", "dp_worker.py", ckpt_path])`
-- `dp_worker.py`: loads checkpoint, reads JSON requests from stdin, writes JSON responses to stdout
-- `GET /health` → `{"status": "ready", "checkpoint": "..."}`
-- Server handles relative→absolute action conversion (model outputs relative; client expects absolute)
+**Episode-start pose (`/reset`).** The policy consumes `robot0_eef_rot_axis_angle_wrt_start` —
+orientation relative to where the *episode* began — but the wire `agent_pos` carries only the
+*current* pose. `serve_policy.py` adds `POST /reset {agent_pos: [8]}` that caches the start pose;
+`predict_cartesian` uses it, falling back to the current pose (with a warning) if `/reset` hasn't
+run. **Follow-up:** once the client calls `/reset` at episode start, `dummy_server.py` needs a
+matching **no-op `/reset`**, or dummy-based ROS bringup/CI breaks.
 
-- [x] subprocess vs. direct import confirmed → **subprocess** (see reasoning above)
-- [ ] `dp_worker.py` implemented and tested standalone
-- [ ] `server.py` wrapping `dp_worker.py` implemented
-- [ ] smoke test with a real checkpoint
+`serve_policy.py` over `dummy_server.py`:
+- Startup (lifespan): validate `CKPT_PATH`, load `ema_model` into the process (direct import).
+- `POST /reset` caches the episode-start pose; `GET /health` → `{status, checkpoint, device, ...}`.
+- `POST /predict_cartesian/`: decode wire obs → `wire_to_obs_dict` → `predict_action` →
+  `actions_rel_to_abs` → absolute EEF chunk.
+
+- [x] subprocess vs. direct import → **single Docker image, direct import** (subprocess plan retired)
+- [x] `serve_obs.py` translation helpers + `test/test_serve_obs.py` (no-checkpoint unit tests)
+- [x] `serve_policy.py` body (load + `/reset` + `/predict_cartesian/`)
+- [ ] standalone smoke test with the 70-epoch checkpoint (health + synthetic predict)
+- [ ] `dummy_server.py` no-op `/reset` (contract parity — before wiring the client)
+- [ ] client: image→224, `inference_server_url`, call `/reset` at episode start
 - [ ] end-to-end: `policy_client_node` → real server → real robot
 
 ---
@@ -485,7 +487,7 @@ Notes that will cost time if missed:
 | 2 | Does DP receive `agent_pos` as absolute or relative to first obs frame? | **Resolved — and the original assumption was backwards.** UMI's convention is *relative*, not absolute: `umi_dataset.__getitem__` re-expresses obs relative to `pose_mat[-1]` (the latest obs), which is what makes the policy translation-invariant. Toby's `PolyUMIImageDataset` passes `agent_pos` through *absolute*, and fits one normalizer across all 8 dims incl. the quaternion. The transform is dataset-side either way, so this wire stays absolute — but "UMI convention = absolute" was wrong. |
 | 3 | `moveit_py` availability — and on which machine (Phase 2)? | **Resolved:** not used at all. Raw `moveit_msgs` calls from a small node (`nuc/fr3_moveit_bridge.py`) running on the NUC, same-rmw as move_group — see Phase 2 / crb-fr3-inference.md. |
 | 4 | Gripper width topic on Franka? | **Resolved:** `/fr3_gripper/joint_states`; actions `/fr3_gripper/{grasp,move,gripper_action,homing}`. |
-| 5 | Subprocess vs direct import for Phase 3 | **Resolved: subprocess.** Checkpoints are dill-pickled and self-describing, so the loading process needs `diffusion_policy` + torch/hydra/robomimic importable. Keeps `inference_server` at fastapi/uvicorn/numpy. See Phase 3. |
+| 5 | Subprocess vs direct import for Phase 3 | **Resolved — direct import (subprocess retired).** The original answer was subprocess, but the training work produced a single Docker image whose `umi` env has both `diffusion_policy`/torch and fastapi/uvicorn, so `serve_policy.py` direct-imports the policy and the container is the isolation boundary. See Phase 3. |
 | 6 | Which physical point is the canonical `hand` frame, and what publishes it on the FR3? | **Open — blocking.** Ingest step 5 emits poses on a `hand` frame defined by `T_gopro_to_hand` (itself an unmeasured placeholder). The FR3 must report that same point as `eef_frame`; today it reports `fr3_hand_tcp`. Needs a mounting calibration + a static TF. |
 | 7 | How do gripper width (obs) and gripper command (action) get wired? | **Open.** Obs: subscribe `/fr3_gripper/joint_states` and fill `agent_pos[7]` (currently `0.0`). Action: `PoseArray` can't carry width — either change the chunk message type or publish a parallel one, then drive `/fr3_gripper/{grasp,move}` from the NUC bridge. |
 | 8 | Do finger cam / piezo feed the policy, and at what latency? | **Open.** Params exist and are unconsumed. If they become obs, the capture instant becomes the *oldest* across streams (an observation is only as fresh as its slowest signal), and they must also be added to the DP export, which carries none of them today. |
