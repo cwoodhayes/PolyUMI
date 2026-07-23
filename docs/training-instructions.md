@@ -123,20 +123,28 @@ The same image serves the policy over the exact HTTP contract the ROS-side
 `policy_client_node` already speaks to `inference_server/dummy_server.py`:
 
 ```bash
-docker run --rm -it -p 8000:8000 \
-    -e CKPT_PATH=/data/checkpoints/latest.ckpt \
+docker run --rm -it --gpus all --user 0:0 -p 8000:8000 \
+    -e HOME=/tmp -e HF_HOME=/hf_cache \
+    -e CKPT_PATH='/data/checkpoints/epoch=0070-train_loss=0.021.ckpt' \
     -v /abs/path/to/checkpoints:/data/checkpoints:ro \
+    -v "${HOME}/.cache/huggingface:/hf_cache:rw" \
     polyumi-dp bash docker/serve.sh
 ```
+
+The `-v ...huggingface:/hf_cache` mount + `HF_HOME=/hf_cache` persist the timm ViT encoder
+weights (~600 MB) so the server doesn't re-download them on every start — same cache
+`train_policy.sh` uses. `--gpus all` and `--user 0:0` mirror the training flags (GPU access;
+rootless-safe uid). Single-quote the `CKPT_PATH` value — checkpoint filenames contain `=`.
 
 `policy_client_node` then POSTs to `http://<workstation>:8000/predict_cartesian/` — the same
 call it makes to the dummy server today, so nothing changes on the ROS side but the URL.
 
-> **`serve_policy.py` is currently a scaffold.** The transport and contract are real (it returns
-> HTTP 501 until filled in), but model loading, the wire-obs → UMI-obs-key translation, and the
-> relative→absolute action conversion are deferred to the post-training inference step. Use
-> `dummy-server` for ROS bringup until then. See `serve_policy.py` and
-> [franka-inference-bringup.md](franka-inference-bringup.md).
+> **`serve_policy.py` is implemented** (loads `ema_model`, translates the wire obs to UMI's keys,
+> converts the relative action chunk back to absolute EEF poses). One extra endpoint: the client
+> must `POST /reset {agent_pos: [8]}` at the start of each rollout to set the episode-start pose
+> (used by `robot0_eef_rot_axis_angle_wrt_start`); absent a reset it falls back to the current
+> pose with a warning. Wiring `policy_client_node` to it (image→224, URL, calling `/reset`) is the
+> remaining step — see [franka-inference-bringup.md](franka-inference-bringup.md) Phase 3.
 
 ## What is out of scope here
 

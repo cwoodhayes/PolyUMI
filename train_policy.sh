@@ -38,12 +38,18 @@ USER_FLAG="${USER_FLAG:---user 0:0}"
 TTY_FLAG=""
 [ -t 0 ] && TTY_FLAG="-t"
 
+# HuggingFace cache. The timm ViT encoder weights (~600 MB) are fetched from the HF hub on every
+# run; without a persistent cache they re-download each time because HOME=/tmp is ephemeral.
+# Mount a host dir and point HF_HOME at it. Defaults to the host user's standard HF cache so
+# downloads are shared with any host-side HF usage; override with HF_CACHE_DIR.
+HF_CACHE_DIR="${HF_CACHE_DIR:-${HOME}/.cache/huggingface}"
+
 if [ ! -f "${DATASET}" ]; then
     echo "error: DATASET '${DATASET}' not found" >&2
     exit 1
 fi
 
-mkdir -p "${OUTPUT_DIR}"
+mkdir -p "${OUTPUT_DIR}" "${HF_CACHE_DIR}"
 
 echo ">> building ${IMAGE} from ${FORK_DIR}"
 docker build -t "${IMAGE}" "${FORK_DIR}"
@@ -63,7 +69,9 @@ exec docker run --rm -i ${TTY_FLAG} \
     -e HOME=/tmp \
     -e MPLCONFIGDIR=/tmp/mpl \
     -e NUMBA_CACHE_DIR=/tmp/numba \
+    -e HF_HOME=/hf_cache \
     -v "${DATASET}:/data/dataset.zarr.zip:ro" \
     -v "${OUTPUT_DIR}:/app/data/outputs:rw" \
+    -v "${HF_CACHE_DIR}:/hf_cache:rw" \
     "${IMAGE}" \
     bash docker/train.sh "$@"
