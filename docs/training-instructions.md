@@ -120,21 +120,34 @@ Watch `train_action_mse_error` (and `train_loss`) descend in the console or in W
 ## Inference (after you have a checkpoint)
 
 The same image serves the policy over the exact HTTP contract the ROS-side
-`policy_client_node` already speaks to `inference_server/dummy_server.py`:
+`policy_client_node` already speaks to `inference_server/dummy_server.py`. Use the
+`serve_policy.sh` wrapper (the inference counterpart of `train_policy.sh` — it builds the image
+and wires the rootless-safe flags, checkpoint mount, and HF cache):
+
+```bash
+CKPT=/abs/path/to/epoch=0070-train_loss=0.021.ckpt ./serve_policy.sh
+# CKPT=... PORT=8001 ./serve_policy.sh    # override the published port
+```
+
+> **Do not run `external/polyumi_diffusion_policy/docker/serve.sh` on the host** — it is the
+> *in-container* entrypoint (`exec uvicorn …`) and fails with `exec: uvicorn: not found` because
+> the `umi` conda env only exists inside the image. `serve_policy.sh` runs it via `docker run`.
+
+The equivalent raw command, if you'd rather not use the wrapper:
 
 ```bash
 docker run --rm -it --gpus all --user 0:0 -p 8000:8000 \
     -e HOME=/tmp -e HF_HOME=/hf_cache \
-    -e CKPT_PATH='/data/checkpoints/epoch=0070-train_loss=0.021.ckpt' \
-    -v /abs/path/to/checkpoints:/data/checkpoints:ro \
+    -e CKPT_PATH=/data/model.ckpt \
+    -v /abs/path/to/epoch=0070-train_loss=0.021.ckpt:/data/model.ckpt:ro \
     -v "${HOME}/.cache/huggingface:/hf_cache:rw" \
     polyumi-dp bash docker/serve.sh
 ```
 
 The `-v ...huggingface:/hf_cache` mount + `HF_HOME=/hf_cache` persist the timm ViT encoder
-weights (~600 MB) so the server doesn't re-download them on every start — same cache
+weights (~600 MB) so the server doesn't re-download them on every start — the same cache
 `train_policy.sh` uses. `--gpus all` and `--user 0:0` mirror the training flags (GPU access;
-rootless-safe uid). Single-quote the `CKPT_PATH` value — checkpoint filenames contain `=`.
+rootless-safe uid). Mounting the checkpoint *file* to a clean path sidesteps the `=` in its name.
 
 `policy_client_node` then POSTs to `http://<workstation>:8000/predict_cartesian/` — the same
 call it makes to the dummy server today, so nothing changes on the ROS side but the URL.

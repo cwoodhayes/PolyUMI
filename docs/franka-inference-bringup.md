@@ -488,9 +488,9 @@ commanded chunk **only** to the viz-only `/polyumi/target_poses_preview` (the NU
 subscribes to it). Accuracy is not the goal here — `eef_frame` is still `fr3_hand_tcp` (Q6), so
 poses are structurally real but not spatially calibrated.
 
-1. **Server on sheep**: `docker run … bash docker/serve.sh` with the 70-epoch ckpt + HF cache
-   (see [training-instructions.md](training-instructions.md)). From the laptop:
-   `curl http://<sheep-ip>:8000/health` → `ready`.
+1. **Server on sheep**: `CKPT=/abs/path/to/epoch=0070-….ckpt ./serve_policy.sh` (builds the image,
+   wires the checkpoint + HF cache; see [training-instructions.md](training-instructions.md)). From
+   the laptop: `curl http://<sheep-ip>:8000/health` → `ready`.
 2. **Laptop**: `source setup_franka_env.sh`; NUC publishing `fr3_*` TF; GoPro streaming.
    `ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=http://<sheep-ip>:8000/predict_cartesian/`
 3. **Watch**: node logs `mode: log-only (no motion)`, one `/reset` line, then per-tick chunk logs.
