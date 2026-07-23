@@ -336,3 +336,15 @@ def test_preview_disabled_creates_no_publisher(make_node):
     """publish_preview=false suppresses the preview publisher entirely."""
     node = make_node(publish_preview=False)
     assert node._preview_pub is None
+
+
+def test_max_image_age_auto_default(make_node):
+    """max_image_age_s=0 resolves to the auto value: half a control period at 10 Hz."""
+    node = make_node(control_hz=10.0)
+    assert node._max_image_age_s == pytest.approx(0.05)  # max(2/60, 0.5/10) = 0.05
+
+
+def test_max_image_age_override(make_node):
+    """A positive max_image_age_s wins over the auto formula (for slow camera paths)."""
+    node = make_node(control_hz=10.0, max_image_age_s=0.3)
+    assert node._max_image_age_s == pytest.approx(0.3)

@@ -32,6 +32,10 @@
   <!-- Camera resize target fed to the policy. 224 matches the trained model. -->
   <arg name="image_width" default="224"/>
   <arg name="image_height" default="224"/>
+  <!-- Max age (s) of the newest camera frame before a tick is dropped (0 = auto ~50 ms, which
+       assumes a 60 Hz camera). Raise for a slow capture path, e.g. an Elgato card doing a 1080p
+       software YUYV->RGB convert (~200 ms stamp-to-usable): max_image_age_s:=0.3 -->
+  <arg name="max_image_age_s" default="0.0"/>
   <!-- HTTP timeout (s) for the inference POST; raise if real inference over LAN is slow. -->
   <arg name="post_timeout_s" default="1.0"/>
   <!-- Forwarded to stream_demo.launch.xml; defaults mirror that file. -->
@@ -55,6 +59,7 @@
     <param name="publish_preview" value="$(var publish_preview)"/>
     <param name="image_width" value="$(var image_width)"/>
     <param name="image_height" value="$(var image_height)"/>
+    <param name="max_image_age_s" value="$(var max_image_age_s)"/>
     <param name="post_timeout_s" value="$(var post_timeout_s)"/>
     <param from="$(var latency_config)"/>
   </node>

@@ -63,6 +63,13 @@ class PolicyClientNode(Node):
         # frames to 224 too, so the client's resize reproduces training's aspect handling.
         self.declare_parameter('image_width', 224)
         self.declare_parameter('image_height', 224)
+        # Max age (s) of the newest cached camera frame before a tick is dropped as a stalled
+        # capture pipeline. 0.0 = auto: max(2 camera periods @ 60 Hz, half a control period). The
+        # auto value assumes a ~60 Hz camera; a slower path (e.g. an Elgato capture card doing a
+        # 1080p software YUYV→RGB conversion, which adds ~200 ms of stamp-to-usable latency) needs
+        # a larger value. Raising it only tolerates older frames — image and pose stay aligned to
+        # the frame's own capture stamp regardless (see _lookup_agent_pos).
+        self.declare_parameter('max_image_age_s', 0.0)
         # Frame IDs for the EEF pose lookup. Defaults match the FR3 TF tree; on a
         # different arm override base_frame / eef_frame instead of editing code.
         self.declare_parameter('base_frame', 'fr3_link0')
@@ -104,6 +111,7 @@ class PolicyClientNode(Node):
         self._n_obs_steps = self.get_parameter('n_obs_steps').get_parameter_value().integer_value
         self._image_w = self.get_parameter('image_width').get_parameter_value().integer_value
         self._image_h = self.get_parameter('image_height').get_parameter_value().integer_value
+        max_image_age_s = self.get_parameter('max_image_age_s').get_parameter_value().double_value
         self._base_frame = self.get_parameter('base_frame').get_parameter_value().string_value
         self._eef_frame = self.get_parameter('eef_frame').get_parameter_value().string_value
         self._execute_motion = self.get_parameter('execute_motion').get_parameter_value().bool_value
@@ -139,11 +147,13 @@ class PolicyClientNode(Node):
         self._latest_image: np.ndarray | None = None
         self._latest_image_stamp: rclpy.time.Time | None = None
         self._latest_image_lock = threading.Lock()
-        # Reject a cached frame older than this at tick time. Sized to two camera periods at
-        # the 60 Hz v4l2 rate, floored so a slow tick doesn't trip it; a frame older than this
-        # means the capture pipeline stalled, and pairing it with a fresh pose would silently
-        # feed the policy a mismatched observation.
-        self._max_image_age_s = max(2.0 / 60.0, 0.5 / control_hz)
+        # Reject a cached frame older than this at tick time; a frame older than this means the
+        # capture pipeline stalled. The auto default (max_image_age_s <= 0) is two camera periods
+        # at the 60 Hz v4l2 rate, floored at half a control period so a slow tick doesn't trip it;
+        # override the param for slower camera paths (see the param declaration).
+        self._max_image_age_s = (
+            max_image_age_s if max_image_age_s > 0 else max(2.0 / 60.0, 0.5 / control_hz)
+        )
 
         # TF — cache_time sized from buffers.ee_pose_s so a pose from up to that far back can
         # still be looked up (needed to time-align with the delayed gopro frame; see
@@ -195,7 +205,10 @@ class PolicyClientNode(Node):
             f'policy_client_node started — server: {self._url} — mode: {mode} — preview: {preview}'
         )
         latency_str = ' '.join(f'{name}={seconds}s' for name, seconds in self._latency.items())
-        self.get_logger().info(f'latency config — {latency_str} (ee_pose buffer: {self._ee_pose_buffer_s}s)')
+        self.get_logger().info(
+            f'latency config — {latency_str} (ee_pose buffer: {self._ee_pose_buffer_s}s, '
+            f'max_image_age: {self._max_image_age_s * 1e3:.0f}ms)'
+        )
         self.get_logger().info(
             f'latency budget — measured observation age (capture→response) + '
             f'act={self._latency_act}s vs action_dt={self._action_dt}s'
