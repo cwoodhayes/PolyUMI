@@ -78,12 +78,25 @@ source setup_franka_env.sh   # RMW=cyclonedds, domain 0, CYCLONEDDS_URI, 10.0.0.
 On the NUC: `fr3-bringup` + `fr3-arm-controller`. Full reference and the exact
 environment assumptions live in [docs/crb-fr3-inference.md](docs/crb-fr3-inference.md).
 
+**Clock sync (this setup):** the NUC and laptop must agree on wall time or TF lookups fail
+with "extrapolation into the past". The NUC (`jailfranka`) is on a jailed VLAN that blocks
+outbound **UDP 123**, so it cannot reach public NTP — it syncs to the **laptop over the
+`10.0.0.x` arm link** instead. This is wired durably via chrony drop-ins (persist across
+reboots): the NUC has `/etc/chrony/conf.d/laptop-time.conf` = `server 10.0.0.1 iburst prefer`,
+and the laptop has `/etc/chrony/conf.d/allow-fr3-link.conf` = `allow 10.0.0.0/24` (plus its
+existing internet pools + `local stratum 5`). Verify with `ssh jailfranka chronyc sources` →
+expect `^* 10.0.0.1` (sub-ms offset). If it ever drifts again, the laptop was probably down /
+off `10.0.0.1` when the NUC booted (the NUC then falls back to its own `local stratum 10`
+clock); `ssh jailfranka 'sudo chronyc makestep'` once the link is up re-steps it. With this in
+place, `tf_use_latest` is no longer needed for real runs — it was only a stationary-dry-run
+crutch for the old skew.
+
 **When debugging FR3 inference on the arm — read [docs/crb-fr3-inference.md](docs/crb-fr3-inference.md)
 FIRST, especially its Troubleshooting section, before re-diagnosing.** The common failure modes and
 their fixes are documented there: nothing publishing / Foxglove blank (a duplicate or leftover
 launch grabbing port 8765 + `/dev/video2` — `pkill` leftovers and confirm a single stack); TF
-"extrapolation into the past" (laptop↔NUC clock skew — sync clocks, or `tf_use_latest:=true` for a
-stationary dry run only); TF "fr3_link0 does not exist" (NUC `fr3-bringup` crashed — restart it);
+"extrapolation into the past" (laptop↔NUC clock skew — should be fixed durably by the chrony
+setup below; if it recurs, re-step the NUC clock, don't reach for `tf_use_latest`); TF "fr3_link0 does not exist" (NUC `fr3-bringup` crashed — restart it);
 "capture pipeline stalled" (the Elgato's ~200 ms 1080p convert latency — `max_image_age_s:=0.3`).
 The **dry-run** pattern (validate commanded motion without moving the arm) is `execute_motion:=false`
 (default) + watch `/polyumi/target_poses_preview` in Foxglove.
