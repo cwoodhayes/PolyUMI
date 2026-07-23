@@ -22,7 +22,7 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
 | Gripper — observation | **not started** — hardcoded `0.0` |
 | Gripper — command | **not started** — `action[7]` dropped before publish |
 | DP export | **exists** for pose+image+gripper; no tactile; wrong schema for UMI; untested |
-| Real inference server | **in progress** — Phase 3: `serve_policy.py` + `serve_obs.py` implemented (single-image direct import), standalone smoke test pending |
+| Real inference server | **in progress** — Phase 3: `serve_policy.py` verified standalone on sheep; client dry-run wiring done + unit-tested (image 224, viz preview, `/reset`); on-arm dry-run pending hardware |
 
 ### Blocking issues
 
@@ -472,10 +472,31 @@ matching **no-op `/reset`**, or dummy-based ROS bringup/CI breaks.
 - [x] subprocess vs. direct import → **single Docker image, direct import** (subprocess plan retired)
 - [x] `serve_obs.py` translation helpers + `test/test_serve_obs.py` (no-checkpoint unit tests)
 - [x] `serve_policy.py` body (load + `/reset` + `/predict_cartesian/`)
-- [ ] standalone smoke test with the 70-epoch checkpoint (health + synthetic predict)
-- [ ] `dummy_server.py` no-op `/reset` (contract parity — before wiring the client)
-- [ ] client: image→224, `inference_server_url`, call `/reset` at episode start
-- [ ] end-to-end: `policy_client_node` → real server → real robot
+- [x] standalone smoke test with the 70-epoch checkpoint (health + synthetic predict) — green on sheep
+- [x] `dummy_server.py` no-op `/reset` (contract parity)
+- [x] client wiring: image→224, viz-only preview `PoseArray`, `/reset` at episode start,
+      `post_timeout_s` param (unit-tested; `colcon test` clean)
+- [ ] **arm dry-run** (`execute_motion:=false`): watch `/polyumi/target_poses_preview` in Foxglove
+      — pending GoPro/arm hardware access
+- [ ] end-to-end WITH execution (`execute_motion:=true`) — after the dry-run looks sane
+
+### Arm dry-run procedure (no execution)
+
+Validates the full pipeline and the *sanity* of commanded motion without moving the arm:
+`execute_motion` stays `false`, so the node computes obs → POSTs → logs, and publishes the
+commanded chunk **only** to the viz-only `/polyumi/target_poses_preview` (the NUC bridge never
+subscribes to it). Accuracy is not the goal here — `eef_frame` is still `fr3_hand_tcp` (Q6), so
+poses are structurally real but not spatially calibrated.
+
+1. **Server on sheep**: `docker run … bash docker/serve.sh` with the 70-epoch ckpt + HF cache
+   (see [training-instructions.md](training-instructions.md)). From the laptop:
+   `curl http://<sheep-ip>:8000/health` → `ready`.
+2. **Laptop**: `source setup_franka_env.sh`; NUC publishing `fr3_*` TF; GoPro streaming.
+   `ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=http://<sheep-ip>:8000/predict_cartesian/`
+3. **Watch**: node logs `mode: log-only (no motion)`, one `/reset` line, then per-tick chunk logs.
+   Server `/health` shows `episode_start_set: true`. In **Foxglove** (`:8765`) add
+   `/polyumi/target_poses_preview` — the chunk shows as pose arrows in `fr3_link0`, and should sit
+   near the current EEF and step smoothly. Wild jumps / NaNs / off-workspace poses are the finding.
 
 ---
 

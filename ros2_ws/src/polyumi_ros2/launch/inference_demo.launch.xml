@@ -12,6 +12,11 @@
         inference_server_url:=http://192.168.x.x:8000/predict_cartesian/   # Phase 3: remote GPU box
     ros2 launch polyumi_ros2 inference_demo.launch.xml \
         execute_motion:=true motion_only:=true   # FR3 motion only, no Pi needed
+
+  Arm dry-run (real server on the GPU box, NO execution — watch the commanded chunk in Foxglove
+  on /polyumi/target_poses_preview):
+    ros2 launch polyumi_ros2 inference_demo.launch.xml \
+        inference_server_url:=http://<sheep-ip>:8000/predict_cartesian/   # execute_motion stays false
 -->
 <launch>
   <arg name="inference_server_url" default="http://localhost:8000/predict_cartesian/"/>
@@ -20,6 +25,15 @@
        the NUC-side fr3_moveit_bridge drives move_group. Requires move_group + the bridge
        running on the FR3 NUC (see docs/crb-fr3-inference.md). -->
   <arg name="execute_motion" default="false"/>
+  <!-- Viz-only preview of the commanded chunk on /polyumi/target_poses_preview (Foxglove/RViz).
+       On by default; the NUC bridge ignores it, so it never moves the arm. This is how the arm
+       dry-run (execute_motion:=false) is observed. -->
+  <arg name="publish_preview" default="true"/>
+  <!-- Camera resize target fed to the policy. 224 matches the trained model. -->
+  <arg name="image_width" default="224"/>
+  <arg name="image_height" default="224"/>
+  <!-- HTTP timeout (s) for the inference POST; raise if real inference over LAN is slow. -->
+  <arg name="post_timeout_s" default="1.0"/>
   <!-- Forwarded to stream_demo.launch.xml; defaults mirror that file. -->
   <arg name="pi_host" default="10.106.10.62"/>
   <arg name="video_device" default="/dev/video2"/>
@@ -38,6 +52,10 @@
   <node pkg="polyumi_ros2" exec="policy_client_node" name="policy_client_node" output="screen">
     <param name="inference_server_url" value="$(var inference_server_url)"/>
     <param name="execute_motion" value="$(var execute_motion)"/>
+    <param name="publish_preview" value="$(var publish_preview)"/>
+    <param name="image_width" value="$(var image_width)"/>
+    <param name="image_height" value="$(var image_height)"/>
+    <param name="post_timeout_s" value="$(var post_timeout_s)"/>
     <param from="$(var latency_config)"/>
   </node>
 </launch>

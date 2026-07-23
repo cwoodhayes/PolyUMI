@@ -268,3 +268,71 @@ def test_lookup_agent_pos_shape_and_orientation(make_node):
     assert agent_pos.shape == (8,)
     assert agent_pos.dtype == np.float64
     np.testing.assert_allclose(agent_pos[3:7], [0.0, 0.0, 0.0, 1.0], atol=1e-9)
+
+
+# ----------------------------------------------------------------------
+# Episode /reset and viz-only preview (arm dry-run wiring)
+# ----------------------------------------------------------------------
+
+
+def test_reset_url_derives_from_predict_url(make_node):
+    """The /reset URL is derived from the predict URL's base, with or without a trailing slash."""
+    node = make_node(inference_server_url='http://sheep:8000/predict_cartesian/')
+    assert node._reset_url == 'http://sheep:8000/reset'
+
+    node2 = make_node(inference_server_url='http://sheep:8000/predict_cartesian')
+    assert node2._reset_url == 'http://sheep:8000/reset'
+
+
+def test_reset_episode_posts_start_pose_once(make_node):
+    """_reset_episode POSTs the given pose to the reset URL and latches _episode_reset_done."""
+    node = make_node(inference_server_url='http://sheep:8000/predict_cartesian/')
+    agent_pos = np.array([0.4, 0.0, 0.3, 0.0, 0.0, 0.0, 1.0, 0.0])
+
+    with patch.object(node, '_http_post_json', return_value={'status': 'ok'}) as post:
+        node._reset_episode(agent_pos)
+
+    assert node._episode_reset_done is True
+    post.assert_called_once()
+    url, body = post.call_args[0]
+    assert url == 'http://sheep:8000/reset'
+    assert body == {'agent_pos': agent_pos.tolist()}
+
+
+def test_reset_episode_not_latched_on_failure(make_node):
+    """A failed /reset leaves the flag unset so the next tick retries."""
+    node = make_node()
+    with patch.object(node, '_http_post_json', return_value=None):
+        node._reset_episode(np.zeros(8))
+    assert node._episode_reset_done is False
+
+
+def test_preview_published_full_chunk_without_execution(make_node):
+    """
+    The preview publishes the FULL commanded chunk even with execute_motion off and all-stale.
+
+    This is the eyeball for the arm dry-run: the whole policy output must reach Foxglove
+    regardless of execution or staleness, while nothing is published to the execution topic.
+    """
+    node = make_node(publish_preview=True)  # execute_motion defaults to False
+    assert node._target_pub is None  # nothing can drive the arm
+    assert node._preview_pub is not None
+
+    actions = [[float(i), 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0] for i in range(8)]
+    now = _t(100.0)
+    t_obs = _t(98.0)  # 2s old -> every action is stale, so the chunk is dropped for execution
+    with patch.object(node, '_http_post_json', return_value={'actions': actions}), \
+            patch.object(node, 'get_clock', return_value=_FakeClock(now)), \
+            patch.object(node._preview_pub, 'publish') as preview_pub:
+        node._post_and_act(payload={}, t_obs=t_obs)
+
+    preview_pub.assert_called_once()
+    msg = preview_pub.call_args[0][0]
+    assert len(msg.poses) == 8  # full chunk, not the post-stale-drop subset
+    assert msg.header.frame_id == node._base_frame
+
+
+def test_preview_disabled_creates_no_publisher(make_node):
+    """publish_preview=false suppresses the preview publisher entirely."""
+    node = make_node(publish_preview=False)
+    assert node._preview_pub is None

@@ -59,8 +59,10 @@ class PolicyClientNode(Node):
         self.declare_parameter('n_obs_steps', 2)
         self.declare_parameter('image_topic', '/gopro/image_raw')
         self.declare_parameter('control_hz', 10.0)
-        self.declare_parameter('image_width', 256)
-        self.declare_parameter('image_height', 256)
+        # 224 matches the model's shape_meta (camera0_rgb [3,224,224]); the DP exporter squashes
+        # frames to 224 too, so the client's resize reproduces training's aspect handling.
+        self.declare_parameter('image_width', 224)
+        self.declare_parameter('image_height', 224)
         # Frame IDs for the EEF pose lookup. Defaults match the FR3 TF tree; on a
         # different arm override base_frame / eef_frame instead of editing code.
         self.declare_parameter('base_frame', 'fr3_link0')
@@ -69,6 +71,15 @@ class PolicyClientNode(Node):
         # but does NOT publish target poses unless execute_motion is explicitly enabled.
         # Planning params (group, velocity scaling) live on the NUC bridge, not here.
         self.declare_parameter('execute_motion', False)
+        # Viz-only preview: publish every commanded chunk as a PoseArray on
+        # /polyumi/target_poses_preview regardless of execute_motion, so the motion can be seen in
+        # Foxglove/RViz without the arm moving (the NUC bridge subscribes only to the execution
+        # topic /polyumi/target_poses, never this one). On by default — it moves nothing.
+        self.declare_parameter('publish_preview', True)
+        # HTTP timeout (s) for the inference POST. Real diffusion inference over LAN is slower
+        # than the trivial dummy server; 0.5 s was fine for the dummy but risks timing out every
+        # tick against the real model. An overrun just skips the tick (see the tick lock).
+        self.declare_parameter('post_timeout_s', 1.0)
         # Action-chunk size requested from the server and published for execution as one
         # multi-waypoint Cartesian path. UMI/DP-style receding-horizon control: 1 would mean
         # a discrete hop every control tick, which the arm can't track in real time — the
@@ -96,6 +107,8 @@ class PolicyClientNode(Node):
         self._base_frame = self.get_parameter('base_frame').get_parameter_value().string_value
         self._eef_frame = self.get_parameter('eef_frame').get_parameter_value().string_value
         self._execute_motion = self.get_parameter('execute_motion').get_parameter_value().bool_value
+        self._publish_preview = self.get_parameter('publish_preview').get_parameter_value().bool_value
+        self._post_timeout_s = self.get_parameter('post_timeout_s').get_parameter_value().double_value
         self._n_action_steps = self.get_parameter('n_action_steps').get_parameter_value().integer_value
         control_hz = self.get_parameter('control_hz').get_parameter_value().double_value
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
@@ -150,6 +163,19 @@ class PolicyClientNode(Node):
         if self._execute_motion:
             self._target_pub = self.create_publisher(PoseArray, '/polyumi/target_poses', 10)
 
+        # Viz-only preview publisher (always on when publish_preview). Shows every commanded chunk
+        # in Foxglove/RViz without moving the arm: the NUC bridge subscribes only to the execution
+        # topic /polyumi/target_poses, never this one.
+        self._preview_pub = None
+        if self._publish_preview:
+            self._preview_pub = self.create_publisher(PoseArray, '/polyumi/target_poses_preview', 10)
+
+        # Episode-start /reset. The server needs the episode-start EEF pose for
+        # robot0_eef_rot_axis_angle_wrt_start; sent once on the first full-buffer tick. The reset
+        # URL is derived from the predict URL's base so one param configures both endpoints.
+        self._reset_url = self._url.split('/predict_cartesian')[0] + '/reset'
+        self._episode_reset_done = False
+
         # Subscribers
         self.create_subscription(Image, image_topic, self._image_cb, 10)
 
@@ -164,7 +190,10 @@ class PolicyClientNode(Node):
         self._last_warn_t: rclpy.time.Time | None = None
 
         mode = 'EXECUTE (arm will move)' if self._execute_motion else 'log-only (no motion)'
-        self.get_logger().info(f'policy_client_node started — server: {self._url} — mode: {mode}')
+        preview = 'on (/polyumi/target_poses_preview)' if self._publish_preview else 'off'
+        self.get_logger().info(
+            f'policy_client_node started — server: {self._url} — mode: {mode} — preview: {preview}'
+        )
         latency_str = ' '.join(f'{name}={seconds}s' for name, seconds in self._latency.items())
         self.get_logger().info(f'latency config — {latency_str} (ee_pose buffer: {self._ee_pose_buffer_s}s)')
         self.get_logger().info(
@@ -193,6 +222,8 @@ class PolicyClientNode(Node):
             errors.append(f'n_obs_steps must be >= 1, got {self._n_obs_steps}')
         if self._n_action_steps < 1:
             errors.append(f'n_action_steps must be >= 1, got {self._n_action_steps}')
+        if self._post_timeout_s <= 0:
+            errors.append(f'post_timeout_s must be > 0, got {self._post_timeout_s}')
         for name, seconds in self._latency.items():
             if seconds < 0:
                 errors.append(f'latency.{name} must be >= 0, got {seconds}')
@@ -274,6 +305,11 @@ class PolicyClientNode(Node):
             if len(self._obs_buffer) < self._n_obs_steps:
                 self._warn_throttled(f'Observation buffer filling ({len(self._obs_buffer)}/{self._n_obs_steps})')
                 return
+
+            # First full observation marks the episode start: tell the server the start pose once
+            # (used for robot0_eef_rot_axis_angle_wrt_start). Retried on failure until it lands.
+            if not self._episode_reset_done:
+                self._reset_episode(agent_pos)
 
             # --- 4. Serialize and POST ---
             # Images go as base64-encoded raw bytes (+ dtype/shape) rather than nested-list
@@ -363,6 +399,32 @@ class PolicyClientNode(Node):
         total_latency = elapsed_since_obs + self._latency_act
         return max(0, math.ceil(total_latency / self._action_dt))
 
+    def _http_post_json(self, url: str, payload: dict) -> dict | None:
+        """POST payload as JSON to url and return the parsed response, or None on failure (logged)."""
+        body = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            url, data=body, headers={'Content-Type': 'application/json'}, method='POST'
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self._post_timeout_s) as resp:
+                return json.loads(resp.read())
+        except urllib.error.URLError as e:
+            self.get_logger().error(f'POST {url} unreachable: {e}')
+        except Exception as e:
+            self.get_logger().error(f'POST {url} failed: {e}')
+        return None
+
+    def _reset_episode(self, agent_pos: np.ndarray) -> None:
+        """Send the episode-start pose to the server's /reset once; retried each tick until it lands."""
+        result = self._http_post_json(self._reset_url, {'agent_pos': agent_pos.tolist()})
+        if result is not None:
+            self._episode_reset_done = True
+            self.get_logger().info(f'episode /reset sent (start pose set): {self._reset_url}')
+        else:
+            self._warn_throttled(
+                'episode /reset failed; server will approximate wrt_start with the current pose'
+            )
+
     def _post_and_act(self, payload: dict, t_obs: rclpy.time.Time) -> None:
         """
         POST payload to the inference server, log the returned action, and optionally execute it.
@@ -370,25 +432,18 @@ class PolicyClientNode(Node):
         :param payload: request body for /predict_cartesian/.
         :param t_obs: instant the observation was captured, used to drop stale actions.
         """
-        body = json.dumps(payload).encode()
-        req = urllib.request.Request(
-            self._url,
-            data=body,
-            headers={'Content-Type': 'application/json'},
-            method='POST',
-        )
-        try:
-            t_sent = time.monotonic()
-            with urllib.request.urlopen(req, timeout=0.5) as resp:
-                result = json.loads(resp.read())
-            latency_inference = time.monotonic() - t_sent
-            actions = result['actions']
-        except urllib.error.URLError as e:
-            self.get_logger().error(f'Inference server unreachable: {e}')
+        t_sent = time.monotonic()
+        result = self._http_post_json(self._url, payload)
+        if result is None:
             return
-        except Exception as e:
-            self.get_logger().error(f'POST failed: {e}')
-            return
+        latency_inference = time.monotonic() - t_sent
+        actions = result['actions']
+
+        # Viz-only preview: publish the full commanded chunk (before the stale-drop below) so the
+        # motion is visible in Foxglove/RViz even when execute_motion is off or the whole chunk is
+        # stale. The NUC bridge never subscribes to this topic, so nothing moves.
+        if self._preview_pub is not None:
+            self._preview_pub.publish(self._actions_to_pose_array(actions))
 
         # Drop the leading actions that refer to instants already elapsed by the time the arm
         # can act on them, so execution starts from the first still-future waypoint.
