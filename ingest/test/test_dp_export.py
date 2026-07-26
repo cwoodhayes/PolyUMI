@@ -11,7 +11,7 @@ so a regression fails here rather than deep inside a training run.
 import pathlib
 import zipfile
 
-import imagecodecs.numcodecs
+import cv2
 import numpy as np
 import pytest
 import zarr
@@ -19,10 +19,19 @@ from scipy.spatial.transform import Rotation
 
 from polyumi_ingest.export.dp import export_scene_to_dp
 
-imagecodecs.numcodecs.register_codecs()
-
 RES = 224
 RATE = 59.94
+
+
+def _write_gopro_mp4(path: pathlib.Path, n: int, h: int = 240, w: int = 320) -> None:
+    """Write an n-frame gopro.mp4 sidecar (content arbitrary — frames are read by index)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*'mp4v'), 30.0, (w, h))
+    if not writer.isOpened():
+        pytest.skip('cv2.VideoWriter (mp4v) unavailable in this environment')
+    for i in range(n):
+        writer.write(np.full((h, w, 3), i % 256, dtype=np.uint8))
+    writer.release()
 
 EXPECTED_KEYS = {
     'camera0_rgb': ((RES, RES, 3), np.uint8),
@@ -47,6 +56,9 @@ def _build_scene(
     root.attrs['n_episodes'] = 1
     ep = root.create_group('episode_0')
     ep.attrs['session_type'] = session_type
+    # v3: GoPro frames live in the gopro.mp4 sidecar, resolved via the session_dir attr.
+    ep.attrs['session_dir'] = 'session_0'
+    _write_gopro_mp4(tmp_path / 'session_0' / 'gopro.mp4', n)
 
     gopro_ts = np.arange(n, dtype=np.float64) / RATE
     ep.create_group('timestamps').create_array('gopro', data=gopro_ts)
@@ -65,10 +77,6 @@ def _build_scene(
     widths = np.linspace(0.02, 0.08, n).astype(np.float32)
     ep.create_group('annotations').create_group('gripper_width').create_array('width_m', data=widths)
 
-    # Distinct per-frame fill so resize/index bugs are visible; larger than RES so resize runs.
-    frames = np.zeros((n, 240, 320, 3), dtype=np.uint8)
-    frames[:, :, :, 0] = np.arange(n, dtype=np.uint8)[:, None, None]
-    ep.create_group('gopro').create_array('frames', data=frames)
     return scene
 
 

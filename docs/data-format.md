@@ -12,7 +12,7 @@ Compared to downstream data formats like LeRobot Dataset or Diffusion Policy's z
 
 1. Allows efficient incremental writes from multiple pipeline steps (e.g. SLAM, gripper width extraction) without needing to rewrite the whole episode or scene on each step
 2. Preserves the original multi-rate timestamps from each stream, rather than resampling to a common time grid
-3. Stores full-fidelity decoded audio and video, rather than pre-encoding into a training codec (like WebM for video) or a heavily downsampled format
+3. Stores full-fidelity audio and preserves full-fidelity video via the source `gopro.mp4` (frames are decoded from it on demand rather than re-encoded into the store), rather than pre-encoding into a downsampled training codec
 
 `pzarr` is implemented as a zarr `DirectoryStore` with a specific schema. The schema is designed to be flexible and extensible, but the above principles should guide any additions or modifications.
 
@@ -21,7 +21,7 @@ Compared to downstream data formats like LeRobot Dataset or Diffusion Policy's z
 
 Use `zarr-python 3.x` with `zarr_format=2` explicitly. zarr-python 3 reads and writes v2 stores cleanly, but the v2 format gives us reliable JpegXl codec support (the v3 codec story for non-spec codecs has interop caveats) and matches the format that downstream tools like forge and CRB's `ReplayBuffer` already expect. If sharding becomes a real pain point as datasets grow, migrate to v3 later via `zarr.copy()`.
 
-The format version is tracked as `pzarr_version` (currently `2`) in the scene root `.zattrs`. Read this from the store in your code rather than hardcoding it, so schema migrations are operational rather than code changes. See `ingest/polyumi_ingest/pzarr/version.py` for the version history.
+The format version is tracked as `pzarr_version` (currently `3`) in the scene root `.zattrs`. Read this from the store in your code rather than hardcoding it, so schema migrations are operational rather than code changes. See `ingest/polyumi_ingest/pzarr/version.py` for the version history.
 
 ## Schema
 
@@ -34,8 +34,8 @@ scene.zarr/
 │   │   ├── frames                  (N_finger, H, W, 3) uint8 — RGB frames
 │   │   ├── finger_piezo            (N_audio,) float32 — piezo contact mic, normalized [-1, 1]
 │   │   └── finger_air              (N_audio,) float32 — air mic, normalized [-1, 1]
-│   ├── gopro/
-│   │   ├── frames                  (N_gopro, H, W, 3) uint8 — RGB frames
+│   ├── gopro/                      NOTE: no `frames` array — GoPro frames are decoded
+│   │   │                           on demand from the gopro.mp4 sidecar (see below)
 │   │   ├── audio                   (N_gopro_audio,) float32 — mono GoPro mic
 │   │   ├── accl                    (N_accl, 3) float64 — [z, x, y] m/s²
 │   │   ├── gyro                    (N_gyro, 3) float64 — [z, x, y] rad/s
@@ -92,7 +92,9 @@ scene.zarr/
 
 ## Codecs
 
-- **Video** (finger and GoPro frames): `imagecodecs.numcodecs.Jpegxl(effort=1)`. Per-frame chunking — one frame per chunk — so random-access frame loading at training time doesn't have to decode entire video segments. `effort=1` is perceptually lossless and encodes fast. Decode is slower than raw — mitigate with parallel data loaders.
+- **Video** (finger frames only): `imagecodecs.numcodecs.Jpegxl(effort=1)`. Per-frame chunking — one frame per chunk — so random-access frame loading at training time doesn't have to decode entire video segments. `effort=1` is perceptually lossless and encodes fast. Decode is slower than raw — mitigate with parallel data loaders.
+
+- **GoPro frames are NOT stored in the zarr.** They are decoded on demand straight from the `gopro.mp4` sidecar via `video_helpers.GoproMp4Frames`, which presents a zarr-`Array`-like surface (`len`/`shape`/integer & slice indexing, returning `(H,W,3)` uint8 RGB) on the `timestamps/gopro` grid. Storing a per-frame JpegXl re-encode of frames the mp4 already holds inflated the store ~70× (e.g. ~38 GB of `gopro/frames` vs. a ~0.5 GB `gopro.mp4`) with no fidelity gain — the mp4 is the true source, and JpegXl was a redundant second lossy pass. The reader is forward-sequential (all consumers iterate a contiguous ascending range); it is not thread-safe. `timestamps/gopro` (length = authoritative frame count) is still written at ingest.
 
 - **IMU, timestamps, scalar arrays**: `numcodecs.Blosc(cname='zstd', clevel=5, shuffle=Blosc.SHUFFLE)`. Blosc works well for smoothly-varying signals like IMU readings, claiming 4–8× compression and decodes faster than the data loader can consume.
 
@@ -117,9 +119,9 @@ Steps are tracked in `preprocessing_steps` (list of completed step numbers) in t
 | Step | Name | Reads | Writes |
 |------|------|-------|--------|
 | 1 | `chirp-time-sync` | finger_air, gopro/audio, timestamps | `annotations/time_sync/` |
-| 2 | `orb-slam3` | gopro/frames, gopro/accl, gopro/gyro, timestamps | `gopro/slam_poses`, `annotations/slam/`, `.osa` atlas sidecar |
+| 2 | `orb-slam3` | gopro.mp4 (sidecar), gopro/accl, gopro/gyro, timestamps | `gopro/slam_poses`, `annotations/slam/`, `.osa` atlas sidecar |
 | 3 | `slam-optitrack-align` | gopro/slam_poses, optitrack/pose, timestamps | `optitrack_to_slam_transform` in root `.zattrs` |
-| 4 | `aruco-gripper-width` | finger/frames, timestamps/finger | `annotations/gripper_width/` |
+| 4 | `aruco-gripper-width` | gopro frames (from gopro.mp4), timestamps/gopro | `annotations/gripper_width/` |
 | 5 | `eef-pose` | optitrack/pose or gopro/slam_poses, timestamps, `gripper_calib.yaml` | `eef/pose` |
 
 ## SLAM is a swappable step
@@ -188,14 +190,30 @@ The scene `.zattrs` contains:
 
 These live alongside the zarr, not inside it:
 
-- **Raw `.mp4` originals** (`finger.mp4`, `gopro.mp4` per session directory): keep these. Decoded frames in zarr are post-decode and post-codec, so re-decoding from source is the only way to recover full fidelity. Also useful for debugging and for swapping in different SLAM tools that may want different decoding parameters.
+- **Raw `.mp4` originals** (`finger.mp4`, `gopro.mp4` per session directory): keep these. `gopro.mp4` is now **load-bearing** — GoPro frames are decoded from it on demand (there is no `gopro/frames` array), so every GoPro consumer (aruco step 4, DP export, mcap export) resolves it via `scene_files.resolve_gopro_mp4`. `finger.mp4` is still just a convenience encode (finger frames live in the zarr).
 - **SLAM atlas** (`{scene_name}.atlas.osa`): only when using ORB-SLAM3. Placed in the scene directory, not inside the zarr.
+
+### Archiving
+
+`pingest archive-scene` produces a **self-contained** `scene.zarr.zip` that bundles `scene.zarr` **plus** each `session_*/gopro.mp4` and the atlas sidecar, with paths relative to the scene directory (so an unzip reproduces `<scene>/scene.zarr` + `<scene>/session_*/gopro.mp4`, exactly what the frame reader resolves against). Because the GoPro video now lives only in the mp4, the mp4s must travel with the archive for it to remain replayable/exportable. `ZIP_STORED` (no re-compress): zarr chunks and the mp4 are already compressed.
+
+## camera0_rgb preprocessing contract
+
+The policy only compares like with like, so the frame the DP exporter bakes into `camera0_rgb` at training time and the frame the ROS inference node feeds the policy must go through the **same** pixel transform. That transform is a single contract:
+
+- input is an **RGB** `(H, W, 3)` uint8 frame;
+- output is `(224, 224, 3)` uint8, resized with **`cv2.INTER_AREA`** (the anti-aliased choice for downscaling), squashed to the target with **no crop**;
+- any `float32/255` normalization is applied downstream (the training loader / the inference node), not baked into the stored uint8.
+
+It is implemented once per side because the two live in separate Python environments (the ingest uv workspace vs. the ROS venv) and can't share an import: `ingest/polyumi_ingest/camera_preproc.py` (`resize_camera0_rgb`, used by `export/dp/buffer.py`) and `ros2_ws/src/polyumi_ros2/polyumi_ros2/camera_preproc.py` (used by `policy_client_node.py`). Both are pinned by unit tests. **Keep them byte-identical.**
+
+> **Known residual skew (not a bug):** training frames are resized from the **4K** `gopro.mp4`, while the inference feed is the **1080p** Elgato/v4l2 capture of the GoPro HDMI output. Even with identical interpolation the two 224² results differ slightly because the source resolutions differ. Closing this fully (e.g. downscaling training frames to 1080p first, or matching capture resolution) is out of scope; it is recorded here so it is not mistaken for a defect. Audio is **not** part of the policy observation, so it has no export-alignment requirement.
 
 ## Export targets
 
 `pzarr` is the source of truth; downstream formats are exports produced on demand.
 
-- **UMI ReplayBuffer** (`pingest export-dp`): a `.zarr.zip` matching `universal_manipulation_interface`'s `ReplayBuffer` so `UmiDataset` reads it directly. `meta/episode_ends` plus `data/` keys `camera0_rgb` (T,224,224,3 uint8, JpegXl), `robot0_eef_pos` (T,3), `robot0_eef_rot_axis_angle` (T,3, rotvec), `robot0_gripper_width` (T,1), and `robot0_demo_start_pose`/`robot0_demo_end_pose` (T,6, the episode's first/last `[pos, rotvec]` broadcast). The key *names* are load-bearing — `UmiDataset` name-matches them. Poses are read from `eef/pose` (so step 5 must have run) and are on the hand frame; the `action` key is deliberately omitted (the sampler synthesises it from `[eef_pos, eef_rot_axis_angle, gripper_width]`). Frames are exported at the native GoPro rate (~59.94 Hz); the training config sets the observation rate via `obs_down_sample_steps`. Only `EPISODE`-typed sessions are exported; `MAPPING` sessions are skipped.
+- **UMI ReplayBuffer** (`pingest export-dp`): a `.zarr.zip` matching `universal_manipulation_interface`'s `ReplayBuffer` so `UmiDataset` reads it directly. `meta/episode_ends` plus `data/` keys `camera0_rgb` (T,224,224,3 uint8, Blosc-zstd; see the camera0_rgb preprocessing contract above), `robot0_eef_pos` (T,3), `robot0_eef_rot_axis_angle` (T,3, rotvec), `robot0_gripper_width` (T,1), and `robot0_demo_start_pose`/`robot0_demo_end_pose` (T,6, the episode's first/last `[pos, rotvec]` broadcast). The key *names* are load-bearing — `UmiDataset` name-matches them. Poses are read from `eef/pose` (so step 5 must have run) and are on the hand frame; the `action` key is deliberately omitted (the sampler synthesises it from `[eef_pos, eef_rot_axis_angle, gripper_width]`). Frames are exported at the native GoPro rate (~59.94 Hz); the training config sets the observation rate via `obs_down_sample_steps`. Only `EPISODE`-typed sessions are exported; `MAPPING` sessions are skipped.
 
 - **MCAP** (`pingest export-mcap`): one `.mcap` file per episode, with channels for finger image, GoPro image, both audio streams, IMU, GPS, SLAM pose, OptiTrack pose, ArUco annotations, and gripper width. Uses Foxglove JSON schemas; audio is chunked at 4096 samples per message.
 

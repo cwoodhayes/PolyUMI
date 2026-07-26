@@ -20,6 +20,7 @@ from polyumi_ingest.preproc.step_base import (
     PreprocessingStep,
     register_preprocessing_step,
 )
+from polyumi_ingest.pzarr.scene_files import resolve_gopro_mp4
 from polyumi_ingest.pzarr.store import arr, grp
 
 log = logging.getLogger(__name__)
@@ -43,40 +44,6 @@ _DEFAULT_SETTINGS_YAML = _DEFAULT_ORB_SLAM3_DIR / 'Examples' / 'Monocular-Inerti
 _TRAJ_TOLERANCE_FRAC = 0.5
 
 
-_GOPRO_MP4 = 'gopro.mp4'
-
-
-def _find_gopro_mp4(ep_grp: zarr.Group, scene_zarr: pathlib.Path) -> pathlib.Path:
-    """
-    Return the original gopro.mp4 path for an episode.
-
-    Checks the episode's ``session_dir`` attr first (written by build_pzarr for
-    new zarrs). Falls back to matching the episode index against session dirs in
-    the scene directory sorted by name (same order build_pzarr uses for older
-    zarrs that predate the attr). Raises FileNotFoundError if not found.
-    """
-    scene_dir = scene_zarr.parent
-    session_dir_name = ep_grp.attrs.get('session_dir', None)
-    if isinstance(session_dir_name, str) and session_dir_name:
-        candidate = scene_dir / session_dir_name / _GOPRO_MP4
-        if candidate.exists():
-            return candidate
-
-    # Fallback: derive from episode index by sorting session directories.
-    ep_key = ep_grp.name.lstrip('/')
-    try:
-        ep_index = int(ep_key.split('_')[1])
-    except (IndexError, ValueError):
-        raise FileNotFoundError(f'Could not determine session directory for episode {ep_key!r}')
-    session_dirs = sorted(d for d in scene_dir.iterdir() if d.is_dir() and d.name.startswith('session_'))
-    if ep_index < len(session_dirs):
-        candidate = session_dirs[ep_index] / _GOPRO_MP4
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(
-        f'gopro.mp4 not found for {ep_key!r} — expected at '
-        f'{session_dirs[ep_index] / _GOPRO_MP4 if ep_index < len(session_dirs) else "<no matching session dir>"}'
-    )
 
 
 def _export_telemetry_json(
@@ -444,7 +411,7 @@ class OrbSlam3Step(PreprocessingStep):
         log_dir: pathlib.Path,
         scene_zarr: pathlib.Path,
     ) -> None:
-        gopro_mp4 = _find_gopro_mp4(ep_grp, scene_zarr)
+        gopro_mp4 = resolve_gopro_mp4(ep_grp, scene_zarr)
         tmp_dir = pathlib.Path(tempfile.mkdtemp(prefix='polyumi_slam_map_'))
         try:
             video_path, json_path, frame_ts = _export_episode(ep_grp, tmp_dir, gopro_mp4)
@@ -494,7 +461,7 @@ class OrbSlam3Step(PreprocessingStep):
         log_dir: pathlib.Path,
         scene_zarr: pathlib.Path,
     ) -> None:
-        gopro_mp4 = _find_gopro_mp4(ep_grp, scene_zarr)
+        gopro_mp4 = resolve_gopro_mp4(ep_grp, scene_zarr)
         tmp_dir = pathlib.Path(tempfile.mkdtemp(prefix=f'polyumi_slam_ep{episode_index}_'))
         try:
             video_path, json_path, frame_ts = _export_episode(ep_grp, tmp_dir, gopro_mp4)

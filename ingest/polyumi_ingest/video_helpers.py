@@ -17,6 +17,122 @@ from polyumi_pi.files.session import SessionFiles
 log = logging.getLogger(__name__)
 
 
+class GoproMp4Frames:
+    """
+    Sequential-access, zarr-Array-like view over a gopro.mp4's decoded frames.
+
+    Presents the subset of the zarr ``Array`` surface the frame consumers use
+    (``__len__``, ``.shape``, ``.dtype``, integer and slice ``__getitem__``,
+    returning ``(H,W,3)`` / ``(k,H,W,3)`` uint8 **RGB**), decoding on demand from
+    the mp4 rather than a stored ``gopro/frames`` array. This lets the pipeline
+    drop the ~70x-larger JpegXl re-encode of frames the mp4 already holds.
+
+    ``len`` is pinned to the authoritative ``timestamps/gopro`` grid length so an
+    index maps 1:1 onto the former zarr frame index. Access is intended to be
+    forward/sequential — every consumer iterates a contiguous ascending range —
+    so decode is a single forward pass, skipping to a target with ``cap.grab()``.
+    A backward request transparently reopens from the start (rare).
+
+    NOT thread-safe: a single OpenCV ``VideoCapture`` backs it, so never index it
+    from multiple threads. Call ``close()`` (or let it be garbage-collected) to
+    release the capture.
+    """
+
+    def __init__(self, path: pathlib.Path, n_frames: int) -> None:
+        """Bind the reader to a gopro.mp4 at ``path`` with a pinned ``n_frames`` length."""
+        self._path = pathlib.Path(path)
+        self._n = int(n_frames)
+        self._cap: cv2.VideoCapture | None = None
+        self._next = 0  # index the next cap.read() will return
+        self._h = 0
+        self._w = 0
+
+    def _ensure_open(self) -> cv2.VideoCapture:
+        if self._cap is None:
+            cap = cv2.VideoCapture(str(self._path))
+            if not cap.isOpened():
+                raise RuntimeError(f'Could not open GoPro video: {self._path}')
+            self._cap = cap
+            self._w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            self._h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            self._next = 0
+        return self._cap
+
+    @property
+    def shape(self) -> tuple[int, int, int, int]:
+        """Return (n_frames, H, W, 3), matching the former gopro/frames array."""
+        self._ensure_open()
+        return (self._n, self._h, self._w, 3)
+
+    @property
+    def dtype(self) -> np.dtype:
+        """Return the frame dtype (uint8), matching the former array."""
+        return np.dtype('uint8')
+
+    def __len__(self) -> int:
+        return self._n
+
+    def close(self) -> None:
+        """Release the underlying VideoCapture."""
+        if self._cap is not None:
+            self._cap.release()
+            self._cap = None
+
+    def __del__(self) -> None:  # noqa: D105
+        self.close()
+
+    def _read_index(self, i: int) -> np.ndarray:
+        if not (0 <= i < self._n):
+            raise IndexError(f'frame index {i} out of range [0, {self._n})')
+        cap = self._ensure_open()
+        if i < self._next:
+            # Backward seek: reopen from the start. Consumers go forward, so this is rare.
+            cap.release()
+            cap = cv2.VideoCapture(str(self._path))
+            if not cap.isOpened():
+                raise RuntimeError(f'Could not reopen GoPro video: {self._path}')
+            self._cap = cap
+            self._next = 0
+        while self._next < i:
+            if not cap.grab():
+                raise RuntimeError(f'{self._path}: unexpected EOF skipping to frame {i} (at {self._next})')
+            self._next += 1
+        ok, bgr = cap.read()
+        if not ok:
+            raise RuntimeError(f'{self._path}: failed to read frame {i}')
+        self._next += 1
+        return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+    def __getitem__(self, key: int | np.integer | slice) -> np.ndarray:
+        if isinstance(key, slice):
+            indices = range(*key.indices(self._n))
+            if not indices:
+                return np.empty((0, self._h, self._w, 3), dtype=np.uint8)
+            return np.stack([self._read_index(i) for i in indices], axis=0)
+        if isinstance(key, (int, np.integer)):
+            i = int(key)
+            if i < 0:
+                i += self._n
+            return self._read_index(i)
+        raise TypeError(f'GoproMp4Frames index must be int or slice, got {type(key)!r}')
+
+
+def open_gopro_frames(ep_grp: zarr.Group, scene_zarr: pathlib.Path) -> GoproMp4Frames:
+    """
+    Return a GoproMp4Frames reader for an episode, resolving its gopro.mp4 sidecar.
+
+    The reader length is pinned to the episode's ``timestamps/gopro`` grid, so it
+    is a drop-in for the former ``gopro/frames`` array on that same index grid.
+    """
+    # Imported lazily: scene_files pulls in the pzarr package, whose __init__ imports
+    # store, which imports this module — a top-level import here would be circular.
+    from polyumi_ingest.pzarr.scene_files import resolve_gopro_mp4
+
+    mp4 = resolve_gopro_mp4(ep_grp, scene_zarr)
+    n_frames = int(ep_grp['timestamps/gopro'].shape[0])  # type: ignore[union-attr]
+    return GoproMp4Frames(mp4, n_frames)
+
+
 def _video_frames(cap: cv2.VideoCapture) -> Iterator[np.ndarray]:
     while True:
         ok, bgr = cap.read()

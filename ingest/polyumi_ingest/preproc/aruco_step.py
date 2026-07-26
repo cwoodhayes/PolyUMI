@@ -22,6 +22,7 @@ from polyumi_ingest.preproc._umi_cv_util import (
 )
 from polyumi_ingest.preproc.step_base import PreprocessingStep, register_preprocessing_step
 from polyumi_ingest.pzarr.store import arr
+from polyumi_ingest.video_helpers import open_gopro_frames
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +71,7 @@ class ArucoGripperWidthStep(PreprocessingStep):
             self._process_episode(
                 ep=ep,
                 episode_key=episode_key,
+                scene_zarr=scene_zarr,
                 base_intr=base_intr,
                 aruco_dict=aruco_dict,
                 marker_size_map=marker_size_map,
@@ -85,6 +87,7 @@ class ArucoGripperWidthStep(PreprocessingStep):
         self,
         ep: zarr.Group,
         episode_key: str,
+        scene_zarr: pathlib.Path,
         base_intr: dict,
         aruco_dict: cv2.aruco.Dictionary,
         marker_size_map: dict[int, float],
@@ -95,11 +98,12 @@ class ArucoGripperWidthStep(PreprocessingStep):
         z_tolerance_m: float,
         force: bool,
     ) -> None:
-        if 'gopro/frames' not in ep:
-            log.warning(f'{episode_key}: no gopro/frames; skipping aruco width.')
+        if 'timestamps/gopro' not in ep:
+            log.warning(f'{episode_key}: no timestamps/gopro; skipping aruco width.')
             return
 
-        frames_arr = arr(ep, 'gopro/frames')
+        # GoPro frames are decoded on demand from the gopro.mp4 sidecar.
+        frames_arr = open_gopro_frames(ep, scene_zarr)
         timestamps = np.asarray(arr(ep, 'timestamps/gopro')[:], dtype=np.float64)
         n_frames, H, W, _ = frames_arr.shape
         if n_frames != len(timestamps):

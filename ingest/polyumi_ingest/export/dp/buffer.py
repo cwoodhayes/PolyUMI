@@ -40,8 +40,13 @@ Images use **Blosc**, not JpegXl, on purpose. The training container pins Python
 ``imagecodecs`` (2026.x) writes (``bitspersample``, ``squeeze``, ``usecontainer``, …), and no
 single ``imagecodecs`` release supports both interpreters. Blosc is in ``numcodecs`` core, so
 its config is byte-identical across both stacks; it is lossless, decodes faster than JpegXl,
-and only costs disk. (``imagecodecs`` is still needed here to *read* the source
-``gopro/frames``, which the pzarr stored as JpegXl.)
+and only costs disk.
+
+GoPro frames are decoded on demand from each episode's ``gopro.mp4`` sidecar (via
+``video_helpers.open_gopro_frames``) — the pzarr no longer stores a ``gopro/frames`` array.
+The resize onto the 224x224 ``camera0_rgb`` grid goes through the shared
+``camera_preproc.resize_camera0_rgb`` contract so it stays identical to what the inference
+node feeds the policy.
 
 The store is written ``zarr_format=2`` so the (v2-pinned) UMI zarr can read it, then packed
 into a ``.zarr.zip`` because ``UmiDataset`` opens its dataset through ``zarr.ZipStore``.
@@ -53,24 +58,21 @@ import logging
 import pathlib
 import tempfile
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
 
-import cv2
-import imagecodecs.numcodecs
 import numpy as np
 import zarr
 from numcodecs import Blosc
 from scipy.spatial.transform import Rotation
 
+from polyumi_ingest.camera_preproc import CAMERA0_RGB_RESOLUTION, resize_camera0_rgb
 from polyumi_ingest.pzarr.scene_files import SceneFiles
 from polyumi_ingest.pzarr.store import arr, grp
-
-imagecodecs.numcodecs.register_codecs()
+from polyumi_ingest.video_helpers import GoproMp4Frames, open_gopro_frames
 
 log = logging.getLogger('export.dp')
 
 #: Output image resolution, matching UMI's ``camera0_rgb`` shape ``[3, 224, 224]``.
-RESOLUTION = 224
+RESOLUTION = CAMERA0_RGB_RESOLUTION
 #: Single robot arm; UMI's multi-robot keying still applies with one ``robot0``.
 _ROBOT = 'robot0'
 _CAMERA = 'camera0_rgb'
@@ -116,15 +118,12 @@ def _longest_valid_span(valid: np.ndarray) -> tuple[int, int]:
     return best_start, best_start + best_len - 1
 
 
-def _decode_resized_frames(frames_arr: zarr.Array, gidx: np.ndarray) -> np.ndarray:
+def _decode_resized_frames(frames_arr: GoproMp4Frames, gidx: np.ndarray) -> np.ndarray:
     """Decode the selected GoPro frames and resize to (T,RES,RES,3) uint8 (channel-last)."""
-
-    def one(i: int) -> np.ndarray:
-        frame = np.asarray(frames_arr[int(i)])  # (H,W,3) uint8 RGB
-        return cv2.resize(frame, (RESOLUTION, RESOLUTION), interpolation=cv2.INTER_AREA)
-
-    with ThreadPoolExecutor() as executor:
-        frames = list(executor.map(one, gidx))
+    # gidx is a contiguous ascending range, so decode sequentially — the mp4 reader is a
+    # forward-only single VideoCapture (not thread-safe), and H.264 decode is inherently
+    # sequential anyway. resize_camera0_rgb is the shared export/inference transform.
+    frames = [resize_camera0_rgb(np.asarray(frames_arr[int(i)])) for i in gidx]
     return np.stack(frames, axis=0).astype(np.uint8)
 
 
@@ -154,14 +153,14 @@ def _append(data_grp: zarr.Group, arrays: dict[str, np.ndarray]) -> None:
             a[old:] = value
 
 
-def _export_episode(ep: zarr.Group, data_grp: zarr.Group, episode_key: str) -> int:
+def _export_episode(ep: zarr.Group, data_grp: zarr.Group, episode_key: str, scene_zarr: pathlib.Path) -> int:
     """Export one episode's longest valid span at native rate and append it. Returns step count T."""
     if 'eef/pose' not in ep:
         raise RuntimeError(f'{episode_key}: no eef/pose — run preprocessing step 5 (eef-pose) before exporting.')
     gopro_ts = np.asarray(arr(ep, 'timestamps/gopro')[:], dtype=np.float64)
     pose = np.asarray(arr(ep, 'eef/pose')[:], dtype=np.float64)  # (N,7) [xyz, quat] hand frame
     gripper = np.asarray(arr(ep, 'annotations/gripper_width/width_m')[:], dtype=np.float64)
-    frames = arr(ep, 'gopro/frames')
+    frames = open_gopro_frames(ep, scene_zarr)
 
     n = len(gopro_ts)
     if not (len(pose) == len(gripper) == frames.shape[0] == n):
@@ -261,7 +260,7 @@ def export_scene_to_dp(scene_path: pathlib.Path, output_path: pathlib.Path) -> i
             if ep.attrs.get('session_type') == 'MAPPING':
                 log.info(f'  {ep_key}: MAPPING session, skipping.')
                 continue
-            total += _export_episode(ep, data, ep_key)
+            total += _export_episode(ep, data, ep_key, zarr_path)
             episode_ends.append(total)
 
         if not episode_ends:

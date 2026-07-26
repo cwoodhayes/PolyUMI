@@ -45,6 +45,8 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException  # type: ignore[attr-defined]
 
+from polyumi_ros2.camera_preproc import CAMERA0_RGB_INTERPOLATION
+
 
 class PolicyClientNode(Node):
     """Buffer observations and call the remote inference server at a fixed rate."""
@@ -62,8 +64,10 @@ class PolicyClientNode(Node):
         self.declare_parameter('n_obs_steps', 2)
         self.declare_parameter('image_topic', '/gopro/image_raw')
         self.declare_parameter('control_hz', 10.0)
-        # 224 matches the model's shape_meta (camera0_rgb [3,224,224]); the DP exporter squashes
-        # frames to 224 too, so the client's resize reproduces training's aspect handling.
+        # 224 matches the model's shape_meta (camera0_rgb [3,224,224]). The resize below MUST
+        # match the DP exporter's camera0_rgb contract exactly (RGB, 224x224, INTER_AREA, no
+        # crop) — same pixels at train and inference. See ingest camera_preproc.resize_camera0_rgb
+        # and docs/data-format.md ("camera0_rgb preprocessing contract").
         self.declare_parameter('image_width', 224)
         self.declare_parameter('image_height', 224)
         # Max age (s) of the newest cached camera frame before a tick is dropped as a stalled
@@ -306,7 +310,10 @@ class PolicyClientNode(Node):
         img = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
         if msg.encoding == 'bgr8':
             img = img[:, :, ::-1].copy()  # BGR → RGB
-        resized = cv2.resize(img, (self._image_w, self._image_h), interpolation=cv2.INTER_LINEAR)
+        # INTER_AREA (from the shared camera0_rgb contract) to match the DP exporter's
+        # anti-aliased downscale; any mismatch here is train/inference skew. See
+        # camera_preproc.resize_camera0_rgb and docs/data-format.md.
+        resized = cv2.resize(img, (self._image_w, self._image_h), interpolation=CAMERA0_RGB_INTERPOLATION)
         float_img = resized.astype(np.float32) / 255.0
         with self._latest_image_lock:
             self._latest_image = float_img
