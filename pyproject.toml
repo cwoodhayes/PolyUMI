@@ -20,7 +20,7 @@ ignore = [
 # isolated on a standalone GPU/inference machine, so it keeps its own
 # inference_server/.venv with a minimal dep set (fastapi/uvicorn/numpy).
 [tool.uv.workspace]
-members = ["ingest"]
+members = ["ingest", "catalog"]
 
 [tool.uv.sources]
 polyumi_pi = { path = "pi", editable = true }

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "polyumi_catalog"
+version = "0.1.0"
+description = "Metadata catalog & dataset builder UI for PolyUMI"
+requires-python = ">=3.13"
+dependencies = [
+    "polyumi_pi",
+    "sqlmodel>=0.0.22",
+    "typer",
+    "rich",
+]
+
+[tool.uv.sources]
+polyumi_pi = { path = "../pi", editable = true }
+
+[project.scripts]
+polyumi-catalog = "polyumi_catalog.main:app"
