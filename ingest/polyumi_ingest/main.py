@@ -552,15 +552,20 @@ def archive_scene(
     ),
 ):
     """
-    Archive scene.zarr to a zip for at-rest storage or memory-mapped training.
+    Archive a scene to a self-contained zip for at-rest storage.
 
-    Note that this won't actually compress the data since the chunks are already compressed
-    (e.g. JpegXl for video frames, Blosc for sensor data), but it will package everything into a
-    single file and preserve the directory structure expected by a zarr DirectoryStore.
+    Bundles scene.zarr together with each session's gopro.mp4 sidecar (the GoPro
+    frames are decoded on demand from the mp4, not stored in the zarr) and the
+    ORB-SLAM3 atlas if present. Paths are stored relative to the scene directory,
+    so unzipping reproduces ``<scene>/scene.zarr`` + ``<scene>/session_*/gopro.mp4``
+    — exactly the layout the frame reader resolves against.
+
+    ZIP_STORED (no re-compress): zarr chunks are already Blosc-compressed and the
+    mp4 is already an inter-frame codec, so deflate would only cost CPU.
     """
     import zipfile
 
-    from polyumi_ingest.pzarr.scene_files import SceneFiles
+    from polyumi_ingest.pzarr.scene_files import GOPRO_MP4, SceneFiles
 
     scene_path = scene_path.resolve()
     zarr_path = SceneFiles.resolve_zarr_path(scene_path)
@@ -569,7 +574,8 @@ def archive_scene(
         log.error(f'No scene.zarr found at {scene_path}')
         raise typer.Exit(1)
 
-    zip_path = output.resolve() if output else zarr_path.parent / (zarr_path.name + '.zip')
+    scene_dir = zarr_path.parent
+    zip_path = output.resolve() if output else scene_dir / (zarr_path.name + '.zip')
 
     if zip_path.exists():
         if not force:
@@ -577,15 +583,21 @@ def archive_scene(
             raise typer.Exit(1)
         zip_path.unlink()
 
+    # scene.zarr contents + each session's gopro.mp4 + the atlas sidecar (if any).
     files = [f for f in zarr_path.rglob('*') if f.is_file()]
-    src_size = sum(f.stat().st_size for f in files)
-    log.info(f'Archiving {zarr_path} ({_human_size(src_size)}) → {zip_path}')
+    gopro_mp4s = sorted(scene_dir.glob(f'session_*/{GOPRO_MP4}'))
+    files.extend(gopro_mp4s)
+    atlas = SceneFiles(path=scene_dir).orb_slam3_atlas
+    if atlas.exists():
+        files.append(atlas)
 
-    # ZIP_STORED: chunks are already compressed (JpegXl/Blosc), so don't re-compress.
-    # Paths are stored relative to zarr_path so the zip root matches a zarr DirectoryStore.
+    src_size = sum(f.stat().st_size for f in files)
+    log.info(f'Archiving {scene_dir.name} ({_human_size(src_size)}, {len(gopro_mp4s)} gopro.mp4) → {zip_path}')
+
+    # Paths relative to the scene dir so the zip mirrors the on-disk scene layout.
     with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_STORED) as zf:
         for file_path in files:
-            zf.write(file_path, file_path.relative_to(zarr_path))
+            zf.write(file_path, file_path.relative_to(scene_dir))
 
     zip_size = zip_path.stat().st_size
     log.info(f'Done. Archive: {_human_size(zip_size)} (source: {_human_size(src_size)})')

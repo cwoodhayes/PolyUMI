@@ -13,8 +13,9 @@ from scipy.spatial.transform import RigidTransform, Rotation
 
 from polyumi_ingest.config import load_gripper_calib
 from polyumi_ingest.export.helpers import encode_frames_to_jpeg
-from polyumi_ingest.pzarr.scene_files import SceneFiles
+from polyumi_ingest.pzarr.scene_files import SceneFiles, resolve_gopro_mp4
 from polyumi_ingest.transforms import gripper_calib_transforms, transform_optitrack_pose
+from polyumi_ingest.video_helpers import GoproMp4Frames, open_gopro_frames
 
 log = logging.getLogger('export.mcap')
 
@@ -329,12 +330,17 @@ _ENCODE_BATCH = 64
 def _write_video(
     writer: Writer,
     channel_id: int,
-    frames_arr: zarr.Array,
+    frames_arr: zarr.Array | GoproMp4Frames,
     ts: np.ndarray,
     frame_id: str,
     quality: int,
 ) -> None:
-    """Write video frames as CompressedImage messages, re-encoding JpegXL → JPEG."""
+    """
+    Write video frames as CompressedImage messages, re-encoded to JPEG.
+
+    ``frames_arr`` is either an in-zarr frame array (finger) or a GoproMp4Frames
+    reader decoding on demand from gopro.mp4; both slice to (k,H,W,3) RGB uint8.
+    """
     n = len(ts)
     n_batches = (n + _ENCODE_BATCH - 1) // _ENCODE_BATCH
     log_every_batch = max(1, n_batches // 10)
@@ -656,12 +662,27 @@ def _write_gripper_width(
 def export_episode_to_mcap(
     ep_grp: zarr.Group,
     output_path: pathlib.Path,
+    scene_zarr: pathlib.Path | None = None,
     jpeg_quality: int = 85,
     audio_chunk_size: int = 4096,
     root_grp: zarr.Group | None = None,
 ) -> None:
-    """Write one pzarr episode group to an MCAP file at output_path."""
-    has_gopro = 'gopro/frames' in ep_grp
+    """
+    Write one pzarr episode group to an MCAP file at output_path.
+
+    GoPro video frames are decoded on demand from the episode's gopro.mp4
+    sidecar, resolved relative to ``scene_zarr``; the /gopro/image channel is
+    only written when that sidecar can be found.
+    """
+    # GoPro frames live in the gopro.mp4 sidecar, not the zarr. The video channel
+    # is available only if we can resolve that mp4 for this episode.
+    gopro_mp4 = None
+    if scene_zarr is not None and 'timestamps/gopro' in ep_grp:
+        try:
+            gopro_mp4 = resolve_gopro_mp4(ep_grp, scene_zarr)
+        except FileNotFoundError:
+            log.warning('  gopro.mp4 not found for this episode; skipping /gopro/image channel.')
+    has_gopro = gopro_mp4 is not None
     has_gopro_audio = 'gopro/audio' in ep_grp
     has_accel = 'gopro/accl' in ep_grp
     has_gyro = 'gopro/gyro' in ep_grp
@@ -807,10 +828,11 @@ def export_episode_to_mcap(
 
             if has_gopro:
                 log.info('  gopro frames...')
+                assert scene_zarr is not None  # has_gopro implies it resolved
                 _write_video(
                     writer,
                     ch['/gopro/image'],
-                    ep_grp['gopro/frames'],  # type: ignore[index]
+                    open_gopro_frames(ep_grp, scene_zarr),
                     _gopro_ts('gopro'),
                     frame_id='gopro',
                     quality=jpeg_quality,
@@ -920,7 +942,14 @@ def export_scene_to_mcap(
         ep_grp = zarr.open_group(str(zarr_path / ep_key), mode='r')
         out_path = out_dir / f'episode_{ep_idx}.mcap'
         log.info(f'Exporting episode {ep_idx} → {out_path}')
-        export_episode_to_mcap(ep_grp, out_path, jpeg_quality, audio_chunk_size, root_grp=root)
+        export_episode_to_mcap(
+            ep_grp,
+            out_path,
+            scene_zarr=zarr_path,
+            jpeg_quality=jpeg_quality,
+            audio_chunk_size=audio_chunk_size,
+            root_grp=root,
+        )
         size_mb = out_path.stat().st_size / 1e6
         log.info(f'  Done ({size_mb:.1f} MB)')
         written.append(out_path)

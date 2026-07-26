@@ -199,41 +199,51 @@ def _write_gopro_audio(
     log.info(f'  GoPro audio: {n_samples} samples, {n_ch}ch @ {sr} Hz ({n_samples / sr:.1f}s)')
 
 
+def _count_video_frames(cap: cv2.VideoCapture) -> int:
+    """
+    Return the exact decodable frame count via a grab-only pass.
+
+    ``CAP_PROP_FRAME_COUNT`` is a header estimate and can be off; grabbing every
+    frame (decode without color-convert/retrieve) is cheap and authoritative —
+    it's how the old full-decode path derived the truncated ``n_written``.
+    """
+    n = 0
+    while cap.grab():
+        n += 1
+    return n
+
+
 def _write_gopro_frames(ep_grp: zarr.Group, gopro_path: pathlib.Path) -> None:
-    """Decode gopro.mp4 and write frames, timestamps, and IMU into ep_grp."""
+    """
+    Write GoPro frame timestamps, IMU, and audio into ep_grp — but NOT frames.
+
+    GoPro frames are decoded on demand from the gopro.mp4 sidecar (see
+    video_helpers.GoproMp4Frames) rather than re-encoded into the zarr, which
+    avoids a ~70x-larger redundant JpegXl copy of footage the mp4 already holds.
+    Only the uniform ``timestamps/gopro`` grid is materialised here; its length
+    is the authoritative frame count for every downstream consumer.
+    """
     cap = cv2.VideoCapture(str(gopro_path))
     if not cap.isOpened():
         raise RuntimeError(f'Could not open GoPro video: {gopro_path}')
     try:
-        n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = float(cap.get(cv2.CAP_PROP_FPS))
-        if n_frames <= 0 or W <= 0 or H <= 0 or fps <= 0:
+        if W <= 0 or H <= 0 or fps <= 0:
             raise RuntimeError(f'Could not read video properties from {gopro_path}')
 
         recording_start_s = _recording_start_time(gopro_path).timestamp()
 
-        gopro_grp = ep_grp.require_group('gopro')
-        frames_arr = gopro_grp.zeros(
-            name='frames',
-            shape=(n_frames, H, W, 3),
-            dtype='uint8',
-            chunks=(1, H, W, 3),
-            compressor=_JPEGXL,
-            zarr_format=2,
-        )
-
-        log.info(f'  Writing {n_frames} GoPro frames ({W}x{H}, {fps:.1f} fps)...')
-        n_written = write_frames_to_zarr(gopro_path, frames_arr)
-
-        if n_written < n_frames:
-            frames_arr.resize((n_written, H, W, 3))
-            n_frames = n_written
+        log.info(f'  Counting GoPro frames ({W}x{H}, {fps:.1f} fps)...')
+        n_frames = _count_video_frames(cap)
+        if n_frames <= 0:
+            raise RuntimeError(f'No decodable frames in {gopro_path}')
 
         gopro_ts = recording_start_s + np.arange(n_frames, dtype=np.float64) / fps
         ts_grp = ep_grp.require_group('timestamps')
         ts_grp.create_array('gopro', data=gopro_ts, compressor=_BLOSC)
+        log.info(f'  {n_frames} GoPro frames (read on demand from {gopro_path.name})')
     finally:
         cap.release()
 

@@ -5,14 +5,53 @@ from __future__ import annotations
 import logging
 import pathlib
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from polyumi_pi.files.metadata import SessionType
 from polyumi_pi.files.session import SessionFiles
+
+if TYPE_CHECKING:
+    import zarr
 
 log = logging.getLogger(__name__)
 
 FINGER_MP4 = 'finger.mp4'
 GOPRO_MP4 = 'gopro.mp4'
+
+
+def resolve_gopro_mp4(ep_grp: zarr.Group, scene_zarr: pathlib.Path) -> pathlib.Path:
+    """
+    Return the original gopro.mp4 sidecar path for an episode group.
+
+    Checks the episode's ``session_dir`` attr first (written by build_pzarr).
+    Falls back to matching the episode index against the scene's ``session_*``
+    directories sorted by name (the same order build_pzarr uses), for older
+    zarrs that predate the attr. Raises FileNotFoundError if not found.
+
+    This is the single source of truth for locating an episode's GoPro footage;
+    the SLAM step and the on-demand frame reader both resolve through it.
+    """
+    scene_dir = scene_zarr.parent
+    session_dir_name = ep_grp.attrs.get('session_dir', None)
+    if isinstance(session_dir_name, str) and session_dir_name:
+        candidate = scene_dir / session_dir_name / GOPRO_MP4
+        if candidate.exists():
+            return candidate
+
+    ep_key = ep_grp.name.lstrip('/')
+    try:
+        ep_index = int(ep_key.split('_')[1])
+    except (IndexError, ValueError):
+        raise FileNotFoundError(f'Could not determine session directory for episode {ep_key!r}')
+    session_dirs = sorted(d for d in scene_dir.iterdir() if d.is_dir() and d.name.startswith('session_'))
+    if ep_index < len(session_dirs):
+        candidate = session_dirs[ep_index] / GOPRO_MP4
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        f'gopro.mp4 not found for {ep_key!r} — expected at '
+        f'{session_dirs[ep_index] / GOPRO_MP4 if ep_index < len(session_dirs) else "<no matching session dir>"}'
+    )
 
 
 @dataclass
