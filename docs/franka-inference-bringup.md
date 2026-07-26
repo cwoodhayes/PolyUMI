@@ -149,8 +149,8 @@ without remapping.
 - `observations` keys (matching `shape_meta`):
   - `image`: base64-encoded raw bytes plus `dtype`/`shape`, decoded server-side with
     `np.frombuffer(...).reshape(shape)`. Logically `[n_obs_steps, H, W, C]`, float32 in
-    **[0, 1]**, RGB, H=W=**256**. Not nested JSON lists: at 256×256×3×`n_obs_steps` that's
-    ~1.5 MB/frame of JSON and too slow to encode at 10 Hz.
+    **[0, 1]**, RGB, H=W=**224**. Not nested JSON lists: at 224×224×3×`n_obs_steps` that's
+    ~1 MB/frame of JSON and too slow to encode at 10 Hz.
   - `agent_pos`: `[n_obs_steps, 8]` — `[x, y, z, qx, qy, qz, qw, gripper_width]` in robot base
     frame (absolute). **`gripper_width` is currently always `0.0`** — see Status blocker 3.
 
@@ -269,7 +269,7 @@ print(json.dumps({
 **Subscribes:**
 | Topic | Type | Purpose |
 |---|---|---|
-| `/gopro/image_raw` | `sensor_msgs/Image` | wrist camera via HDMI capture card → `v4l2_camera_node` (1920×1080@60, resized to 256×256) |
+| `/gopro/image_raw` | `sensor_msgs/Image` | wrist camera via HDMI capture card → `v4l2_camera_node` (1920×1080@60, resized to 224×224) |
 | TF `eef_frame` → `base_frame` | via `tf2_ros.Buffer` | absolute EEF pose (xyz + quat) |
 | `/fr3_gripper/joint_states` | `sensor_msgs/JointState` | gripper width — **not implemented**, `agent_pos[7]` is hardcoded `0.0` |
 
@@ -283,7 +283,10 @@ print(json.dumps({
    cached transforms; `buffers.ee_pose_s` sizes its `cache_time` so the lookup stays in range.
 3. Assemble `agent_pos = [x, y, z, qx, qy, qz, qw, gripper_width]`.
 4. Append `(image, agent_pos)` to `deque(maxlen=n_obs_steps)`; if not yet full, skip (warn at 1 Hz).
-5. Resize to `(image_height, image_width)`, normalize to [0, 1] float32, base64 the raw bytes.
+5. Resize to `(image_height, image_width)` with `cv2.INTER_AREA`, normalize to [0, 1] float32,
+   base64 the raw bytes. The resize (RGB, 224×224, INTER_AREA, no crop) is the shared
+   **camera0_rgb preprocessing contract** — it must match the DP exporter exactly or the policy
+   sees skewed pixels. See `polyumi_ros2/camera_preproc.py` and data-format.md.
 6. POST to `/predict_cartesian/` with `n_obs_steps` and `n_action_steps` (8).
 7. On success: drop leading actions already elapsed by execution time (`_n_stale_actions`
    measures `now() - t_obs` and adds `latency.arm_exec`), then log / publish the remainder.
@@ -309,8 +312,8 @@ pose with a stale image against a model trained on same-instant pairs.
 | `n_action_steps` | `8` | Chunk size requested and published (≤ model's `n_action_steps`) |
 | `image_topic` | `/gopro/image_raw` | Camera source |
 | `control_hz` | `10.0` | Timer rate; also sets action spacing `action_dt` |
-| `image_width` | `256` | Resize width (matches `shape_meta image: [3, 256, 256]`) |
-| `image_height` | `256` | Resize height |
+| `image_width` | `224` | Resize width (matches `shape_meta image: [3, 224, 224]`); INTER_AREA per the camera0_rgb contract |
+| `image_height` | `224` | Resize height |
 | `base_frame` | `fr3_link0` | TF base frame for the EEF lookup |
 | `eef_frame` | `fr3_hand_tcp` | TF EEF/tool frame — **wrong frame**, see Status blocker 1 |
 | `execute_motion` | `false` | Off by default: the arm does not move until explicitly enabled |
