@@ -45,7 +45,8 @@ def _scene_dirs(recordings_dir: pathlib.Path) -> list[pathlib.Path]:
     return sorted(p for p in recordings_dir.iterdir() if p.is_dir() and p.name.startswith('scene_'))
 
 
-def _preprocessing_steps_done(root: zarr.Group) -> list[int]:
+def preprocessing_steps_done(root: zarr.Group) -> list[int]:
+    """Return the sorted list of preprocessing step numbers already recorded on ``root``."""
     raw = root.attrs.get('preprocessing_steps', [])
     if not isinstance(raw, list):
         return []
@@ -57,7 +58,7 @@ def _preprocessing_steps_done(root: zarr.Group) -> list[int]:
 
 
 def _mark_preprocessing_step(root: zarr.Group, step_number: int) -> None:
-    steps = _preprocessing_steps_done(root)
+    steps = preprocessing_steps_done(root)
     if step_number not in steps:
         steps.append(step_number)
         steps.sort()
@@ -112,7 +113,7 @@ def run_preprocessing(
         raise FileNotFoundError(f'No scene.zarr found at {scene_path}')
 
     root = zarr.open_group(str(scene_zarr), mode='a')
-    completed_steps = set(_preprocessing_steps_done(root))
+    completed_steps = set(preprocessing_steps_done(root))
     step_numbers = [step_number] if step_number is not None else sorted(PREPROCESSING_STEPS)
 
     current_path = scene_path
@@ -130,7 +131,7 @@ def run_preprocessing(
         scene_zarr = SceneFiles.resolve_zarr_path(current_path)
         root = zarr.open_group(str(scene_zarr), mode='a')
         _mark_preprocessing_step(root, number)
-        completed_steps = set(_preprocessing_steps_done(root))
+        completed_steps = set(preprocessing_steps_done(root))
         if step_number is None:
             copy = False
 

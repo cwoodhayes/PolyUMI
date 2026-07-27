@@ -3,6 +3,7 @@
 from polyumi_ingest.preproc.step_base import (
     PreprocessingStep,
     available_preprocessing_steps,
+    preprocessing_steps_done,
     register_preprocessing_step,
     run_preprocessing,
     run_preprocessing_on_recordings,
@@ -22,6 +23,7 @@ __all__ = [
     'SlamToWorldAlignStep',
     'TimeSyncStep',
     'available_preprocessing_steps',
+    'preprocessing_steps_done',
     'register_preprocessing_step',
     'run_preprocessing',
     'run_preprocessing_on_recordings',

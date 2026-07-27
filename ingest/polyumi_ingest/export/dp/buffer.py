@@ -66,7 +66,7 @@ from scipy.spatial.transform import Rotation
 
 from polyumi_ingest.camera_preproc import CAMERA0_RGB_RESOLUTION, resize_camera0_rgb
 from polyumi_ingest.manifests import SceneManifest
-from polyumi_ingest.preproc import available_preprocessing_steps
+from polyumi_ingest.preproc import available_preprocessing_steps, preprocessing_steps_done
 from polyumi_ingest.pzarr.scene_files import SceneFiles
 from polyumi_ingest.pzarr.store import arr, grp
 from polyumi_ingest.video_helpers import GoproMp4Frames, open_gopro_frames
@@ -194,12 +194,17 @@ def _export_episode(ep: zarr.Group, data_grp: zarr.Group, episode_key: str, scen
     if chirp_end_s is None:
         # enforce_preprocessing (checked in _append_scene_episodes) guarantees step 1 ran, but
         # not that this specific marker exists (e.g. an older pzarr predating it) — stay non-fatal.
-        log.warning(f'  {episode_key}: no gopro_chirp_end_s (step 1 not run); exporting without start trim.')
+        log.warning(
+            f'  {episode_key}: no gopro_chirp_end_s annotation (missing, or an older pzarr '
+            f'predating this marker); exporting without start trim.'
+        )
     else:
         first_after = int(np.searchsorted(gopro_ts, float(chirp_end_s), side='left'))
-        if first_after > i1:
+        # _measure_rate needs >=2 frames, so require at least 2 remaining after the trim
+        # (first_after <= i1 - 1); this also covers chirp end landing past the whole span.
+        if first_after >= i1:
             log.warning(
-                f'  {episode_key}: chirp end is after the whole valid span — '
+                f'  {episode_key}: chirp end leaves fewer than 2 valid frames — '
                 f'likely a bad chirp detection; not trimming.'
             )
         elif first_after > i0:
@@ -263,7 +268,7 @@ def _check_preprocessing_complete(root: zarr.Group, scene_label: str) -> None:
     preprocessed scene would silently export a partial/untrimmed dataset. Callers can bypass
     this with ``enforce_preprocessing=False``.
     """
-    done = {int(s) for s in root.attrs.get('preprocessing_steps', [])}
+    done = set(preprocessing_steps_done(root))
     required = {cls.step_number for cls in available_preprocessing_steps()}
     missing = sorted(required - done)
     if missing:
@@ -326,8 +331,10 @@ def export_scene_to_dp(scene_path: pathlib.Path, output_path: pathlib.Path, enfo
     optitrack-vs-slam source choice and put the trajectory on the hand frame.
 
     When ``enforce_preprocessing`` is True (default), the scene must have every registered
-    preprocessing step complete or export raises — this guarantees the chirp-end marker the
-    start trim relies on is present. Set it False to export a partially preprocessed scene.
+    preprocessing step complete or export raises. This does not by itself guarantee the
+    chirp-end marker is present — a scene preprocessed before that marker was added can still
+    be missing it, in which case the start trim is skipped non-fatally (see ``_export_episode``).
+    Set ``enforce_preprocessing`` False to export a partially preprocessed scene instead.
 
     Returns the number of episodes written. MAPPING sessions and episodes marked unusable
     in ``scene.json`` are skipped.

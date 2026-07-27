@@ -669,7 +669,9 @@ def export_dp(
         True,
         '--enforce-preprocessing/--no-enforce-preprocessing',
         help='Require every preprocessing step to be complete before exporting. '
-        'Disable to export a partially preprocessed scene (skips the post-chirp start trim).',
+        'Disable to export a partially preprocessed scene; export can still fail if outputs '
+        '(e.g. eef/pose) are missing, and the post-chirp start trim is applied independently '
+        'whenever the chirp-end marker is present, regardless of this flag.',
     ),
 ):
     """
@@ -706,7 +708,9 @@ def export_dataset(
         True,
         '--enforce-preprocessing/--no-enforce-preprocessing',
         help='Require every preprocessing step to be complete on each scene before exporting. '
-        'Disable to export partially preprocessed scenes (skips the post-chirp start trim).',
+        'Disable to export partially preprocessed scenes; export can still fail if outputs '
+        '(e.g. eef/pose) are missing, and the post-chirp start trim is applied independently '
+        'whenever the chirp-end marker is present, regardless of this flag.',
     ),
 ):
     """

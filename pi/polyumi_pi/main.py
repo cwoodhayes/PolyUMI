@@ -121,6 +121,12 @@ async def _record_session_async(
         # process can delay the sync chirp until then — the chirp doubles as an
         # audible "camera is ready, you can start the demonstration" cue.
         first_frame_event = multiprocessing.Event()
+        # Set below once GoPro recording has actually started (or immediately if there's no
+        # GoPro). ChirpTimeSyncStep detects the chirp in the GoPro's own recorded audio, so
+        # playing it before GoPro recording starts would mean it's never captured there,
+        # silently breaking time-sync for the episode — the audio process must wait for both
+        # this and first_frame_event before playing the chirp.
+        gopro_ready_event = multiprocessing.Event()
 
         log.info('Starting camera streamer...')
         video_parent_conn, video_child_conn = multiprocessing.Pipe(duplex=False)
@@ -135,7 +141,17 @@ async def _record_session_async(
         audio_parent_conn, audio_child_conn = multiprocessing.Pipe(duplex=False)
         audio_process = multiprocessing.Process(
             target=_run_audio_streamer,
-            args=(None, sample_rate, chunk_ms, channels, session, audio_child_conn, True, first_frame_event),
+            args=(
+                None,
+                sample_rate,
+                chunk_ms,
+                channels,
+                session,
+                audio_child_conn,
+                True,
+                first_frame_event,
+                gopro_ready_event,
+            ),
         )
         audio_process.start()
         audio_child_conn.close()
@@ -148,6 +164,7 @@ async def _record_session_async(
             log.info(f'GoPro clock synced to {sync_time.isoformat()}')
             log.info('Starting GoPro recording...')
             await gopro.start_recording()
+        gopro_ready_event.set()
 
         if hat is not None:
             hat.set_indicator(IndicatorState.RECORDING)
@@ -223,6 +240,7 @@ def _run_audio_streamer(
     stats_conn: Connection | None = None,
     play_sync_chirp: bool = False,
     first_frame_event: MpEvent | None = None,
+    gopro_ready_event: MpEvent | None = None,
 ):
     context = zmq.Context()
     streamer = AudioStreamer(
@@ -235,6 +253,7 @@ def _run_audio_streamer(
         stats_conn=stats_conn,
         play_sync_chirp=play_sync_chirp,
         first_frame_event=first_frame_event,
+        gopro_ready_event=gopro_ready_event,
     )
     try:
         streamer.start()
