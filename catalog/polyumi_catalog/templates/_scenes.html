@@ -1,0 +1,21 @@
+<div id="col-scenes-body" class="col-body"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% if not scenes %}
+  <p class="placeholder">No scenes.</p>
+  {% endif %}
+  {% for s in scenes %}
+  <div
+    class="item"
+    role="button"
+    tabindex="0"
+    hx-get="/select/scene/{{ s.scene_id }}"
+    hx-target="#col-episodes-body"
+    hx-swap="outerHTML"
+  >
+    <span class="item-name" title="{{ s.name }}">{{ s.name }}</span>
+    <span class="badges">
+      {% if s.archived %}<span class="badge archived">archived</span>{% endif %}
+      <span class="badge" title="episode / total sessions">{{ s.episode_count }}/{{ s.session_count }}</span>
+    </span>
+  </div>
+  {% endfor %}
+</div>

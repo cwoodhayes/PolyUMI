@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block content %}
+<header id="topbar">
+  <h1>PolyUMI Catalog</h1>
+  {% if can_rescan %}
+  <button
+    hx-post="/rescan"
+    hx-target="#col-tasks-body"
+    hx-swap="outerHTML"
+    hx-indicator="#rescan-spin"
+  >
+    Rescan
+  </button>
+  <span id="rescan-spin" class="htmx-indicator">scanning…</span>
+  {% endif %}
+</header>
+
+<main id="columns">
+  <section class="column" id="col-tasks">
+    <div class="col-head">Tasks</div>
+    {% include "_tasks.html" %}
+    <form class="new-task-form" method="post" action="/tasks">
+      <input type="text" name="name" placeholder="New task…" required />
+      <button type="submit">Add</button>
+    </form>
+  </section>
+
+  <section class="column" id="col-scenes">
+    <div class="col-head">Scenes</div>
+    <div id="col-scenes-body" class="col-body">
+      <p class="placeholder">Select a task.</p>
+    </div>
+  </section>
+
+  <section class="column" id="col-episodes">
+    <div class="col-head">Episodes</div>
+    <div id="col-episodes-body" class="col-body">
+      <p class="placeholder">Select a scene.</p>
+    </div>
+  </section>
+
+  <section class="column" id="col-datasets">
+    <div class="col-head">Datasets</div>
+    <div id="col-datasets-body" class="col-body">
+      <p class="placeholder">Select a task.</p>
+    </div>
+  </section>
+</main>
+
+<section id="detail">
+  <div class="col-head">Detail</div>
+  <div id="detail-body">
+    <p class="placeholder">Select a row to inspect it.</p>
+  </div>
+</section>
+{% endblock %}

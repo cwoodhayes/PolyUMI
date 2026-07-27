@@ -143,6 +143,20 @@ pingest export-dp <scene_directory> --output <output.zarr.zip>
 The at-rest data format used during the preprocessing stage managed by `pingest` is a
 zarr-based format stored in `scene.zarr` in each scene directory, referred to in these docs as `pzarr`. See [docs/data-format.md](docs/data-format.md) for details on the format & the rationale behind it. The GoPro camera calibration shared by SLAM and the ArUco gripper-width step is documented in [docs/camera-calibration.md](docs/camera-calibration.md).
 
+## Data Management
+
+Main article: [catalog/README.md](/catalog/README.md)
+
+Collecting demonstration data, running preprocessing pipelines, and training models results in a bunch of files that can quickly
+become confusing & disorganized on disk. 
+In the era of Claude, bringing up simple web app UI's to manage this sort of data management problem is simple; hence
+the existence of the `polyumi-catalog` web tool.
+
+It provides a GUI for managing episodes, scenes, tasks, and datasets, creating associations to keep your data organized, and providing
+a convenient UI to access the ingestion scripts & foxglove viewer described above.
+
+Run the server with: `uv run polyumi-catalog serve --recordings <path-to-your-recordings-dir>` to explore the UI.
+
 ## Training
 
 Once a scene is preprocessed and exported (`pingest export-dp`, above), train the visuomotor

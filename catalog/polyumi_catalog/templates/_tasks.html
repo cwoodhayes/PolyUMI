@@ -1,0 +1,15 @@
+<div id="col-tasks-body" class="col-body"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% for t in tasks %}
+  <div
+    class="item{% if t.pseudo %} pseudo{% endif %}"
+    role="button"
+    tabindex="0"
+    hx-get="/select/task/{{ t.key }}"
+    hx-target="#col-scenes-body"
+    hx-swap="outerHTML"
+  >
+    <span class="item-name">{{ t.name }}</span>
+    <span class="badge">{{ t.scene_count }}</span>
+  </div>
+  {% endfor %}
+</div>
