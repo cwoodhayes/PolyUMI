@@ -67,6 +67,24 @@
     </dd>
     <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
   </dl>
+  <div class="mcap-actions">
+    {% if detail.pzarr_exists %}
+    <button
+      hx-post="/sessions/{{ detail.session_id }}/export-mcap"
+      hx-target="#detail-body"
+      hx-swap="outerHTML"
+      hx-indicator="#mcap-export-spin"
+    >
+      {{ 'Re-export MCAP' if detail.mcap_exists else 'Export to MCAP' }}
+    </button>
+    <span id="mcap-export-spin" class="htmx-indicator">exporting…</span>
+    {% else %}
+    <p class="muted">Build pzarr first (<code>pingest pp</code>) to enable MCAP export.</p>
+    {% endif %}
+    {% if detail.mcap_exists %}
+    <button hx-post="/sessions/{{ detail.session_id }}/open-foxglove" hx-swap="none">Open in Foxglove</button>
+    {% endif %}
+  </div>
 
   {% elif detail.kind == 'dataset' %}
   <h2>{{ detail.name }}</h2>

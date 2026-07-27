@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pathlib
 
+import zarr
 from fastapi.testclient import TestClient
 from polyumi_catalog.app import create_app
 from polyumi_catalog.db import get_engine
@@ -193,3 +194,74 @@ def test_post_rename_task_cascades_and_redirects(tmp_path: pathlib.Path):
 
     manifest = SceneManifest.from_scene_dir(rec / 'scene_2026-07-26_10-00-00_abcd')
     assert manifest.task == 'fold_towel_v2'
+
+
+def _session_id(rec: pathlib.Path) -> str:
+    from polyumi_pi.files.metadata import SessionMetadata as SM
+
+    md = rec / 'scene_2026-07-26_10-00-00_abcd' / 'session_1' / 'metadata.json'
+    return SM.from_file(md).session_id
+
+
+def test_select_scene_shows_pzarr_hint_when_absent(tmp_path: pathlib.Path):
+    """Without a scene.zarr, the session detail explains what's needed instead of showing buttons."""
+    rec, engine = _seed(tmp_path)
+    resp = TestClient(create_app(engine, recordings_dir=rec)).get(f'/select/session/{_session_id(rec)}')
+    assert 'Build pzarr first' in resp.text
+    assert 'Export to MCAP' not in resp.text
+
+
+def test_export_mcap_unknown_session_returns_404(tmp_path: pathlib.Path):
+    """Exporting a nonexistent session id is a clean 404, not a crash."""
+    rec, engine = _seed(tmp_path)
+    resp = TestClient(create_app(engine, recordings_dir=rec)).post('/sessions/does-not-exist/export-mcap')
+    assert resp.status_code == 404
+
+
+def test_export_mcap_without_pzarr_returns_400(tmp_path: pathlib.Path):
+    """Exporting before pzarr exists is rejected with a clear message, not a 500."""
+    rec, engine = _seed(tmp_path)
+    resp = TestClient(create_app(engine, recordings_dir=rec)).post(f'/sessions/{_session_id(rec)}/export-mcap')
+    assert resp.status_code == 400
+    assert 'pzarr' in resp.text.lower()
+
+
+def test_export_mcap_success_then_open_foxglove(tmp_path: pathlib.Path, monkeypatch):
+    """A successful export flips the detail panel to offer 'Open in Foxglove'; that route launches it."""
+    rec, engine = _seed(tmp_path)
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 1
+    ep = root.require_group('episode_0')
+    ep.attrs['session_dir'] = 'session_1'
+
+    def fake_export_scene_to_mcap(scene_path, episode=None, **kwargs):
+        out = scene_path / f'episode_{episode}.mcap'
+        out.write_bytes(b'fake')
+        return [out]
+
+    monkeypatch.setattr('polyumi_ingest.export.mcap.export_scene_to_mcap', fake_export_scene_to_mcap)
+
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    session_id = _session_id(rec)
+
+    export_resp = client.post(f'/sessions/{session_id}/export-mcap')
+    assert export_resp.status_code == 200
+    assert 'Re-export MCAP' in export_resp.text
+    assert 'Open in Foxglove' in export_resp.text
+    assert (scene_dir / 'episode_0.mcap').is_file()
+
+    launches = []
+    monkeypatch.setattr('shutil.which', lambda name: '/usr/bin/foxglove-studio')
+    monkeypatch.setattr('subprocess.Popen', lambda args, **kwargs: launches.append(args))
+
+    open_resp = client.post(f'/sessions/{session_id}/open-foxglove')
+    assert open_resp.status_code == 204
+    assert launches == [['/usr/bin/foxglove-studio', str(scene_dir / 'episode_0.mcap')]]
+
+
+def test_open_foxglove_without_mcap_returns_400(tmp_path: pathlib.Path):
+    """Opening Foxglove before any MCAP has been exported is rejected, not silently a no-op."""
+    rec, engine = _seed(tmp_path)
+    resp = TestClient(create_app(engine, recordings_dir=rec)).post(f'/sessions/{_session_id(rec)}/open-foxglove')
+    assert resp.status_code == 400

@@ -12,3 +12,10 @@ document.body.addEventListener('click', (evt) => {
 // When a column is swapped (new scenes/episodes/datasets loaded), clear stale
 // downstream state visually isn't needed since those columns are re-rendered
 // from scratch by the server on each request.
+
+// Mutation endpoints (e.g. MCAP export/Foxglove launch) return plain-text error
+// bodies on failure; htmx won't swap non-2xx responses in by default, so surface
+// them the simplest way available.
+document.body.addEventListener('htmx:responseError', (evt) => {
+  alert(evt.detail.xhr.responseText || 'Request failed.');
+});

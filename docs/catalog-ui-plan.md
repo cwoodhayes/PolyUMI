@@ -254,6 +254,29 @@ Each phase is independently useful and testable.
 - **Phase 2 — Associations.** Create/rename tasks; assign scene→task writing
   `scene.json` (authoritative) + DB; surface metadata/scene task conflicts.
   Deliverable: retag a scene, drop the DB, re-sync, tag survives.
+- **Phase 2.5 — Per-episode MCAP convenience.** In the Episodes column / session
+  detail panel: an **Export to MCAP** action, and, once a `.mcap` exists, an **Open
+  in Foxglove** action. Both reuse existing machinery rather than building anything
+  new:
+  - `ingest/polyumi_ingest/export/mcap.py::export_scene_to_mcap` already exports one
+    pzarr episode to `<scene_dir>/episode_{i}.mcap` (exposed today as
+    `pingest export-mcap`); `catalog` calls it directly (same import-not-reimplement
+    pattern as the Phase 3 dataset export, §5/§10.2). It requires pzarr
+    (`scene.zarr`) to already exist for that scene — the UI must say so (and not
+    offer the button) if it doesn't.
+  - A session's pzarr **episode index** isn't `session_id` — resolve it by matching
+    the session's directory name against each `episode_i` group's
+    `attrs['session_dir']` in the scene's `scene.zarr`.
+  - "Open in Foxglove" shells out to the locally installed `foxglove-studio <path>`
+    (confirmed installed at `/opt/Foxglove/foxglove-studio`; its own `.desktop` entry
+    opens files the same way via `Exec=... %U`). This is a step beyond "browser +
+    HTML" but is in-scope because the app is explicitly single-user/localhost with
+    direct host access (§2 non-goals) — there is no networked/multi-user case where
+    shelling out to a local GUI app would be wrong. A saved layout already exists at
+    `ingest/foxglove/review_mcap.json`; whether to auto-apply it or leave loading it
+    manual (as today) is a decision for the phase, not fixed by this plan.
+  Deliverable: from the Episodes column, export an episode's MCAP and open it in
+  Foxglove with one click each.
 - **Phase 3 — Dataset builder + export.** Multi-scene export core in `ingest`;
   dataset manifest; the Datasets column + export action. Deliverable: build a dataset
   from ≥2 scenes, export a valid `.zarr.zip` + manifest, load it in the trainer.

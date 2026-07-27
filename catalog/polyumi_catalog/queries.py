@@ -14,6 +14,7 @@ from sqlalchemy import func
 from sqlmodel import Session as DBSession
 from sqlmodel import select
 
+from polyumi_catalog import mcap_tools
 from polyumi_catalog.models import Dataset, Scene, Session, Task
 
 # Sentinel task filters used by the UI's pseudo-rows in the Tasks column.
@@ -218,10 +219,14 @@ def session_detail(db: DBSession, session_id: str) -> dict:
     s = db.get(Session, session_id)
     if s is None:
         return {'kind': 'empty'}
+    scene = db.get(Scene, s.scene_id)
+    session_dirname = _basename(s.dir)
+    pzarr_ok = mcap_tools.pzarr_exists(pathlib.Path(scene.dir)) if scene else False
+    mcap_path = mcap_tools.mcap_path_for_session(pathlib.Path(scene.dir), session_dirname) if pzarr_ok else None
     return {
         'kind': 'session',
         'session_id': s.session_id,
-        'name': _basename(s.dir) or s.session_id,
+        'name': session_dirname or s.session_id,
         'dir': s.dir,
         'scene_id': s.scene_id,
         'session_type': s.session_type,
@@ -231,6 +236,8 @@ def session_detail(db: DBSession, session_id: str) -> dict:
         'n_video_frames': s.n_video_frames,
         'video_dropped_frames': s.video_dropped_frames,
         'created_at': s.created_at,
+        'pzarr_exists': pzarr_ok,
+        'mcap_exists': mcap_path is not None,
     }
 
 

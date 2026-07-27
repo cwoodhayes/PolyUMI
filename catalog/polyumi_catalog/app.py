@@ -7,21 +7,26 @@ swaps the column to its right and out-of-band-updates the detail panel (Phase 1,
 read-only). Phase 2 adds task create/rename and scene→task assignment: these are
 plain HTML form posts (no HTMX) that write the authoritative scene.json + DB row,
 then redirect back to ``/`` for a full reload — simple and correct over
-choreographing OOB swaps across every affected column.
+choreographing OOB swaps across every affected column. Phase 2.5 adds per-session
+MCAP export + Foxglove launch; unlike Phase 2 these stay within the detail panel
+(no other column is affected), so they're plain HTMX POSTs that re-swap
+``#detail-body`` in place rather than reloading the whole page.
 """
 
 from __future__ import annotations
 
 import pathlib
 
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, Form, Request, Response
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import Engine
 from sqlmodel import Session as DBSession
 
-from polyumi_catalog import queries
+from polyumi_catalog import mcap_tools, queries
+from polyumi_catalog.models import Scene
+from polyumi_catalog.models import Session as SessionRow
 from polyumi_catalog.mutations import MutationError, assign_scene_task, create_task, rename_task
 from polyumi_catalog.sync import sync_recordings
 
@@ -121,5 +126,39 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
             except MutationError as err:
                 return PlainTextResponse(str(err), status_code=400)
         return RedirectResponse('/', status_code=303)
+
+    @app.post('/sessions/{session_id}/export-mcap', response_class=HTMLResponse)
+    def post_export_mcap(request: Request, session_id: str) -> HTMLResponse:
+        with DBSession(engine) as db:
+            session = db.get(SessionRow, session_id)
+            if session is None:
+                return PlainTextResponse('No such session.', status_code=404)
+            scene = db.get(Scene, session.scene_id)
+            if scene is None:
+                return PlainTextResponse('No such scene.', status_code=404)
+            try:
+                mcap_tools.export_session_to_mcap(pathlib.Path(scene.dir), pathlib.Path(session.dir).name)
+            except mcap_tools.McapError as err:
+                return PlainTextResponse(str(err), status_code=400)
+            detail = queries.session_detail(db, session_id)
+        return render(request, '_detail.html', detail=detail, oob=False)
+
+    @app.post('/sessions/{session_id}/open-foxglove')
+    def post_open_foxglove(session_id: str):
+        with DBSession(engine) as db:
+            session = db.get(SessionRow, session_id)
+            if session is None:
+                return PlainTextResponse('No such session.', status_code=404)
+            scene = db.get(Scene, session.scene_id)
+            if scene is None:
+                return PlainTextResponse('No such scene.', status_code=404)
+            mcap_path = mcap_tools.mcap_path_for_session(pathlib.Path(scene.dir), pathlib.Path(session.dir).name)
+            if mcap_path is None:
+                return PlainTextResponse('No MCAP exported yet for this session.', status_code=400)
+            try:
+                mcap_tools.open_in_foxglove(mcap_path)
+            except mcap_tools.McapError as err:
+                return PlainTextResponse(str(err), status_code=400)
+        return Response(status_code=204)
 
     return app

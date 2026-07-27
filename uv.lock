@@ -1146,24 +1146,28 @@ source = { editable = "catalog" }
 dependencies = [
     { name = "fastapi" },
     { name = "jinja2" },
+    { name = "polyumi-ingest" },
     { name = "polyumi-pi" },
     { name = "python-multipart" },
     { name = "rich" },
     { name = "sqlmodel" },
     { name = "typer" },
     { name = "uvicorn" },
+    { name = "zarr" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "jinja2", specifier = ">=3.1" },
+    { name = "polyumi-ingest", editable = "ingest" },
     { name = "polyumi-pi", editable = "pi" },
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "rich" },
     { name = "sqlmodel", specifier = ">=0.0.22" },
     { name = "typer" },
     { name = "uvicorn", specifier = ">=0.30" },
+    { name = "zarr", specifier = ">=3.0" },
 ]
 
 [[package]]
