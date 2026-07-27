@@ -102,6 +102,38 @@ def test_select_session_returns_detail(tmp_path: pathlib.Path):
     assert 'EPISODE' in resp.text
 
 
+def test_select_session_shows_gopro_fps(tmp_path: pathlib.Path, monkeypatch):
+    """
+    The session detail panel shows the GoPro's native fps, read from its mp4 sidecar.
+
+    The actual mp4 decoding is exercised in test_thumbnails.py; this only checks the
+    query's glue (session -> its own directory -> thumbnails.gopro_fps -> template).
+    """
+    monkeypatch.setattr('polyumi_catalog.thumbnails.gopro_fps', lambda session_dir: 59.94)
+
+    client = _client(tmp_path)
+    from polyumi_pi.files.metadata import SessionMetadata as SM
+
+    rec = tmp_path / 'recordings' / 'scene_2026-07-26_10-00-00_abcd' / 'session_1' / 'metadata.json'
+    session_id = SM.from_file(rec).session_id
+
+    resp = client.get(f'/select/session/{session_id}')
+    assert '<dt>GoPro fps</dt><dd>59.9</dd>' in resp.text
+
+
+def test_select_session_omits_gopro_fps_when_no_video(tmp_path: pathlib.Path):
+    """A session with no gopro.mp4 sidecar (the seeded fixture has none) shows '—', not a crash."""
+    from polyumi_pi.files.metadata import SessionMetadata as SM
+
+    client = _client(tmp_path)
+    rec = tmp_path / 'recordings' / 'scene_2026-07-26_10-00-00_abcd' / 'session_1' / 'metadata.json'
+    session_id = SM.from_file(rec).session_id
+
+    resp = client.get(f'/select/session/{session_id}')
+    assert resp.status_code == 200
+    assert '<dt>GoPro fps</dt><dd>—</dd>' in resp.text
+
+
 def test_unknown_scene_returns_empty_detail_not_error(tmp_path: pathlib.Path):
     """An unknown id renders the empty-state partial rather than a 404/500."""
     resp = _client(tmp_path).get('/select/scene/does-not-exist')

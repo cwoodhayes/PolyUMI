@@ -122,6 +122,7 @@
         <dt>Robot</dt><dd>{{ detail.robot or '—' }}</dd>
         <dt>Recorded task</dt><dd>{{ detail.task_meta or '—' }}</dd>
         <dt>Duration</dt><dd>{{ '%.1f s' % detail.duration_s if detail.duration_s is not none else '—' }}</dd>
+        <dt>GoPro fps</dt><dd>{{ '%.1f' % detail.gopro_fps if detail.gopro_fps is not none else '—' }}</dd>
         <dt>Video frames</dt><dd>
           {{ detail.n_video_frames if detail.n_video_frames is not none else '—' }}
           {% if detail.video_dropped_frames %}<span class="warn">({{ detail.video_dropped_frames }} dropped)</span>{% endif %}
