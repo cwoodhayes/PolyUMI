@@ -41,6 +41,17 @@
     <button type="submit">Assign</button>
   </form>
   <button hx-post="/dataset-draft/add/{{ detail.scene_id }}" hx-swap="none">Add to dataset</button>
+  {% if detail.quality.n_episodes_with_slam %}
+  <h3>Episode quality</h3>
+  <dl>
+    <dt>Avg. SLAM tracking</dt>
+    <dd>{{ '%.1f%%' % (detail.quality.avg_tracking_ratio * 100) if detail.quality.avg_tracking_ratio is not none else '—' }}</dd>
+    <dt>Low-tracking episodes</dt>
+    <dd>{{ detail.quality.n_low_quality }} / {{ detail.quality.n_episodes_with_slam }}</dd>
+    <dt>Dropped video frames</dt>
+    <dd>{{ detail.total_dropped_video_frames }}</dd>
+  </dl>
+  {% endif %}
   {% if detail.conflicts %}
   <div class="conflict-box">
     <strong>⚠ Task conflicts</strong>
@@ -54,37 +65,82 @@
   {% endif %}
 
   {% elif detail.kind == 'session' %}
-  <h2>{{ detail.name }}</h2>
-  <dl>
-    <dt>Type</dt><dd>{{ detail.session_type }}</dd>
-    <dt>Directory</dt><dd class="mono">{{ detail.dir }}</dd>
-    <dt>Scene</dt><dd>{{ detail.scene_id }}</dd>
-    <dt>Robot</dt><dd>{{ detail.robot or '—' }}</dd>
-    <dt>Recorded task</dt><dd>{{ detail.task_meta or '—' }}</dd>
-    <dt>Duration</dt><dd>{{ '%.1f s' % detail.duration_s if detail.duration_s is not none else '—' }}</dd>
-    <dt>Video frames</dt><dd>
-      {{ detail.n_video_frames if detail.n_video_frames is not none else '—' }}
-      {% if detail.video_dropped_frames %}<span class="warn">({{ detail.video_dropped_frames }} dropped)</span>{% endif %}
-    </dd>
-    <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
-  </dl>
-  <div class="mcap-actions">
-    {% if detail.pzarr_exists %}
-    <button
-      hx-post="/sessions/{{ detail.session_id }}/export-mcap"
-      hx-target="#detail-body"
-      hx-swap="outerHTML"
-      hx-indicator="#mcap-export-spin"
-    >
-      {{ 'Re-export MCAP' if detail.mcap_exists else 'Export to MCAP' }}
-    </button>
-    <span id="mcap-export-spin" class="htmx-indicator">exporting…</span>
-    {% else %}
-    <p class="muted">Build pzarr first (<code>pingest pp</code>) to enable MCAP export.</p>
-    {% endif %}
-    {% if detail.mcap_exists %}
-    <button hx-post="/sessions/{{ detail.session_id }}/open-foxglove" hx-swap="none">Open in Foxglove</button>
-    {% endif %}
+  <div class="session-detail-layout">
+    <div class="session-detail-text">
+      <h2>{{ detail.name }}</h2>
+      <dl>
+        <dt>Type</dt><dd>{{ detail.session_type }}</dd>
+        <dt>Directory</dt><dd class="mono">{{ detail.dir }}</dd>
+        <dt>Scene</dt><dd>{{ detail.scene_id }}</dd>
+        <dt>Robot</dt><dd>{{ detail.robot or '—' }}</dd>
+        <dt>Recorded task</dt><dd>{{ detail.task_meta or '—' }}</dd>
+        <dt>Duration</dt><dd>{{ '%.1f s' % detail.duration_s if detail.duration_s is not none else '—' }}</dd>
+        <dt>Video frames</dt><dd>
+          {{ detail.n_video_frames if detail.n_video_frames is not none else '—' }}
+          {% if detail.video_dropped_frames %}<span class="warn">({{ detail.video_dropped_frames }} dropped)</span>{% endif %}
+        </dd>
+        <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
+      </dl>
+      {% if detail.slam %}
+      <h3>SLAM tracking quality</h3>
+      <dl>
+        <dt>Tracking ratio</dt>
+        <dd>
+          {{ '%.1f%%' % (detail.slam.tracking_ratio * 100) if detail.slam.tracking_ratio is not none else '—' }}
+          {% if detail.slam.low_quality %}<span class="badge warn">low</span>{% endif %}
+        </dd>
+        <dt>Frames lost</dt><dd>{{ detail.slam.n_frames_lost }} / {{ detail.slam.n_frames_total }}</dd>
+        <dt>Relocalizations</dt><dd>{{ detail.slam.n_relocalization_events }}</dd>
+      </dl>
+      {% elif detail.pzarr_exists %}
+      <p class="muted">No SLAM results for this session yet (run <code>pingest pp 2</code>).</p>
+      {% endif %}
+      {% if detail.pzarr_streams %}
+      <h3>pzarr streams (episode {{ detail.pzarr_streams.episode_index }})</h3>
+      <table class="stream-table">
+        <thead>
+          <tr><th>Array</th><th>Shape</th><th>Rate</th><th>Timestamps</th></tr>
+        </thead>
+        <tbody>
+          {% for s in detail.pzarr_streams.streams %}
+          <tr>
+            <td>{{ s.label }}</td>
+            <td class="mono">{{ s.shape }}</td>
+            <td>{{ s.rate or '—' }}</td>
+            <td class="mono">{{ s.timestamps or '—' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% if detail.pzarr_streams.duration_s is not none %}
+      <p class="muted">
+        Episode span: {{ '%.3f' % detail.pzarr_streams.episode_start }} → {{ '%.3f' % detail.pzarr_streams.episode_end }} s
+        ({{ '%.2f' % detail.pzarr_streams.duration_s }} s)
+      </p>
+      {% endif %}
+      {% endif %}
+      <div class="mcap-actions">
+        {% if detail.pzarr_exists %}
+        <button
+          hx-post="/sessions/{{ detail.session_id }}/export-mcap"
+          hx-target="#detail-body"
+          hx-swap="outerHTML"
+          hx-indicator="#mcap-export-spin"
+        >
+          {{ 'Re-export MCAP' if detail.mcap_exists else 'Export to MCAP' }}
+        </button>
+        <span id="mcap-export-spin" class="htmx-indicator">exporting…</span>
+        {% else %}
+        <p class="muted">Build pzarr first (<code>pingest pp</code>) to enable MCAP export.</p>
+        {% endif %}
+        {% if detail.mcap_exists %}
+        <button hx-post="/sessions/{{ detail.session_id }}/open-foxglove" hx-swap="none">Open in Foxglove</button>
+        {% endif %}
+      </div>
+    </div>
+    <div class="session-detail-media">
+      <img class="detail-thumb" src="/sessions/{{ detail.session_id }}/thumbnail.jpg" alt="" onerror="this.remove()" />
+    </div>
   </div>
 
   {% elif detail.kind == 'dataset' %}

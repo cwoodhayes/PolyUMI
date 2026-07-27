@@ -4,12 +4,26 @@ from __future__ import annotations
 
 import pathlib
 
+import zarr
 from polyumi_catalog import queries
 from polyumi_catalog.db import get_engine
 from polyumi_catalog.manifests import SceneManifest
 from polyumi_catalog.sync import sync_recordings
 from polyumi_pi.files.metadata import SessionMetadata, SessionType
 from sqlmodel import Session as DBSession
+
+
+def _add_slam_quality(scene_dir: pathlib.Path, session_dirname: str, *, n_total: int, n_lost: int) -> None:
+    """Stamp a one-episode scene.zarr with SLAM quality attrs for ``session_dirname``."""
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 1
+    ep = root.require_group('episode_0')
+    ep.attrs['session_dir'] = session_dirname
+    slam_grp = ep.require_group('annotations').require_group('slam')
+    slam_grp.attrs['n_frames_total'] = n_total
+    slam_grp.attrs['n_frames_lost'] = n_lost
+    slam_grp.attrs['tracking_ratio'] = (n_total - n_lost) / n_total
+    slam_grp.attrs['n_relocalization_events'] = 0
 
 
 def _make_session(scene_dir: pathlib.Path, name: str, *, scene_id: str, session_type: SessionType, task: str | None):
@@ -85,6 +99,93 @@ def test_list_sessions_for_scene(tmp_path: pathlib.Path):
     assert {s['session_type'] for s in sessions} == {'MAPPING', 'EPISODE'}
     episode = next(s for s in sessions if s['session_type'] == 'EPISODE')
     assert episode['video_dropped_frames'] == 3
+
+
+def test_list_sessions_includes_slam_quality(tmp_path: pathlib.Path):
+    """Episodes with SLAM results carry a tracking ratio and low_quality flag in the list."""
+    engine = _populated_engine(tmp_path)
+    with DBSession(engine) as db:
+        scene = queries.scene_detail(db, 'scene-1')
+    scene_dir = pathlib.Path(scene['dir'])
+    _add_slam_quality(scene_dir, 'session_2', n_total=100, n_lost=60)  # 40% tracked -> low quality
+
+    with DBSession(engine) as db:
+        sessions = queries.list_sessions(db, 'scene-1')
+
+    episode = next(s for s in sessions if s['session_type'] == 'EPISODE')
+    mapping = next(s for s in sessions if s['session_type'] == 'MAPPING')
+    assert episode['slam_tracking_ratio'] == 0.4
+    assert episode['slam_low_quality'] is True
+    assert mapping['slam_tracking_ratio'] is None  # no matching episode group for this session
+
+
+def test_session_detail_includes_slam_quality_when_available(tmp_path: pathlib.Path):
+    """The session detail panel exposes SLAM stats once pzarr + SLAM results exist."""
+    engine = _populated_engine(tmp_path)
+    with DBSession(engine) as db:
+        scene = queries.scene_detail(db, 'scene-1')
+        sessions = queries.list_sessions(db, 'scene-1')
+        session_id = next(s['session_id'] for s in sessions if s['session_type'] == 'EPISODE')
+    scene_dir = pathlib.Path(scene['dir'])
+
+    with DBSession(engine) as db:
+        assert queries.session_detail(db, session_id)['slam'] is None  # no pzarr yet
+
+    _add_slam_quality(scene_dir, 'session_2', n_total=50, n_lost=5)
+    with DBSession(engine) as db:
+        detail = queries.session_detail(db, session_id)
+    assert detail['slam']['n_frames_lost'] == 5
+    assert detail['slam']['tracking_ratio'] == 0.9
+
+
+def test_session_detail_includes_pzarr_streams_when_available(tmp_path: pathlib.Path):
+    """The session detail panel exposes a stream shape/rate table once pzarr exists."""
+    import numpy as np
+
+    engine = _populated_engine(tmp_path)
+    with DBSession(engine) as db:
+        scene = queries.scene_detail(db, 'scene-1')
+        sessions = queries.list_sessions(db, 'scene-1')
+        session_id = next(s['session_id'] for s in sessions if s['session_type'] == 'EPISODE')
+    scene_dir = pathlib.Path(scene['dir'])
+
+    with DBSession(engine) as db:
+        assert queries.session_detail(db, session_id)['pzarr_streams'] is None  # no pzarr yet
+
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 1
+    ep = root.require_group('episode_0')
+    ep.attrs['session_dir'] = 'session_2'
+    finger_grp = ep.require_group('finger')
+    finger_grp.create_array('frames', data=np.zeros((5, 4, 4, 3), dtype='uint8'))
+    ts_grp = ep.require_group('timestamps')
+    ts_grp.create_array('finger', data=np.linspace(0.0, 1.0, 5))
+    ann_grp = ep.require_group('annotations')
+    ann_grp.attrs['episode_start'] = 0.0
+    ann_grp.attrs['episode_end'] = 1.0
+
+    with DBSession(engine) as db:
+        detail = queries.session_detail(db, session_id)
+    assert detail['pzarr_streams']['episode_index'] == 0
+    labels = {s['label'] for s in detail['pzarr_streams']['streams']}
+    assert 'finger/frames' in labels
+
+
+def test_scene_detail_includes_quality_summary(tmp_path: pathlib.Path):
+    """scene_detail aggregates SLAM quality and total dropped video frames across sessions."""
+    engine = _populated_engine(tmp_path)
+    with DBSession(engine) as db:
+        scene = queries.scene_detail(db, 'scene-1')
+    scene_dir = pathlib.Path(scene['dir'])
+    assert scene['quality'] == {'n_episodes_with_slam': 0, 'avg_tracking_ratio': None, 'n_low_quality': 0}
+    assert scene['total_dropped_video_frames'] == 3  # from the EPISODE session's metadata
+
+    _add_slam_quality(scene_dir, 'session_2', n_total=100, n_lost=10)
+    with DBSession(engine) as db:
+        scene = queries.scene_detail(db, 'scene-1')
+    assert scene['quality']['n_episodes_with_slam'] == 1
+    assert scene['quality']['avg_tracking_ratio'] == 0.9
+    assert scene['quality']['n_low_quality'] == 0
 
 
 def test_scene_detail_flags_task_conflict(tmp_path: pathlib.Path):

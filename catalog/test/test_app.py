@@ -384,3 +384,44 @@ def test_post_build_dataset_rejects_no_scenes_selected(tmp_path: pathlib.Path):
     client = TestClient(create_app(engine, recordings_dir=rec), follow_redirects=False)
     resp = client.post('/datasets', data={'name': 'x'})
     assert resp.status_code == 400
+
+
+def test_get_thumbnail_404_for_unknown_session(tmp_path: pathlib.Path):
+    """An unknown session_id 404s rather than crashing."""
+    resp = _client(tmp_path).get('/sessions/does-not-exist/thumbnail.jpg')
+    assert resp.status_code == 404
+
+
+def test_get_thumbnail_404_when_no_gopro_mp4(tmp_path: pathlib.Path):
+    """A real session with no gopro.mp4 sidecar (the seeded fixture has none) 404s cleanly."""
+    from polyumi_pi.files.metadata import SessionMetadata as SM
+
+    client = _client(tmp_path)
+    rec = tmp_path / 'recordings' / 'scene_2026-07-26_10-00-00_abcd' / 'session_1' / 'metadata.json'
+    session_id = SM.from_file(rec).session_id
+
+    resp = client.get(f'/sessions/{session_id}/thumbnail.jpg')
+    assert resp.status_code == 404
+
+
+def test_get_thumbnail_returns_jpeg_when_decodable(tmp_path: pathlib.Path, monkeypatch):
+    """
+    The route serves the bytes thumbnails.session_thumbnail_jpeg produces, with a long cache header.
+
+    The actual mp4 decoding is exercised in test_thumbnails.py; this only checks the route's glue
+    (session lookup -> path resolution -> response headers).
+    """
+    from polyumi_pi.files.metadata import SessionMetadata as SM
+
+    client = _client(tmp_path)
+    rec = tmp_path / 'recordings' / 'scene_2026-07-26_10-00-00_abcd' / 'session_1' / 'metadata.json'
+    session_id = SM.from_file(rec).session_id
+
+    fake_jpeg = b'\xff\xd8fake-jpeg-bytes'
+    monkeypatch.setattr('polyumi_catalog.thumbnails.session_thumbnail_jpeg', lambda session_dir: fake_jpeg)
+
+    resp = client.get(f'/sessions/{session_id}/thumbnail.jpg')
+    assert resp.status_code == 200
+    assert resp.content == fake_jpeg
+    assert resp.headers['content-type'] == 'image/jpeg'
+    assert 'immutable' in resp.headers['cache-control']

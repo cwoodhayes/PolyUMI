@@ -14,7 +14,7 @@ from sqlalchemy import func
 from sqlmodel import Session as DBSession
 from sqlmodel import select
 
-from polyumi_catalog import mcap_tools
+from polyumi_catalog import episode_quality, mcap_tools, pzarr_inspect
 from polyumi_catalog.models import Dataset, DatasetMember, Scene, Session, Task
 
 # Sentinel task filters used by the UI's pseudo-rows in the Tasks column.
@@ -139,20 +139,27 @@ def list_scenes(db: DBSession, task_key: str) -> list[dict]:
 def list_sessions(db: DBSession, scene_id: str) -> list[dict]:
     """Return the Episodes column view models (all sessions) for one scene."""
     sessions = db.exec(select(Session).where(Session.scene_id == scene_id).order_by(Session.dir)).all()
-    return [
-        {
-            'session_id': s.session_id,
-            'name': _basename(s.dir) or s.session_id,
-            'session_type': s.session_type,
-            'robot': s.robot,
-            'duration_s': s.duration_s,
-            'n_video_frames': s.n_video_frames,
-            'video_dropped_frames': s.video_dropped_frames,
-            'task_meta': s.task_meta,
-            'created_at': s.created_at,
-        }
-        for s in sessions
-    ]
+    scene = db.get(Scene, scene_id)
+    quality_by_dir = episode_quality.scene_quality_by_session_dir(pathlib.Path(scene.dir)) if scene else {}
+    result = []
+    for s in sessions:
+        quality = quality_by_dir.get(_basename(s.dir))
+        result.append(
+            {
+                'session_id': s.session_id,
+                'name': _basename(s.dir) or s.session_id,
+                'session_type': s.session_type,
+                'robot': s.robot,
+                'duration_s': s.duration_s,
+                'n_video_frames': s.n_video_frames,
+                'video_dropped_frames': s.video_dropped_frames,
+                'task_meta': s.task_meta,
+                'created_at': s.created_at,
+                'slam_tracking_ratio': quality['tracking_ratio'] if quality else None,
+                'slam_low_quality': quality['low_quality'] if quality else False,
+            }
+        )
+    return result
 
 
 def list_datasets(db: DBSession, task_key: str) -> list[dict]:
@@ -217,6 +224,8 @@ def scene_detail(db: DBSession, scene_id: str) -> dict:
         for s in sessions
         if task is not None and s.task_meta and s.task_meta != task.name
     ]
+    episode_dirs = [_basename(s.dir) for s in sessions if s.session_type == 'EPISODE']
+    quality = episode_quality.scene_quality_summary(pathlib.Path(scene.dir), episode_dirs)
     return {
         'kind': 'scene',
         'scene_id': scene.scene_id,
@@ -231,6 +240,8 @@ def scene_detail(db: DBSession, scene_id: str) -> dict:
         'n_sessions': len(sessions),
         'n_episodes': sum(1 for s in sessions if s.session_type == 'EPISODE'),
         'conflicts': conflicts,
+        'quality': quality,
+        'total_dropped_video_frames': sum(s.video_dropped_frames or 0 for s in sessions),
     }
 
 
@@ -243,6 +254,8 @@ def session_detail(db: DBSession, session_id: str) -> dict:
     session_dirname = _basename(s.dir)
     pzarr_ok = mcap_tools.pzarr_exists(pathlib.Path(scene.dir)) if scene else False
     mcap_path = mcap_tools.mcap_path_for_session(pathlib.Path(scene.dir), session_dirname) if pzarr_ok else None
+    slam = episode_quality.session_quality(pathlib.Path(scene.dir), session_dirname) if pzarr_ok else None
+    pzarr_streams = pzarr_inspect.session_pzarr_streams(pathlib.Path(scene.dir), session_dirname) if pzarr_ok else None
     return {
         'kind': 'session',
         'session_id': s.session_id,
@@ -258,6 +271,8 @@ def session_detail(db: DBSession, session_id: str) -> dict:
         'created_at': s.created_at,
         'pzarr_exists': pzarr_ok,
         'mcap_exists': mcap_path is not None,
+        'slam': slam,
+        'pzarr_streams': pzarr_streams,
     }
 
 

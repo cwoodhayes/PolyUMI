@@ -33,7 +33,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import Engine
 from sqlmodel import Session as DBSession
 
-from polyumi_catalog import mcap_tools, queries
+from polyumi_catalog import mcap_tools, queries, thumbnails
 from polyumi_catalog.db import default_datasets_dir
 from polyumi_catalog.dataset_builder import DatasetBuildError, build_dataset
 from polyumi_catalog.models import Scene
@@ -109,6 +109,19 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
         with DBSession(engine) as db:
             detail = queries.session_detail(db, session_id)
         return render(request, '_detail.html', detail=detail, oob=False)
+
+    @app.get('/sessions/{session_id}/thumbnail.jpg')
+    def get_session_thumbnail(session_id: str):
+        with DBSession(engine) as db:
+            session = db.get(SessionRow, session_id)
+        if session is None:
+            return PlainTextResponse('No such session.', status_code=404)
+        jpeg = thumbnails.session_thumbnail_jpeg(pathlib.Path(session.dir))
+        if jpeg is None:
+            return PlainTextResponse('No thumbnail available.', status_code=404)
+        # session directories are immutable once synced, so the browser can cache indefinitely
+        headers = {'Cache-Control': 'public, max-age=31536000, immutable'}
+        return Response(content=jpeg, media_type='image/jpeg', headers=headers)
 
     @app.get('/select/dataset/{dataset_id}', response_class=HTMLResponse)
     def select_dataset(request: Request, dataset_id: int) -> HTMLResponse:
