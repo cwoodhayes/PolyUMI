@@ -1,0 +1,16 @@
+<div id="col-datasets-body" class="col-body"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% if not datasets %}
+  <p class="placeholder">No datasets.</p>
+  {% endif %}
+  {% for d in datasets %}
+  <div
+    class="item"
+    hx-get="/select/dataset/{{ d.id }}"
+    hx-target="#detail-body"
+    hx-swap="outerHTML"
+  >
+    <span class="item-name" title="{{ d.name }}">{{ d.name }}</span>
+    <span class="badge">{{ d.n_episodes if d.n_episodes is not none else '?' }} ep</span>
+  </div>
+  {% endfor %}
+</div>

@@ -29,4 +29,5 @@ polyumi_pi = { path = "pi", editable = true }
 dev = [
     "picamera2",
     "pytest>=9.0.2",
+    "httpx",
 ]

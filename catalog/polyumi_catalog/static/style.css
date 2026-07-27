@@ -1,0 +1,194 @@
+:root {
+  color-scheme: light dark;
+  --border: #888;
+  --bg-selected: #3568b3;
+  --fg-selected: #fff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: system-ui, sans-serif;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+#topbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+#topbar h1 {
+  font-size: 1.1rem;
+  margin: 0;
+  flex: 1;
+}
+
+.htmx-indicator {
+  opacity: 0;
+  transition: opacity 100ms ease-in;
+}
+
+.htmx-request .htmx-indicator,
+.htmx-request.htmx-indicator {
+  opacity: 1;
+}
+
+#columns {
+  flex: 3;
+  display: flex;
+  min-height: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.column {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+}
+
+.column:last-child {
+  border-right: none;
+}
+
+.col-head {
+  font-weight: 600;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+}
+
+.col-body {
+  overflow-y: auto;
+  flex: 1;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.35rem 0.6rem;
+  cursor: pointer;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 30%, transparent);
+}
+
+.item:hover {
+  background: color-mix(in srgb, var(--bg-selected) 15%, transparent);
+}
+
+.item.selected {
+  background: var(--bg-selected);
+  color: var(--fg-selected);
+}
+
+.item.pseudo .item-name {
+  font-style: italic;
+}
+
+.item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badges {
+  display: flex;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+
+.badge {
+  font-size: 0.75rem;
+  padding: 0 0.4rem;
+  border-radius: 0.7rem;
+  border: 1px solid var(--border);
+  opacity: 0.8;
+}
+
+.badge.archived {
+  border-color: #b58900;
+  color: #b58900;
+}
+
+.badge.warn,
+.warn {
+  color: #cc3333;
+}
+
+.badge.type-mapping {
+  border-color: #6c71c4;
+}
+
+.badge.type-episode {
+  border-color: #2aa198;
+}
+
+.placeholder,
+.muted {
+  color: #888;
+  padding: 0.5rem 0.6rem;
+  font-size: 0.9rem;
+}
+
+#detail {
+  flex: 2;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+#detail-body {
+  overflow-y: auto;
+  flex: 1;
+  padding: 0.6rem 1rem;
+}
+
+#detail-body h2 {
+  margin: 0 0 0.5rem;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.15rem 1rem;
+  margin: 0.3rem 0;
+}
+
+dt {
+  font-weight: 600;
+  opacity: 0.75;
+}
+
+dd {
+  margin: 0;
+}
+
+.mono {
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
+.conflict-box {
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #cc3333;
+  border-radius: 0.4rem;
+}
+
+.conflict-box ul {
+  margin: 0.3rem 0 0;
+  padding-left: 1.2rem;
+}

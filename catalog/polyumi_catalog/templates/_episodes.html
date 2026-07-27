@@ -1,0 +1,19 @@
+<div id="col-episodes-body" class="col-body"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% if not sessions %}
+  <p class="placeholder">No sessions.</p>
+  {% endif %}
+  {% for s in sessions %}
+  <div
+    class="item"
+    hx-get="/select/session/{{ s.session_id }}"
+    hx-target="#detail-body"
+    hx-swap="outerHTML"
+  >
+    <span class="item-name" title="{{ s.name }}">{{ s.name }}</span>
+    <span class="badges">
+      <span class="badge type-{{ s.session_type | lower }}">{{ s.session_type }}</span>
+      {% if s.video_dropped_frames %}<span class="badge warn" title="dropped video frames">⚠ {{ s.video_dropped_frames }}</span>{% endif %}
+    </span>
+  </div>
+  {% endfor %}
+</div>

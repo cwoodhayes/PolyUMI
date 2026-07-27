@@ -1,0 +1,70 @@
+<div id="detail-body"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% if detail.kind == 'empty' or detail is none %}
+  <p class="placeholder">Select a row to inspect it.</p>
+
+  {% elif detail.kind == 'task' %}
+  <h2>{{ detail.name }}</h2>
+  {% if detail.pseudo %}
+  <p class="muted">Virtual grouping — not a real task.</p>
+  {% else %}
+  <dl>
+    <dt>Description</dt><dd>{{ detail.description or '—' }}</dd>
+    <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
+  </dl>
+  {% endif %}
+  <dl>
+    <dt>Scenes</dt><dd>{{ detail.scene_count }}</dd>
+  </dl>
+
+  {% elif detail.kind == 'scene' %}
+  <h2>{{ detail.name }}</h2>
+  <dl>
+    <dt>Task</dt><dd>{{ detail.task_name or '(unassigned)' }}</dd>
+    <dt>Directory</dt><dd class="mono">{{ detail.dir }}</dd>
+    <dt>Notes</dt><dd>{{ detail.notes or '—' }}</dd>
+    <dt>Archived</dt><dd>{{ 'yes' if detail.archived else 'no' }}</dd>
+    <dt>Sessions</dt><dd>{{ detail.n_episodes }} episode / {{ detail.n_sessions }} total</dd>
+    <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
+    <dt>Last synced</dt><dd>{{ detail.synced_at or '—' }}</dd>
+  </dl>
+  {% if detail.conflicts %}
+  <div class="conflict-box">
+    <strong>⚠ Task conflicts</strong>
+    <p class="muted">These sessions' own metadata.json task disagrees with the scene's canonical task.</p>
+    <ul>
+      {% for c in detail.conflicts %}
+      <li>{{ c.session_id[:8] }}… — recorded as <em>{{ c.task_meta }}</em></li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {% elif detail.kind == 'session' %}
+  <h2>{{ detail.name }}</h2>
+  <dl>
+    <dt>Type</dt><dd>{{ detail.session_type }}</dd>
+    <dt>Directory</dt><dd class="mono">{{ detail.dir }}</dd>
+    <dt>Scene</dt><dd>{{ detail.scene_id }}</dd>
+    <dt>Robot</dt><dd>{{ detail.robot or '—' }}</dd>
+    <dt>Recorded task</dt><dd>{{ detail.task_meta or '—' }}</dd>
+    <dt>Duration</dt><dd>{{ '%.1f s' % detail.duration_s if detail.duration_s is not none else '—' }}</dd>
+    <dt>Video frames</dt><dd>
+      {{ detail.n_video_frames if detail.n_video_frames is not none else '—' }}
+      {% if detail.video_dropped_frames %}<span class="warn">({{ detail.video_dropped_frames }} dropped)</span>{% endif %}
+    </dd>
+    <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
+  </dl>
+
+  {% elif detail.kind == 'dataset' %}
+  <h2>{{ detail.name }}</h2>
+  <dl>
+    <dt>Task</dt><dd>{{ detail.task_name or '—' }}</dd>
+    <dt>Episodes</dt><dd>{{ detail.n_episodes if detail.n_episodes is not none else '—' }}</dd>
+    <dt>Output</dt><dd class="mono">{{ detail.output_path or '—' }}</dd>
+    <dt>Manifest</dt><dd class="mono">{{ detail.manifest_path or '—' }}</dd>
+    <dt>PolyUMI version</dt><dd class="mono">{{ detail.polyumi_version or '—' }}</dd>
+    <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
+  </dl>
+
+  {% endif %}
+</div>
