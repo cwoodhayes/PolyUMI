@@ -20,11 +20,21 @@ between requests, so it's kept as plain in-memory state on ``app.state`` — thi
 single-user, single-process, localhost tool (§2 non-goals), so process-global state
 is fine and avoids adding cookies/sessions or client-side state for one working list.
 It does not survive a server restart; that's an accepted trade-off, not an oversight.
+Phase 4 adds a "run full pipeline" button on the scene detail pane: unlike every
+prior mutation this can take minutes (SLAM in particular), so it can't run inline on
+the request thread. It runs on a plain ``threading.Thread`` (started, not joined) with
+per-scene status kept on ``app.state.pp_runs`` — same in-memory-on-app.state pattern as
+the dataset draft, same trade-off (lost on restart). Progress is shown by the detail
+pane polling itself via ``hx-trigger="every ...s"`` while a run is in flight, but the
+authoritative progress log is still whatever's printed to the terminal running
+``polyumi-catalog serve`` — the pipeline logs through the same ``logging`` root logger
+that process already configures, so nothing extra was needed for that.
 """
 
 from __future__ import annotations
 
 import pathlib
+import threading
 
 from fastapi import FastAPI, Form, Request, Response
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
@@ -33,7 +43,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import Engine
 from sqlmodel import Session as DBSession
 
-from polyumi_catalog import mcap_tools, queries, thumbnails
+from polyumi_catalog import mcap_tools, pp_status, queries, thumbnails
 from polyumi_catalog.db import default_datasets_dir
 from polyumi_catalog.dataset_builder import DatasetBuildError, build_dataset
 from polyumi_catalog.models import Scene
@@ -55,6 +65,7 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
     """
     app = FastAPI(title='PolyUMI Catalog')
     app.state.pending_dataset_scene_ids = []
+    app.state.pp_runs = {}  # scene_id -> {'status': 'running'|'error', 'error': str|None}
     app.mount('/static', StaticFiles(directory=_STATIC_DIR), name='static')
     templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
@@ -64,6 +75,14 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
     def render_dataset_builder(request: Request, db: DBSession, *, oob: bool) -> HTMLResponse:
         pending_scenes = queries.scenes_by_ids(db, app.state.pending_dataset_scene_ids)
         return render(request, '_dataset_builder.html', pending_scenes=pending_scenes, oob=oob)
+
+    def _scene_detail_with_run_state(db: DBSession, scene_id: str) -> dict:
+        """scene_detail plus this process's live pipeline-run status, if any."""
+        detail = queries.scene_detail(db, scene_id)
+        run_state = app.state.pp_runs.get(scene_id)
+        detail['pp_running'] = run_state is not None and run_state['status'] == 'running'
+        detail['pp_error'] = run_state['error'] if run_state else None
+        return detail
 
     @app.get('/', response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
@@ -98,7 +117,7 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
     def select_scene(request: Request, scene_id: str) -> HTMLResponse:
         with DBSession(engine) as db:
             sessions = queries.list_sessions(db, scene_id)
-            detail = queries.scene_detail(db, scene_id)
+            detail = _scene_detail_with_run_state(db, scene_id)
             all_tasks = queries.list_task_options(db)
         return render(
             request, 'select_scene.html', sessions=sessions, detail=detail, all_tasks=all_tasks, selected_scene=scene_id
@@ -233,5 +252,41 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
             except mcap_tools.McapError as err:
                 return PlainTextResponse(str(err), status_code=400)
         return Response(status_code=204)
+
+    @app.post('/scenes/{scene_id}/run-pp', response_class=HTMLResponse)
+    def post_run_pp(request: Request, scene_id: str) -> HTMLResponse:
+        with DBSession(engine) as db:
+            scene = db.get(Scene, scene_id)
+            if scene is None:
+                return PlainTextResponse('No such scene.', status_code=404)
+            scene_dir = pathlib.Path(scene.dir)
+
+        run_state = app.state.pp_runs.get(scene_id)
+        if run_state is None or run_state['status'] != 'running':
+            app.state.pp_runs[scene_id] = {'status': 'running', 'error': None}
+
+            def _run() -> None:
+                # Broad except is intentional: this runs unattended on a background
+                # thread, so any failure anywhere in the pipeline (many exception
+                # types across many steps, including external SLAM/ffmpeg subprocess
+                # failures) must be captured here or the run status is stuck at
+                # "running" forever with no way to observe what happened.
+                try:
+                    pp_status.run_full_pipeline(scene_dir)
+                    app.state.pp_runs[scene_id] = {'status': 'done', 'error': None}
+                except Exception as exc:
+                    app.state.pp_runs[scene_id] = {'status': 'error', 'error': str(exc)}
+
+            threading.Thread(target=_run, daemon=True).start()
+
+        with DBSession(engine) as db:
+            detail = _scene_detail_with_run_state(db, scene_id)
+        return render(request, '_detail.html', detail=detail, oob=False)
+
+    @app.get('/scenes/{scene_id}/pp-poll', response_class=HTMLResponse)
+    def get_pp_poll(request: Request, scene_id: str) -> HTMLResponse:
+        with DBSession(engine) as db:
+            detail = _scene_detail_with_run_state(db, scene_id)
+        return render(request, '_detail.html', detail=detail, oob=False)
 
     return app

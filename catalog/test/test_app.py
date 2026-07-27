@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pathlib
+import threading
+import time
 
 import zarr
 from fastapi.testclient import TestClient
@@ -425,3 +427,94 @@ def test_get_thumbnail_returns_jpeg_when_decodable(tmp_path: pathlib.Path, monke
     assert resp.content == fake_jpeg
     assert resp.headers['content-type'] == 'image/jpeg'
     assert 'immutable' in resp.headers['cache-control']
+
+
+def _wait_until(predicate, *, timeout: float = 5.0) -> None:
+    """Poll predicate() until truthy, or raise once timeout elapses (background-thread tests)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.02)
+    raise AssertionError('condition never became true within timeout')
+
+
+def test_run_pp_unknown_scene_returns_404(tmp_path: pathlib.Path):
+    """Triggering the pipeline for a nonexistent scene is a clean 404, not a crash."""
+    rec, engine = _seed(tmp_path)
+    resp = TestClient(create_app(engine, recordings_dir=rec)).post('/scenes/does-not-exist/run-pp')
+    assert resp.status_code == 404
+
+
+def test_run_pp_shows_running_then_done(tmp_path: pathlib.Path, monkeypatch):
+    """POST /run-pp returns immediately with a running indicator; it clears once the thread finishes."""
+    rec, engine = _seed(tmp_path)
+    started = threading.Event()
+    finish = threading.Event()
+
+    def fake_run_full_pipeline(scene_dir):
+        started.set()
+        finish.wait(timeout=5)
+
+    monkeypatch.setattr('polyumi_catalog.pp_status.run_full_pipeline', fake_run_full_pipeline)
+
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    resp = client.post('/scenes/scene-1/run-pp')
+    assert resp.status_code == 200
+    assert 'Running pipeline' in resp.text
+    assert started.wait(timeout=5)
+
+    poll_resp = client.get('/select/scene/scene-1')
+    assert 'Running pipeline' in poll_resp.text
+    assert 'Run full pipeline' not in poll_resp.text
+
+    finish.set()
+    _wait_until(lambda: 'Run full pipeline' in client.get('/select/scene/scene-1').text)
+
+
+def test_run_pp_records_error_on_failure(tmp_path: pathlib.Path, monkeypatch):
+    """A failing pipeline run surfaces its error message instead of leaving status stuck."""
+    rec, engine = _seed(tmp_path)
+
+    def failing(scene_dir):
+        raise RuntimeError('missing gopro.mp4 in session_1')
+
+    monkeypatch.setattr('polyumi_catalog.pp_status.run_full_pipeline', failing)
+
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    client.post('/scenes/scene-1/run-pp')
+
+    _wait_until(lambda: 'Last run failed' in client.get('/select/scene/scene-1').text)
+    assert 'missing gopro.mp4' in client.get('/select/scene/scene-1').text
+
+
+def test_run_pp_is_idempotent_while_already_running(tmp_path: pathlib.Path, monkeypatch):
+    """A second POST while a run is in flight doesn't start a second background run."""
+    rec, engine = _seed(tmp_path)
+    calls = []
+    started = threading.Event()
+    finish = threading.Event()
+
+    def fake_run_full_pipeline(scene_dir):
+        calls.append(scene_dir)
+        started.set()
+        finish.wait(timeout=5)
+
+    monkeypatch.setattr('polyumi_catalog.pp_status.run_full_pipeline', fake_run_full_pipeline)
+
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    client.post('/scenes/scene-1/run-pp')
+    assert started.wait(timeout=5)
+    client.post('/scenes/scene-1/run-pp')
+    finish.set()
+    _wait_until(lambda: 'Run full pipeline' in client.get('/select/scene/scene-1').text)
+
+    assert len(calls) == 1
+
+
+def test_select_scene_includes_pp_status(tmp_path: pathlib.Path):
+    """The scene detail panel shows pipeline step names even with no pzarr built yet."""
+    resp = _client(tmp_path).get('/select/scene/scene-1')
+    assert 'Preprocessing pipeline' in resp.text
+    assert 'No pzarr built yet' in resp.text
+    assert 'Run full pipeline' in resp.text

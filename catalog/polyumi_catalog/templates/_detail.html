@@ -21,48 +21,84 @@
   </dl>
 
   {% elif detail.kind == 'scene' %}
-  <h2>{{ detail.name }}</h2>
-  <dl>
-    <dt>Task</dt><dd>{{ detail.task_name or '(unassigned)' }}</dd>
-    <dt>Directory</dt><dd class="mono">{{ detail.dir }}</dd>
-    <dt>Notes</dt><dd>{{ detail.notes or '—' }}</dd>
-    <dt>Archived</dt><dd>{{ 'yes' if detail.archived else 'no' }}</dd>
-    <dt>Sessions</dt><dd>{{ detail.n_episodes }} episode / {{ detail.n_sessions }} total</dd>
-    <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
-    <dt>Last synced</dt><dd>{{ detail.synced_at or '—' }}</dd>
-  </dl>
-  <form class="assign-task-form" method="post" action="/scenes/{{ detail.scene_id }}/task">
-    <select name="task_id">
-      <option value=""{% if not detail.task_id %} selected{% endif %}>(unassigned)</option>
-      {% for t in all_tasks %}
-      <option value="{{ t.id }}"{% if detail.task_id == t.id %} selected{% endif %}>{{ t.name }}</option>
-      {% endfor %}
-    </select>
-    <button type="submit">Assign</button>
-  </form>
-  <button hx-post="/dataset-draft/add/{{ detail.scene_id }}" hx-swap="none">Add to dataset</button>
-  {% if detail.quality.n_episodes_with_slam %}
-  <h3>Episode quality</h3>
-  <dl>
-    <dt>Avg. SLAM tracking</dt>
-    <dd>{{ '%.1f%%' % (detail.quality.avg_tracking_ratio * 100) if detail.quality.avg_tracking_ratio is not none else '—' }}</dd>
-    <dt>Low-tracking episodes</dt>
-    <dd>{{ detail.quality.n_low_quality }} / {{ detail.quality.n_episodes_with_slam }}</dd>
-    <dt>Dropped video frames</dt>
-    <dd>{{ detail.total_dropped_video_frames }}</dd>
-  </dl>
-  {% endif %}
-  {% if detail.conflicts %}
-  <div class="conflict-box">
-    <strong>⚠ Task conflicts</strong>
-    <p class="muted">These sessions' own metadata.json task disagrees with the scene's canonical task.</p>
-    <ul>
-      {% for c in detail.conflicts %}
-      <li>{{ c.session_id[:8] }}… — recorded as <em>{{ c.task_meta }}</em></li>
-      {% endfor %}
-    </ul>
+  <div class="scene-detail-layout">
+    <div class="scene-detail-text">
+      <h2>{{ detail.name }}</h2>
+      <dl>
+        <dt>Task</dt><dd>{{ detail.task_name or '(unassigned)' }}</dd>
+        <dt>Directory</dt><dd class="mono">{{ detail.dir }}</dd>
+        <dt>Notes</dt><dd>{{ detail.notes or '—' }}</dd>
+        <dt>Archived</dt><dd>{{ 'yes' if detail.archived else 'no' }}</dd>
+        <dt>Sessions</dt><dd>{{ detail.n_episodes }} episode / {{ detail.n_sessions }} total</dd>
+        <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
+        <dt>Last synced</dt><dd>{{ detail.synced_at or '—' }}</dd>
+      </dl>
+      <form class="assign-task-form" method="post" action="/scenes/{{ detail.scene_id }}/task">
+        <select name="task_id">
+          <option value=""{% if not detail.task_id %} selected{% endif %}>(unassigned)</option>
+          {% for t in all_tasks %}
+          <option value="{{ t.id }}"{% if detail.task_id == t.id %} selected{% endif %}>{{ t.name }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit">Assign</button>
+      </form>
+      <button hx-post="/dataset-draft/add/{{ detail.scene_id }}" hx-swap="none">Add to dataset</button>
+      {% if detail.quality.n_episodes_with_slam %}
+      <h3>Episode quality</h3>
+      <dl>
+        <dt>Avg. SLAM tracking</dt>
+        <dd>{{ '%.1f%%' % (detail.quality.avg_tracking_ratio * 100) if detail.quality.avg_tracking_ratio is not none else '—' }}</dd>
+        <dt>Low-tracking episodes</dt>
+        <dd>{{ detail.quality.n_low_quality }} / {{ detail.quality.n_episodes_with_slam }}</dd>
+        <dt>Dropped video frames</dt>
+        <dd>{{ detail.total_dropped_video_frames }}</dd>
+      </dl>
+      {% endif %}
+      {% if detail.conflicts %}
+      <div class="conflict-box">
+        <strong>⚠ Task conflicts</strong>
+        <p class="muted">These sessions' own metadata.json task disagrees with the scene's canonical task.</p>
+        <ul>
+          {% for c in detail.conflicts %}
+          <li>{{ c.session_id[:8] }}… — recorded as <em>{{ c.task_meta }}</em></li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+    </div>
+    <div class="scene-detail-side">
+      <h3>Preprocessing pipeline</h3>
+      {% if not detail.pp_status.pzarr_exists %}
+      <p class="muted">No pzarr built yet — running the pipeline will build it first.</p>
+      {% endif %}
+      <dl>
+        <dt>Steps complete</dt><dd>{{ detail.pp_status.n_complete }} / {{ detail.pp_status.n_total }}</dd>
+      </dl>
+      <ul class="pp-steps-list">
+        {% for step in detail.pp_status.steps %}
+        <li class="{{ 'pp-step-done' if step.complete else 'pp-step-pending' }}">
+          {{ '✓' if step.complete else '○' }} {{ step.number }}. {{ step.name }}
+        </li>
+        {% endfor %}
+      </ul>
+      {% if detail.pp_running %}
+      <p
+        class="muted"
+        hx-get="/scenes/{{ detail.scene_id }}/pp-poll"
+        hx-trigger="load delay:3s"
+        hx-target="#detail-body"
+        hx-swap="outerHTML"
+      >
+        Running pipeline… (this can take a while — check the server terminal for progress; refreshing automatically)
+      </p>
+      {% else %}
+      <button hx-post="/scenes/{{ detail.scene_id }}/run-pp" hx-target="#detail-body" hx-swap="outerHTML">
+        Run full pipeline
+      </button>
+      {% if detail.pp_error %}<p class="warn">Last run failed: {{ detail.pp_error }}</p>{% endif %}
+      {% endif %}
+    </div>
   </div>
-  {% endif %}
 
   {% elif detail.kind == 'session' %}
   <div class="session-detail-layout">
