@@ -7,6 +7,7 @@ import logging
 import signal
 import time
 from multiprocessing.connection import Connection
+from multiprocessing.synchronize import Event as MpEvent
 
 import zmq
 from libcamera import controls  # type: ignore
@@ -35,12 +36,25 @@ class CameraStreamer:
         zmq_context: zmq.Context,
         session: SessionFiles | None = None,
         stats_conn: Connection | None = None,
+        first_frame_event: MpEvent | None = None,
     ):
-        """Initialize the camera streamer."""
+        """
+        Initialize the camera streamer.
+
+        Args:
+            port: ZMQ TCP port to publish frames on, or None to disable.
+            zmq_context: Shared ZMQ context used to create the publisher socket.
+            session: Optional session object used for video recording.
+            stats_conn: Optional child->parent IPC connection for final stats.
+            first_frame_event: Optional event set once the first frame has been
+                captured, so other processes (e.g. the audio streamer) can wait on it.
+
+        """
         self.port = port
         self.zmq_context = zmq_context
         self.session = session
         self.stats_conn = stats_conn
+        self.first_frame_event = first_frame_event
         self.cam = Picamera2()
 
     @classmethod
@@ -118,6 +132,8 @@ class CameraStreamer:
                     if first_frame_metadata is None:
                         first_frame_metadata = dict(metadata)
                         log.info(f'First-frame metadata: {first_frame_metadata}')
+                        if self.first_frame_event is not None:
+                            self.first_frame_event.set()
                     log.debug(metadata)
 
                     msg = camera_frame_pb2.CameraFrame()

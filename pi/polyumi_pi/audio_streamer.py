@@ -7,6 +7,7 @@ import signal
 import threading
 import time
 from multiprocessing.connection import Connection
+from multiprocessing.synchronize import Event as MpEvent
 
 import sounddevice as sd
 import zmq
@@ -35,6 +36,7 @@ class AudioStreamer:
         session: SessionFiles | None = None,
         stats_conn: Connection | None = None,
         play_sync_chirp: bool = False,
+        first_frame_event: MpEvent | None = None,
     ):
         """
         Initialize the audio streamer.
@@ -48,7 +50,12 @@ class AudioStreamer:
             session: Optional session object used for WAV recording metadata.
             stats_conn: Optional child->parent IPC connection for final stats.
             play_sync_chirp: If True, play a sync chirp through the speaker
-                immediately after the capture stream opens.
+                once the capture stream is open (and, if first_frame_event is
+                given, once the first camera frame has also arrived).
+            first_frame_event: Optional event, set by the camera streamer once
+                its first frame has been captured. If provided alongside
+                play_sync_chirp, the chirp is delayed until the event is set,
+                so the chirp doubles as an audible "camera is ready" cue.
 
         """
         self.port = port
@@ -59,6 +66,7 @@ class AudioStreamer:
         self.session = session
         self.stats_conn = stats_conn
         self.play_sync_chirp = play_sync_chirp
+        self.first_frame_event = first_frame_event
 
     @staticmethod
     def find_device_index(name: str) -> int:
@@ -208,8 +216,15 @@ class AudioStreamer:
                 callback=callback,
             ):
                 if self.play_sync_chirp:
-                    log.info('Playing sync chirp...')
-                    sync_chirp_play_time_ns = sync_chirp.play(self.sample_rate, device=self.DEVICE_NAME)
+                    if self.first_frame_event is not None and not self.first_frame_event.is_set():
+                        log.info('Waiting for first camera frame before playing sync chirp...')
+                        while not self.first_frame_event.is_set() and not stop_event.is_set():
+                            self.first_frame_event.wait(timeout=0.1)
+                    if stop_event.is_set():
+                        log.warning('Stopped before first camera frame arrived; sync chirp not played.')
+                    else:
+                        log.info('Playing sync chirp...')
+                        sync_chirp_play_time_ns = sync_chirp.play(self.sample_rate, device=self.DEVICE_NAME)
                 log.info('Streaming... Ctrl+C to stop.')
                 try:
                     while not stop_event.is_set():

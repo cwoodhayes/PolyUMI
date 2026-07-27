@@ -29,6 +29,16 @@ from typing import Any
 _fast_ble_controller_cls: type | None = None
 
 
+class GoProNotReadyError(RuntimeError):
+    """
+    Raised when the GoPro is connected but not in a state where it can record.
+
+    The common case is a missing or unusable SD card: attempting to start
+    recording (set_shutter) in that state makes the camera's BLE response hang,
+    so we check the primary-storage status first and raise this instead.
+    """
+
+
 def _get_fast_ble_controller() -> type:
     """Return (lazily) a BleakWrapperController subclass whose scan() uses find_device_by_address()."""
     global _fast_ble_controller_cls
@@ -74,10 +84,12 @@ class GoProWrapper:
         """
         from open_gopro import WirelessGoPro
         from open_gopro.models import constants, proto
+        from open_gopro.models.constants.statuses import PrimaryStorage
 
         self._WirelessGoPro = WirelessGoPro
         self._constants = constants
         self._proto = proto
+        self._PrimaryStorage = PrimaryStorage
         self._identifier = identifier
         self._mac_address = mac_address
         self._gopro: Any = None
@@ -160,6 +172,35 @@ class GoProWrapper:
             is_dst=is_dst,
         )
         return dt
+
+    async def get_sd_card_status(self) -> Any:
+        """
+        Query the GoPro's primary (SD card) storage status over BLE.
+
+        Returns:
+            A PrimaryStorage enum value (e.g. OK, SD_CARD_REMOVED, SD_CARD_FULL).
+
+        """
+        gopro = self._require_connected()
+        resp = await gopro.ble_status.primary_storage.get_value()
+        if not resp.ok:
+            raise RuntimeError(f'Failed to query GoPro SD card status: {resp.status}')
+        return resp.data
+
+    async def ensure_ready_to_record(self) -> None:
+        """
+        Verify the GoPro can record, raising GoProNotReadyError if not.
+
+        Checks the primary-storage status: anything other than OK (a missing,
+        full, busy, or unformatted SD card) means we must not attempt to start
+        recording, since set_shutter would hang.
+        """
+        status = await self.get_sd_card_status()
+        if status != self._PrimaryStorage.OK:
+            raise GoProNotReadyError(
+                f'GoPro is not ready to record: SD card status is {status.name} '
+                f'(expected {self._PrimaryStorage.OK.name}). Is a usable SD card inserted?'
+            )
 
     async def start_recording(self) -> None:
         """Start GoPro video recording."""
