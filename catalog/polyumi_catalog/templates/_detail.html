@@ -92,7 +92,17 @@
         Running pipeline… (this can take a while — check the server terminal for progress; refreshing automatically)
       </p>
       {% else %}
-      <button hx-post="/scenes/{{ detail.scene_id }}/run-pp" hx-target="#detail-body" hx-swap="outerHTML">
+      {% set fully_processed = detail.pp_status.pzarr_exists and detail.pp_status.n_total > 0
+         and detail.pp_status.n_complete == detail.pp_status.n_total %}
+      <button
+        hx-post="/scenes/{{ detail.scene_id }}/run-pp"
+        hx-target="#detail-body"
+        hx-swap="outerHTML"
+        hx-disabled-elt="this"
+        {% if fully_processed %}
+        hx-confirm="This scene has already completed all {{ detail.pp_status.n_total }} preprocessing steps. Run the pipeline again anyway?"
+        {% endif %}
+      >
         Run full pipeline
       </button>
       {% if detail.pp_error %}<p class="warn">Last run failed: {{ detail.pp_error }}</p>{% endif %}

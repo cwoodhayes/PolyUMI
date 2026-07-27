@@ -270,11 +270,12 @@ def test_open_foxglove_without_mcap_returns_400(tmp_path: pathlib.Path):
 
 
 def test_index_includes_empty_dataset_builder(tmp_path: pathlib.Path):
-    """With no scenes added yet, the builder shows its empty state and no task_id field at all."""
+    """With no scenes added yet, the builder shows its empty state, still offering a task picker."""
     resp = _client(tmp_path).get('/')
     assert 'New Dataset Builder' in resp.text
     assert 'name="scene_ids"' not in resp.text
-    assert 'name="task_id"' not in resp.text
+    assert 'name="task_id"' in resp.text
+    assert '>fold_towel<' in resp.text
 
 
 def test_index_omits_dataset_builder_without_recordings_dir(tmp_path: pathlib.Path):
@@ -370,6 +371,36 @@ def test_post_build_dataset_success_redirects_and_clears_draft(tmp_path: pathlib
     # the draft is cleared after a successful build
     index_resp = client.get('/')
     assert 'name="scene_ids"' not in index_resp.text
+
+
+def test_post_build_dataset_with_task_id_persists_it(tmp_path: pathlib.Path, monkeypatch):
+    """Selecting a task in the builder form actually associates the built dataset with it."""
+
+    def fake_export_scenes_to_dp(scene_paths, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b'fake-zip')
+        return 1
+
+    monkeypatch.setattr('polyumi_ingest.export.dp.export_scenes_to_dp', fake_export_scenes_to_dp)
+
+    rec, engine = _seed(tmp_path)
+    with DBSession(engine) as db:
+        task = db.exec(select(Task).where(Task.name == 'fold_towel')).first()
+        task_id = task.id
+
+    client = TestClient(create_app(engine, recordings_dir=rec), follow_redirects=False)
+    resp = client.post('/datasets', data={'name': 'fold_towel_v1', 'task_id': str(task_id), 'scene_ids': ['scene-1']})
+    assert resp.status_code == 303
+
+    with DBSession(engine) as db:
+        from polyumi_catalog.models import Dataset
+
+        dataset = db.exec(select(Dataset).where(Dataset.name == 'fold_towel_v1')).first()
+        assert dataset.task_id == task_id
+
+    # and it now shows up when the Datasets column is filtered to that task
+    task_resp = client.get(f'/select/task/{task_id}')
+    assert 'fold_towel_v1' in task_resp.text
 
 
 def test_post_build_dataset_without_recordings_dir_returns_400(tmp_path: pathlib.Path):
@@ -518,3 +549,64 @@ def test_select_scene_includes_pp_status(tmp_path: pathlib.Path):
     assert 'Preprocessing pipeline' in resp.text
     assert 'No pzarr built yet' in resp.text
     assert 'Run full pipeline' in resp.text
+
+
+def test_run_pp_button_disables_itself_and_has_no_confirm_when_not_fully_done(tmp_path: pathlib.Path):
+    """The button self-disables on click (hx-disabled-elt) and doesn't prompt when nothing's complete yet."""
+    resp = _client(tmp_path).get('/select/scene/scene-1')
+    assert 'hx-disabled-elt="this"' in resp.text
+    assert 'hx-confirm' not in resp.text
+
+
+def test_run_pp_button_confirms_when_scene_already_fully_processed(tmp_path: pathlib.Path):
+    """Once every registered step is already complete, re-running asks for confirmation first."""
+    from polyumi_ingest.preproc import available_preprocessing_steps
+
+    rec, engine = _seed(tmp_path)
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 0
+    root.attrs['preprocessing_steps'] = [s.step_number for s in available_preprocessing_steps()]
+
+    resp = TestClient(create_app(engine, recordings_dir=rec)).get('/select/scene/scene-1')
+    assert 'hx-confirm=' in resp.text
+    assert 'already completed all' in resp.text
+
+
+def test_run_pp_lock_prevents_concurrent_duplicate_runs(tmp_path: pathlib.Path, monkeypatch):
+    """
+    Many near-simultaneous POSTs to run-pp start the pipeline exactly once.
+
+    Regression test for the check-then-act race on app.state.pp_runs: without the lock
+    around the check-and-set, threads released by the barrier at the same instant could
+    all observe 'not running' before any of them wrote 'running', each starting its own
+    background pipeline run against the same scene.zarr.
+    """
+    rec, engine = _seed(tmp_path)
+    n_threads = 8
+    calls: list[pathlib.Path] = []
+    calls_lock = threading.Lock()
+    barrier = threading.Barrier(n_threads)
+    finish = threading.Event()
+
+    def fake_run_full_pipeline(scene_dir):
+        with calls_lock:
+            calls.append(scene_dir)
+        finish.wait(timeout=5)
+
+    monkeypatch.setattr('polyumi_catalog.pp_status.run_full_pipeline', fake_run_full_pipeline)
+
+    app = create_app(engine, recordings_dir=rec)
+
+    def _post():
+        barrier.wait(timeout=5)
+        TestClient(app).post('/scenes/scene-1/run-pp')
+
+    threads = [threading.Thread(target=_post) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+    finish.set()
+
+    assert len(calls) == 1

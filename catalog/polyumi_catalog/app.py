@@ -28,7 +28,11 @@ the dataset draft, same trade-off (lost on restart). Progress is shown by the de
 pane polling itself via ``hx-trigger="every ...s"`` while a run is in flight, but the
 authoritative progress log is still whatever's printed to the terminal running
 ``polyumi-catalog serve`` — the pipeline logs through the same ``logging`` root logger
-that process already configures, so nothing extra was needed for that.
+that process already configures, so nothing extra was needed for that. Starting a run
+is a check-then-set on that shared dict, so it's guarded by ``app.state.pp_runs_lock``
+(a plain ``threading.Lock``) to keep two near-simultaneous POSTs (e.g. a fast double
+click before the button disables) from both passing the "not already running" check
+and starting two pipeline runs against the same scene.zarr concurrently.
 """
 
 from __future__ import annotations
@@ -65,7 +69,8 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
     """
     app = FastAPI(title='PolyUMI Catalog')
     app.state.pending_dataset_scene_ids = []
-    app.state.pp_runs = {}  # scene_id -> {'status': 'running'|'error', 'error': str|None}
+    app.state.pp_runs = {}  # scene_id -> {'status': 'running'|'done'|'error', 'error': str|None}
+    app.state.pp_runs_lock = threading.Lock()
     app.mount('/static', StaticFiles(directory=_STATIC_DIR), name='static')
     templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
@@ -74,7 +79,8 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
 
     def render_dataset_builder(request: Request, db: DBSession, *, oob: bool) -> HTMLResponse:
         pending_scenes = queries.scenes_by_ids(db, app.state.pending_dataset_scene_ids)
-        return render(request, '_dataset_builder.html', pending_scenes=pending_scenes, oob=oob)
+        all_tasks = queries.list_task_options(db)
+        return render(request, '_dataset_builder.html', pending_scenes=pending_scenes, all_tasks=all_tasks, oob=oob)
 
     def _scene_detail_with_run_state(db: DBSession, scene_id: str) -> dict:
         """scene_detail plus this process's live pipeline-run status, if any."""
@@ -89,11 +95,13 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
         with DBSession(engine) as db:
             tasks = queries.list_tasks(db)
             pending_scenes = queries.scenes_by_ids(db, app.state.pending_dataset_scene_ids)
+            all_tasks = queries.list_task_options(db)
         return render(
             request,
             'index.html',
             tasks=tasks,
             pending_scenes=pending_scenes,
+            all_tasks=all_tasks,
             can_rescan=recordings_dir is not None,
             can_build_dataset=recordings_dir is not None,
         )
@@ -185,7 +193,7 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
         return RedirectResponse('/', status_code=303)
 
     @app.post('/datasets')
-    def post_build_dataset(name: str = Form(...), scene_ids: list[str] = Form([])):
+    def post_build_dataset(name: str = Form(...), task_id: str = Form(''), scene_ids: list[str] = Form([])):
         if recordings_dir is None:
             return PlainTextResponse('Dataset export requires a recordings directory.', status_code=400)
 
@@ -194,7 +202,7 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
                 build_dataset(
                     db,
                     name=name,
-                    task_id=None,
+                    task_id=int(task_id) if task_id else None,
                     scene_ids=scene_ids,
                     output_dir=default_datasets_dir(recordings_dir),
                 )
@@ -261,9 +269,13 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
                 return PlainTextResponse('No such scene.', status_code=404)
             scene_dir = pathlib.Path(scene.dir)
 
-        run_state = app.state.pp_runs.get(scene_id)
-        if run_state is None or run_state['status'] != 'running':
-            app.state.pp_runs[scene_id] = {'status': 'running', 'error': None}
+        with app.state.pp_runs_lock:
+            run_state = app.state.pp_runs.get(scene_id)
+            already_running = run_state is not None and run_state['status'] == 'running'
+            if not already_running:
+                app.state.pp_runs[scene_id] = {'status': 'running', 'error': None}
+
+        if not already_running:
 
             def _run() -> None:
                 # Broad except is intentional: this runs unattended on a background
@@ -273,9 +285,11 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
                 # "running" forever with no way to observe what happened.
                 try:
                     pp_status.run_full_pipeline(scene_dir)
-                    app.state.pp_runs[scene_id] = {'status': 'done', 'error': None}
+                    with app.state.pp_runs_lock:
+                        app.state.pp_runs[scene_id] = {'status': 'done', 'error': None}
                 except Exception as exc:
-                    app.state.pp_runs[scene_id] = {'status': 'error', 'error': str(exc)}
+                    with app.state.pp_runs_lock:
+                        app.state.pp_runs[scene_id] = {'status': 'error', 'error': str(exc)}
 
             threading.Thread(target=_run, daemon=True).start()
 

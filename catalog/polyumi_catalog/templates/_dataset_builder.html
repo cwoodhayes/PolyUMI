@@ -20,6 +20,12 @@
   {% endif %}
   <form class="new-dataset-form" method="post" action="/datasets">
     <input type="text" name="name" placeholder="Dataset name…" required />
+    <select name="task_id">
+      <option value="">(unassigned)</option>
+      {% for t in all_tasks %}
+      <option value="{{ t.id }}">{{ t.name }}</option>
+      {% endfor %}
+    </select>
     {% for s in pending_scenes %}
     <input type="hidden" name="scene_ids" value="{{ s.scene_id }}" />
     {% endfor %}

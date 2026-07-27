@@ -52,6 +52,30 @@ def test_scene_pp_status_reflects_completed_steps(tmp_path: pathlib.Path):
     assert complete_numbers == {1, 2}
 
 
+def test_scene_pp_status_does_not_call_inspect_pzarr(tmp_path: pathlib.Path, monkeypatch):
+    """
+    Regression test: scene_pp_status must not go through inspect_pzarr.
+
+    inspect_pzarr reads every episode's full per-sample timestamp arrays to compute
+    stream shapes/rates that scene_pp_status doesn't use; since this is called on every
+    scene selection, it needs to stay a cheap, attrs-only read.
+    """
+
+    def _boom(*args, **kwargs):
+        raise AssertionError('scene_pp_status must not call inspect_pzarr')
+
+    monkeypatch.setattr('polyumi_ingest.pzarr.inspect_pzarr', _boom)
+
+    scene_dir = tmp_path / 'scene_g'
+    scene_dir.mkdir()
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 1
+    root.attrs['preprocessing_steps'] = [1]
+
+    status = pp_status.scene_pp_status(scene_dir)
+    assert status['n_complete'] == 1
+
+
 def test_missing_gopro_mp4s_lists_only_sessions_without_it(tmp_path: pathlib.Path):
     """missing_gopro_mp4s reports session dirs lacking gopro.mp4, and only those."""
     scene_dir = tmp_path / 'scene_c'
