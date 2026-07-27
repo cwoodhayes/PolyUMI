@@ -208,6 +208,25 @@ def test_scene_detail_flags_task_conflict(tmp_path: pathlib.Path):
     assert detail['conflicts'][0]['task_meta'] == 'wipe_table'
 
 
+def test_task_detail_includes_episode_count(tmp_path: pathlib.Path):
+    """task_detail reports the EPISODE-session count across a task's scenes, for real and pseudo rows alike."""
+    engine = _populated_engine(tmp_path)
+    with DBSession(engine) as db:
+        tasks = {t['name']: t for t in queries.list_tasks(db) if not t['pseudo']}
+        task_id = tasks['fold_towel']['id']
+
+        real = queries.task_detail(db, str(task_id))
+        all_scenes = queries.task_detail(db, queries.FILTER_ALL)
+        unassigned = queries.task_detail(db, queries.FILTER_UNASSIGNED)
+
+    # scene-1 (fold_towel) has 1 EPISODE session (session_2; session_1 is MAPPING).
+    assert real['episode_count'] == 1
+    # scene-2 (unassigned) has 1 EPISODE session.
+    assert unassigned['episode_count'] == 1
+    # both scenes' EPISODE sessions combined.
+    assert all_scenes['episode_count'] == 2
+
+
 def test_detail_helpers_return_empty_for_missing_ids(tmp_path: pathlib.Path):
     """Unknown ids return the {'kind': 'empty'} sentinel rather than raising."""
     engine = get_engine(tmp_path / 'catalog.db')

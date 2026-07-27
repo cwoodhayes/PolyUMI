@@ -68,6 +68,12 @@ def test_select_task_returns_scenes_and_oob_detail(tmp_path: pathlib.Path):
     assert 'hx-swap-oob' in resp.text  # datasets + detail come back OOB
 
 
+def test_select_task_detail_includes_episode_count(tmp_path: pathlib.Path):
+    """The task detail panel shows an episode count alongside the scene count."""
+    resp = _client(tmp_path).get('/select/task/all')
+    assert '<dt>Episodes</dt><dd>1</dd>' in resp.text
+
+
 def test_select_scene_returns_sessions(tmp_path: pathlib.Path):
     """Selecting a scene returns its session list."""
     client = _client(tmp_path)

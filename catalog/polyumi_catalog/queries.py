@@ -41,6 +41,18 @@ def _episode_counts_by_scene(db: DBSession) -> dict[str, int]:
     return {scene_id: n for scene_id, n in rows}
 
 
+def _episode_counts_by_task(db: DBSession) -> dict[int | None, int]:
+    """Map each task_id (None = unassigned) to its EPISODE-session count across all its scenes."""
+    rows = db.exec(
+        select(Scene.task_id, func.count())
+        .select_from(Session)
+        .join(Scene, Session.scene_id == Scene.scene_id)
+        .where(Session.session_type == 'EPISODE')
+        .group_by(Scene.task_id)
+    ).all()
+    return {task_id: n for task_id, n in rows}
+
+
 def _session_counts_by_scene(db: DBSession) -> dict[str, int]:
     """Map each scene_id to its total session count."""
     rows = db.exec(select(Session.scene_id, func.count()).group_by(Session.scene_id)).all()
@@ -189,13 +201,21 @@ def task_detail(db: DBSession, task_key: str) -> dict:
     """Return the detail-panel view model for a Tasks-column selection."""
     if task_key == FILTER_ALL:
         total = sum(_scene_counts_by_task(db).values())
-        return {'kind': 'task', 'name': 'All scenes', 'pseudo': True, 'scene_count': total}
+        total_episodes = sum(_episode_counts_by_task(db).values())
+        return {
+            'kind': 'task',
+            'name': 'All scenes',
+            'pseudo': True,
+            'scene_count': total,
+            'episode_count': total_episodes,
+        }
     if task_key == FILTER_UNASSIGNED:
         return {
             'kind': 'task',
             'name': 'Unassigned',
             'pseudo': True,
             'scene_count': _scene_counts_by_task(db).get(None, 0),
+            'episode_count': _episode_counts_by_task(db).get(None, 0),
         }
     task = db.get(Task, int(task_key))
     if task is None:
@@ -207,6 +227,7 @@ def task_detail(db: DBSession, task_key: str) -> dict:
         'description': task.description,
         'pseudo': False,
         'scene_count': _scene_counts_by_task(db).get(task.id, 0),
+        'episode_count': _episode_counts_by_task(db).get(task.id, 0),
         'created_at': task.created_at,
     }
 
