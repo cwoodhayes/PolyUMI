@@ -65,6 +65,7 @@ from numcodecs import Blosc
 from scipy.spatial.transform import Rotation
 
 from polyumi_ingest.camera_preproc import CAMERA0_RGB_RESOLUTION, resize_camera0_rgb
+from polyumi_ingest.manifests import SceneManifest
 from polyumi_ingest.pzarr.scene_files import SceneFiles
 from polyumi_ingest.pzarr.store import arr, grp
 from polyumi_ingest.video_helpers import GoproMp4Frames, open_gopro_frames
@@ -238,6 +239,13 @@ def _append_scene_episodes(scene_path: pathlib.Path, data_grp: zarr.Group, episo
     # apart in logs/errors (otherwise every scene logs as e.g. 'scene.zarr/episode_0').
     scene_label = zarr_path.parent.name
 
+    # scene.json (not the pzarr) is the canonical home of the unusable-episode marker set from
+    # the catalog UI, so it's checked here rather than baked into pzarr at build time.
+    # zarr_path.parent is the scene root regardless of whether scene_path itself was given as
+    # the scene root or as a direct .zarr path (see resolve_zarr_path).
+    manifest = SceneManifest.from_scene_dir(zarr_path.parent)
+    unusable_dirs = set(manifest.unusable_episodes) if manifest else set()
+
     root = zarr.open_group(str(zarr_path), mode='r')
     n_episodes = int(root.attrs.get('n_episodes', 0))
     for i in range(n_episodes):
@@ -248,6 +256,9 @@ def _append_scene_episodes(scene_path: pathlib.Path, data_grp: zarr.Group, episo
         ep = zarr.open_group(str(zarr_path / ep_key), mode='r')
         if ep.attrs.get('session_type') == 'MAPPING':
             log.info(f'  {scene_label}/{ep_key}: MAPPING session, skipping.')
+            continue
+        if ep.attrs.get('session_dir') in unusable_dirs:
+            log.info(f'  {scene_label}/{ep_key}: marked unusable, skipping.')
             continue
         total += _export_episode(ep, data_grp, f'{scene_label}/{ep_key}', zarr_path)
         episode_ends.append(total)
@@ -261,7 +272,8 @@ def export_scene_to_dp(scene_path: pathlib.Path, output_path: pathlib.Path) -> i
     Poses come from ``eef/pose`` (preprocessing step 5), which has already resolved the
     optitrack-vs-slam source choice and put the trajectory on the hand frame.
 
-    Returns the number of episodes written. MAPPING sessions are skipped.
+    Returns the number of episodes written. MAPPING sessions and episodes marked unusable
+    in ``scene.json`` are skipped.
     """
     return export_scenes_to_dp([scene_path], output_path)
 
@@ -272,8 +284,9 @@ def export_scenes_to_dp(scene_paths: list[pathlib.Path], output_path: pathlib.Pa
 
     Each scene's episodes are appended in the given order, with ``episode_ends`` accumulating
     across the whole list — a multi-scene dataset is indistinguishable from a single big scene
-    to ``UmiDataset``, which only ever sees one buffer. MAPPING sessions are skipped scene by
-    scene, same as the single-scene exporter. Poses come from ``eef/pose`` (preprocessing step 5).
+    to ``UmiDataset``, which only ever sees one buffer. MAPPING sessions and episodes marked
+    unusable in ``scene.json`` are skipped scene by scene, same as the single-scene exporter.
+    Poses come from ``eef/pose`` (preprocessing step 5).
 
     Returns the total number of episodes written across all scenes.
     """

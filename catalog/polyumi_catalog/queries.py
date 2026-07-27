@@ -167,6 +167,7 @@ def list_sessions(db: DBSession, scene_id: str) -> list[dict]:
                 'video_dropped_frames': s.video_dropped_frames,
                 'task_meta': s.task_meta,
                 'created_at': s.created_at,
+                'unusable': s.unusable,
                 'slam_tracking_ratio': quality['tracking_ratio'] if quality else None,
                 'slam_low_quality': quality['low_quality'] if quality else False,
             }
@@ -291,6 +292,8 @@ def session_detail(db: DBSession, session_id: str) -> dict:
         'n_video_frames': s.n_video_frames,
         'video_dropped_frames': s.video_dropped_frames,
         'created_at': s.created_at,
+        'unusable': s.unusable,
+        'notes': s.notes,
         'pzarr_exists': pzarr_ok,
         'mcap_exists': mcap_path is not None,
         'slam': slam,

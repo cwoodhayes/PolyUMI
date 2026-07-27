@@ -29,3 +29,17 @@ document.body.addEventListener('keydown', (evt) => {
 document.body.addEventListener('htmx:responseError', (evt) => {
   alert(evt.detail.xhr.responseText || 'Request failed.');
 });
+
+// 'x' toggles the currently-open episode's usable/unusable status. Looked up by id at
+// keypress time (rather than bound once) since #detail-body — and the button inside it —
+// is replaced wholesale on every htmx swap. Ignored while typing in a form field so it
+// doesn't hijack the rename/assign/dataset-name inputs elsewhere on the page.
+document.body.addEventListener('keydown', (evt) => {
+  if (evt.key.toLowerCase() !== 'x' || evt.ctrlKey || evt.metaKey || evt.altKey) return;
+  const tag = evt.target.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  const btn = document.getElementById('unusable-toggle-btn');
+  if (!btn) return;
+  evt.preventDefault();
+  btn.click();
+});

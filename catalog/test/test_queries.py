@@ -8,6 +8,7 @@ import zarr
 from polyumi_catalog import queries
 from polyumi_catalog.db import get_engine
 from polyumi_catalog.manifests import SceneManifest
+from polyumi_catalog.models import Session
 from polyumi_catalog.sync import sync_recordings
 from polyumi_pi.files.metadata import SessionMetadata, SessionType
 from sqlmodel import Session as DBSession
@@ -99,6 +100,44 @@ def test_list_sessions_for_scene(tmp_path: pathlib.Path):
     assert {s['session_type'] for s in sessions} == {'MAPPING', 'EPISODE'}
     episode = next(s for s in sessions if s['session_type'] == 'EPISODE')
     assert episode['video_dropped_frames'] == 3
+
+
+def test_list_sessions_and_detail_include_unusable(tmp_path: pathlib.Path):
+    """Both list_sessions and session_detail expose the unusable flag once a session is marked."""
+    engine = _populated_engine(tmp_path)
+    with DBSession(engine) as db:
+        sessions = queries.list_sessions(db, 'scene-1')
+        episode = next(s for s in sessions if s['session_type'] == 'EPISODE')
+        assert episode['unusable'] is False
+        assert queries.session_detail(db, episode['session_id'])['unusable'] is False
+
+        row = db.get(Session, episode['session_id'])
+        row.unusable = True
+        db.add(row)
+        db.commit()
+
+    with DBSession(engine) as db:
+        sessions = queries.list_sessions(db, 'scene-1')
+        episode = next(s for s in sessions if s['session_type'] == 'EPISODE')
+        assert episode['unusable'] is True
+        assert queries.session_detail(db, episode['session_id'])['unusable'] is True
+
+
+def test_session_detail_includes_notes(tmp_path: pathlib.Path):
+    """session_detail exposes the session's notes, synced from its metadata.json."""
+    engine = _populated_engine(tmp_path)
+    with DBSession(engine) as db:
+        sessions = queries.list_sessions(db, 'scene-1')
+        episode_id = next(s['session_id'] for s in sessions if s['session_type'] == 'EPISODE')
+        assert queries.session_detail(db, episode_id)['notes'] is None
+
+        row = db.get(Session, episode_id)
+        row.notes = 'gripper slipped'
+        db.add(row)
+        db.commit()
+
+    with DBSession(engine) as db:
+        assert queries.session_detail(db, episode_id)['notes'] == 'gripper slipped'
 
 
 def test_list_sessions_includes_slam_quality(tmp_path: pathlib.Path):

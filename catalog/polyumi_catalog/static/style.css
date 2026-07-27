@@ -97,6 +97,10 @@ body {
   font-style: italic;
 }
 
+.item.item-unusable {
+  opacity: 0.45;
+}
+
 .item-name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -289,6 +293,19 @@ dd {
   display: flex;
   gap: 0.4rem;
   margin: 0.5rem 0;
+}
+
+.notes-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin: 0.5rem 0;
+}
+
+.notes-form textarea {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
 }
 
 .mcap-actions {

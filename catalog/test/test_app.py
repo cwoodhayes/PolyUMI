@@ -236,6 +236,28 @@ def test_post_rename_task_cascades_and_redirects(tmp_path: pathlib.Path):
     assert manifest.task == 'fold_towel_v2'
 
 
+def test_post_task_description_saves_and_shows_in_textarea(tmp_path: pathlib.Path):
+    """POST /tasks/{id}/description updates the task row and shows the new text on re-render."""
+    rec, engine = _seed(tmp_path)
+    with DBSession(engine) as db:
+        task_id = db.exec(select(Task).where(Task.name == 'fold_towel')).first().id
+
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    resp = client.post(f'/tasks/{task_id}/description', data={'description': 'Fold in half, then in half again.'})
+    assert resp.status_code == 200
+    assert 'Fold in half, then in half again.</textarea>' in resp.text
+
+    with DBSession(engine) as db:
+        assert db.get(Task, task_id).description == 'Fold in half, then in half again.'
+
+
+def test_post_task_description_unknown_task_returns_400(tmp_path: pathlib.Path):
+    """Saving a description for a nonexistent task is rejected, not a crash."""
+    rec, engine = _seed(tmp_path)
+    resp = TestClient(create_app(engine, recordings_dir=rec)).post('/tasks/999/description', data={'description': 'hi'})
+    assert resp.status_code == 400
+
+
 def _session_id(rec: pathlib.Path) -> str:
     from polyumi_pi.files.metadata import SessionMetadata as SM
 
@@ -304,6 +326,83 @@ def test_open_foxglove_without_mcap_returns_400(tmp_path: pathlib.Path):
     """Opening Foxglove before any MCAP has been exported is rejected, not silently a no-op."""
     rec, engine = _seed(tmp_path)
     resp = TestClient(create_app(engine, recordings_dir=rec)).post(f'/sessions/{_session_id(rec)}/open-foxglove')
+    assert resp.status_code == 400
+
+
+def test_post_scene_notes_saves_and_shows_in_textarea(tmp_path: pathlib.Path):
+    """POST /scenes/{id}/notes rewrites scene.json and shows the new text on re-render."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+
+    resp = client.post('/scenes/scene-1/notes', data={'notes': 'left-handed grasp'})
+    assert resp.status_code == 200
+    assert 'left-handed grasp</textarea>' in resp.text
+
+    manifest = SceneManifest.from_scene_dir(rec / 'scene_2026-07-26_10-00-00_abcd')
+    assert manifest.notes == 'left-handed grasp'
+
+
+def test_post_scene_notes_unknown_scene_returns_400(tmp_path: pathlib.Path):
+    """Saving notes for a nonexistent scene is rejected, not a crash."""
+    rec, engine = _seed(tmp_path)
+    resp = TestClient(create_app(engine, recordings_dir=rec)).post('/scenes/no-such-scene/notes', data={'notes': 'hi'})
+    assert resp.status_code == 400
+
+
+def test_post_session_notes_saves_and_shows_in_textarea(tmp_path: pathlib.Path):
+    """POST /sessions/{id}/notes rewrites metadata.json and shows the new text on re-render."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    session_id = _session_id(rec)
+
+    resp = client.post(f'/sessions/{session_id}/notes', data={'notes': 'gripper slipped'})
+    assert resp.status_code == 200
+    assert 'gripper slipped</textarea>' in resp.text
+
+    md_path = rec / 'scene_2026-07-26_10-00-00_abcd' / 'session_1' / 'metadata.json'
+    from polyumi_pi.files.metadata import SessionMetadata as SM
+
+    assert SM.from_file(md_path).notes == 'gripper slipped'
+
+
+def test_post_session_notes_unknown_session_returns_400(tmp_path: pathlib.Path):
+    """Saving notes for a nonexistent session is rejected, not a crash."""
+    rec, engine = _seed(tmp_path)
+    resp = TestClient(create_app(engine, recordings_dir=rec)).post(
+        '/sessions/does-not-exist/notes', data={'notes': 'hi'}
+    )
+    assert resp.status_code == 400
+
+
+def test_mark_unusable_then_usable_round_trip(tmp_path: pathlib.Path):
+    """Marking a session unusable then usable toggles the badge, scene.json, and the DB row."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    session_id = _session_id(rec)
+
+    resp = client.post(f'/sessions/{session_id}/mark-unusable')
+    assert resp.status_code == 200
+    assert 'Mark usable' in resp.text
+    assert 'unusable — excluded from exports' in resp.text
+    # OOB episodes-column fragment is included in the same response
+    assert 'item-unusable' in resp.text
+    with DBSession(engine) as db:
+        assert db.get(Scene, 'scene-1')  # sanity: scene still resolves
+    manifest = SceneManifest.from_scene_dir(rec / 'scene_2026-07-26_10-00-00_abcd')
+    assert manifest.unusable_episodes == ['session_1']
+
+    resp = client.post(f'/sessions/{session_id}/mark-usable')
+    assert resp.status_code == 200
+    assert 'Mark unusable' in resp.text
+    assert 'item-unusable' not in resp.text
+    manifest = SceneManifest.from_scene_dir(rec / 'scene_2026-07-26_10-00-00_abcd')
+    assert manifest.unusable_episodes == []
+
+
+def test_mark_unusable_unknown_session_returns_400(tmp_path: pathlib.Path):
+    """Marking a nonexistent session id is rejected, not a crash."""
+    rec, engine = _seed(tmp_path)
+    resp = TestClient(create_app(engine, recordings_dir=rec)).post('/sessions/does-not-exist/mark-unusable')
     assert resp.status_code == 400
 
 

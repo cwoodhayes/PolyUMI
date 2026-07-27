@@ -29,6 +29,25 @@ def test_scene_manifest_absent_returns_none(tmp_path: pathlib.Path):
     assert SceneManifest.from_scene_dir(scene_dir) is None
 
 
+def test_scene_manifest_unusable_episodes_round_trip(tmp_path: pathlib.Path):
+    """unusable_episodes (session dir names) survives a write/read round trip."""
+    scene_dir = tmp_path / 'scene_y'
+    scene_dir.mkdir()
+    manifest = SceneManifest(scene_id='abc-456', unusable_episodes=['session_1', 'session_3'])
+    manifest.write_to_scene_dir(scene_dir)
+
+    loaded = SceneManifest.from_scene_dir(scene_dir)
+    assert loaded.unusable_episodes == ['session_1', 'session_3']
+
+
+def test_scene_manifest_unusable_episodes_defaults_to_empty(tmp_path: pathlib.Path):
+    """A scene.json written before this field existed loads with an empty list, not a crash."""
+    path = tmp_path / 'scene.json'
+    path.write_text('{"scene_id": "abc-789", "file_version": 1}')
+    loaded = SceneManifest.from_file(path)
+    assert loaded.unusable_episodes == []
+
+
 def test_scene_manifest_rejects_unknown_version(tmp_path: pathlib.Path):
     """An unsupported file_version raises."""
     path = tmp_path / 'scene.json'
