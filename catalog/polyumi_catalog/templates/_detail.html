@@ -138,9 +138,11 @@
       </dl>
       {% if detail.session_type == 'EPISODE' %}
       <button
+        id="unusable-toggle-btn"
         hx-post="/sessions/{{ detail.session_id }}/{{ 'mark-usable' if detail.unusable else 'mark-unusable' }}"
         hx-target="#detail-body"
         hx-swap="outerHTML"
+        title="Shortcut: X"
       >
         {{ 'Mark usable' if detail.unusable else 'Mark unusable' }}
       </button>
