@@ -107,8 +107,9 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
 
     def _detail_with_episodes_oob(db: DBSession, session_id: str) -> HTMLResponse:
         """
-        Re-render the session detail pane plus an out-of-band update of its scene's Episodes
-        column, so a usable/unusable toggle grey-out is reflected immediately if that scene's
+        Re-render the session detail pane plus an out-of-band update of its scene's Episodes column.
+
+        This keeps a usable/unusable toggle's grey-out reflected immediately if that scene's
         episode list happens to be open (same "update a currently-visible widget" pattern as
         the dataset-draft builder — see the module docstring's Phase 3 paragraph).
         """
@@ -325,23 +326,21 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
             detail = queries.session_detail(db, session_id)
         return render(request, '_detail.html', detail=detail, oob=False)
 
-    @app.post('/sessions/{session_id}/mark-unusable', response_class=HTMLResponse)
-    def post_mark_unusable(session_id: str) -> HTMLResponse:
+    def _post_mark_usable(session_id: str, unusable: bool) -> HTMLResponse:
         with DBSession(engine) as db:
             try:
-                set_session_unusable(db, session_id, True)
+                set_session_unusable(db, session_id, unusable)
             except MutationError as err:
                 return PlainTextResponse(str(err), status_code=400)
             return _detail_with_episodes_oob(db, session_id)
 
+    @app.post('/sessions/{session_id}/mark-unusable', response_class=HTMLResponse)
+    def post_mark_unusable(session_id: str) -> HTMLResponse:
+        return _post_mark_usable(session_id, True)
+
     @app.post('/sessions/{session_id}/mark-usable', response_class=HTMLResponse)
     def post_mark_usable(session_id: str) -> HTMLResponse:
-        with DBSession(engine) as db:
-            try:
-                set_session_unusable(db, session_id, False)
-            except MutationError as err:
-                return PlainTextResponse(str(err), status_code=400)
-            return _detail_with_episodes_oob(db, session_id)
+        return _post_mark_usable(session_id, False)
 
     @app.post('/scenes/{scene_id}/run-pp', response_class=HTMLResponse)
     def post_run_pp(request: Request, scene_id: str) -> HTMLResponse:

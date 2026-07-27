@@ -252,6 +252,24 @@ def test_set_session_notes_rejects_unknown_session(tmp_path: pathlib.Path):
             set_session_notes(db, 'no-such-session', 'hello')
 
 
+def test_set_session_notes_rejects_missing_metadata_json(tmp_path: pathlib.Path):
+    """A synced session whose metadata.json has since vanished from disk raises MutationError, not FileNotFoundError."""
+    rec = tmp_path / 'recordings'
+    scene_dir = _make_scene(rec, 'scene_2026-07-27_14-00-00_yzst', scene_id='scene-13', task=None)
+    sd = scene_dir / 'session_1'
+
+    engine = get_engine(tmp_path / 'catalog.db')
+    sync_recordings(rec, engine)
+    with DBSession(engine) as db:
+        session_id = db.exec(select(Session).where(Session.scene_id == 'scene-13')).first().session_id
+
+    (sd / 'metadata.json').unlink()
+
+    with DBSession(engine) as db:
+        with pytest.raises(MutationError):
+            set_session_notes(db, session_id, 'hello')
+
+
 def test_rename_task_cascades_to_every_member_scene(tmp_path: pathlib.Path):
     """Renaming a task rewrites scene.json for every scene assigned to it, and only those."""
     rec = tmp_path / 'recordings'

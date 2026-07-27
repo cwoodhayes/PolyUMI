@@ -15,6 +15,7 @@ round-trips through _get_or_create_task.
 from __future__ import annotations
 
 import pathlib
+import threading
 
 from polyumi_pi.files.metadata import SessionMetadata
 from sqlmodel import Session as DBSession
@@ -23,17 +24,33 @@ from sqlmodel import select
 from polyumi_catalog.manifests import SceneManifest
 from polyumi_catalog.models import Scene, Session, Task
 
+# Every scene.json mutation is a read-modify-write of the same file, so two near-simultaneous
+# writes to the *same* scene (e.g. marking several episodes unusable back-to-back) could
+# otherwise interleave and clobber one another. One process-wide lock serializes them, same
+# "guard a check/read-then-write against a fast double" rationale as app.state.pp_runs_lock.
+_SCENE_JSON_LOCK = threading.Lock()
+
 
 class MutationError(ValueError):
     """A mutation was rejected due to invalid input (e.g. a duplicate task name)."""
 
 
+def _load_scene_manifest(scene: Scene) -> SceneManifest:
+    """Load ``scene``'s scene.json, or a fresh default manifest if it doesn't exist yet."""
+    return SceneManifest.from_scene_dir(pathlib.Path(scene.dir)) or SceneManifest(scene_id=scene.scene_id)
+
+
+def _clean_notes(notes: str | None) -> str | None:
+    """Strip ``notes``, collapsing a blank/whitespace-only value to ``None``."""
+    return notes.strip() or None if notes is not None else None
+
+
 def _write_scene_task(scene: Scene, task_name: str | None) -> None:
     """Rewrite ``scene.json`` for ``scene`` with a new task name, preserving its other fields."""
-    scene_dir = pathlib.Path(scene.dir)
-    manifest = SceneManifest.from_scene_dir(scene_dir) or SceneManifest(scene_id=scene.scene_id)
-    manifest.task = task_name
-    manifest.write_to_scene_dir(scene_dir)
+    with _SCENE_JSON_LOCK:
+        manifest = _load_scene_manifest(scene)
+        manifest.task = task_name
+        manifest.write_to_scene_dir(pathlib.Path(scene.dir))
 
 
 def create_task(db: DBSession, name: str, description: str | None = None) -> Task:
@@ -80,16 +97,24 @@ def rename_task(db: DBSession, task_id: int, new_name: str) -> Task:
 
 
 def _write_session_unusable(scene: Scene, session_dir_name: str, unusable: bool) -> None:
-    """Rewrite ``scene.json`` for ``scene``, adding/removing ``session_dir_name`` from the unusable set."""
-    scene_dir = pathlib.Path(scene.dir)
-    manifest = SceneManifest.from_scene_dir(scene_dir) or SceneManifest(scene_id=scene.scene_id)
-    unusable_dirs = set(manifest.unusable_episodes)
-    if unusable:
-        unusable_dirs.add(session_dir_name)
-    else:
-        unusable_dirs.discard(session_dir_name)
-    manifest.unusable_episodes = sorted(unusable_dirs)
-    manifest.write_to_scene_dir(scene_dir)
+    """
+    Rewrite ``scene.json`` for ``scene``, adding/removing ``session_dir_name`` from the unusable set.
+
+    Keyed by the session directory's basename rather than its session_id: session directories
+    are immutable once synced (see app.py's thumbnail-caching comment for the same invariant),
+    so the name is stable, and DP export (buffer.py) only has the directory name available on
+    the pzarr episode group, not the session_id.
+    """
+    with _SCENE_JSON_LOCK:
+        scene_dir = pathlib.Path(scene.dir)
+        manifest = _load_scene_manifest(scene)
+        unusable_dirs = set(manifest.unusable_episodes)
+        if unusable:
+            unusable_dirs.add(session_dir_name)
+        else:
+            unusable_dirs.discard(session_dir_name)
+        manifest.unusable_episodes = sorted(unusable_dirs)
+        manifest.write_to_scene_dir(scene_dir)
 
 
 def set_session_unusable(db: DBSession, session_id: str, unusable: bool) -> Session:
@@ -114,12 +139,12 @@ def set_scene_notes(db: DBSession, scene_id: str, notes: str | None) -> Scene:
     scene = db.get(Scene, scene_id)
     if scene is None:
         raise MutationError(f'No such scene: {scene_id}')
-    notes = notes.strip() or None if notes is not None else None
+    notes = _clean_notes(notes)
 
-    scene_dir = pathlib.Path(scene.dir)
-    manifest = SceneManifest.from_scene_dir(scene_dir) or SceneManifest(scene_id=scene.scene_id)
-    manifest.notes = notes
-    manifest.write_to_scene_dir(scene_dir)
+    with _SCENE_JSON_LOCK:
+        manifest = _load_scene_manifest(scene)
+        manifest.notes = notes
+        manifest.write_to_scene_dir(pathlib.Path(scene.dir))
 
     scene.notes = notes
     db.add(scene)
@@ -139,10 +164,13 @@ def set_session_notes(db: DBSession, session_id: str, notes: str | None) -> Sess
     session = db.get(Session, session_id)
     if session is None:
         raise MutationError(f'No such session: {session_id}')
-    notes = notes.strip() or None if notes is not None else None
+    notes = _clean_notes(notes)
 
     meta_path = pathlib.Path(session.dir) / 'metadata.json'
-    meta = SessionMetadata.from_file(meta_path)
+    try:
+        meta = SessionMetadata.from_file(meta_path)
+    except FileNotFoundError:
+        raise MutationError(f'metadata.json missing on disk for session: {session_id}') from None
     meta.notes = notes
     meta.to_file()
 
