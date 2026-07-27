@@ -2,6 +2,8 @@
   {% for t in tasks %}
   <div
     class="item{% if t.pseudo %} pseudo{% endif %}"
+    role="button"
+    tabindex="0"
     hx-get="/select/task/{{ t.key }}"
     hx-target="#col-scenes-body"
     hx-swap="outerHTML"

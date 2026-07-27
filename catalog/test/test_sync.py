@@ -124,6 +124,84 @@ def test_sync_reconciles_removed_sessions(tmp_path: pathlib.Path):
         assert len(db.exec(select(Session).where(Session.scene_id == 'scene-e')).all()) == 1
 
 
+def test_sync_preserves_session_row_when_metadata_fails_to_parse(tmp_path: pathlib.Path):
+    """A session row survives resync if its metadata.json merely fails to parse (not deleted)."""
+    rec = tmp_path / 'recordings'
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_yzab'
+    scene_dir.mkdir(parents=True)
+    # keep a second, healthy session in the scene so the scene's own identity (resolved from
+    # metas[0] when there's no scene.json) doesn't shift once session_2's metadata is corrupted.
+    _make_session(scene_dir, 'session_1', scene_id='scene-g', session_type=SessionType.EPISODE, task=None)
+    sd2 = _make_session(scene_dir, 'session_2', scene_id='scene-g', session_type=SessionType.EPISODE, task=None)
+
+    engine = _engine(tmp_path)
+    sync_recordings(rec, engine)
+    with DBSession(engine) as db:
+        rows = db.exec(select(Session).where(Session.scene_id == 'scene-g')).all()
+        assert len(rows) == 2
+        session2_id = next(r.session_id for r in rows if r.dir == str(sd2))
+
+    # corrupt session_2's metadata.json in place, then force a resync
+    (sd2 / 'metadata.json').write_text('not valid json')
+    stats = sync_recordings(rec, engine, force=True)
+
+    assert stats.sessions_removed == 0
+    with DBSession(engine) as db:
+        row = db.get(Session, session2_id)
+        assert row is not None
+        assert row.dir == str(sd2)
+
+
+def test_sync_retires_stale_scene_row_when_identity_recovers(tmp_path: pathlib.Path):
+    """
+    A scene resynced after unparseable metadata recovers doesn't leave a duplicate row.
+
+    Without scene.json, an all-sessions-unparseable scene falls back to the directory name
+    as its scene_id. Once metadata becomes parseable again, the real (metadata) scene_id
+    resolves differently — the old fallback-id row must be retired, not left behind
+    pointing at the same directory.
+    """
+    rec = tmp_path / 'recordings'
+    scene_dir = rec / 'scene_2026-07-26_16-00-00_yzcd'
+    scene_dir.mkdir(parents=True)
+    sd = _make_session(scene_dir, 'session_1', scene_id='scene-real-id', session_type=SessionType.EPISODE, task=None)
+
+    # break metadata.json before the very first sync, so scene_id falls back to the dirname
+    good_metadata = (sd / 'metadata.json').read_text()
+    (sd / 'metadata.json').write_text('not valid json')
+
+    engine = _engine(tmp_path)
+    sync_recordings(rec, engine)
+    with DBSession(engine) as db:
+        fallback_scene = db.get(Scene, scene_dir.name)
+        assert fallback_scene is not None
+
+    # metadata recovers; resync should resolve the real scene_id and drop the fallback row
+    (sd / 'metadata.json').write_text(good_metadata)
+    sync_recordings(rec, engine, force=True)
+
+    with DBSession(engine) as db:
+        rows = db.exec(select(Scene).where(Scene.dir == str(scene_dir))).all()
+        assert [s.scene_id for s in rows] == ['scene-real-id']
+
+
+def test_sync_normalizes_whitespace_only_task_from_scene_json(tmp_path: pathlib.Path):
+    """A scene.json task of only whitespace is treated as unassigned, not a blank Task row."""
+    rec = tmp_path / 'recordings'
+    scene_dir = rec / 'scene_2026-07-26_17-00-00_yzef'
+    scene_dir.mkdir(parents=True)
+    SceneManifest(scene_id='scene-h', task='   ').write_to_scene_dir(scene_dir)
+    _make_session(scene_dir, 'session_1', scene_id='scene-h', session_type=SessionType.EPISODE, task=None)
+
+    engine = _engine(tmp_path)
+    sync_recordings(rec, engine)
+
+    with DBSession(engine) as db:
+        scene = db.get(Scene, 'scene-h')
+        assert scene.task_id is None
+        assert db.exec(select(Task)).all() == []
+
+
 def test_sync_flags_archived_scene(tmp_path: pathlib.Path):
     """A scene with a *.zarr.zip and no working scene.zarr is marked archived."""
     rec = tmp_path / 'recordings'

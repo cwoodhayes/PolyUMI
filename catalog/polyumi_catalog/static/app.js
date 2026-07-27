@@ -13,6 +13,16 @@ document.body.addEventListener('click', (evt) => {
 // downstream state visually isn't needed since those columns are re-rendered
 // from scratch by the server on each request.
 
+// Items are role="button"/tabindex="0" divs (htmx binds its hx-get to native click
+// events), so Enter/Space need an explicit trigger for keyboard and screen-reader users.
+document.body.addEventListener('keydown', (evt) => {
+  if (evt.key !== 'Enter' && evt.key !== ' ') return;
+  const item = evt.target.closest('.item');
+  if (!item) return;
+  evt.preventDefault();
+  item.click();
+});
+
 // Mutation endpoints (e.g. MCAP export/Foxglove launch) return plain-text error
 // bodies on failure; htmx won't swap non-2xx responses in by default, so surface
 // them the simplest way available.

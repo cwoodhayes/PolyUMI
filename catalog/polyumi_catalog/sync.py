@@ -104,6 +104,7 @@ def _sync_scene(db: DBSession, scene_dir: pathlib.Path, now: datetime, force: bo
 
     # parse session metadata
     metas: list[tuple[pathlib.Path, SessionMetadata]] = []
+    parse_failed_dirs: set[str] = set()
     for sd in session_dirs:
         md_path = sd / 'metadata.json'
         if not md_path.is_file():
@@ -112,13 +113,23 @@ def _sync_scene(db: DBSession, scene_dir: pathlib.Path, now: datetime, force: bo
             metas.append((sd, SessionMetadata.from_file(md_path)))
         except Exception as err:
             log.error(f'Failed to parse {md_path}: {err}')
+            parse_failed_dirs.add(str(sd))
 
     # resolve scene identity + canonical task
     scene_id = manifest.scene_id if manifest else (metas[0][1].scene_id if metas else scene_dir.name)
-    task_name = manifest.task if manifest else None
+    task_name = None
+    if manifest and manifest.task:
+        task_name = manifest.task.strip() or None
     task_id = _get_or_create_task(db, task_name, stats).id if task_name else None
     created_ats = [m.created_at for _, m in metas if m.created_at is not None]
     scene_created = min(created_ats) if created_ats else None
+
+    # retire a stale row left behind if this scene's resolved identity has changed since
+    # the last sync (e.g. metadata previously failed to parse everywhere, so scene_id fell
+    # back to the directory name; now that it parses, the real scene_id resolves
+    # differently) — otherwise two rows would end up pointing at the same directory.
+    for stale in db.exec(select(Scene).where(Scene.dir == str(scene_dir), Scene.scene_id != scene_id)).all():
+        db.delete(stale)
 
     scene = db.get(Scene, scene_id) or Scene(scene_id=scene_id)
     scene.dir = str(scene_dir)
@@ -149,11 +160,14 @@ def _sync_scene(db: DBSession, scene_dir: pathlib.Path, now: datetime, force: bo
         if task_name and meta.task and meta.task != task_name:
             stats.conflicts.append(Conflict(meta.session_id, scene_id, task_name, meta.task))
 
-    # reconcile: drop session rows that no longer exist on disk
+    # reconcile: drop session rows whose directory is genuinely gone. A directory whose
+    # metadata.json merely failed to parse this round is left alone rather than evicted,
+    # since the underlying data hasn't actually been removed (see parse_failed_dirs above).
     for row in db.exec(select(Session).where(Session.scene_id == scene_id)).all():
-        if row.session_id not in seen:
-            db.delete(row)
-            stats.sessions_removed += 1
+        if row.session_id in seen or row.dir in parse_failed_dirs:
+            continue
+        db.delete(row)
+        stats.sessions_removed += 1
 
     stats.scenes_updated += 1
 

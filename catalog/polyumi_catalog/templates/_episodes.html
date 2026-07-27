@@ -5,6 +5,8 @@
   {% for s in sessions %}
   <div
     class="item"
+    role="button"
+    tabindex="0"
     hx-get="/select/session/{{ s.session_id }}"
     hx-target="#detail-body"
     hx-swap="outerHTML"

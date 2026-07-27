@@ -5,6 +5,8 @@
   {% for s in scenes %}
   <div
     class="item"
+    role="button"
+    tabindex="0"
     hx-get="/select/scene/{{ s.scene_id }}"
     hx-target="#col-episodes-body"
     hx-swap="outerHTML"
