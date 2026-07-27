@@ -40,9 +40,9 @@ def _load_scene_manifest(scene: Scene) -> SceneManifest:
     return SceneManifest.from_scene_dir(pathlib.Path(scene.dir)) or SceneManifest(scene_id=scene.scene_id)
 
 
-def _clean_notes(notes: str | None) -> str | None:
-    """Strip ``notes``, collapsing a blank/whitespace-only value to ``None``."""
-    return notes.strip() or None if notes is not None else None
+def _clean_text(text: str | None) -> str | None:
+    """Strip ``text``, collapsing a blank/whitespace-only value to ``None``."""
+    return text.strip() or None if text is not None else None
 
 
 def _write_scene_task(scene: Scene, task_name: str | None) -> None:
@@ -96,6 +96,23 @@ def rename_task(db: DBSession, task_id: int, new_name: str) -> Task:
     return task
 
 
+def set_task_description(db: DBSession, task_id: int, description: str | None) -> Task:
+    """
+    Set a task's description, writing only the DB row.
+
+    Unlike scene/session fields, tasks have no on-disk manifest of their own (see the module
+    docstring), so there's no file to rewrite here. A blank/whitespace value clears it.
+    """
+    task = db.get(Task, task_id)
+    if task is None:
+        raise MutationError(f'No such task: {task_id}')
+    task.description = _clean_text(description)
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task
+
+
 def _write_session_unusable(scene: Scene, session_dir_name: str, unusable: bool) -> None:
     """
     Rewrite ``scene.json`` for ``scene``, adding/removing ``session_dir_name`` from the unusable set.
@@ -139,7 +156,7 @@ def set_scene_notes(db: DBSession, scene_id: str, notes: str | None) -> Scene:
     scene = db.get(Scene, scene_id)
     if scene is None:
         raise MutationError(f'No such scene: {scene_id}')
-    notes = _clean_notes(notes)
+    notes = _clean_text(notes)
 
     with _SCENE_JSON_LOCK:
         manifest = _load_scene_manifest(scene)
@@ -164,7 +181,7 @@ def set_session_notes(db: DBSession, session_id: str, notes: str | None) -> Sess
     session = db.get(Session, session_id)
     if session is None:
         raise MutationError(f'No such session: {session_id}')
-    notes = _clean_notes(notes)
+    notes = _clean_text(notes)
 
     meta_path = pathlib.Path(session.dir) / 'metadata.json'
     try:

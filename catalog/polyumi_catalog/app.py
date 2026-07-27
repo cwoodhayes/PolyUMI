@@ -45,6 +45,11 @@ Phase 6 adds editable notes for both scenes and sessions: an HTMX form POST that
 the first Session field the catalog itself writes back to metadata.json rather than only
 ever reading (see the Session model + mutations module docstrings) — everything else there
 still mirrors what the Pi recorded.
+Phase 7 adds an editable task description, same in-place ``#detail-body`` swap as notes.
+Unlike task rename (Phase 2), a description edit doesn't affect the Tasks column or any
+other selection on the page, so it doesn't need the full-page reload rename uses — it's
+scoped to the detail pane like every Phase 6 field, just with no on-disk manifest to write
+(tasks have none; see the mutations module docstring).
 """
 
 from __future__ import annotations
@@ -72,6 +77,7 @@ from polyumi_catalog.mutations import (
     set_scene_notes,
     set_session_notes,
     set_session_unusable,
+    set_task_description,
 )
 from polyumi_catalog.sync import sync_datasets, sync_recordings
 
@@ -224,6 +230,16 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
             except MutationError as err:
                 return PlainTextResponse(str(err), status_code=400)
         return RedirectResponse('/', status_code=303)
+
+    @app.post('/tasks/{task_id}/description', response_class=HTMLResponse)
+    def post_task_description(request: Request, task_id: int, description: str = Form('')) -> HTMLResponse:
+        with DBSession(engine) as db:
+            try:
+                set_task_description(db, task_id, description)
+            except MutationError as err:
+                return PlainTextResponse(str(err), status_code=400)
+            detail = queries.task_detail(db, str(task_id))
+        return render(request, '_detail.html', detail=detail, oob=False)
 
     @app.post('/scenes/{scene_id}/task')
     def post_assign_scene_task(scene_id: str, task_id: str = Form('')):

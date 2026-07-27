@@ -8,12 +8,16 @@
   <p class="muted">Virtual grouping — not a real task.</p>
   {% else %}
   <dl>
-    <dt>Description</dt><dd>{{ detail.description or '—' }}</dd>
     <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
   </dl>
   <form class="rename-task-form" method="post" action="/tasks/{{ detail.id }}/rename">
     <input type="text" name="new_name" value="{{ detail.name }}" required />
     <button type="submit">Rename</button>
+  </form>
+  <form class="notes-form" hx-post="/tasks/{{ detail.id }}/description" hx-target="#detail-body" hx-swap="outerHTML">
+    <label for="task-description">Description</label>
+    <textarea id="task-description" name="description" rows="3" placeholder="Add description…">{{ detail.description or '' }}</textarea>
+    <button type="submit">Save description</button>
   </form>
   {% endif %}
   <dl>

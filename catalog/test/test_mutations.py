@@ -23,6 +23,7 @@ from polyumi_catalog.mutations import (
     set_scene_notes,
     set_session_notes,
     set_session_unusable,
+    set_task_description,
 )
 from polyumi_catalog.sync import sync_recordings
 from polyumi_pi.files.metadata import SessionMetadata, SessionType
@@ -305,3 +306,29 @@ def test_rename_task_rejects_name_collision(tmp_path: pathlib.Path):
         create_task(db, 'wipe_table')
         with pytest.raises(MutationError):
             rename_task(db, a.id, 'wipe_table')
+
+
+def test_set_task_description_writes_db_row(tmp_path: pathlib.Path):
+    """Setting a task's description updates the DB row (tasks have no on-disk manifest to write)."""
+    engine = get_engine(tmp_path / 'catalog.db')
+    with DBSession(engine) as db:
+        task = create_task(db, 'fold_towel')
+        set_task_description(db, task.id, 'Fold the towel in half, then in half again.')
+        assert db.get(Task, task.id).description == 'Fold the towel in half, then in half again.'
+
+
+def test_set_task_description_blank_clears(tmp_path: pathlib.Path):
+    """A blank/whitespace-only value clears the description rather than storing an empty string."""
+    engine = get_engine(tmp_path / 'catalog.db')
+    with DBSession(engine) as db:
+        task = create_task(db, 'fold_towel', description='old description')
+        set_task_description(db, task.id, '   ')
+        assert db.get(Task, task.id).description is None
+
+
+def test_set_task_description_rejects_unknown_task(tmp_path: pathlib.Path):
+    """An unknown task_id raises MutationError instead of a crash."""
+    engine = get_engine(tmp_path / 'catalog.db')
+    with DBSession(engine) as db:
+        with pytest.raises(MutationError):
+            set_task_description(db, 999, 'hello')

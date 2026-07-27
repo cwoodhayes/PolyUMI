@@ -236,6 +236,28 @@ def test_post_rename_task_cascades_and_redirects(tmp_path: pathlib.Path):
     assert manifest.task == 'fold_towel_v2'
 
 
+def test_post_task_description_saves_and_shows_in_textarea(tmp_path: pathlib.Path):
+    """POST /tasks/{id}/description updates the task row and shows the new text on re-render."""
+    rec, engine = _seed(tmp_path)
+    with DBSession(engine) as db:
+        task_id = db.exec(select(Task).where(Task.name == 'fold_towel')).first().id
+
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    resp = client.post(f'/tasks/{task_id}/description', data={'description': 'Fold in half, then in half again.'})
+    assert resp.status_code == 200
+    assert 'Fold in half, then in half again.</textarea>' in resp.text
+
+    with DBSession(engine) as db:
+        assert db.get(Task, task_id).description == 'Fold in half, then in half again.'
+
+
+def test_post_task_description_unknown_task_returns_400(tmp_path: pathlib.Path):
+    """Saving a description for a nonexistent task is rejected, not a crash."""
+    rec, engine = _seed(tmp_path)
+    resp = TestClient(create_app(engine, recordings_dir=rec)).post('/tasks/999/description', data={'description': 'hi'})
+    assert resp.status_code == 400
+
+
 def _session_id(rec: pathlib.Path) -> str:
     from polyumi_pi.files.metadata import SessionMetadata as SM
 
