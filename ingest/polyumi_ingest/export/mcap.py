@@ -797,6 +797,13 @@ def export_episode_to_mcap(
                 _write_optitrack_poses(
                     writer, ch['/optitrack/pose'], ch['/optitrack/pose_raw'], ot_poses, ot_ts, gripper_calib
                 )
+            elif has_slam:
+                # No optitrack for this episode (e.g. no mocap for this session), so there's
+                # no world -> optitrack -> slam chain to anchor 'slam' to 'world'. Publish an
+                # identity world -> slam transform directly so the same Foxglove layout (built
+                # around a fixed 'world' root) works unchanged whether or not optitrack is present.
+                log.info('  no optitrack: publishing identity world -> slam transform')
+                _write_static_transform(writer, ch['/tf_static'], t0, parent='world', child='slam')
 
             log.info('  finger frames...')
             _write_video(

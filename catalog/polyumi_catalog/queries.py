@@ -14,7 +14,7 @@ from sqlalchemy import func
 from sqlmodel import Session as DBSession
 from sqlmodel import select
 
-from polyumi_catalog import episode_quality, mcap_tools, pp_status, pzarr_inspect
+from polyumi_catalog import episode_quality, mcap_tools, pp_status, pzarr_inspect, thumbnails
 from polyumi_catalog.models import Dataset, DatasetMember, Scene, Session, Task
 
 # Sentinel task filters used by the UI's pseudo-rows in the Tasks column.
@@ -295,6 +295,8 @@ def session_detail(db: DBSession, session_id: str) -> dict:
         'mcap_exists': mcap_path is not None,
         'slam': slam,
         'pzarr_streams': pzarr_streams,
+        # read straight from the gopro.mp4 sidecar, independent of pzarr build state
+        'gopro_fps': thumbnails.gopro_fps(pathlib.Path(s.dir)),
     }
 
 

@@ -138,6 +138,25 @@ def test_session_detail_includes_slam_quality_when_available(tmp_path: pathlib.P
     assert detail['slam']['tracking_ratio'] == 0.9
 
 
+def test_session_detail_includes_gopro_fps(tmp_path: pathlib.Path, monkeypatch):
+    """
+    session_detail exposes gopro_fps regardless of pzarr build state.
+
+    Unlike slam/pzarr_streams, this reads gopro.mp4 directly (via thumbnails.gopro_fps),
+    so it should be available even before any pzarr has been built for the scene.
+    """
+    monkeypatch.setattr('polyumi_catalog.thumbnails.gopro_fps', lambda session_dir: 59.94)
+
+    engine = _populated_engine(tmp_path)
+    with DBSession(engine) as db:
+        sessions = queries.list_sessions(db, 'scene-1')
+        session_id = next(s['session_id'] for s in sessions if s['session_type'] == 'EPISODE')
+        detail = queries.session_detail(db, session_id)
+
+    assert detail['pzarr_exists'] is False  # no pzarr built yet
+    assert detail['gopro_fps'] == 59.94
+
+
 def test_session_detail_includes_pzarr_streams_when_available(tmp_path: pathlib.Path):
     """The session detail panel exposes a stream shape/rate table once pzarr exists."""
     import numpy as np

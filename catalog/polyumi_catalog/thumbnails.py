@@ -1,11 +1,11 @@
 """
-On-demand GoPro frame thumbnails for the Episodes list + session detail pane (Phase 4).
+On-demand GoPro video info (thumbnails, fps) for the Episodes list + session detail pane.
 
-Decodes a single representative frame directly from a session's ``gopro.mp4``
-sidecar via OpenCV — independent of pzarr, so a thumbnail is available for any
-synced session regardless of preprocessing stage. Each call opens its own
-``cv2.VideoCapture`` and releases it before returning, so concurrent requests
-(FastAPI runs sync routes in a threadpool) are safe.
+Reads directly from a session's ``gopro.mp4`` sidecar via OpenCV — independent of pzarr
+(the frames array itself isn't stored there; see ``polyumi_ingest.pzarr.store``), so this
+works for any synced session regardless of preprocessing stage. Each call opens its own
+``cv2.VideoCapture`` and releases it before returning, so concurrent requests (FastAPI runs
+sync routes in a threadpool) are safe.
 """
 
 from __future__ import annotations
@@ -58,3 +58,24 @@ def session_thumbnail_jpeg(session_dir: pathlib.Path) -> bytes | None:
     if not ok:
         return None
     return buf.tobytes()
+
+
+def gopro_fps(session_dir: pathlib.Path) -> float | None:
+    """
+    Return ``session_dir/gopro.mp4``'s native frame rate (from the file's own header), or ``None``.
+
+    ``None`` covers "no gopro.mp4", "file won't open", and "fps header missing/invalid" alike —
+    same "collapse every failure mode to unavailable" approach as ``session_thumbnail_jpeg``.
+    """
+    mp4_path = session_dir / 'gopro.mp4'
+    if not mp4_path.is_file():
+        return None
+
+    cap = cv2.VideoCapture(str(mp4_path))
+    try:
+        if not cap.isOpened():
+            return None
+        fps = float(cap.get(cv2.CAP_PROP_FPS))
+    finally:
+        cap.release()
+    return fps if fps > 0 else None

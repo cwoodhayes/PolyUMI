@@ -84,3 +84,25 @@ def test_session_thumbnail_jpeg_returns_none_for_corrupt_file(tmp_path: pathlib.
     sd.mkdir()
     (sd / 'gopro.mp4').write_bytes(b'not a real video file')
     assert thumbnails.session_thumbnail_jpeg(sd) is None
+
+
+def test_gopro_fps_returns_none_without_gopro_mp4(tmp_path: pathlib.Path):
+    """A session directory with no gopro.mp4 has no fps, not an error."""
+    sd = tmp_path / 'session_1'
+    sd.mkdir()
+    assert thumbnails.gopro_fps(sd) is None
+
+
+def test_gopro_fps_reads_native_rate(session_dir: pathlib.Path):
+    """A readable gopro.mp4 reports the fps it was encoded at (_write_test_mp4 uses 30.0)."""
+    fps = thumbnails.gopro_fps(session_dir)
+    assert fps is not None
+    assert fps == pytest.approx(30.0, abs=0.5)
+
+
+def test_gopro_fps_returns_none_for_corrupt_file(tmp_path: pathlib.Path):
+    """A gopro.mp4 that isn't actually a video is treated as 'fps unavailable', not a crash."""
+    sd = tmp_path / 'session_bad'
+    sd.mkdir()
+    (sd / 'gopro.mp4').write_bytes(b'not a real video file')
+    assert thumbnails.gopro_fps(sd) is None
