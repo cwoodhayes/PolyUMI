@@ -684,6 +684,37 @@ def export_dp(
     log.info(f'Exported {n} episode(s) → {output_path}')
 
 
+@app.command(name='export-dataset')
+def export_dataset(
+    scene_paths: list[pathlib.Path] = typer.Argument(
+        ...,
+        help='Scene directories (each containing scene.zarr) to combine into one dataset.',
+    ),
+    output_path: pathlib.Path = typer.Option(
+        ...,
+        '--output',
+        '-o',
+        help='Output UMI ReplayBuffer path (a .zarr.zip file).',
+    ),
+):
+    """
+    Export EPISODE sessions from multiple pzarr scenes into a single UMI ReplayBuffer.
+
+    Scenes are concatenated in the order given; episode_ends accumulates across all of them,
+    so the result is indistinguishable from a single big scene to UmiDataset. Each scene needs
+    preprocessing step 5 (eef-pose) run first, same as `export-dp`.
+    """
+    from polyumi_ingest.export.dp import export_scenes_to_dp
+
+    try:
+        n = export_scenes_to_dp(scene_paths, output_path)
+    except (FileNotFoundError, ValueError, RuntimeError) as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+
+    log.info(f'Exported {n} episode(s) from {len(scene_paths)} scene(s) → {output_path}')
+
+
 def _step_summary(step_cls: type) -> str:
     """First line of a step class's docstring, with RST inline markup flattened for a terminal."""
     doc = inspect.getdoc(step_cls)

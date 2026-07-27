@@ -17,7 +17,7 @@ import pytest
 import zarr
 from scipy.spatial.transform import Rotation
 
-from polyumi_ingest.export.dp import export_scene_to_dp
+from polyumi_ingest.export.dp import export_scene_to_dp, export_scenes_to_dp
 
 RES = 224
 RATE = 59.94
@@ -32,6 +32,7 @@ def _write_gopro_mp4(path: pathlib.Path, n: int, h: int = 240, w: int = 320) -> 
     for i in range(n):
         writer.write(np.full((h, w, 3), i % 256, dtype=np.uint8))
     writer.release()
+
 
 EXPECTED_KEYS = {
     'camera0_rgb': ((RES, RES, 3), np.uint8),
@@ -209,3 +210,96 @@ def test_output_is_a_valid_zip(tmp_path: pathlib.Path) -> None:
     out = tmp_path / 'buf.zarr.zip'
     export_scene_to_dp(scene, out)
     assert zipfile.is_zipfile(out)
+
+
+def test_export_scene_to_dp_is_the_single_scene_case(tmp_path: pathlib.Path) -> None:
+    """export_scene_to_dp is just export_scenes_to_dp with a one-element list."""
+    scene = _build_scene(tmp_path, n=60)
+    out_single = tmp_path / 'single.zarr.zip'
+    out_multi = tmp_path / 'multi.zarr.zip'
+
+    n1 = export_scene_to_dp(scene, out_single)
+    n2 = export_scenes_to_dp([scene], out_multi)
+
+    assert n1 == n2 == 1
+    ends_single = _open_zip(out_single)['meta/episode_ends'][:].tolist()
+    ends_multi = _open_zip(out_multi)['meta/episode_ends'][:].tolist()
+    assert ends_single == ends_multi
+
+
+def test_export_scenes_to_dp_concatenates_episode_ends_across_scenes(tmp_path: pathlib.Path) -> None:
+    """Two scenes' episodes land in one buffer, with episode_ends accumulating across both."""
+    scene_a = _build_scene(tmp_path / 'a', n=50)
+    scene_b = _build_scene(tmp_path / 'b', n=70)
+    out = tmp_path / 'combined.zarr.zip'
+
+    n_eps = export_scenes_to_dp([scene_a, scene_b], out)
+
+    assert n_eps == 2
+    g = _open_zip(out)
+    ends = g['meta/episode_ends'][:].tolist()
+    assert ends == [50, 120]
+    for key, (per_step_shape, dtype) in EXPECTED_KEYS.items():
+        a = g[f'data/{key}']
+        assert a.shape == (120,) + per_step_shape
+        assert a.dtype == dtype
+
+
+def test_export_scenes_to_dp_skips_mapping_per_scene(tmp_path: pathlib.Path) -> None:
+    """A MAPPING scene among the given scenes contributes nothing, but others still export."""
+    scene_a = _build_scene(tmp_path / 'a', n=40)
+    scene_mapping = _build_scene(tmp_path / 'b', n=30, session_type='MAPPING')
+    out = tmp_path / 'combined.zarr.zip'
+
+    n_eps = export_scenes_to_dp([scene_a, scene_mapping], out)
+
+    assert n_eps == 1
+    assert _open_zip(out)['meta/episode_ends'][:].tolist() == [40]
+
+
+def test_export_scenes_to_dp_raises_if_no_scenes_given() -> None:
+    """An empty scene list is rejected rather than silently producing an empty buffer."""
+    with pytest.raises(ValueError, match='No scenes'):
+        export_scenes_to_dp([], pathlib.Path('unused.zarr.zip'))
+
+
+def test_export_scenes_to_dp_raises_if_every_scene_is_mapping_only(tmp_path: pathlib.Path) -> None:
+    """All-MAPPING input across every scene still raises rather than writing an empty buffer."""
+    scene_a = _build_scene(tmp_path / 'a', session_type='MAPPING')
+    scene_b = _build_scene(tmp_path / 'b', session_type='MAPPING')
+    out = tmp_path / 'combined.zarr.zip'
+
+    with pytest.raises(RuntimeError, match='no EPISODE sessions'):
+        export_scenes_to_dp([scene_a, scene_b], out)
+
+
+def test_export_scenes_to_dp_raises_for_missing_scene(tmp_path: pathlib.Path) -> None:
+    """A scene path with no scene.zarr raises FileNotFoundError, not a partial export."""
+    scene_a = _build_scene(tmp_path / 'a')
+    missing = tmp_path / 'does-not-exist'
+    out = tmp_path / 'combined.zarr.zip'
+
+    with pytest.raises(FileNotFoundError):
+        export_scenes_to_dp([scene_a, missing], out)
+    assert not out.exists()
+
+
+def test_export_scenes_to_dp_error_identifies_the_failing_scene(tmp_path: pathlib.Path) -> None:
+    """
+    A failure in the second of several scenes names *that scene's own directory*, not 'scene.zarr'.
+
+    Every scene's zarr store is named identically ('scene.zarr') inside its own directory, so
+    labeling by that name alone would make every scene's episode_0 indistinguishable in a
+    multi-scene export's errors/logs. It must use the scene directory name instead.
+    """
+    scene_a = _build_scene(tmp_path / 'a')
+    scene_b = _build_scene(tmp_path / 'b')
+    root_b = zarr.open_group(str(scene_b), mode='a')
+    del root_b['episode_0']['eef']
+    out = tmp_path / 'combined.zarr.zip'
+
+    with pytest.raises(RuntimeError, match='step 5') as exc_info:
+        export_scenes_to_dp([scene_a, scene_b], out)
+
+    assert 'b/episode_0' in str(exc_info.value)
+    assert 'scene.zarr/episode_0' not in str(exc_info.value)

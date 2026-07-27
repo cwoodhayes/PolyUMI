@@ -7,9 +7,9 @@ import pathlib
 from datetime import datetime, timezone
 
 from polyumi_catalog.db import get_engine
-from polyumi_catalog.manifests import SceneManifest
-from polyumi_catalog.models import Scene, Session, Task
-from polyumi_catalog.sync import sync_recordings
+from polyumi_catalog.manifests import DatasetManifest, DatasetMemberSpec, SceneManifest
+from polyumi_catalog.models import Dataset, DatasetMember, Scene, Session, Task
+from polyumi_catalog.sync import sync_datasets, sync_recordings
 from polyumi_pi.files.metadata import SessionMetadata, SessionType
 from sqlmodel import Session as DBSession
 from sqlmodel import select
@@ -214,3 +214,136 @@ def test_sync_flags_archived_scene(tmp_path: pathlib.Path):
     sync_recordings(rec, engine)
     with DBSession(engine) as db:
         assert db.get(Scene, 'scene-f').archived is True
+
+
+def test_sync_datasets_populates_dataset_and_members(tmp_path: pathlib.Path):
+    """A dataset manifest on disk upserts a Dataset row plus one DatasetMember per member scene."""
+    datasets_dir = tmp_path / 'recordings' / 'datasets'
+    datasets_dir.mkdir(parents=True)
+    manifest = DatasetManifest(
+        name='fold_towel_v1',
+        task='fold_towel',
+        output='fold_towel_v1.zarr.zip',
+        n_episodes=7,
+        polyumi_version='deadbeef',
+        members=[
+            DatasetMemberSpec('scene-1', 'scene_a/', 'all'),
+            DatasetMemberSpec('scene-2', 'scene_b/', [0, 2]),
+        ],
+    )
+    manifest.to_file(datasets_dir / 'fold_towel_v1.dataset.json')
+
+    engine = _engine(tmp_path)
+    stats = sync_datasets(datasets_dir, engine)
+
+    assert stats.datasets_scanned == 1
+    assert stats.datasets_updated == 1
+    with DBSession(engine) as db:
+        dataset = db.exec(select(Dataset).where(Dataset.name == 'fold_towel_v1')).first()
+        assert dataset is not None
+        assert dataset.n_episodes == 7
+        assert dataset.polyumi_version == 'deadbeef'
+        task = db.get(Task, dataset.task_id)
+        assert task.name == 'fold_towel'
+
+        members = db.exec(select(DatasetMember).where(DatasetMember.dataset_id == dataset.id)).all()
+        assert {m.scene_id for m in members} == {'scene-1', 'scene-2'}
+        by_scene = {m.scene_id: m.episodes for m in members}
+        assert by_scene['scene-1'] == 'all'
+        assert by_scene['scene-2'] == '[0, 2]'
+
+
+def test_sync_datasets_survives_db_rebuild(tmp_path: pathlib.Path):
+    """Dropping the DB and re-running sync_datasets recovers the dataset from its manifest."""
+    datasets_dir = tmp_path / 'recordings' / 'datasets'
+    datasets_dir.mkdir(parents=True)
+    DatasetManifest(
+        name='wipe_table_v1',
+        members=[DatasetMemberSpec('scene-9', 'scene_z/', 'all')],
+    ).to_file(datasets_dir / 'wipe_table_v1.dataset.json')
+
+    engine = _engine(tmp_path)
+    sync_datasets(datasets_dir, engine)
+
+    rebuilt = get_engine(tmp_path / 'catalog2.db')
+    sync_datasets(datasets_dir, rebuilt)
+    with DBSession(rebuilt) as db:
+        assert db.exec(select(Dataset).where(Dataset.name == 'wipe_table_v1')).first() is not None
+
+
+def test_sync_datasets_reparses_manifest_every_call(tmp_path: pathlib.Path):
+    """Unlike scene sync, dataset sync has no mtime gating — an edited manifest is always picked up."""
+    datasets_dir = tmp_path / 'recordings' / 'datasets'
+    datasets_dir.mkdir(parents=True)
+    manifest_path = datasets_dir / 'v1.dataset.json'
+    DatasetManifest(name='v1', n_episodes=1, members=[DatasetMemberSpec('scene-1', 'a/', 'all')]).to_file(manifest_path)
+
+    engine = _engine(tmp_path)
+    sync_datasets(datasets_dir, engine)
+
+    DatasetManifest(name='v1', n_episodes=99, members=[DatasetMemberSpec('scene-1', 'a/', 'all')]).to_file(
+        manifest_path
+    )
+    sync_datasets(datasets_dir, engine)
+
+    with DBSession(engine) as db:
+        assert db.exec(select(Dataset).where(Dataset.name == 'v1')).first().n_episodes == 99
+
+
+def test_sync_datasets_skips_missing_directory(tmp_path: pathlib.Path):
+    """A nonexistent datasets directory is a no-op, not an error."""
+    engine = _engine(tmp_path)
+    stats = sync_datasets(tmp_path / 'no-such-dir', engine)
+    assert stats.datasets_scanned == 0
+
+
+def test_sync_datasets_counts_newly_created_tasks(tmp_path: pathlib.Path):
+    """A manifest referencing a brand-new task name is counted in stats.tasks_created."""
+    datasets_dir = tmp_path / 'recordings' / 'datasets'
+    datasets_dir.mkdir(parents=True)
+    DatasetManifest(
+        name='fold_towel_v1', task='fold_towel', members=[DatasetMemberSpec('scene-1', 'a/', 'all')]
+    ).to_file(datasets_dir / 'fold_towel_v1.dataset.json')
+
+    engine = _engine(tmp_path)
+    stats = sync_datasets(datasets_dir, engine)
+
+    assert stats.tasks_created == 1
+    with DBSession(engine) as db:
+        assert db.exec(select(Task).where(Task.name == 'fold_towel')).first() is not None
+
+
+def test_sync_datasets_normalizes_whitespace_only_task(tmp_path: pathlib.Path):
+    """A whitespace-only manifest task doesn't create a blank-named Task row."""
+    datasets_dir = tmp_path / 'recordings' / 'datasets'
+    datasets_dir.mkdir(parents=True)
+    DatasetManifest(name='v1', task='   ', members=[DatasetMemberSpec('scene-1', 'a/', 'all')]).to_file(
+        datasets_dir / 'v1.dataset.json'
+    )
+
+    engine = _engine(tmp_path)
+    stats = sync_datasets(datasets_dir, engine)
+
+    assert stats.tasks_created == 0
+    with DBSession(engine) as db:
+        dataset = db.exec(select(Dataset).where(Dataset.name == 'v1')).first()
+        assert dataset.task_id is None
+        assert db.exec(select(Task)).all() == []
+
+
+def test_sync_datasets_logs_and_skips_unparseable_manifest(tmp_path: pathlib.Path):
+    """A corrupt *.dataset.json is logged and skipped, not a crash, and doesn't block the rest."""
+    datasets_dir = tmp_path / 'recordings' / 'datasets'
+    datasets_dir.mkdir(parents=True)
+    (datasets_dir / 'broken.dataset.json').write_text('not valid json')
+    DatasetManifest(name='ok_one', members=[DatasetMemberSpec('scene-1', 'a/', 'all')]).to_file(
+        datasets_dir / 'ok_one.dataset.json'
+    )
+
+    engine = _engine(tmp_path)
+    stats = sync_datasets(datasets_dir, engine)
+
+    assert stats.manifests_failed == 1
+    assert stats.datasets_updated == 1
+    with DBSession(engine) as db:
+        assert db.exec(select(Dataset).where(Dataset.name == 'ok_one')).first() is not None

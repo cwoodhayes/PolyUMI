@@ -18,72 +18,176 @@
   {% endif %}
   <dl>
     <dt>Scenes</dt><dd>{{ detail.scene_count }}</dd>
+    <dt>Episodes</dt><dd>{{ detail.episode_count }}</dd>
   </dl>
 
   {% elif detail.kind == 'scene' %}
-  <h2>{{ detail.name }}</h2>
-  <dl>
-    <dt>Task</dt><dd>{{ detail.task_name or '(unassigned)' }}</dd>
-    <dt>Directory</dt><dd class="mono">{{ detail.dir }}</dd>
-    <dt>Notes</dt><dd>{{ detail.notes or '—' }}</dd>
-    <dt>Archived</dt><dd>{{ 'yes' if detail.archived else 'no' }}</dd>
-    <dt>Sessions</dt><dd>{{ detail.n_episodes }} episode / {{ detail.n_sessions }} total</dd>
-    <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
-    <dt>Last synced</dt><dd>{{ detail.synced_at or '—' }}</dd>
-  </dl>
-  <form class="assign-task-form" method="post" action="/scenes/{{ detail.scene_id }}/task">
-    <select name="task_id">
-      <option value=""{% if not detail.task_id %} selected{% endif %}>(unassigned)</option>
-      {% for t in all_tasks %}
-      <option value="{{ t.id }}"{% if detail.task_id == t.id %} selected{% endif %}>{{ t.name }}</option>
-      {% endfor %}
-    </select>
-    <button type="submit">Assign</button>
-  </form>
-  {% if detail.conflicts %}
-  <div class="conflict-box">
-    <strong>⚠ Task conflicts</strong>
-    <p class="muted">These sessions' own metadata.json task disagrees with the scene's canonical task.</p>
-    <ul>
-      {% for c in detail.conflicts %}
-      <li>{{ c.session_id[:8] }}… — recorded as <em>{{ c.task_meta }}</em></li>
-      {% endfor %}
-    </ul>
+  <div class="scene-detail-layout">
+    <div class="scene-detail-text">
+      <h2>{{ detail.name }}</h2>
+      <dl>
+        <dt>Task</dt><dd>{{ detail.task_name or '(unassigned)' }}</dd>
+        <dt>Directory</dt><dd class="mono">{{ detail.dir }}</dd>
+        <dt>Notes</dt><dd>{{ detail.notes or '—' }}</dd>
+        <dt>Archived</dt><dd>{{ 'yes' if detail.archived else 'no' }}</dd>
+        <dt>Sessions</dt><dd>{{ detail.n_episodes }} episode / {{ detail.n_sessions }} total</dd>
+        <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
+        <dt>Last synced</dt><dd>{{ detail.synced_at or '—' }}</dd>
+      </dl>
+      <form class="assign-task-form" method="post" action="/scenes/{{ detail.scene_id }}/task">
+        <select name="task_id">
+          <option value=""{% if not detail.task_id %} selected{% endif %}>(unassigned)</option>
+          {% for t in all_tasks %}
+          <option value="{{ t.id }}"{% if detail.task_id == t.id %} selected{% endif %}>{{ t.name }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit">Assign</button>
+      </form>
+      <button hx-post="/dataset-draft/add/{{ detail.scene_id }}" hx-swap="none">Add to dataset</button>
+      {% if detail.quality.n_episodes_with_slam %}
+      <h3>Episode quality</h3>
+      <dl>
+        <dt>Avg. SLAM tracking</dt>
+        <dd>{{ '%.1f%%' % (detail.quality.avg_tracking_ratio * 100) if detail.quality.avg_tracking_ratio is not none else '—' }}</dd>
+        <dt>Low-tracking episodes</dt>
+        <dd>{{ detail.quality.n_low_quality }} / {{ detail.quality.n_episodes_with_slam }}</dd>
+        <dt>Dropped video frames</dt>
+        <dd>{{ detail.total_dropped_video_frames }}</dd>
+      </dl>
+      {% endif %}
+      {% if detail.conflicts %}
+      <div class="conflict-box">
+        <strong>⚠ Task conflicts</strong>
+        <p class="muted">These sessions' own metadata.json task disagrees with the scene's canonical task.</p>
+        <ul>
+          {% for c in detail.conflicts %}
+          <li>{{ c.session_id[:8] }}… — recorded as <em>{{ c.task_meta }}</em></li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+    </div>
+    <div class="scene-detail-side">
+      <h3>Preprocessing pipeline</h3>
+      {% if not detail.pp_status.pzarr_exists %}
+      <p class="muted">No pzarr built yet — running the pipeline will build it first.</p>
+      {% endif %}
+      <dl>
+        <dt>Steps complete</dt><dd>{{ detail.pp_status.n_complete }} / {{ detail.pp_status.n_total }}</dd>
+      </dl>
+      <ul class="pp-steps-list">
+        {% for step in detail.pp_status.steps %}
+        <li class="{{ 'pp-step-done' if step.complete else 'pp-step-pending' }}">
+          {{ '✓' if step.complete else '○' }} {{ step.number }}. {{ step.name }}
+        </li>
+        {% endfor %}
+      </ul>
+      {% if detail.pp_running %}
+      <p
+        class="muted"
+        hx-get="/scenes/{{ detail.scene_id }}/pp-poll"
+        hx-trigger="load delay:3s"
+        hx-target="#detail-body"
+        hx-swap="outerHTML"
+      >
+        Running pipeline… (this can take a while — check the server terminal for progress; refreshing automatically)
+      </p>
+      {% else %}
+      {% set fully_processed = detail.pp_status.pzarr_exists and detail.pp_status.n_total > 0
+         and detail.pp_status.n_complete == detail.pp_status.n_total %}
+      <button
+        hx-post="/scenes/{{ detail.scene_id }}/run-pp"
+        hx-target="#detail-body"
+        hx-swap="outerHTML"
+        hx-disabled-elt="this"
+        {% if fully_processed %}
+        hx-confirm="This scene has already completed all {{ detail.pp_status.n_total }} preprocessing steps. Run the pipeline again anyway?"
+        {% endif %}
+      >
+        Run full pipeline
+      </button>
+      {% if detail.pp_error %}<p class="warn">Last run failed: {{ detail.pp_error }}</p>{% endif %}
+      {% endif %}
+    </div>
   </div>
-  {% endif %}
 
   {% elif detail.kind == 'session' %}
-  <h2>{{ detail.name }}</h2>
-  <dl>
-    <dt>Type</dt><dd>{{ detail.session_type }}</dd>
-    <dt>Directory</dt><dd class="mono">{{ detail.dir }}</dd>
-    <dt>Scene</dt><dd>{{ detail.scene_id }}</dd>
-    <dt>Robot</dt><dd>{{ detail.robot or '—' }}</dd>
-    <dt>Recorded task</dt><dd>{{ detail.task_meta or '—' }}</dd>
-    <dt>Duration</dt><dd>{{ '%.1f s' % detail.duration_s if detail.duration_s is not none else '—' }}</dd>
-    <dt>Video frames</dt><dd>
-      {{ detail.n_video_frames if detail.n_video_frames is not none else '—' }}
-      {% if detail.video_dropped_frames %}<span class="warn">({{ detail.video_dropped_frames }} dropped)</span>{% endif %}
-    </dd>
-    <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
-  </dl>
-  <div class="mcap-actions">
-    {% if detail.pzarr_exists %}
-    <button
-      hx-post="/sessions/{{ detail.session_id }}/export-mcap"
-      hx-target="#detail-body"
-      hx-swap="outerHTML"
-      hx-indicator="#mcap-export-spin"
-    >
-      {{ 'Re-export MCAP' if detail.mcap_exists else 'Export to MCAP' }}
-    </button>
-    <span id="mcap-export-spin" class="htmx-indicator">exporting…</span>
-    {% else %}
-    <p class="muted">Build pzarr first (<code>pingest pp</code>) to enable MCAP export.</p>
-    {% endif %}
-    {% if detail.mcap_exists %}
-    <button hx-post="/sessions/{{ detail.session_id }}/open-foxglove" hx-swap="none">Open in Foxglove</button>
-    {% endif %}
+  <div class="session-detail-layout">
+    <div class="session-detail-text">
+      <h2>{{ detail.name }}</h2>
+      <dl>
+        <dt>Type</dt><dd>{{ detail.session_type }}</dd>
+        <dt>Directory</dt><dd class="mono">{{ detail.dir }}</dd>
+        <dt>Scene</dt><dd>{{ detail.scene_id }}</dd>
+        <dt>Robot</dt><dd>{{ detail.robot or '—' }}</dd>
+        <dt>Recorded task</dt><dd>{{ detail.task_meta or '—' }}</dd>
+        <dt>Duration</dt><dd>{{ '%.1f s' % detail.duration_s if detail.duration_s is not none else '—' }}</dd>
+        <dt>Video frames</dt><dd>
+          {{ detail.n_video_frames if detail.n_video_frames is not none else '—' }}
+          {% if detail.video_dropped_frames %}<span class="warn">({{ detail.video_dropped_frames }} dropped)</span>{% endif %}
+        </dd>
+        <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
+      </dl>
+      {% if detail.slam %}
+      <h3>SLAM tracking quality</h3>
+      <dl>
+        <dt>Tracking ratio</dt>
+        <dd>
+          {{ '%.1f%%' % (detail.slam.tracking_ratio * 100) if detail.slam.tracking_ratio is not none else '—' }}
+          {% if detail.slam.low_quality %}<span class="badge warn">low</span>{% endif %}
+        </dd>
+        <dt>Frames lost</dt><dd>{{ detail.slam.n_frames_lost }} / {{ detail.slam.n_frames_total }}</dd>
+        <dt>Relocalizations</dt><dd>{{ detail.slam.n_relocalization_events }}</dd>
+      </dl>
+      {% elif detail.pzarr_exists %}
+      <p class="muted">No SLAM results for this session yet (run <code>pingest pp 2</code>).</p>
+      {% endif %}
+      {% if detail.pzarr_streams %}
+      <h3>pzarr streams (episode {{ detail.pzarr_streams.episode_index }})</h3>
+      <table class="stream-table">
+        <thead>
+          <tr><th>Array</th><th>Shape</th><th>Rate</th><th>Timestamps</th></tr>
+        </thead>
+        <tbody>
+          {% for s in detail.pzarr_streams.streams %}
+          <tr>
+            <td>{{ s.label }}</td>
+            <td class="mono">{{ s.shape }}</td>
+            <td>{{ s.rate or '—' }}</td>
+            <td class="mono">{{ s.timestamps or '—' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% if detail.pzarr_streams.duration_s is not none %}
+      <p class="muted">
+        Episode span: {{ '%.3f' % detail.pzarr_streams.episode_start }} → {{ '%.3f' % detail.pzarr_streams.episode_end }} s
+        ({{ '%.2f' % detail.pzarr_streams.duration_s }} s)
+      </p>
+      {% endif %}
+      {% endif %}
+      <div class="mcap-actions">
+        {% if detail.pzarr_exists %}
+        <button
+          hx-post="/sessions/{{ detail.session_id }}/export-mcap"
+          hx-target="#detail-body"
+          hx-swap="outerHTML"
+          hx-indicator="#mcap-export-spin"
+        >
+          {{ 'Re-export MCAP' if detail.mcap_exists else 'Export to MCAP' }}
+        </button>
+        <span id="mcap-export-spin" class="htmx-indicator">exporting…</span>
+        {% else %}
+        <p class="muted">Build pzarr first (<code>pingest pp</code>) to enable MCAP export.</p>
+        {% endif %}
+        {% if detail.mcap_exists %}
+        <button hx-post="/sessions/{{ detail.session_id }}/open-foxglove" hx-swap="none">Open in Foxglove</button>
+        {% endif %}
+      </div>
+    </div>
+    <div class="session-detail-media">
+      <img class="detail-thumb" src="/sessions/{{ detail.session_id }}/thumbnail.jpg" alt="" onerror="this.remove()" />
+    </div>
   </div>
 
   {% elif detail.kind == 'dataset' %}
@@ -96,6 +200,16 @@
     <dt>PolyUMI version</dt><dd class="mono">{{ detail.polyumi_version or '—' }}</dd>
     <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
   </dl>
+  <h3>Member scenes</h3>
+  {% if detail.members %}
+  <ul>
+    {% for m in detail.members %}
+    <li>{{ m.name }} <span class="muted">({{ m.episodes }})</span></li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">No member scenes.</p>
+  {% endif %}
 
   {% endif %}
 </div>

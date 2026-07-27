@@ -14,8 +14,8 @@ from sqlalchemy import func
 from sqlmodel import Session as DBSession
 from sqlmodel import select
 
-from polyumi_catalog import mcap_tools
-from polyumi_catalog.models import Dataset, Scene, Session, Task
+from polyumi_catalog import episode_quality, mcap_tools, pp_status, pzarr_inspect
+from polyumi_catalog.models import Dataset, DatasetMember, Scene, Session, Task
 
 # Sentinel task filters used by the UI's pseudo-rows in the Tasks column.
 FILTER_ALL = 'all'
@@ -39,6 +39,18 @@ def _episode_counts_by_scene(db: DBSession) -> dict[str, int]:
         select(Session.scene_id, func.count()).where(Session.session_type == 'EPISODE').group_by(Session.scene_id)
     ).all()
     return {scene_id: n for scene_id, n in rows}
+
+
+def _episode_counts_by_task(db: DBSession) -> dict[int | None, int]:
+    """Map each task_id (None = unassigned) to its EPISODE-session count across all its scenes."""
+    rows = db.exec(
+        select(Scene.task_id, func.count())
+        .select_from(Session)
+        .join(Scene, Session.scene_id == Scene.scene_id)
+        .where(Session.session_type == 'EPISODE')
+        .group_by(Scene.task_id)
+    ).all()
+    return {task_id: n for task_id, n in rows}
 
 
 def _session_counts_by_scene(db: DBSession) -> dict[str, int]:
@@ -77,6 +89,26 @@ def list_tasks(db: DBSession) -> list[dict]:
 def list_task_options(db: DBSession) -> list[dict]:
     """Return every real task as ``{'id', 'name'}``, for assignment dropdowns (no pseudo-rows)."""
     return [{'id': t.id, 'name': t.name} for t in db.exec(select(Task).order_by(Task.name)).all()]
+
+
+def list_scene_options(db: DBSession) -> list[dict]:
+    """Return every scene as ``{'scene_id', 'name', 'task_name'}``."""
+    task_names = {t.id: t.name for t in db.exec(select(Task)).all()}
+    return [
+        {'scene_id': s.scene_id, 'name': _basename(s.dir) or s.scene_id, 'task_name': task_names.get(s.task_id)}
+        for s in db.exec(select(Scene).order_by(Scene.dir)).all()
+    ]
+
+
+def scenes_by_ids(db: DBSession, scene_ids: list[str]) -> list[dict]:
+    """
+    Resolve ``scene_ids`` to their ``{'scene_id', 'name', 'task_name'}`` view models.
+
+    Preserves the given order (the order scenes were added to the dataset-builder draft)
+    and silently drops any id that no longer resolves to a scene.
+    """
+    by_id = {opt['scene_id']: opt for opt in list_scene_options(db)}
+    return [by_id[sid] for sid in scene_ids if sid in by_id]
 
 
 def _scene_view(scene: Scene, task_name: str | None, ep_count: int, sess_count: int) -> dict:
@@ -119,20 +151,27 @@ def list_scenes(db: DBSession, task_key: str) -> list[dict]:
 def list_sessions(db: DBSession, scene_id: str) -> list[dict]:
     """Return the Episodes column view models (all sessions) for one scene."""
     sessions = db.exec(select(Session).where(Session.scene_id == scene_id).order_by(Session.dir)).all()
-    return [
-        {
-            'session_id': s.session_id,
-            'name': _basename(s.dir) or s.session_id,
-            'session_type': s.session_type,
-            'robot': s.robot,
-            'duration_s': s.duration_s,
-            'n_video_frames': s.n_video_frames,
-            'video_dropped_frames': s.video_dropped_frames,
-            'task_meta': s.task_meta,
-            'created_at': s.created_at,
-        }
-        for s in sessions
-    ]
+    scene = db.get(Scene, scene_id)
+    quality_by_dir = episode_quality.scene_quality_by_session_dir(pathlib.Path(scene.dir)) if scene else {}
+    result = []
+    for s in sessions:
+        quality = quality_by_dir.get(_basename(s.dir))
+        result.append(
+            {
+                'session_id': s.session_id,
+                'name': _basename(s.dir) or s.session_id,
+                'session_type': s.session_type,
+                'robot': s.robot,
+                'duration_s': s.duration_s,
+                'n_video_frames': s.n_video_frames,
+                'video_dropped_frames': s.video_dropped_frames,
+                'task_meta': s.task_meta,
+                'created_at': s.created_at,
+                'slam_tracking_ratio': quality['tracking_ratio'] if quality else None,
+                'slam_low_quality': quality['low_quality'] if quality else False,
+            }
+        )
+    return result
 
 
 def list_datasets(db: DBSession, task_key: str) -> list[dict]:
@@ -162,13 +201,21 @@ def task_detail(db: DBSession, task_key: str) -> dict:
     """Return the detail-panel view model for a Tasks-column selection."""
     if task_key == FILTER_ALL:
         total = sum(_scene_counts_by_task(db).values())
-        return {'kind': 'task', 'name': 'All scenes', 'pseudo': True, 'scene_count': total}
+        total_episodes = sum(_episode_counts_by_task(db).values())
+        return {
+            'kind': 'task',
+            'name': 'All scenes',
+            'pseudo': True,
+            'scene_count': total,
+            'episode_count': total_episodes,
+        }
     if task_key == FILTER_UNASSIGNED:
         return {
             'kind': 'task',
             'name': 'Unassigned',
             'pseudo': True,
             'scene_count': _scene_counts_by_task(db).get(None, 0),
+            'episode_count': _episode_counts_by_task(db).get(None, 0),
         }
     task = db.get(Task, int(task_key))
     if task is None:
@@ -180,6 +227,7 @@ def task_detail(db: DBSession, task_key: str) -> dict:
         'description': task.description,
         'pseudo': False,
         'scene_count': _scene_counts_by_task(db).get(task.id, 0),
+        'episode_count': _episode_counts_by_task(db).get(task.id, 0),
         'created_at': task.created_at,
     }
 
@@ -197,6 +245,8 @@ def scene_detail(db: DBSession, scene_id: str) -> dict:
         for s in sessions
         if task is not None and s.task_meta and s.task_meta != task.name
     ]
+    episode_dirs = [_basename(s.dir) for s in sessions if s.session_type == 'EPISODE']
+    quality = episode_quality.scene_quality_summary(pathlib.Path(scene.dir), episode_dirs)
     return {
         'kind': 'scene',
         'scene_id': scene.scene_id,
@@ -211,6 +261,9 @@ def scene_detail(db: DBSession, scene_id: str) -> dict:
         'n_sessions': len(sessions),
         'n_episodes': sum(1 for s in sessions if s.session_type == 'EPISODE'),
         'conflicts': conflicts,
+        'quality': quality,
+        'total_dropped_video_frames': sum(s.video_dropped_frames or 0 for s in sessions),
+        'pp_status': pp_status.scene_pp_status(pathlib.Path(scene.dir)),
     }
 
 
@@ -223,6 +276,8 @@ def session_detail(db: DBSession, session_id: str) -> dict:
     session_dirname = _basename(s.dir)
     pzarr_ok = mcap_tools.pzarr_exists(pathlib.Path(scene.dir)) if scene else False
     mcap_path = mcap_tools.mcap_path_for_session(pathlib.Path(scene.dir), session_dirname) if pzarr_ok else None
+    slam = episode_quality.session_quality(pathlib.Path(scene.dir), session_dirname) if pzarr_ok else None
+    pzarr_streams = pzarr_inspect.session_pzarr_streams(pathlib.Path(scene.dir), session_dirname) if pzarr_ok else None
     return {
         'kind': 'session',
         'session_id': s.session_id,
@@ -238,6 +293,8 @@ def session_detail(db: DBSession, session_id: str) -> dict:
         'created_at': s.created_at,
         'pzarr_exists': pzarr_ok,
         'mcap_exists': mcap_path is not None,
+        'slam': slam,
+        'pzarr_streams': pzarr_streams,
     }
 
 
@@ -247,6 +304,8 @@ def dataset_detail(db: DBSession, dataset_id: int) -> dict:
     if d is None:
         return {'kind': 'empty'}
     task = db.get(Task, d.task_id) if d.task_id is not None else None
+    members = db.exec(select(DatasetMember).where(DatasetMember.dataset_id == d.id)).all()
+    scene_names = {s.scene_id: _basename(s.dir) or s.scene_id for s in db.exec(select(Scene)).all()}
     return {
         'kind': 'dataset',
         'id': d.id,
@@ -257,4 +316,8 @@ def dataset_detail(db: DBSession, dataset_id: int) -> dict:
         'manifest_path': d.manifest_path,
         'polyumi_version': d.polyumi_version,
         'created_at': d.created_at,
+        'members': [
+            {'scene_id': m.scene_id, 'name': scene_names.get(m.scene_id, m.scene_id), 'episodes': m.episodes}
+            for m in members
+        ],
     }

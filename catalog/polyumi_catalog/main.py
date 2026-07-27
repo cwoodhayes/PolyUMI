@@ -17,8 +17,8 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
-from polyumi_catalog.db import default_db_path, get_engine
-from polyumi_catalog.sync import sync_recordings
+from polyumi_catalog.db import default_datasets_dir, default_db_path, get_engine
+from polyumi_catalog.sync import sync_datasets, sync_recordings
 
 logging.basicConfig(
     level=os.environ.get('LOG_LEVEL', 'INFO').upper(),
@@ -64,6 +64,7 @@ def sync(
     db_path = db.expanduser() if db else default_db_path(recordings)
     engine = get_engine(db_path)
     stats = sync_recordings(recordings, engine, force=force)
+    dataset_stats = sync_datasets(default_datasets_dir(recordings), engine)
 
     console = Console()
     table = Table(title='Catalog sync', title_justify='left', header_style='bold')
@@ -74,8 +75,10 @@ def sync(
     table.add_row('scenes skipped', str(stats.scenes_skipped))
     table.add_row('sessions upserted', str(stats.sessions_upserted))
     table.add_row('sessions removed', str(stats.sessions_removed))
-    table.add_row('tasks created', str(stats.tasks_created))
+    table.add_row('tasks created', str(stats.tasks_created + dataset_stats.tasks_created))
     table.add_row('task conflicts', str(len(stats.conflicts)))
+    table.add_row('datasets scanned', str(dataset_stats.datasets_scanned))
+    table.add_row('dataset manifests failed', str(dataset_stats.manifests_failed))
     console.print()
     console.print(f'DB: [bold]{db_path}[/bold]')
     console.print(table)
@@ -118,9 +121,11 @@ def serve(
 
     if sync_on_start and recordings.is_dir():
         stats = sync_recordings(recordings, engine)
+        dataset_stats = sync_datasets(default_datasets_dir(recordings), engine)
         log.info(
             f'sync: scanned={stats.scenes_scanned} updated={stats.scenes_updated} '
-            f'skipped={stats.scenes_skipped} conflicts={len(stats.conflicts)}'
+            f'skipped={stats.scenes_skipped} conflicts={len(stats.conflicts)} '
+            f'datasets={dataset_stats.datasets_scanned}'
         )
     elif sync_on_start:
         log.warning(f'Recordings directory not found, skipping startup sync: {recordings}')

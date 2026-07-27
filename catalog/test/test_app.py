@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pathlib
+import threading
+import time
 
 import zarr
 from fastapi.testclient import TestClient
@@ -64,6 +66,12 @@ def test_select_task_returns_scenes_and_oob_detail(tmp_path: pathlib.Path):
     assert resp.status_code == 200
     assert 'scene_2026-07-26_10-00-00_abcd' in resp.text
     assert 'hx-swap-oob' in resp.text  # datasets + detail come back OOB
+
+
+def test_select_task_detail_includes_episode_count(tmp_path: pathlib.Path):
+    """The task detail panel shows an episode count alongside the scene count."""
+    resp = _client(tmp_path).get('/select/task/all')
+    assert '<dt>Episodes</dt><dd>1</dd>' in resp.text
 
 
 def test_select_scene_returns_sessions(tmp_path: pathlib.Path):
@@ -265,3 +273,372 @@ def test_open_foxglove_without_mcap_returns_400(tmp_path: pathlib.Path):
     rec, engine = _seed(tmp_path)
     resp = TestClient(create_app(engine, recordings_dir=rec)).post(f'/sessions/{_session_id(rec)}/open-foxglove')
     assert resp.status_code == 400
+
+
+def test_index_includes_empty_dataset_builder(tmp_path: pathlib.Path):
+    """With no scenes added yet, the builder shows its empty state, still offering a task picker."""
+    resp = _client(tmp_path).get('/')
+    assert 'New Dataset Builder' in resp.text
+    assert 'name="scene_ids"' not in resp.text
+    assert 'name="task_id"' in resp.text
+    assert '>fold_towel<' in resp.text
+
+
+def test_index_omits_dataset_builder_without_recordings_dir(tmp_path: pathlib.Path):
+    """Without a recordings_dir there's nowhere to export to, so the builder is hidden."""
+    resp = _client(tmp_path, with_recordings=False).get('/')
+    assert 'New Dataset Builder' not in resp.text
+
+
+def test_post_dataset_draft_add_appears_on_index(tmp_path: pathlib.Path):
+    """Adding a scene from its detail pane makes it show up in the builder on the next page load."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+
+    add_resp = client.post('/dataset-draft/add/scene-1')
+    assert add_resp.status_code == 200
+    assert 'hx-swap-oob' in add_resp.text
+    assert 'scene_2026-07-26_10-00-00_abcd' in add_resp.text
+
+    index_resp = client.get('/')
+    assert 'name="scene_ids" value="scene-1"' in index_resp.text
+    assert index_resp.text.count('<li>') == 1
+
+
+def test_post_dataset_draft_add_is_idempotent(tmp_path: pathlib.Path):
+    """Adding the same scene twice doesn't duplicate it in the builder."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+
+    client.post('/dataset-draft/add/scene-1')
+    client.post('/dataset-draft/add/scene-1')
+
+    resp = client.get('/')
+    assert resp.text.count('name="scene_ids"') == 1
+
+
+def test_post_dataset_draft_add_lock_prevents_concurrent_duplicates(tmp_path: pathlib.Path):
+    """
+    Many near-simultaneous 'add' POSTs for the same scene still only add it once.
+
+    Regression test for the check-then-append race on app.state.pending_dataset_scene_ids
+    (same class of bug as the pp-run race): without the lock, threads released at the same
+    instant could all observe 'not yet in the list' before any of them appended.
+    """
+    rec, engine = _seed(tmp_path)
+    n_threads = 8
+    app = create_app(engine, recordings_dir=rec)
+    barrier = threading.Barrier(n_threads)
+
+    def _post():
+        barrier.wait(timeout=5)
+        TestClient(app).post('/dataset-draft/add/scene-1')
+
+    threads = [threading.Thread(target=_post) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert app.state.pending_dataset_scene_ids == ['scene-1']
+
+
+def test_post_dataset_draft_add_unknown_scene_returns_404(tmp_path: pathlib.Path):
+    """Adding a nonexistent scene id is a clean 404, not a crash."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    resp = client.post('/dataset-draft/add/no-such-scene')
+    assert resp.status_code == 404
+
+
+def test_post_dataset_draft_remove(tmp_path: pathlib.Path):
+    """Removing a scene takes it back out of the builder."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+
+    client.post('/dataset-draft/add/scene-1')
+    remove_resp = client.post('/dataset-draft/remove/scene-1')
+    assert remove_resp.status_code == 200
+
+    resp = client.get('/')
+    assert 'name="scene_ids"' not in resp.text
+
+
+def test_post_dataset_draft_remove_never_added_is_a_noop(tmp_path: pathlib.Path):
+    """Removing a scene that was never added doesn't error."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    resp = client.post('/dataset-draft/remove/scene-1')
+    assert resp.status_code == 200
+
+
+def test_post_build_dataset_success_redirects_and_clears_draft(tmp_path: pathlib.Path, monkeypatch):
+    """Building a dataset (via the draft-populated hidden inputs) redirects and clears the draft."""
+
+    def fake_export_scenes_to_dp(scene_paths, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b'fake-zip')
+        return 3
+
+    monkeypatch.setattr('polyumi_ingest.export.dp.export_scenes_to_dp', fake_export_scenes_to_dp)
+
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec), follow_redirects=False)
+    client.post('/dataset-draft/add/scene-1')
+
+    resp = client.post('/datasets', data={'name': 'fold_towel_v1', 'scene_ids': ['scene-1']})
+
+    assert resp.status_code == 303
+    assert resp.headers['location'] == '/'
+    with DBSession(engine) as db:
+        from polyumi_catalog.models import Dataset
+
+        dataset = db.exec(select(Dataset).where(Dataset.name == 'fold_towel_v1')).first()
+        assert dataset is not None
+        assert dataset.n_episodes == 3
+        assert dataset.task_id is None
+    assert (rec / 'datasets' / 'fold_towel_v1.zarr.zip').is_file()
+    assert (rec / 'datasets' / 'fold_towel_v1.dataset.json').is_file()
+
+    # the draft is cleared after a successful build
+    index_resp = client.get('/')
+    assert 'name="scene_ids"' not in index_resp.text
+
+
+def test_post_build_dataset_with_task_id_persists_it(tmp_path: pathlib.Path, monkeypatch):
+    """Selecting a task in the builder form actually associates the built dataset with it."""
+
+    def fake_export_scenes_to_dp(scene_paths, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b'fake-zip')
+        return 1
+
+    monkeypatch.setattr('polyumi_ingest.export.dp.export_scenes_to_dp', fake_export_scenes_to_dp)
+
+    rec, engine = _seed(tmp_path)
+    with DBSession(engine) as db:
+        task = db.exec(select(Task).where(Task.name == 'fold_towel')).first()
+        task_id = task.id
+
+    client = TestClient(create_app(engine, recordings_dir=rec), follow_redirects=False)
+    resp = client.post('/datasets', data={'name': 'fold_towel_v1', 'task_id': str(task_id), 'scene_ids': ['scene-1']})
+    assert resp.status_code == 303
+
+    with DBSession(engine) as db:
+        from polyumi_catalog.models import Dataset
+
+        dataset = db.exec(select(Dataset).where(Dataset.name == 'fold_towel_v1')).first()
+        assert dataset.task_id == task_id
+
+    # and it now shows up when the Datasets column is filtered to that task
+    task_resp = client.get(f'/select/task/{task_id}')
+    assert 'fold_towel_v1' in task_resp.text
+
+
+def test_post_build_dataset_without_recordings_dir_returns_400(tmp_path: pathlib.Path):
+    """Building a dataset with no recordings_dir configured is rejected, not a crash."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=None), follow_redirects=False)
+    resp = client.post('/datasets', data={'name': 'x', 'scene_ids': ['scene-1']})
+    assert resp.status_code == 400
+
+
+def test_post_build_dataset_rejects_no_scenes_selected(tmp_path: pathlib.Path):
+    """Submitting the form with no scenes added is a clean 400, not an empty dataset."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec), follow_redirects=False)
+    resp = client.post('/datasets', data={'name': 'x'})
+    assert resp.status_code == 400
+
+
+def test_get_thumbnail_404_for_unknown_session(tmp_path: pathlib.Path):
+    """An unknown session_id 404s rather than crashing."""
+    resp = _client(tmp_path).get('/sessions/does-not-exist/thumbnail.jpg')
+    assert resp.status_code == 404
+
+
+def test_get_thumbnail_404_when_no_gopro_mp4(tmp_path: pathlib.Path):
+    """A real session with no gopro.mp4 sidecar (the seeded fixture has none) 404s cleanly."""
+    from polyumi_pi.files.metadata import SessionMetadata as SM
+
+    client = _client(tmp_path)
+    rec = tmp_path / 'recordings' / 'scene_2026-07-26_10-00-00_abcd' / 'session_1' / 'metadata.json'
+    session_id = SM.from_file(rec).session_id
+
+    resp = client.get(f'/sessions/{session_id}/thumbnail.jpg')
+    assert resp.status_code == 404
+
+
+def test_get_thumbnail_returns_jpeg_when_decodable(tmp_path: pathlib.Path, monkeypatch):
+    """
+    The route serves the bytes thumbnails.session_thumbnail_jpeg produces, with a long cache header.
+
+    The actual mp4 decoding is exercised in test_thumbnails.py; this only checks the route's glue
+    (session lookup -> path resolution -> response headers).
+    """
+    from polyumi_pi.files.metadata import SessionMetadata as SM
+
+    client = _client(tmp_path)
+    rec = tmp_path / 'recordings' / 'scene_2026-07-26_10-00-00_abcd' / 'session_1' / 'metadata.json'
+    session_id = SM.from_file(rec).session_id
+
+    fake_jpeg = b'\xff\xd8fake-jpeg-bytes'
+    monkeypatch.setattr('polyumi_catalog.thumbnails.session_thumbnail_jpeg', lambda session_dir: fake_jpeg)
+
+    resp = client.get(f'/sessions/{session_id}/thumbnail.jpg')
+    assert resp.status_code == 200
+    assert resp.content == fake_jpeg
+    assert resp.headers['content-type'] == 'image/jpeg'
+    assert 'immutable' in resp.headers['cache-control']
+
+
+def _wait_until(predicate, *, timeout: float = 5.0) -> None:
+    """Poll predicate() until truthy, or raise once timeout elapses (background-thread tests)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.02)
+    raise AssertionError('condition never became true within timeout')
+
+
+def test_run_pp_unknown_scene_returns_404(tmp_path: pathlib.Path):
+    """Triggering the pipeline for a nonexistent scene is a clean 404, not a crash."""
+    rec, engine = _seed(tmp_path)
+    resp = TestClient(create_app(engine, recordings_dir=rec)).post('/scenes/does-not-exist/run-pp')
+    assert resp.status_code == 404
+
+
+def test_run_pp_shows_running_then_done(tmp_path: pathlib.Path, monkeypatch):
+    """POST /run-pp returns immediately with a running indicator; it clears once the thread finishes."""
+    rec, engine = _seed(tmp_path)
+    started = threading.Event()
+    finish = threading.Event()
+
+    def fake_run_full_pipeline(scene_dir):
+        started.set()
+        finish.wait(timeout=5)
+
+    monkeypatch.setattr('polyumi_catalog.pp_status.run_full_pipeline', fake_run_full_pipeline)
+
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    resp = client.post('/scenes/scene-1/run-pp')
+    assert resp.status_code == 200
+    assert 'Running pipeline' in resp.text
+    assert started.wait(timeout=5)
+
+    poll_resp = client.get('/select/scene/scene-1')
+    assert 'Running pipeline' in poll_resp.text
+    assert 'Run full pipeline' not in poll_resp.text
+
+    finish.set()
+    _wait_until(lambda: 'Run full pipeline' in client.get('/select/scene/scene-1').text)
+
+
+def test_run_pp_records_error_on_failure(tmp_path: pathlib.Path, monkeypatch):
+    """A failing pipeline run surfaces its error message instead of leaving status stuck."""
+    rec, engine = _seed(tmp_path)
+
+    def failing(scene_dir):
+        raise RuntimeError('missing gopro.mp4 in session_1')
+
+    monkeypatch.setattr('polyumi_catalog.pp_status.run_full_pipeline', failing)
+
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    client.post('/scenes/scene-1/run-pp')
+
+    _wait_until(lambda: 'Last run failed' in client.get('/select/scene/scene-1').text)
+    assert 'missing gopro.mp4' in client.get('/select/scene/scene-1').text
+
+
+def test_run_pp_is_idempotent_while_already_running(tmp_path: pathlib.Path, monkeypatch):
+    """A second POST while a run is in flight doesn't start a second background run."""
+    rec, engine = _seed(tmp_path)
+    calls = []
+    started = threading.Event()
+    finish = threading.Event()
+
+    def fake_run_full_pipeline(scene_dir):
+        calls.append(scene_dir)
+        started.set()
+        finish.wait(timeout=5)
+
+    monkeypatch.setattr('polyumi_catalog.pp_status.run_full_pipeline', fake_run_full_pipeline)
+
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    client.post('/scenes/scene-1/run-pp')
+    assert started.wait(timeout=5)
+    client.post('/scenes/scene-1/run-pp')
+    finish.set()
+    _wait_until(lambda: 'Run full pipeline' in client.get('/select/scene/scene-1').text)
+
+    assert len(calls) == 1
+
+
+def test_select_scene_includes_pp_status(tmp_path: pathlib.Path):
+    """The scene detail panel shows pipeline step names even with no pzarr built yet."""
+    resp = _client(tmp_path).get('/select/scene/scene-1')
+    assert 'Preprocessing pipeline' in resp.text
+    assert 'No pzarr built yet' in resp.text
+    assert 'Run full pipeline' in resp.text
+
+
+def test_run_pp_button_disables_itself_and_has_no_confirm_when_not_fully_done(tmp_path: pathlib.Path):
+    """The button self-disables on click (hx-disabled-elt) and doesn't prompt when nothing's complete yet."""
+    resp = _client(tmp_path).get('/select/scene/scene-1')
+    assert 'hx-disabled-elt="this"' in resp.text
+    assert 'hx-confirm' not in resp.text
+
+
+def test_run_pp_button_confirms_when_scene_already_fully_processed(tmp_path: pathlib.Path):
+    """Once every registered step is already complete, re-running asks for confirmation first."""
+    from polyumi_ingest.preproc import available_preprocessing_steps
+
+    rec, engine = _seed(tmp_path)
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 0
+    root.attrs['preprocessing_steps'] = [s.step_number for s in available_preprocessing_steps()]
+
+    resp = TestClient(create_app(engine, recordings_dir=rec)).get('/select/scene/scene-1')
+    assert 'hx-confirm=' in resp.text
+    assert 'already completed all' in resp.text
+
+
+def test_run_pp_lock_prevents_concurrent_duplicate_runs(tmp_path: pathlib.Path, monkeypatch):
+    """
+    Many near-simultaneous POSTs to run-pp start the pipeline exactly once.
+
+    Regression test for the check-then-act race on app.state.pp_runs: without the lock
+    around the check-and-set, threads released by the barrier at the same instant could
+    all observe 'not running' before any of them wrote 'running', each starting its own
+    background pipeline run against the same scene.zarr.
+    """
+    rec, engine = _seed(tmp_path)
+    n_threads = 8
+    calls: list[pathlib.Path] = []
+    calls_lock = threading.Lock()
+    barrier = threading.Barrier(n_threads)
+    finish = threading.Event()
+
+    def fake_run_full_pipeline(scene_dir):
+        with calls_lock:
+            calls.append(scene_dir)
+        finish.wait(timeout=5)
+
+    monkeypatch.setattr('polyumi_catalog.pp_status.run_full_pipeline', fake_run_full_pipeline)
+
+    app = create_app(engine, recordings_dir=rec)
+
+    def _post():
+        barrier.wait(timeout=5)
+        TestClient(app).post('/scenes/scene-1/run-pp')
+
+    threads = [threading.Thread(target=_post) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+    finish.set()
+
+    assert len(calls) == 1

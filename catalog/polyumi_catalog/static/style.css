@@ -135,6 +135,85 @@ body {
   border-color: #2aa198;
 }
 
+.thumb {
+  width: 42px;
+  height: 24px;
+  object-fit: cover;
+  border-radius: 0.2rem;
+  flex-shrink: 0;
+  background: color-mix(in srgb, var(--border) 25%, transparent);
+}
+
+.session-detail-layout,
+.scene-detail-layout {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.session-detail-text,
+.scene-detail-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.session-detail-media {
+  flex: 0 0 280px;
+}
+
+.scene-detail-side {
+  flex: 0 0 280px;
+  min-width: 0;
+}
+
+.scene-detail-side h3 {
+  margin-top: 0;
+}
+
+.detail-thumb {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 0.3rem;
+}
+
+.pp-steps-list {
+  list-style: none;
+  margin: 0.3rem 0;
+  padding: 0;
+  font-size: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.pp-step-done {
+  color: #2aa198;
+}
+
+.pp-step-pending {
+  opacity: 0.6;
+}
+
+.stream-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.85rem;
+  margin: 0.3rem 0;
+}
+
+.stream-table th,
+.stream-table td {
+  text-align: left;
+  padding: 0.2rem 0.5rem 0.2rem 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 30%, transparent);
+}
+
+.stream-table th {
+  opacity: 0.75;
+  font-weight: 600;
+}
+
 .placeholder,
 .muted {
   color: #888;
@@ -217,4 +296,44 @@ dd {
   align-items: center;
   gap: 0.6rem;
   margin-top: 0.75rem;
+}
+
+.new-dataset-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.4rem 0.6rem;
+  border-top: 1px solid var(--border);
+}
+
+#dataset-builder {
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
+}
+
+#dataset-builder h3 {
+  margin: 0 0 0.4rem;
+  padding: 0 0.6rem;
+}
+
+.pending-scene-list {
+  list-style: none;
+  margin: 0 0 0.4rem;
+  padding: 0.4rem 0.6rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.pending-scene-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.remove-btn {
+  flex-shrink: 0;
+  line-height: 1;
+  padding: 0 0.4rem;
 }
