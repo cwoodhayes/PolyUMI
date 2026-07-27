@@ -108,10 +108,13 @@ class CameraStreamer:
                 while not stop_requested:
                     t_start = time.monotonic()
 
-                    # Capture and encode frame as JPEG
+                    # Capture and encode frame as JPEG. capture_file() already returns the
+                    # metadata for the exact frame it saved — do NOT also call
+                    # capture_metadata() separately, since that pops the *next* completed
+                    # request off picamera2's queue rather than reusing this one, silently
+                    # discarding every other hardware frame (10fps commanded -> 5fps observed).
                     data = io.BytesIO()
-                    self.cam.capture_file(data, format='jpeg')
-                    metadata = self.cam.capture_metadata()
+                    metadata = self.cam.capture_file(data, format='jpeg')
                     if first_frame_metadata is None:
                         first_frame_metadata = dict(metadata)
                         log.info(f'First-frame metadata: {first_frame_metadata}')
