@@ -227,6 +227,28 @@ def _zip_zarr_dir(zarr_dir: pathlib.Path, out_path: pathlib.Path) -> None:
                 zf.write(path, path.relative_to(zarr_dir).as_posix())
 
 
+def _append_scene_episodes(scene_path: pathlib.Path, data_grp: zarr.Group, episode_ends: list[int], total: int) -> int:
+    """Append every EPISODE session of one scene onto ``data_grp``, returning the new running total."""
+    zarr_path = SceneFiles.resolve_zarr_path(scene_path)
+    if not zarr_path.exists():
+        raise FileNotFoundError(f'No scene.zarr found at {scene_path}')
+
+    root = zarr.open_group(str(zarr_path), mode='r')
+    n_episodes = int(root.attrs.get('n_episodes', 0))
+    for i in range(n_episodes):
+        ep_key = f'episode_{i}'
+        if ep_key not in root:
+            log.warning(f'{ep_key} not found in {zarr_path.name}, skipping.')
+            continue
+        ep = zarr.open_group(str(zarr_path / ep_key), mode='r')
+        if ep.attrs.get('session_type') == 'MAPPING':
+            log.info(f'  {zarr_path.name}/{ep_key}: MAPPING session, skipping.')
+            continue
+        total += _export_episode(ep, data_grp, f'{zarr_path.name}/{ep_key}', zarr_path)
+        episode_ends.append(total)
+    return total
+
+
 def export_scene_to_dp(scene_path: pathlib.Path, output_path: pathlib.Path) -> int:
     """
     Export EPISODE sessions of a pzarr scene to a UMI-format ``.zarr.zip`` ReplayBuffer.
@@ -236,12 +258,22 @@ def export_scene_to_dp(scene_path: pathlib.Path, output_path: pathlib.Path) -> i
 
     Returns the number of episodes written. MAPPING sessions are skipped.
     """
-    zarr_path = SceneFiles.resolve_zarr_path(scene_path)
-    if not zarr_path.exists():
-        raise FileNotFoundError(f'No scene.zarr found at {scene_path}')
+    return export_scenes_to_dp([scene_path], output_path)
 
-    root = zarr.open_group(str(zarr_path), mode='r')
-    n_episodes = int(root.attrs.get('n_episodes', 0))
+
+def export_scenes_to_dp(scene_paths: list[pathlib.Path], output_path: pathlib.Path) -> int:
+    """
+    Export EPISODE sessions from one or more pzarr scenes into a single UMI ``.zarr.zip``.
+
+    Each scene's episodes are appended in the given order, with ``episode_ends`` accumulating
+    across the whole list — a multi-scene dataset is indistinguishable from a single big scene
+    to ``UmiDataset``, which only ever sees one buffer. MAPPING sessions are skipped scene by
+    scene, same as the single-scene exporter. Poses come from ``eef/pose`` (preprocessing step 5).
+
+    Returns the total number of episodes written across all scenes.
+    """
+    if not scene_paths:
+        raise ValueError('No scenes given to export.')
 
     with tempfile.TemporaryDirectory(prefix='dp_export_') as tmp:
         build_dir = pathlib.Path(tmp) / 'buffer.zarr'
@@ -251,24 +283,15 @@ def export_scene_to_dp(scene_path: pathlib.Path, output_path: pathlib.Path) -> i
 
         episode_ends: list[int] = []
         total = 0
-        for i in range(n_episodes):
-            ep_key = f'episode_{i}'
-            if ep_key not in root:
-                log.warning(f'{ep_key} not found in {zarr_path.name}, skipping.')
-                continue
-            ep = zarr.open_group(str(zarr_path / ep_key), mode='r')
-            if ep.attrs.get('session_type') == 'MAPPING':
-                log.info(f'  {ep_key}: MAPPING session, skipping.')
-                continue
-            total += _export_episode(ep, data, ep_key, zarr_path)
-            episode_ends.append(total)
+        for scene_path in scene_paths:
+            total = _append_scene_episodes(scene_path, data, episode_ends, total)
 
         if not episode_ends:
-            raise RuntimeError(f'{zarr_path.name}: no EPISODE sessions to export.')
+            raise RuntimeError('no EPISODE sessions to export across the given scene(s).')
 
         meta.create_array('episode_ends', data=np.array(episode_ends, dtype=np.int64), compressor=_BLOSC)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         _zip_zarr_dir(build_dir, output_path)
 
-    log.info(f'Wrote {len(episode_ends)} episode(s), {total} steps → {output_path}')
+    log.info(f'Wrote {len(episode_ends)} episode(s) from {len(scene_paths)} scene(s), {total} steps → {output_path}')
     return len(episode_ends)
