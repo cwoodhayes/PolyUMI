@@ -49,9 +49,11 @@ class Session(SQLModel, table=True):
     """
     A single recording session (one demo episode or a mapping pass).
 
-    Read-only mirror of the session's ``metadata.json``. ``task_meta`` preserves the
-    session's own collection-time task string so the UI can flag it when it disagrees
-    with the canonical scene-level task.
+    Mirrors the session's ``metadata.json``, except ``unusable`` which caches the scene's
+    ``scene.json`` (``unusable_episodes``, keyed by session directory name) — same
+    cache-of-the-manifest pattern as ``Scene.task_id``/``Scene.notes``. ``task_meta`` preserves
+    the session's own collection-time task string so the UI can flag it when it disagrees with
+    the canonical scene-level task.
     """
 
     session_id: str = Field(primary_key=True)
@@ -63,6 +65,7 @@ class Session(SQLModel, table=True):
     duration_s: float | None = None
     n_video_frames: int | None = None
     video_dropped_frames: int | None = None
+    unusable: bool = False
     created_at: datetime | None = None
 
 

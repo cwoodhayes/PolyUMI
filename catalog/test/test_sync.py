@@ -72,6 +72,22 @@ def test_sync_scene_id_falls_back_to_metadata(tmp_path: pathlib.Path):
         assert db.get(Scene, 'meta-scene') is not None
 
 
+def test_sync_populates_unusable_from_scene_json(tmp_path: pathlib.Path):
+    """A session dir listed in scene.json's unusable_episodes syncs with Session.unusable=True."""
+    rec = tmp_path / 'recordings'
+    scene_dir = rec / 'scene_2026-07-26_09-00-00_zzzz'
+    scene_dir.mkdir(parents=True)
+    SceneManifest(scene_id='scene-u', unusable_episodes=['session_2']).write_to_scene_dir(scene_dir)
+    _make_session(scene_dir, 'session_1', scene_id='scene-u', session_type=SessionType.EPISODE, task=None)
+    _make_session(scene_dir, 'session_2', scene_id='scene-u', session_type=SessionType.EPISODE, task=None)
+
+    engine = _engine(tmp_path)
+    sync_recordings(rec, engine)
+    with DBSession(engine) as db:
+        sessions = {pathlib.Path(s.dir).name: s.unusable for s in db.exec(select(Session)).all()}
+    assert sessions == {'session_1': False, 'session_2': True}
+
+
 def test_sync_detects_task_conflict(tmp_path: pathlib.Path):
     """A session whose metadata task differs from scene.json is flagged, not silently merged."""
     rec = tmp_path / 'recordings'

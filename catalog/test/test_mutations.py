@@ -14,8 +14,8 @@ import pathlib
 import pytest
 from polyumi_catalog.db import get_engine
 from polyumi_catalog.manifests import SceneManifest
-from polyumi_catalog.models import Scene, Task
-from polyumi_catalog.mutations import MutationError, assign_scene_task, create_task, rename_task
+from polyumi_catalog.models import Scene, Session, Task
+from polyumi_catalog.mutations import MutationError, assign_scene_task, create_task, rename_task, set_session_unusable
 from polyumi_catalog.sync import sync_recordings
 from polyumi_pi.files.metadata import SessionMetadata, SessionType
 from sqlmodel import Session as DBSession
@@ -103,6 +103,54 @@ def test_assign_scene_task_rejects_unknown_ids(tmp_path: pathlib.Path):
             assign_scene_task(db, 'no-such-scene', None)
         with pytest.raises(MutationError):
             assign_scene_task(db, 'scene-3', 999)
+
+
+def test_set_session_unusable_writes_scene_json_and_survives_resync(tmp_path: pathlib.Path):
+    """Marking a session unusable rewrites scene.json; a dropped-and-resynced DB recovers it."""
+    rec = tmp_path / 'recordings'
+    scene_dir = _make_scene(rec, 'scene_2026-07-26_18-00-00_yzgh', scene_id='scene-7', task=None)
+
+    engine = get_engine(tmp_path / 'catalog.db')
+    sync_recordings(rec, engine)
+    with DBSession(engine) as db:
+        session_id = db.exec(select(Session).where(Session.scene_id == 'scene-7')).first().session_id
+        set_session_unusable(db, session_id, True)
+        assert db.get(Session, session_id).unusable is True
+
+    manifest = SceneManifest.from_scene_dir(scene_dir)
+    assert manifest.unusable_episodes == ['session_1']
+
+    rebuilt = get_engine(tmp_path / 'catalog2.db')
+    sync_recordings(rec, rebuilt)
+    with DBSession(rebuilt) as db:
+        row = db.exec(select(Session).where(Session.scene_id == 'scene-7')).first()
+        assert row.unusable is True
+
+
+def test_set_session_unusable_can_clear(tmp_path: pathlib.Path):
+    """Marking a session usable again removes it from scene.json's unusable_episodes."""
+    rec = tmp_path / 'recordings'
+    scene_dir = _make_scene(rec, 'scene_2026-07-26_19-00-00_yzij', scene_id='scene-8', task=None)
+    SceneManifest(scene_id='scene-8', unusable_episodes=['session_1']).write_to_scene_dir(scene_dir)
+
+    engine = get_engine(tmp_path / 'catalog.db')
+    sync_recordings(rec, engine)
+    with DBSession(engine) as db:
+        session_id = db.exec(select(Session).where(Session.scene_id == 'scene-8')).first().session_id
+        assert db.get(Session, session_id).unusable is True
+        set_session_unusable(db, session_id, False)
+        assert db.get(Session, session_id).unusable is False
+
+    manifest = SceneManifest.from_scene_dir(scene_dir)
+    assert manifest.unusable_episodes == []
+
+
+def test_set_session_unusable_rejects_unknown_session(tmp_path: pathlib.Path):
+    """An unknown session_id raises MutationError instead of silently no-op'ing."""
+    engine = get_engine(tmp_path / 'catalog.db')
+    with DBSession(engine) as db:
+        with pytest.raises(MutationError):
+            set_session_unusable(db, 'no-such-session', True)
 
 
 def test_rename_task_cascades_to_every_member_scene(tmp_path: pathlib.Path):

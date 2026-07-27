@@ -2,9 +2,10 @@
 Read/write helpers for the catalog's authoritative on-disk manifests.
 
 ``SceneManifest`` (``scene.json`` at a scene root) is the canonical home of a scene's
-task assignment and notes. ``DatasetManifest`` (``<name>.dataset.json`` beside an
-exported buffer) records what scenes/episodes and which code version produced a training
-dataset. See docs/catalog-ui-plan.md §3.2.
+task assignment, notes, and unusable-episode markers; it lives in ``polyumi_ingest.manifests``
+(re-exported here) because DP export needs to read it too — see that module's docstring.
+``DatasetManifest`` (``<name>.dataset.json`` beside an exported buffer) records what
+scenes/episodes and which code version produced a training dataset. See docs/catalog-ui-plan.md §3.2.
 """
 
 from __future__ import annotations
@@ -14,54 +15,14 @@ import pathlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-SCENE_MANIFEST_NAME = 'scene.json'
+from polyumi_ingest.manifests import SCENE_MANIFEST_NAME, SceneManifest
 
-
-@dataclass
-class SceneManifest:
-    """Authoritative scene-level metadata stored at ``<scene>/scene.json``."""
-
-    scene_id: str
-    task: str | None = None
-    notes: str | None = None
-    file_version: int = 1
-
-    @classmethod
-    def from_scene_dir(cls, scene_dir: pathlib.Path) -> SceneManifest | None:
-        """Load the manifest for ``scene_dir``, or return ``None`` if absent."""
-        path = scene_dir / SCENE_MANIFEST_NAME
-        if not path.is_file():
-            return None
-        return cls.from_file(path)
-
-    @classmethod
-    def from_file(cls, path: pathlib.Path) -> SceneManifest:
-        """Load a manifest from an explicit ``scene.json`` path."""
-        data = json.loads(path.read_text())
-        version = data.get('file_version', 1)
-        if version != 1:
-            raise ValueError(f'Unsupported scene.json file_version: {version}')
-        return cls(
-            scene_id=data['scene_id'],
-            task=data.get('task'),
-            notes=data.get('notes'),
-            file_version=version,
-        )
-
-    def to_dict(self) -> dict:
-        """Serialize to a plain dict for JSON output."""
-        return {
-            'scene_id': self.scene_id,
-            'task': self.task,
-            'notes': self.notes,
-            'file_version': self.file_version,
-        }
-
-    def write_to_scene_dir(self, scene_dir: pathlib.Path) -> pathlib.Path:
-        """Write this manifest to ``<scene_dir>/scene.json`` and return the path."""
-        path = scene_dir / SCENE_MANIFEST_NAME
-        path.write_text(json.dumps(self.to_dict(), indent=2))
-        return path
+__all__ = [
+    'SCENE_MANIFEST_NAME',
+    'SceneManifest',
+    'DatasetMemberSpec',
+    'DatasetManifest',
+]
 
 
 @dataclass

@@ -18,6 +18,7 @@ import zarr
 from scipy.spatial.transform import Rotation
 
 from polyumi_ingest.export.dp import export_scene_to_dp, export_scenes_to_dp
+from polyumi_ingest.manifests import SceneManifest
 
 RES = 224
 RATE = 59.94
@@ -174,6 +175,15 @@ def test_demo_poses_are_first_and_last_repeated(tmp_path: pathlib.Path) -> None:
 def test_skips_mapping_session(tmp_path: pathlib.Path) -> None:
     """A MAPPING-only scene has nothing to export and raises rather than writing an empty store."""
     scene = _build_scene(tmp_path, session_type='MAPPING')
+    out = tmp_path / 'buf.zarr.zip'
+    with pytest.raises(RuntimeError, match='no EPISODE sessions'):
+        export_scene_to_dp(scene, out)
+
+
+def test_skips_episode_marked_unusable_in_scene_json(tmp_path: pathlib.Path) -> None:
+    """An episode whose session dir is listed in scene.json's unusable_episodes is skipped."""
+    scene = _build_scene(tmp_path)
+    SceneManifest(scene_id='x', unusable_episodes=['session_0']).write_to_scene_dir(tmp_path)
     out = tmp_path / 'buf.zarr.zip'
     with pytest.raises(RuntimeError, match='no EPISODE sessions'):
         export_scene_to_dp(scene, out)

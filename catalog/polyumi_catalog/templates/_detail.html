@@ -128,7 +128,23 @@
           {% if detail.video_dropped_frames %}<span class="warn">({{ detail.video_dropped_frames }} dropped)</span>{% endif %}
         </dd>
         <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
+        {% if detail.session_type == 'EPISODE' %}
+        <dt>Usable</dt>
+        <dd>
+          {% if detail.unusable %}<span class="badge warn">unusable — excluded from exports</span>
+          {% else %}yes{% endif %}
+        </dd>
+        {% endif %}
       </dl>
+      {% if detail.session_type == 'EPISODE' %}
+      <button
+        hx-post="/sessions/{{ detail.session_id }}/{{ 'mark-usable' if detail.unusable else 'mark-unusable' }}"
+        hx-target="#detail-body"
+        hx-swap="outerHTML"
+      >
+        {{ 'Mark usable' if detail.unusable else 'Mark unusable' }}
+      </button>
+      {% endif %}
       {% if detail.slam %}
       <h3>SLAM tracking quality</h3>
       <dl>

@@ -17,7 +17,7 @@ from sqlmodel import Session as DBSession
 from sqlmodel import select
 
 from polyumi_catalog.manifests import SceneManifest
-from polyumi_catalog.models import Scene, Task
+from polyumi_catalog.models import Scene, Session, Task
 
 
 class MutationError(ValueError):
@@ -73,6 +73,36 @@ def rename_task(db: DBSession, task_id: int, new_name: str) -> Task:
     db.commit()
     db.refresh(task)
     return task
+
+
+def _write_session_unusable(scene: Scene, session_dir_name: str, unusable: bool) -> None:
+    """Rewrite ``scene.json`` for ``scene``, adding/removing ``session_dir_name`` from the unusable set."""
+    scene_dir = pathlib.Path(scene.dir)
+    manifest = SceneManifest.from_scene_dir(scene_dir) or SceneManifest(scene_id=scene.scene_id)
+    unusable_dirs = set(manifest.unusable_episodes)
+    if unusable:
+        unusable_dirs.add(session_dir_name)
+    else:
+        unusable_dirs.discard(session_dir_name)
+    manifest.unusable_episodes = sorted(unusable_dirs)
+    manifest.write_to_scene_dir(scene_dir)
+
+
+def set_session_unusable(db: DBSession, session_id: str, unusable: bool) -> Session:
+    """Mark a session's episode usable/unusable, writing scene.json + the DB row."""
+    session = db.get(Session, session_id)
+    if session is None:
+        raise MutationError(f'No such session: {session_id}')
+    scene = db.get(Scene, session.scene_id)
+    if scene is None:
+        raise MutationError(f'No such scene: {session.scene_id}')
+
+    _write_session_unusable(scene, pathlib.Path(session.dir).name, unusable)
+    session.unusable = unusable
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return session
 
 
 def assign_scene_task(db: DBSession, scene_id: str, task_id: int | None) -> Scene:

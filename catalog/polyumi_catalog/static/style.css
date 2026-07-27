@@ -97,6 +97,10 @@ body {
   font-style: italic;
 }
 
+.item.item-unusable {
+  opacity: 0.45;
+}
+
 .item-name {
   overflow: hidden;
   text-overflow: ellipsis;

@@ -307,6 +307,38 @@ def test_open_foxglove_without_mcap_returns_400(tmp_path: pathlib.Path):
     assert resp.status_code == 400
 
 
+def test_mark_unusable_then_usable_round_trip(tmp_path: pathlib.Path):
+    """Marking a session unusable then usable toggles the badge, scene.json, and the DB row."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    session_id = _session_id(rec)
+
+    resp = client.post(f'/sessions/{session_id}/mark-unusable')
+    assert resp.status_code == 200
+    assert 'Mark usable' in resp.text
+    assert 'unusable — excluded from exports' in resp.text
+    # OOB episodes-column fragment is included in the same response
+    assert 'item-unusable' in resp.text
+    with DBSession(engine) as db:
+        assert db.get(Scene, 'scene-1')  # sanity: scene still resolves
+    manifest = SceneManifest.from_scene_dir(rec / 'scene_2026-07-26_10-00-00_abcd')
+    assert manifest.unusable_episodes == ['session_1']
+
+    resp = client.post(f'/sessions/{session_id}/mark-usable')
+    assert resp.status_code == 200
+    assert 'Mark unusable' in resp.text
+    assert 'item-unusable' not in resp.text
+    manifest = SceneManifest.from_scene_dir(rec / 'scene_2026-07-26_10-00-00_abcd')
+    assert manifest.unusable_episodes == []
+
+
+def test_mark_unusable_unknown_session_returns_400(tmp_path: pathlib.Path):
+    """Marking a nonexistent session id is rejected, not a crash."""
+    rec, engine = _seed(tmp_path)
+    resp = TestClient(create_app(engine, recordings_dir=rec)).post('/sessions/does-not-exist/mark-unusable')
+    assert resp.status_code == 400
+
+
 def test_index_includes_empty_dataset_builder(tmp_path: pathlib.Path):
     """With no scenes added yet, the builder shows its empty state, still offering a task picker."""
     resp = _client(tmp_path).get('/')

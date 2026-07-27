@@ -36,6 +36,10 @@ is a check-then-set on that shared dict, so it's guarded by ``app.state.pp_runs_
 (a plain ``threading.Lock``) to keep two near-simultaneous POSTs (e.g. a fast double
 click before the button disables) from both passing the "not already running" check
 and starting two pipeline runs against the same scene.zarr concurrently.
+Phase 5 adds marking an episode unusable (excluded from dataset exports): a plain HTMX POST
+from the session detail pane, same in-place-swap style as MCAP export, except it also
+out-of-band-updates the Episodes column (``_detail_with_episodes_oob``) so that column's
+grey-out reflects the change immediately without requiring the scene to be reselected.
 """
 
 from __future__ import annotations
@@ -55,7 +59,7 @@ from polyumi_catalog.db import default_datasets_dir
 from polyumi_catalog.dataset_builder import DatasetBuildError, build_dataset
 from polyumi_catalog.models import Scene
 from polyumi_catalog.models import Session as SessionRow
-from polyumi_catalog.mutations import MutationError, assign_scene_task, create_task, rename_task
+from polyumi_catalog.mutations import MutationError, assign_scene_task, create_task, rename_task, set_session_unusable
 from polyumi_catalog.sync import sync_datasets, sync_recordings
 
 _PKG_DIR = pathlib.Path(__file__).resolve().parent
@@ -87,6 +91,22 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
         pending_scenes = queries.scenes_by_ids(db, pending_ids)
         all_tasks = queries.list_task_options(db)
         return render(request, '_dataset_builder.html', pending_scenes=pending_scenes, all_tasks=all_tasks, oob=oob)
+
+    def _detail_with_episodes_oob(db: DBSession, session_id: str) -> HTMLResponse:
+        """
+        Re-render the session detail pane plus an out-of-band update of its scene's Episodes
+        column, so a usable/unusable toggle grey-out is reflected immediately if that scene's
+        episode list happens to be open (same "update a currently-visible widget" pattern as
+        the dataset-draft builder — see the module docstring's Phase 3 paragraph).
+        """
+        detail = queries.session_detail(db, session_id)
+        detail_html = templates.env.get_template('_detail.html').render(detail=detail, oob=False)
+        if detail.get('scene_id'):
+            sessions = queries.list_sessions(db, detail['scene_id'])
+            episodes_html = templates.env.get_template('_episodes.html').render(sessions=sessions, oob=True)
+        else:
+            episodes_html = ''
+        return HTMLResponse(detail_html + episodes_html)
 
     def _scene_detail_with_run_state(db: DBSession, scene_id: str) -> dict:
         """scene_detail plus this process's live pipeline-run status, if any."""
@@ -271,6 +291,24 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
             except mcap_tools.McapError as err:
                 return PlainTextResponse(str(err), status_code=400)
         return Response(status_code=204)
+
+    @app.post('/sessions/{session_id}/mark-unusable', response_class=HTMLResponse)
+    def post_mark_unusable(session_id: str) -> HTMLResponse:
+        with DBSession(engine) as db:
+            try:
+                set_session_unusable(db, session_id, True)
+            except MutationError as err:
+                return PlainTextResponse(str(err), status_code=400)
+            return _detail_with_episodes_oob(db, session_id)
+
+    @app.post('/sessions/{session_id}/mark-usable', response_class=HTMLResponse)
+    def post_mark_usable(session_id: str) -> HTMLResponse:
+        with DBSession(engine) as db:
+            try:
+                set_session_unusable(db, session_id, False)
+            except MutationError as err:
+                return PlainTextResponse(str(err), status_code=400)
+            return _detail_with_episodes_oob(db, session_id)
 
     @app.post('/scenes/{scene_id}/run-pp', response_class=HTMLResponse)
     def post_run_pp(request: Request, scene_id: str) -> HTMLResponse:
