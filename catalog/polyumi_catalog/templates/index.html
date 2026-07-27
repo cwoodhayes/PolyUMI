@@ -44,6 +44,9 @@
     <div id="col-datasets-body" class="col-body">
       <p class="placeholder">Select a task.</p>
     </div>
+    {% if can_build_dataset %}
+    {% include "_dataset_builder.html" %}
+    {% endif %}
   </section>
 </main>
 

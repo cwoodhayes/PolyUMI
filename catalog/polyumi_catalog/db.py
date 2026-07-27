@@ -16,6 +16,11 @@ def default_db_path(recordings_dir: pathlib.Path) -> pathlib.Path:
     return recordings_dir / '.catalog' / 'catalog.db'
 
 
+def default_datasets_dir(recordings_dir: pathlib.Path) -> pathlib.Path:
+    """Return the default directory exported datasets + their manifests live in."""
+    return recordings_dir / 'datasets'
+
+
 def get_engine(db_path: pathlib.Path) -> Engine:
     """
     Create (or open) the SQLite engine at ``db_path`` and ensure the schema exists.

@@ -10,7 +10,16 @@ then redirect back to ``/`` for a full reload — simple and correct over
 choreographing OOB swaps across every affected column. Phase 2.5 adds per-session
 MCAP export + Foxglove launch; unlike Phase 2 these stay within the detail panel
 (no other column is affected), so they're plain HTMX POSTs that re-swap
-``#detail-body`` in place rather than reloading the whole page.
+``#detail-body`` in place rather than reloading the whole page. Phase 3 adds the
+dataset builder: building a dataset is a plain form POST + redirect (same pattern as
+Phase 2, since it affects the Datasets column rather than wherever the form lives),
+but *populating* that form is driven by an "Add to dataset" button in the scene
+detail pane — a scene the user is looking at, not one selected from a picker in the
+form itself. The set of scenes added so far (the "draft") has nowhere else to live
+between requests, so it's kept as plain in-memory state on ``app.state`` — this is a
+single-user, single-process, localhost tool (§2 non-goals), so process-global state
+is fine and avoids adding cookies/sessions or client-side state for one working list.
+It does not survive a server restart; that's an accepted trade-off, not an oversight.
 """
 
 from __future__ import annotations
@@ -25,10 +34,12 @@ from sqlalchemy import Engine
 from sqlmodel import Session as DBSession
 
 from polyumi_catalog import mcap_tools, queries
+from polyumi_catalog.db import default_datasets_dir
+from polyumi_catalog.dataset_builder import DatasetBuildError, build_dataset
 from polyumi_catalog.models import Scene
 from polyumi_catalog.models import Session as SessionRow
 from polyumi_catalog.mutations import MutationError, assign_scene_task, create_task, rename_task
-from polyumi_catalog.sync import sync_recordings
+from polyumi_catalog.sync import sync_datasets, sync_recordings
 
 _PKG_DIR = pathlib.Path(__file__).resolve().parent
 _TEMPLATES_DIR = _PKG_DIR / 'templates'
@@ -43,17 +54,30 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
     against it; otherwise rescanning is disabled.
     """
     app = FastAPI(title='PolyUMI Catalog')
+    app.state.pending_dataset_scene_ids = []
     app.mount('/static', StaticFiles(directory=_STATIC_DIR), name='static')
     templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
     def render(request: Request, template: str, **ctx) -> HTMLResponse:
         return templates.TemplateResponse(request, template, ctx)
 
+    def render_dataset_builder(request: Request, db: DBSession, *, oob: bool) -> HTMLResponse:
+        pending_scenes = queries.scenes_by_ids(db, app.state.pending_dataset_scene_ids)
+        return render(request, '_dataset_builder.html', pending_scenes=pending_scenes, oob=oob)
+
     @app.get('/', response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
         with DBSession(engine) as db:
             tasks = queries.list_tasks(db)
-        return render(request, 'index.html', tasks=tasks, can_rescan=recordings_dir is not None)
+            pending_scenes = queries.scenes_by_ids(db, app.state.pending_dataset_scene_ids)
+        return render(
+            request,
+            'index.html',
+            tasks=tasks,
+            pending_scenes=pending_scenes,
+            can_rescan=recordings_dir is not None,
+            can_build_dataset=recordings_dir is not None,
+        )
 
     @app.get('/select/task/{task_key}', response_class=HTMLResponse)
     def select_task(request: Request, task_key: str) -> HTMLResponse:
@@ -96,6 +120,7 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
     def rescan(request: Request) -> HTMLResponse:
         if recordings_dir is not None:
             sync_recordings(recordings_dir, engine)
+            sync_datasets(default_datasets_dir(recordings_dir), engine)
         with DBSession(engine) as db:
             tasks = queries.list_tasks(db)
         return render(request, '_tasks.html', tasks=tasks, oob=False)
@@ -126,6 +151,41 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
             except MutationError as err:
                 return PlainTextResponse(str(err), status_code=400)
         return RedirectResponse('/', status_code=303)
+
+    @app.post('/datasets')
+    def post_build_dataset(name: str = Form(...), scene_ids: list[str] = Form([])):
+        if recordings_dir is None:
+            return PlainTextResponse('Dataset export requires a recordings directory.', status_code=400)
+
+        with DBSession(engine) as db:
+            try:
+                build_dataset(
+                    db,
+                    name=name,
+                    task_id=None,
+                    scene_ids=scene_ids,
+                    output_dir=default_datasets_dir(recordings_dir),
+                )
+            except DatasetBuildError as err:
+                return PlainTextResponse(str(err), status_code=400)
+        app.state.pending_dataset_scene_ids.clear()
+        return RedirectResponse('/', status_code=303)
+
+    @app.post('/dataset-draft/add/{scene_id}', response_class=HTMLResponse)
+    def post_dataset_draft_add(request: Request, scene_id: str) -> HTMLResponse:
+        with DBSession(engine) as db:
+            if db.get(Scene, scene_id) is None:
+                return PlainTextResponse('No such scene.', status_code=404)
+            if scene_id not in app.state.pending_dataset_scene_ids:
+                app.state.pending_dataset_scene_ids.append(scene_id)
+            return render_dataset_builder(request, db, oob=True)
+
+    @app.post('/dataset-draft/remove/{scene_id}', response_class=HTMLResponse)
+    def post_dataset_draft_remove(request: Request, scene_id: str) -> HTMLResponse:
+        if scene_id in app.state.pending_dataset_scene_ids:
+            app.state.pending_dataset_scene_ids.remove(scene_id)
+        with DBSession(engine) as db:
+            return render_dataset_builder(request, db, oob=True)
 
     @app.post('/sessions/{session_id}/export-mcap', response_class=HTMLResponse)
     def post_export_mcap(request: Request, session_id: str) -> HTMLResponse:

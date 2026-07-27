@@ -115,3 +115,36 @@ def test_detail_helpers_return_empty_for_missing_ids(tmp_path: pathlib.Path):
         assert queries.session_detail(db, 'nope')['kind'] == 'empty'
         assert queries.dataset_detail(db, 999)['kind'] == 'empty'
         assert queries.task_detail(db, '999')['kind'] == 'empty'
+
+
+def test_list_scene_options_includes_task_name(tmp_path: pathlib.Path):
+    """Scene options for the dataset builder carry a friendly name and their task's name."""
+    engine = _populated_engine(tmp_path)
+    with DBSession(engine) as db:
+        options = queries.list_scene_options(db)
+
+    by_id = {o['scene_id']: o for o in options}
+    assert by_id['scene-1']['task_name'] == 'fold_towel'
+    assert by_id['scene-2']['task_name'] is None
+
+
+def test_dataset_detail_lists_member_scenes(tmp_path: pathlib.Path):
+    """dataset_detail resolves each DatasetMember's scene_id to a friendly name."""
+    from polyumi_catalog.models import Dataset, DatasetMember
+
+    engine = _populated_engine(tmp_path)
+    with DBSession(engine) as db:
+        dataset = Dataset(name='fold_towel_v1', n_episodes=3)
+        db.add(dataset)
+        db.commit()
+        db.refresh(dataset)
+        db.add(DatasetMember(dataset_id=dataset.id, scene_id='scene-1', episodes='all'))
+        db.commit()
+
+        detail = queries.dataset_detail(db, dataset.id)
+
+    assert detail['kind'] == 'dataset'
+    assert len(detail['members']) == 1
+    assert detail['members'][0]['scene_id'] == 'scene-1'
+    assert detail['members'][0]['episodes'] == 'all'
+    assert detail['members'][0]['name']  # resolved to the scene's basename, not just the id

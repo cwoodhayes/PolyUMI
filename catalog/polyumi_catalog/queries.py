@@ -15,7 +15,7 @@ from sqlmodel import Session as DBSession
 from sqlmodel import select
 
 from polyumi_catalog import mcap_tools
-from polyumi_catalog.models import Dataset, Scene, Session, Task
+from polyumi_catalog.models import Dataset, DatasetMember, Scene, Session, Task
 
 # Sentinel task filters used by the UI's pseudo-rows in the Tasks column.
 FILTER_ALL = 'all'
@@ -77,6 +77,26 @@ def list_tasks(db: DBSession) -> list[dict]:
 def list_task_options(db: DBSession) -> list[dict]:
     """Return every real task as ``{'id', 'name'}``, for assignment dropdowns (no pseudo-rows)."""
     return [{'id': t.id, 'name': t.name} for t in db.exec(select(Task).order_by(Task.name)).all()]
+
+
+def list_scene_options(db: DBSession) -> list[dict]:
+    """Return every scene as ``{'scene_id', 'name', 'task_name'}``."""
+    task_names = {t.id: t.name for t in db.exec(select(Task)).all()}
+    return [
+        {'scene_id': s.scene_id, 'name': _basename(s.dir) or s.scene_id, 'task_name': task_names.get(s.task_id)}
+        for s in db.exec(select(Scene).order_by(Scene.dir)).all()
+    ]
+
+
+def scenes_by_ids(db: DBSession, scene_ids: list[str]) -> list[dict]:
+    """
+    Resolve ``scene_ids`` to their ``{'scene_id', 'name', 'task_name'}`` view models.
+
+    Preserves the given order (the order scenes were added to the dataset-builder draft)
+    and silently drops any id that no longer resolves to a scene.
+    """
+    by_id = {opt['scene_id']: opt for opt in list_scene_options(db)}
+    return [by_id[sid] for sid in scene_ids if sid in by_id]
 
 
 def _scene_view(scene: Scene, task_name: str | None, ep_count: int, sess_count: int) -> dict:
@@ -247,6 +267,8 @@ def dataset_detail(db: DBSession, dataset_id: int) -> dict:
     if d is None:
         return {'kind': 'empty'}
     task = db.get(Task, d.task_id) if d.task_id is not None else None
+    members = db.exec(select(DatasetMember).where(DatasetMember.dataset_id == d.id)).all()
+    scene_names = {s.scene_id: _basename(s.dir) or s.scene_id for s in db.exec(select(Scene)).all()}
     return {
         'kind': 'dataset',
         'id': d.id,
@@ -257,4 +279,8 @@ def dataset_detail(db: DBSession, dataset_id: int) -> dict:
         'manifest_path': d.manifest_path,
         'polyumi_version': d.polyumi_version,
         'created_at': d.created_at,
+        'members': [
+            {'scene_id': m.scene_id, 'name': scene_names.get(m.scene_id, m.scene_id), 'episodes': m.episodes}
+            for m in members
+        ],
     }

@@ -40,6 +40,7 @@
     </select>
     <button type="submit">Assign</button>
   </form>
+  <button hx-post="/dataset-draft/add/{{ detail.scene_id }}" hx-swap="none">Add to dataset</button>
   {% if detail.conflicts %}
   <div class="conflict-box">
     <strong>⚠ Task conflicts</strong>
@@ -96,6 +97,16 @@
     <dt>PolyUMI version</dt><dd class="mono">{{ detail.polyumi_version or '—' }}</dd>
     <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
   </dl>
+  <h3>Member scenes</h3>
+  {% if detail.members %}
+  <ul>
+    {% for m in detail.members %}
+    <li>{{ m.name }} <span class="muted">({{ m.episodes }})</span></li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">No member scenes.</p>
+  {% endif %}
 
   {% endif %}
 </div>

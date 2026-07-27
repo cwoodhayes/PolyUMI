@@ -1,0 +1,28 @@
+<div id="dataset-builder"{% if oob %} hx-swap-oob="true"{% endif %}>
+  <h3>New Dataset Builder</h3>
+  {% if not pending_scenes %}
+  <p class="placeholder">No scenes added yet — use "Add to dataset" from a scene's detail pane.</p>
+  {% else %}
+  <ul class="pending-scene-list">
+    {% for s in pending_scenes %}
+    <li>
+      <span class="item-name">{{ s.name }}{% if s.task_name %} ({{ s.task_name }}){% endif %}</span>
+      <button
+        type="button"
+        class="remove-btn"
+        title="Remove from dataset"
+        hx-post="/dataset-draft/remove/{{ s.scene_id }}"
+        hx-swap="none"
+      >×</button>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  <form class="new-dataset-form" method="post" action="/datasets">
+    <input type="text" name="name" placeholder="Dataset name…" required />
+    {% for s in pending_scenes %}
+    <input type="hidden" name="scene_ids" value="{{ s.scene_id }}" />
+    {% endfor %}
+    <button type="submit"{% if not pending_scenes %} disabled{% endif %}>Build dataset</button>
+  </form>
+</div>

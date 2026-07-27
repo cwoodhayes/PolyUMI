@@ -265,3 +265,122 @@ def test_open_foxglove_without_mcap_returns_400(tmp_path: pathlib.Path):
     rec, engine = _seed(tmp_path)
     resp = TestClient(create_app(engine, recordings_dir=rec)).post(f'/sessions/{_session_id(rec)}/open-foxglove')
     assert resp.status_code == 400
+
+
+def test_index_includes_empty_dataset_builder(tmp_path: pathlib.Path):
+    """With no scenes added yet, the builder shows its empty state and no task_id field at all."""
+    resp = _client(tmp_path).get('/')
+    assert 'New Dataset Builder' in resp.text
+    assert 'name="scene_ids"' not in resp.text
+    assert 'name="task_id"' not in resp.text
+
+
+def test_index_omits_dataset_builder_without_recordings_dir(tmp_path: pathlib.Path):
+    """Without a recordings_dir there's nowhere to export to, so the builder is hidden."""
+    resp = _client(tmp_path, with_recordings=False).get('/')
+    assert 'New Dataset Builder' not in resp.text
+
+
+def test_post_dataset_draft_add_appears_on_index(tmp_path: pathlib.Path):
+    """Adding a scene from its detail pane makes it show up in the builder on the next page load."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+
+    add_resp = client.post('/dataset-draft/add/scene-1')
+    assert add_resp.status_code == 200
+    assert 'hx-swap-oob' in add_resp.text
+    assert 'scene_2026-07-26_10-00-00_abcd' in add_resp.text
+
+    index_resp = client.get('/')
+    assert 'name="scene_ids" value="scene-1"' in index_resp.text
+    assert index_resp.text.count('<li>') == 1
+
+
+def test_post_dataset_draft_add_is_idempotent(tmp_path: pathlib.Path):
+    """Adding the same scene twice doesn't duplicate it in the builder."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+
+    client.post('/dataset-draft/add/scene-1')
+    client.post('/dataset-draft/add/scene-1')
+
+    resp = client.get('/')
+    assert resp.text.count('name="scene_ids"') == 1
+
+
+def test_post_dataset_draft_add_unknown_scene_returns_404(tmp_path: pathlib.Path):
+    """Adding a nonexistent scene id is a clean 404, not a crash."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    resp = client.post('/dataset-draft/add/no-such-scene')
+    assert resp.status_code == 404
+
+
+def test_post_dataset_draft_remove(tmp_path: pathlib.Path):
+    """Removing a scene takes it back out of the builder."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+
+    client.post('/dataset-draft/add/scene-1')
+    remove_resp = client.post('/dataset-draft/remove/scene-1')
+    assert remove_resp.status_code == 200
+
+    resp = client.get('/')
+    assert 'name="scene_ids"' not in resp.text
+
+
+def test_post_dataset_draft_remove_never_added_is_a_noop(tmp_path: pathlib.Path):
+    """Removing a scene that was never added doesn't error."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    resp = client.post('/dataset-draft/remove/scene-1')
+    assert resp.status_code == 200
+
+
+def test_post_build_dataset_success_redirects_and_clears_draft(tmp_path: pathlib.Path, monkeypatch):
+    """Building a dataset (via the draft-populated hidden inputs) redirects and clears the draft."""
+
+    def fake_export_scenes_to_dp(scene_paths, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b'fake-zip')
+        return 3
+
+    monkeypatch.setattr('polyumi_ingest.export.dp.export_scenes_to_dp', fake_export_scenes_to_dp)
+
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec), follow_redirects=False)
+    client.post('/dataset-draft/add/scene-1')
+
+    resp = client.post('/datasets', data={'name': 'fold_towel_v1', 'scene_ids': ['scene-1']})
+
+    assert resp.status_code == 303
+    assert resp.headers['location'] == '/'
+    with DBSession(engine) as db:
+        from polyumi_catalog.models import Dataset
+
+        dataset = db.exec(select(Dataset).where(Dataset.name == 'fold_towel_v1')).first()
+        assert dataset is not None
+        assert dataset.n_episodes == 3
+        assert dataset.task_id is None
+    assert (rec / 'datasets' / 'fold_towel_v1.zarr.zip').is_file()
+    assert (rec / 'datasets' / 'fold_towel_v1.dataset.json').is_file()
+
+    # the draft is cleared after a successful build
+    index_resp = client.get('/')
+    assert 'name="scene_ids"' not in index_resp.text
+
+
+def test_post_build_dataset_without_recordings_dir_returns_400(tmp_path: pathlib.Path):
+    """Building a dataset with no recordings_dir configured is rejected, not a crash."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=None), follow_redirects=False)
+    resp = client.post('/datasets', data={'name': 'x', 'scene_ids': ['scene-1']})
+    assert resp.status_code == 400
+
+
+def test_post_build_dataset_rejects_no_scenes_selected(tmp_path: pathlib.Path):
+    """Submitting the form with no scenes added is a clean 400, not an empty dataset."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec), follow_redirects=False)
+    resp = client.post('/datasets', data={'name': 'x'})
+    assert resp.status_code == 400
