@@ -15,7 +15,15 @@ from sqlmodel import Session as DBSession
 from sqlmodel import select
 
 
-def _make_session(scene_dir: pathlib.Path, name: str, *, scene_id: str, session_type: SessionType, task: str | None):
+def _make_session(
+    scene_dir: pathlib.Path,
+    name: str,
+    *,
+    scene_id: str,
+    session_type: SessionType,
+    task: str | None,
+    notes: str | None = None,
+):
     """Create a session directory with a metadata.json under scene_dir."""
     sd = scene_dir / name
     sd.mkdir(parents=True)
@@ -24,6 +32,7 @@ def _make_session(scene_dir: pathlib.Path, name: str, *, scene_id: str, session_
         scene_id=scene_id,
         session_type=session_type,
         task=task,
+        notes=notes,
         n_video_frames=100,
     )
     md.to_file()
@@ -86,6 +95,23 @@ def test_sync_populates_unusable_from_scene_json(tmp_path: pathlib.Path):
     with DBSession(engine) as db:
         sessions = {pathlib.Path(s.dir).name: s.unusable for s in db.exec(select(Session)).all()}
     assert sessions == {'session_1': False, 'session_2': True}
+
+
+def test_sync_populates_session_notes_from_metadata(tmp_path: pathlib.Path):
+    """A session's metadata.json notes field syncs onto Session.notes."""
+    rec = tmp_path / 'recordings'
+    scene_dir = rec / 'scene_2026-07-27_09-00-00_yzst'
+    scene_dir.mkdir(parents=True)
+    _make_session(
+        scene_dir, 'session_1', scene_id='scene-v', session_type=SessionType.EPISODE, task=None, notes='wobbly grip'
+    )
+    _make_session(scene_dir, 'session_2', scene_id='scene-v', session_type=SessionType.EPISODE, task=None)
+
+    engine = _engine(tmp_path)
+    sync_recordings(rec, engine)
+    with DBSession(engine) as db:
+        notes = {pathlib.Path(s.dir).name: s.notes for s in db.exec(select(Session)).all()}
+    assert notes == {'session_1': 'wobbly grip', 'session_2': None}
 
 
 def test_sync_detects_task_conflict(tmp_path: pathlib.Path):

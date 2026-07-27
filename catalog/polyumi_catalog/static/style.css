@@ -295,6 +295,19 @@ dd {
   margin: 0.5rem 0;
 }
 
+.notes-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin: 0.5rem 0;
+}
+
+.notes-form textarea {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+}
+
 .mcap-actions {
   display: flex;
   align-items: center;

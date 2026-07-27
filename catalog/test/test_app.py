@@ -307,6 +307,51 @@ def test_open_foxglove_without_mcap_returns_400(tmp_path: pathlib.Path):
     assert resp.status_code == 400
 
 
+def test_post_scene_notes_saves_and_shows_in_textarea(tmp_path: pathlib.Path):
+    """POST /scenes/{id}/notes rewrites scene.json and shows the new text on re-render."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+
+    resp = client.post('/scenes/scene-1/notes', data={'notes': 'left-handed grasp'})
+    assert resp.status_code == 200
+    assert 'left-handed grasp</textarea>' in resp.text
+
+    manifest = SceneManifest.from_scene_dir(rec / 'scene_2026-07-26_10-00-00_abcd')
+    assert manifest.notes == 'left-handed grasp'
+
+
+def test_post_scene_notes_unknown_scene_returns_400(tmp_path: pathlib.Path):
+    """Saving notes for a nonexistent scene is rejected, not a crash."""
+    rec, engine = _seed(tmp_path)
+    resp = TestClient(create_app(engine, recordings_dir=rec)).post('/scenes/no-such-scene/notes', data={'notes': 'hi'})
+    assert resp.status_code == 400
+
+
+def test_post_session_notes_saves_and_shows_in_textarea(tmp_path: pathlib.Path):
+    """POST /sessions/{id}/notes rewrites metadata.json and shows the new text on re-render."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    session_id = _session_id(rec)
+
+    resp = client.post(f'/sessions/{session_id}/notes', data={'notes': 'gripper slipped'})
+    assert resp.status_code == 200
+    assert 'gripper slipped</textarea>' in resp.text
+
+    md_path = rec / 'scene_2026-07-26_10-00-00_abcd' / 'session_1' / 'metadata.json'
+    from polyumi_pi.files.metadata import SessionMetadata as SM
+
+    assert SM.from_file(md_path).notes == 'gripper slipped'
+
+
+def test_post_session_notes_unknown_session_returns_400(tmp_path: pathlib.Path):
+    """Saving notes for a nonexistent session is rejected, not a crash."""
+    rec, engine = _seed(tmp_path)
+    resp = TestClient(create_app(engine, recordings_dir=rec)).post(
+        '/sessions/does-not-exist/notes', data={'notes': 'hi'}
+    )
+    assert resp.status_code == 400
+
+
 def test_mark_unusable_then_usable_round_trip(tmp_path: pathlib.Path):
     """Marking a session unusable then usable toggles the badge, scene.json, and the DB row."""
     rec, engine = _seed(tmp_path)

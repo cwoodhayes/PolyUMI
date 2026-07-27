@@ -49,11 +49,13 @@ class Session(SQLModel, table=True):
     """
     A single recording session (one demo episode or a mapping pass).
 
-    Mirrors the session's ``metadata.json``, except ``unusable`` which caches the scene's
-    ``scene.json`` (``unusable_episodes``, keyed by session directory name) — same
-    cache-of-the-manifest pattern as ``Scene.task_id``/``Scene.notes``. ``task_meta`` preserves
-    the session's own collection-time task string so the UI can flag it when it disagrees with
-    the canonical scene-level task.
+    Mirrors the session's ``metadata.json`` — including ``notes``, which the catalog UI can
+    now edit in place (rewriting metadata.json), not just the Pi at record time — except
+    ``unusable``, which caches the scene's ``scene.json`` (``unusable_episodes``, keyed by
+    session directory name) instead, same cache-of-the-manifest pattern as
+    ``Scene.task_id``/``Scene.notes``. ``task_meta`` preserves the session's own
+    collection-time task string so the UI can flag it when it disagrees with the canonical
+    scene-level task.
     """
 
     session_id: str = Field(primary_key=True)
@@ -66,6 +68,7 @@ class Session(SQLModel, table=True):
     n_video_frames: int | None = None
     video_dropped_frames: int | None = None
     unusable: bool = False
+    notes: str | None = None
     created_at: datetime | None = None
 
 

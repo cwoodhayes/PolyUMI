@@ -293,6 +293,7 @@ def session_detail(db: DBSession, session_id: str) -> dict:
         'video_dropped_frames': s.video_dropped_frames,
         'created_at': s.created_at,
         'unusable': s.unusable,
+        'notes': s.notes,
         'pzarr_exists': pzarr_ok,
         'mcap_exists': mcap_path is not None,
         'slam': slam,

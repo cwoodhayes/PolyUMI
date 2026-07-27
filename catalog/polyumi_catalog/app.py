@@ -40,6 +40,11 @@ Phase 5 adds marking an episode unusable (excluded from dataset exports): a plai
 from the session detail pane, same in-place-swap style as MCAP export, except it also
 out-of-band-updates the Episodes column (``_detail_with_episodes_oob``) so that column's
 grey-out reflects the change immediately without requiring the scene to be reselected.
+Phase 6 adds editable notes for both scenes and sessions: an HTMX form POST that re-swaps
+``#detail-body`` in place, same style as every other detail-pane mutation. Session notes is
+the first Session field the catalog itself writes back to metadata.json rather than only
+ever reading (see the Session model + mutations module docstrings) — everything else there
+still mirrors what the Pi recorded.
 """
 
 from __future__ import annotations
@@ -59,7 +64,15 @@ from polyumi_catalog.db import default_datasets_dir
 from polyumi_catalog.dataset_builder import DatasetBuildError, build_dataset
 from polyumi_catalog.models import Scene
 from polyumi_catalog.models import Session as SessionRow
-from polyumi_catalog.mutations import MutationError, assign_scene_task, create_task, rename_task, set_session_unusable
+from polyumi_catalog.mutations import (
+    MutationError,
+    assign_scene_task,
+    create_task,
+    rename_task,
+    set_scene_notes,
+    set_session_notes,
+    set_session_unusable,
+)
 from polyumi_catalog.sync import sync_datasets, sync_recordings
 
 _PKG_DIR = pathlib.Path(__file__).resolve().parent
@@ -291,6 +304,26 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
             except mcap_tools.McapError as err:
                 return PlainTextResponse(str(err), status_code=400)
         return Response(status_code=204)
+
+    @app.post('/scenes/{scene_id}/notes', response_class=HTMLResponse)
+    def post_scene_notes(request: Request, scene_id: str, notes: str = Form('')) -> HTMLResponse:
+        with DBSession(engine) as db:
+            try:
+                set_scene_notes(db, scene_id, notes)
+            except MutationError as err:
+                return PlainTextResponse(str(err), status_code=400)
+            detail = _scene_detail_with_run_state(db, scene_id)
+        return render(request, '_detail.html', detail=detail, oob=False)
+
+    @app.post('/sessions/{session_id}/notes', response_class=HTMLResponse)
+    def post_session_notes(request: Request, session_id: str, notes: str = Form('')) -> HTMLResponse:
+        with DBSession(engine) as db:
+            try:
+                set_session_notes(db, session_id, notes)
+            except MutationError as err:
+                return PlainTextResponse(str(err), status_code=400)
+            detail = queries.session_detail(db, session_id)
+        return render(request, '_detail.html', detail=detail, oob=False)
 
     @app.post('/sessions/{session_id}/mark-unusable', response_class=HTMLResponse)
     def post_mark_unusable(session_id: str) -> HTMLResponse:

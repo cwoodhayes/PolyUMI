@@ -175,6 +175,7 @@ def _sync_scene(db: DBSession, scene_dir: pathlib.Path, now: datetime, force: bo
         row.n_video_frames = meta.n_video_frames
         row.video_dropped_frames = meta.video_dropped_frames
         row.unusable = sd.name in unusable_dirs
+        row.notes = meta.notes
         row.created_at = meta.created_at
         db.add(row)
         stats.sessions_upserted += 1

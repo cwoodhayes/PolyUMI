@@ -123,6 +123,23 @@ def test_list_sessions_and_detail_include_unusable(tmp_path: pathlib.Path):
         assert queries.session_detail(db, episode['session_id'])['unusable'] is True
 
 
+def test_session_detail_includes_notes(tmp_path: pathlib.Path):
+    """session_detail exposes the session's notes, synced from its metadata.json."""
+    engine = _populated_engine(tmp_path)
+    with DBSession(engine) as db:
+        sessions = queries.list_sessions(db, 'scene-1')
+        episode_id = next(s['session_id'] for s in sessions if s['session_type'] == 'EPISODE')
+        assert queries.session_detail(db, episode_id)['notes'] is None
+
+        row = db.get(Session, episode_id)
+        row.notes = 'gripper slipped'
+        db.add(row)
+        db.commit()
+
+    with DBSession(engine) as db:
+        assert queries.session_detail(db, episode_id)['notes'] == 'gripper slipped'
+
+
 def test_list_sessions_includes_slam_quality(tmp_path: pathlib.Path):
     """Episodes with SLAM results carry a tracking ratio and low_quality flag in the list."""
     engine = _populated_engine(tmp_path)

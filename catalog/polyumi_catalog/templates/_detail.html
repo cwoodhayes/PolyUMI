@@ -28,7 +28,6 @@
       <dl>
         <dt>Task</dt><dd>{{ detail.task_name or '(unassigned)' }}</dd>
         <dt>Directory</dt><dd class="mono">{{ detail.dir }}</dd>
-        <dt>Notes</dt><dd>{{ detail.notes or '—' }}</dd>
         <dt>Archived</dt><dd>{{ 'yes' if detail.archived else 'no' }}</dd>
         <dt>Sessions</dt><dd>{{ detail.n_episodes }} episode / {{ detail.n_sessions }} total</dd>
         <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
@@ -44,6 +43,11 @@
         <button type="submit">Assign</button>
       </form>
       <button hx-post="/dataset-draft/add/{{ detail.scene_id }}" hx-swap="none">Add to dataset</button>
+      <form class="notes-form" hx-post="/scenes/{{ detail.scene_id }}/notes" hx-target="#detail-body" hx-swap="outerHTML">
+        <label for="scene-notes">Notes</label>
+        <textarea id="scene-notes" name="notes" rows="3" placeholder="Add notes…">{{ detail.notes or '' }}</textarea>
+        <button type="submit">Save notes</button>
+      </form>
       {% if detail.quality.n_episodes_with_slam %}
       <h3>Episode quality</h3>
       <dl>
@@ -147,6 +151,11 @@
         {{ 'Mark usable' if detail.unusable else 'Mark unusable' }}
       </button>
       {% endif %}
+      <form class="notes-form" hx-post="/sessions/{{ detail.session_id }}/notes" hx-target="#detail-body" hx-swap="outerHTML">
+        <label for="session-notes">Notes</label>
+        <textarea id="session-notes" name="notes" rows="3" placeholder="Add notes…">{{ detail.notes or '' }}</textarea>
+        <button type="submit">Save notes</button>
+      </form>
       {% if detail.slam %}
       <h3>SLAM tracking quality</h3>
       <dl>
