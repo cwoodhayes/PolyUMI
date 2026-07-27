@@ -208,15 +208,24 @@ class ChirpTimeSyncStep(PreprocessingStep):
             t_chirp_gopro = gopro_ts[0] + onset_gopro / gopro_sr
             gopro_to_finger_offset_s = t_chirp_gopro - t_chirp_finger
 
+            # Chirp end on the GoPro clock: the earliest time real demonstration can begin,
+            # since the operator waits for the chirp before starting. The DP exporter uses this
+            # to trim the idle "waiting for chirp" prefix. gopro_ts here is timestamps/gopro_audio,
+            # which shares its epoch/origin with timestamps/gopro (video), so this value is
+            # directly comparable to the video frame grid the exporter runs on.
+            gopro_chirp_end_s = t_chirp_gopro + sync_chirp.DURATION_S
+
             step_group = ep.require_group('annotations').require_group('time_sync')
             _write_scalar(step_group, 'gopro_to_finger_offset_s', gopro_to_finger_offset_s)
             _write_scalar(step_group, 'finger_chirp_onset_s', t_chirp_finger)
             _write_scalar(step_group, 'gopro_chirp_onset_s', t_chirp_gopro)
+            _write_scalar(step_group, 'gopro_chirp_end_s', gopro_chirp_end_s)
             _write_scalar(step_group, 'finger_chirp_peak', peak_finger)
             _write_scalar(step_group, 'gopro_chirp_peak', peak_gopro)
 
             log.info(
                 f'{episode_key}: offset={gopro_to_finger_offset_s:.6f}s '
                 f'(finger_onset={t_chirp_finger:.3f}s, gopro_onset={t_chirp_gopro:.3f}s, '
+                f'gopro_chirp_end={gopro_chirp_end_s:.3f}s, '
                 f'finger_peak={peak_finger:.4f}, gopro_peak={peak_gopro:.4f})'
             )
