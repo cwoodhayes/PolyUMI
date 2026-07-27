@@ -73,6 +73,11 @@ def list_tasks(db: DBSession) -> list[dict]:
     return rows
 
 
+def list_task_options(db: DBSession) -> list[dict]:
+    """Return every real task as ``{'id', 'name'}``, for assignment dropdowns (no pseudo-rows)."""
+    return [{'id': t.id, 'name': t.name} for t in db.exec(select(Task).order_by(Task.name)).all()]
+
+
 def _scene_view(scene: Scene, task_name: str | None, ep_count: int, sess_count: int) -> dict:
     """Build a Scenes-column view model from a scene row and its counts."""
     return {
@@ -196,6 +201,7 @@ def scene_detail(db: DBSession, scene_id: str) -> dict:
         'scene_id': scene.scene_id,
         'name': _basename(scene.dir) or scene.scene_id,
         'dir': scene.dir,
+        'task_id': scene.task_id,
         'task_name': task.name if task else None,
         'notes': scene.notes,
         'archived': scene.archived,

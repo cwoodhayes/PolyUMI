@@ -1,24 +1,28 @@
 """
-FastAPI app for the Phase 1 read-only catalog browser.
+FastAPI app for the catalog browser.
 
 Serves the four-column Miller layout (Tasks → Scenes → Episodes → Datasets) plus a
 detail panel over the synced catalog DB. Selecting a row issues an HTMX request that
-swaps the column to its right and out-of-band-updates the detail panel; no route here
-mutates disk or DB (mutations arrive in Phase 2).
+swaps the column to its right and out-of-band-updates the detail panel (Phase 1,
+read-only). Phase 2 adds task create/rename and scene→task assignment: these are
+plain HTML form posts (no HTMX) that write the authoritative scene.json + DB row,
+then redirect back to ``/`` for a full reload — simple and correct over
+choreographing OOB swaps across every affected column.
 """
 
 from __future__ import annotations
 
 import pathlib
 
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Form, Request
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import Engine
 from sqlmodel import Session as DBSession
 
 from polyumi_catalog import queries
+from polyumi_catalog.mutations import MutationError, assign_scene_task, create_task, rename_task
 from polyumi_catalog.sync import sync_recordings
 
 _PKG_DIR = pathlib.Path(__file__).resolve().parent
@@ -66,7 +70,10 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
         with DBSession(engine) as db:
             sessions = queries.list_sessions(db, scene_id)
             detail = queries.scene_detail(db, scene_id)
-        return render(request, 'select_scene.html', sessions=sessions, detail=detail, selected_scene=scene_id)
+            all_tasks = queries.list_task_options(db)
+        return render(
+            request, 'select_scene.html', sessions=sessions, detail=detail, all_tasks=all_tasks, selected_scene=scene_id
+        )
 
     @app.get('/select/session/{session_id}', response_class=HTMLResponse)
     def select_session(request: Request, session_id: str) -> HTMLResponse:
@@ -87,5 +94,32 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
         with DBSession(engine) as db:
             tasks = queries.list_tasks(db)
         return render(request, '_tasks.html', tasks=tasks, oob=False)
+
+    @app.post('/tasks')
+    def post_create_task(name: str = Form(...)):
+        with DBSession(engine) as db:
+            try:
+                create_task(db, name)
+            except MutationError as err:
+                return PlainTextResponse(str(err), status_code=400)
+        return RedirectResponse('/', status_code=303)
+
+    @app.post('/tasks/{task_id}/rename')
+    def post_rename_task(task_id: int, new_name: str = Form(...)):
+        with DBSession(engine) as db:
+            try:
+                rename_task(db, task_id, new_name)
+            except MutationError as err:
+                return PlainTextResponse(str(err), status_code=400)
+        return RedirectResponse('/', status_code=303)
+
+    @app.post('/scenes/{scene_id}/task')
+    def post_assign_scene_task(scene_id: str, task_id: str = Form('')):
+        with DBSession(engine) as db:
+            try:
+                assign_scene_task(db, scene_id, int(task_id) if task_id else None)
+            except MutationError as err:
+                return PlainTextResponse(str(err), status_code=400)
+        return RedirectResponse('/', status_code=303)
 
     return app

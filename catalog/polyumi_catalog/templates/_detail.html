@@ -11,6 +11,10 @@
     <dt>Description</dt><dd>{{ detail.description or '—' }}</dd>
     <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
   </dl>
+  <form class="rename-task-form" method="post" action="/tasks/{{ detail.id }}/rename">
+    <input type="text" name="new_name" value="{{ detail.name }}" required />
+    <button type="submit">Rename</button>
+  </form>
   {% endif %}
   <dl>
     <dt>Scenes</dt><dd>{{ detail.scene_count }}</dd>
@@ -27,6 +31,15 @@
     <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
     <dt>Last synced</dt><dd>{{ detail.synced_at or '—' }}</dd>
   </dl>
+  <form class="assign-task-form" method="post" action="/scenes/{{ detail.scene_id }}/task">
+    <select name="task_id">
+      <option value=""{% if not detail.task_id %} selected{% endif %}>(unassigned)</option>
+      {% for t in all_tasks %}
+      <option value="{{ t.id }}"{% if detail.task_id == t.id %} selected{% endif %}>{{ t.name }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit">Assign</button>
+  </form>
   {% if detail.conflicts %}
   <div class="conflict-box">
     <strong>⚠ Task conflicts</strong>

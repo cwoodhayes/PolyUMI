@@ -19,6 +19,10 @@
   <section class="column" id="col-tasks">
     <div class="col-head">Tasks</div>
     {% include "_tasks.html" %}
+    <form class="new-task-form" method="post" action="/tasks">
+      <input type="text" name="name" placeholder="New task…" required />
+      <button type="submit">Add</button>
+    </form>
   </section>
 
   <section class="column" id="col-scenes">

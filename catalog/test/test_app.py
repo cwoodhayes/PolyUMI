@@ -1,4 +1,4 @@
-"""HTTP-level tests for the Phase 1 read-only browser (routes never mutate)."""
+"""HTTP-level tests for the catalog browser: Phase 1 reads plus Phase 2 mutations."""
 
 from __future__ import annotations
 
@@ -10,6 +10,10 @@ from polyumi_catalog.db import get_engine
 from polyumi_catalog.manifests import SceneManifest
 from polyumi_catalog.sync import sync_recordings
 from polyumi_pi.files.metadata import SessionMetadata, SessionType
+from sqlmodel import Session as DBSession
+from sqlmodel import select
+
+from polyumi_catalog.models import Scene, Task
 
 
 def _make_session(scene_dir: pathlib.Path, name: str, *, scene_id: str, session_type: SessionType):
@@ -20,7 +24,8 @@ def _make_session(scene_dir: pathlib.Path, name: str, *, scene_id: str, session_
     return sd
 
 
-def _client(tmp_path: pathlib.Path, *, with_recordings: bool = True) -> TestClient:
+def _seed(tmp_path: pathlib.Path):
+    """Seed a recordings tree + synced engine, returning (recordings_dir, engine)."""
     rec = tmp_path / 'recordings'
     scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
     scene_dir.mkdir(parents=True)
@@ -29,6 +34,11 @@ def _client(tmp_path: pathlib.Path, *, with_recordings: bool = True) -> TestClie
 
     engine = get_engine(tmp_path / 'catalog.db')
     sync_recordings(rec, engine)
+    return rec, engine
+
+
+def _client(tmp_path: pathlib.Path, *, with_recordings: bool = True) -> TestClient:
+    rec, engine = _seed(tmp_path)
     app = create_app(engine, recordings_dir=rec if with_recordings else None)
     return TestClient(app)
 
@@ -104,3 +114,82 @@ def test_no_get_route_mutates_state(tmp_path: pathlib.Path):
         first = client.get(path).text
         second = client.get(path).text
         assert first == second
+
+
+def test_select_scene_includes_assign_task_dropdown(tmp_path: pathlib.Path):
+    """The scene detail panel offers a task dropdown populated with real tasks."""
+    resp = _client(tmp_path).get('/select/scene/scene-1')
+    assert 'name="task_id"' in resp.text
+    assert '>fold_towel<' in resp.text
+
+
+def test_post_create_task_redirects_and_persists(tmp_path: pathlib.Path):
+    """POST /tasks creates a task and redirects to '/' without following it automatically."""
+    rec, engine = _seed(tmp_path)
+    app = create_app(engine, recordings_dir=rec)
+    client = TestClient(app, follow_redirects=False)
+
+    resp = client.post('/tasks', data={'name': 'wipe_table'})
+    assert resp.status_code == 303
+    assert resp.headers['location'] == '/'
+
+    with DBSession(engine) as db:
+        assert db.exec(select(Task).where(Task.name == 'wipe_table')).first() is not None
+
+
+def test_post_create_task_rejects_blank_name(tmp_path: pathlib.Path):
+    """A blank task name is rejected with 400, not silently accepted."""
+    rec, engine = _seed(tmp_path)
+    app = create_app(engine, recordings_dir=rec)
+    client = TestClient(app, follow_redirects=False)
+
+    resp = client.post('/tasks', data={'name': '   '})
+    assert resp.status_code == 400
+
+
+def test_post_assign_scene_task_writes_scene_json(tmp_path: pathlib.Path):
+    """POST /scenes/{id}/task reassigns the scene and rewrites its scene.json."""
+    rec, engine = _seed(tmp_path)
+    with DBSession(engine) as db:
+        wipe = Task(name='wipe_table')
+        db.add(wipe)
+        db.commit()
+        wipe_id = wipe.id
+
+    app = create_app(engine, recordings_dir=rec)
+    client = TestClient(app, follow_redirects=False)
+    resp = client.post('/scenes/scene-1/task', data={'task_id': str(wipe_id)})
+    assert resp.status_code == 303
+
+    with DBSession(engine) as db:
+        assert db.get(Scene, 'scene-1').task_id == wipe_id
+    manifest = SceneManifest.from_scene_dir(rec / 'scene_2026-07-26_10-00-00_abcd')
+    assert manifest.task == 'wipe_table'
+
+
+def test_post_assign_scene_task_unassign_with_empty_value(tmp_path: pathlib.Path):
+    """Posting an empty task_id clears the scene's task (the '(unassigned)' option)."""
+    rec, engine = _seed(tmp_path)
+    app = create_app(engine, recordings_dir=rec)
+    client = TestClient(app, follow_redirects=False)
+
+    resp = client.post('/scenes/scene-1/task', data={'task_id': ''})
+    assert resp.status_code == 303
+    with DBSession(engine) as db:
+        assert db.get(Scene, 'scene-1').task_id is None
+
+
+def test_post_rename_task_cascades_and_redirects(tmp_path: pathlib.Path):
+    """POST /tasks/{id}/rename updates the task and rewrites every member scene.json."""
+    rec, engine = _seed(tmp_path)
+    with DBSession(engine) as db:
+        task = db.exec(select(Task).where(Task.name == 'fold_towel')).first()
+        task_id = task.id
+
+    app = create_app(engine, recordings_dir=rec)
+    client = TestClient(app, follow_redirects=False)
+    resp = client.post(f'/tasks/{task_id}/rename', data={'new_name': 'fold_towel_v2'})
+    assert resp.status_code == 303
+
+    manifest = SceneManifest.from_scene_dir(rec / 'scene_2026-07-26_10-00-00_abcd')
+    assert manifest.task == 'fold_towel_v2'
