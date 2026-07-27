@@ -282,3 +282,24 @@ def test_export_scenes_to_dp_raises_for_missing_scene(tmp_path: pathlib.Path) ->
     with pytest.raises(FileNotFoundError):
         export_scenes_to_dp([scene_a, missing], out)
     assert not out.exists()
+
+
+def test_export_scenes_to_dp_error_identifies_the_failing_scene(tmp_path: pathlib.Path) -> None:
+    """
+    A failure in the second of several scenes names *that scene's own directory*, not 'scene.zarr'.
+
+    Every scene's zarr store is named identically ('scene.zarr') inside its own directory, so
+    labeling by that name alone would make every scene's episode_0 indistinguishable in a
+    multi-scene export's errors/logs. It must use the scene directory name instead.
+    """
+    scene_a = _build_scene(tmp_path / 'a')
+    scene_b = _build_scene(tmp_path / 'b')
+    root_b = zarr.open_group(str(scene_b), mode='a')
+    del root_b['episode_0']['eef']
+    out = tmp_path / 'combined.zarr.zip'
+
+    with pytest.raises(RuntimeError, match='step 5') as exc_info:
+        export_scenes_to_dp([scene_a, scene_b], out)
+
+    assert 'b/episode_0' in str(exc_info.value)
+    assert 'scene.zarr/episode_0' not in str(exc_info.value)

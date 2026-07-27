@@ -233,18 +233,23 @@ def _append_scene_episodes(scene_path: pathlib.Path, data_grp: zarr.Group, episo
     if not zarr_path.exists():
         raise FileNotFoundError(f'No scene.zarr found at {scene_path}')
 
+    # zarr_path.name is always the literal 'scene.zarr', identical across every scene; use the
+    # scene directory's own name so multi-scene exports can tell episodes from different scenes
+    # apart in logs/errors (otherwise every scene logs as e.g. 'scene.zarr/episode_0').
+    scene_label = zarr_path.parent.name
+
     root = zarr.open_group(str(zarr_path), mode='r')
     n_episodes = int(root.attrs.get('n_episodes', 0))
     for i in range(n_episodes):
         ep_key = f'episode_{i}'
         if ep_key not in root:
-            log.warning(f'{ep_key} not found in {zarr_path.name}, skipping.')
+            log.warning(f'{ep_key} not found in {scene_label}, skipping.')
             continue
         ep = zarr.open_group(str(zarr_path / ep_key), mode='r')
         if ep.attrs.get('session_type') == 'MAPPING':
-            log.info(f'  {zarr_path.name}/{ep_key}: MAPPING session, skipping.')
+            log.info(f'  {scene_label}/{ep_key}: MAPPING session, skipping.')
             continue
-        total += _export_episode(ep, data_grp, f'{zarr_path.name}/{ep_key}', zarr_path)
+        total += _export_episode(ep, data_grp, f'{scene_label}/{ep_key}', zarr_path)
         episode_ends.append(total)
     return total
 

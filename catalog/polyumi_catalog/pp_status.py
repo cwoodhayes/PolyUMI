@@ -50,7 +50,10 @@ def scene_pp_status(scene_dir: pathlib.Path) -> dict:
     return {
         'pzarr_exists': True,
         'steps': steps,
-        'n_complete': len(completed),
+        # counted from `steps` (intersected with currently-registered step numbers), not
+        # len(completed) directly — a scene processed under a since-retired step number
+        # would otherwise report e.g. "7/5 complete".
+        'n_complete': sum(1 for s in steps if s['complete']),
         'n_total': len(all_steps),
     }
 

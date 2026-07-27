@@ -20,6 +20,9 @@ between requests, so it's kept as plain in-memory state on ``app.state`` — thi
 single-user, single-process, localhost tool (§2 non-goals), so process-global state
 is fine and avoids adding cookies/sessions or client-side state for one working list.
 It does not survive a server restart; that's an accepted trade-off, not an oversight.
+Reads/writes of that list are still guarded by ``app.state.pending_dataset_lock`` — a
+single-user tool can still see two nearly-simultaneous requests (e.g. two browser tabs),
+and an unguarded check-then-append could otherwise add a duplicate entry.
 Phase 4 adds a "run full pipeline" button on the scene detail pane: unlike every
 prior mutation this can take minutes (SLAM in particular), so it can't run inline on
 the request thread. It runs on a plain ``threading.Thread`` (started, not joined) with
@@ -69,6 +72,7 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
     """
     app = FastAPI(title='PolyUMI Catalog')
     app.state.pending_dataset_scene_ids = []
+    app.state.pending_dataset_lock = threading.Lock()
     app.state.pp_runs = {}  # scene_id -> {'status': 'running'|'done'|'error', 'error': str|None}
     app.state.pp_runs_lock = threading.Lock()
     app.mount('/static', StaticFiles(directory=_STATIC_DIR), name='static')
@@ -78,7 +82,9 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
         return templates.TemplateResponse(request, template, ctx)
 
     def render_dataset_builder(request: Request, db: DBSession, *, oob: bool) -> HTMLResponse:
-        pending_scenes = queries.scenes_by_ids(db, app.state.pending_dataset_scene_ids)
+        with app.state.pending_dataset_lock:
+            pending_ids = list(app.state.pending_dataset_scene_ids)
+        pending_scenes = queries.scenes_by_ids(db, pending_ids)
         all_tasks = queries.list_task_options(db)
         return render(request, '_dataset_builder.html', pending_scenes=pending_scenes, all_tasks=all_tasks, oob=oob)
 
@@ -94,7 +100,9 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
     def index(request: Request) -> HTMLResponse:
         with DBSession(engine) as db:
             tasks = queries.list_tasks(db)
-            pending_scenes = queries.scenes_by_ids(db, app.state.pending_dataset_scene_ids)
+            with app.state.pending_dataset_lock:
+                pending_ids = list(app.state.pending_dataset_scene_ids)
+            pending_scenes = queries.scenes_by_ids(db, pending_ids)
             all_tasks = queries.list_task_options(db)
         return render(
             request,
@@ -208,7 +216,8 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
                 )
             except DatasetBuildError as err:
                 return PlainTextResponse(str(err), status_code=400)
-        app.state.pending_dataset_scene_ids.clear()
+        with app.state.pending_dataset_lock:
+            app.state.pending_dataset_scene_ids.clear()
         return RedirectResponse('/', status_code=303)
 
     @app.post('/dataset-draft/add/{scene_id}', response_class=HTMLResponse)
@@ -216,14 +225,16 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
         with DBSession(engine) as db:
             if db.get(Scene, scene_id) is None:
                 return PlainTextResponse('No such scene.', status_code=404)
-            if scene_id not in app.state.pending_dataset_scene_ids:
-                app.state.pending_dataset_scene_ids.append(scene_id)
+            with app.state.pending_dataset_lock:
+                if scene_id not in app.state.pending_dataset_scene_ids:
+                    app.state.pending_dataset_scene_ids.append(scene_id)
             return render_dataset_builder(request, db, oob=True)
 
     @app.post('/dataset-draft/remove/{scene_id}', response_class=HTMLResponse)
     def post_dataset_draft_remove(request: Request, scene_id: str) -> HTMLResponse:
-        if scene_id in app.state.pending_dataset_scene_ids:
-            app.state.pending_dataset_scene_ids.remove(scene_id)
+        with app.state.pending_dataset_lock:
+            if scene_id in app.state.pending_dataset_scene_ids:
+                app.state.pending_dataset_scene_ids.remove(scene_id)
         with DBSession(engine) as db:
             return render_dataset_builder(request, db, oob=True)
 

@@ -311,6 +311,32 @@ def test_post_dataset_draft_add_is_idempotent(tmp_path: pathlib.Path):
     assert resp.text.count('name="scene_ids"') == 1
 
 
+def test_post_dataset_draft_add_lock_prevents_concurrent_duplicates(tmp_path: pathlib.Path):
+    """
+    Many near-simultaneous 'add' POSTs for the same scene still only add it once.
+
+    Regression test for the check-then-append race on app.state.pending_dataset_scene_ids
+    (same class of bug as the pp-run race): without the lock, threads released at the same
+    instant could all observe 'not yet in the list' before any of them appended.
+    """
+    rec, engine = _seed(tmp_path)
+    n_threads = 8
+    app = create_app(engine, recordings_dir=rec)
+    barrier = threading.Barrier(n_threads)
+
+    def _post():
+        barrier.wait(timeout=5)
+        TestClient(app).post('/dataset-draft/add/scene-1')
+
+    threads = [threading.Thread(target=_post) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert app.state.pending_dataset_scene_ids == ['scene-1']
+
+
 def test_post_dataset_draft_add_unknown_scene_returns_404(tmp_path: pathlib.Path):
     """Adding a nonexistent scene id is a clean 404, not a crash."""
     rec, engine = _seed(tmp_path)

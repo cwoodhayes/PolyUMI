@@ -75,7 +75,7 @@ def sync(
     table.add_row('scenes skipped', str(stats.scenes_skipped))
     table.add_row('sessions upserted', str(stats.sessions_upserted))
     table.add_row('sessions removed', str(stats.sessions_removed))
-    table.add_row('tasks created', str(stats.tasks_created))
+    table.add_row('tasks created', str(stats.tasks_created + dataset_stats.tasks_created))
     table.add_row('task conflicts', str(len(stats.conflicts)))
     table.add_row('datasets scanned', str(dataset_stats.datasets_scanned))
     table.add_row('dataset manifests failed', str(dataset_stats.manifests_failed))

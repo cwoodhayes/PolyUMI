@@ -63,6 +63,7 @@ class DatasetSyncStats:
     datasets_scanned: int = 0
     datasets_updated: int = 0
     manifests_failed: int = 0
+    tasks_created: int = 0
 
 
 def _utc_ts(dt: datetime) -> float:
@@ -218,7 +219,13 @@ def _sync_dataset_manifest(
     db: DBSession, manifest: DatasetManifest, manifest_path: pathlib.Path, stats: DatasetSyncStats
 ) -> None:
     """Upsert one dataset manifest's Dataset row and fully replace its DatasetMember rows."""
-    task_id = _get_or_create_task(db, manifest.task)[0].id if manifest.task else None
+    task_id = None
+    task_name = manifest.task.strip() if manifest.task else None
+    if task_name:
+        task, created = _get_or_create_task(db, task_name)
+        task_id = task.id
+        if created:
+            stats.tasks_created += 1
 
     dataset = db.exec(select(Dataset).where(Dataset.name == manifest.name)).first() or Dataset(name=manifest.name)
     dataset.task_id = task_id

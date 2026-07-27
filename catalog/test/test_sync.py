@@ -297,6 +297,40 @@ def test_sync_datasets_skips_missing_directory(tmp_path: pathlib.Path):
     assert stats.datasets_scanned == 0
 
 
+def test_sync_datasets_counts_newly_created_tasks(tmp_path: pathlib.Path):
+    """A manifest referencing a brand-new task name is counted in stats.tasks_created."""
+    datasets_dir = tmp_path / 'recordings' / 'datasets'
+    datasets_dir.mkdir(parents=True)
+    DatasetManifest(
+        name='fold_towel_v1', task='fold_towel', members=[DatasetMemberSpec('scene-1', 'a/', 'all')]
+    ).to_file(datasets_dir / 'fold_towel_v1.dataset.json')
+
+    engine = _engine(tmp_path)
+    stats = sync_datasets(datasets_dir, engine)
+
+    assert stats.tasks_created == 1
+    with DBSession(engine) as db:
+        assert db.exec(select(Task).where(Task.name == 'fold_towel')).first() is not None
+
+
+def test_sync_datasets_normalizes_whitespace_only_task(tmp_path: pathlib.Path):
+    """A whitespace-only manifest task doesn't create a blank-named Task row."""
+    datasets_dir = tmp_path / 'recordings' / 'datasets'
+    datasets_dir.mkdir(parents=True)
+    DatasetManifest(name='v1', task='   ', members=[DatasetMemberSpec('scene-1', 'a/', 'all')]).to_file(
+        datasets_dir / 'v1.dataset.json'
+    )
+
+    engine = _engine(tmp_path)
+    stats = sync_datasets(datasets_dir, engine)
+
+    assert stats.tasks_created == 0
+    with DBSession(engine) as db:
+        dataset = db.exec(select(Dataset).where(Dataset.name == 'v1')).first()
+        assert dataset.task_id is None
+        assert db.exec(select(Task)).all() == []
+
+
 def test_sync_datasets_logs_and_skips_unparseable_manifest(tmp_path: pathlib.Path):
     """A corrupt *.dataset.json is logged and skipped, not a crash, and doesn't block the rest."""
     datasets_dir = tmp_path / 'recordings' / 'datasets'

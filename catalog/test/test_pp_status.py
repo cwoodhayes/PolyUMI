@@ -52,6 +52,29 @@ def test_scene_pp_status_reflects_completed_steps(tmp_path: pathlib.Path):
     assert complete_numbers == {1, 2}
 
 
+def test_scene_pp_status_ignores_unregistered_step_numbers(tmp_path: pathlib.Path):
+    """
+    A stale/unregistered step number in the attr doesn't inflate n_complete past n_total.
+
+    Regression test: n_complete used to be len(completed) directly, so a scene processed
+    under a since-retired step number (e.g. 999, never registered) would report more steps
+    complete than actually exist.
+    """
+    from polyumi_ingest.preproc import available_preprocessing_steps
+
+    scene_dir = tmp_path / 'scene_stale'
+    scene_dir.mkdir()
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 0
+    root.attrs['preprocessing_steps'] = [1, 999]
+
+    status = pp_status.scene_pp_status(scene_dir)
+
+    assert status['n_total'] == len(available_preprocessing_steps())
+    assert status['n_complete'] == 1
+    assert status['n_complete'] <= status['n_total']
+
+
 def test_scene_pp_status_does_not_call_inspect_pzarr(tmp_path: pathlib.Path, monkeypatch):
     """
     Regression test: scene_pp_status must not go through inspect_pzarr.
