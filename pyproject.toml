@@ -30,4 +30,6 @@ dev = [
     "picamera2",
     "pytest>=9.0.2",
     "httpx",
+    "ipykernel",
+    "jupyterlab",
 ]
