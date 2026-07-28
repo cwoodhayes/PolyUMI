@@ -66,6 +66,7 @@ from scipy.spatial.transform import Rotation
 
 from polyumi_ingest.camera_preproc import CAMERA0_RGB_RESOLUTION, resize_camera0_rgb
 from polyumi_ingest.manifests import SceneManifest
+from polyumi_ingest.preproc import available_preprocessing_steps, preprocessing_steps_done
 from polyumi_ingest.pzarr.scene_files import SceneFiles
 from polyumi_ingest.pzarr.store import arr, grp
 from polyumi_ingest.video_helpers import GoproMp4Frames, open_gopro_frames
@@ -183,6 +184,36 @@ def _export_episode(ep: zarr.Group, data_grp: zarr.Group, episode_key: str, scen
             f'({n_dropped} dropped as NaN/outside span).'
         )
 
+    # Advance the start past the sync chirp: the operator waits for the chirp before starting,
+    # so the frames up to gopro_chirp_end_s are an idle prefix that shouldn't train the policy.
+    # gopro_chirp_end_s (step 1, chirp-time-sync) is on the same clock as gopro_ts. Moving i0
+    # forward within the contiguous valid run keeps every remaining row valid.
+    chirp_end_s = None
+    if 'annotations/time_sync' in ep:
+        chirp_end_s = grp(ep, 'annotations/time_sync').attrs.get('gopro_chirp_end_s')
+    if chirp_end_s is None:
+        # enforce_preprocessing (checked in _append_scene_episodes) guarantees step 1 ran, but
+        # not that this specific marker exists (e.g. an older pzarr predating it) — stay non-fatal.
+        log.warning(
+            f'  {episode_key}: no gopro_chirp_end_s annotation (missing, or an older pzarr '
+            f'predating this marker); exporting without start trim.'
+        )
+    else:
+        first_after = int(np.searchsorted(gopro_ts, float(chirp_end_s), side='left'))
+        # _measure_rate needs >=2 frames, so require at least 2 remaining after the trim
+        # (first_after <= i1 - 1); this also covers chirp end landing past the whole span.
+        if first_after >= i1:
+            log.warning(
+                f'  {episode_key}: chirp end leaves fewer than 2 valid frames — '
+                f'likely a bad chirp detection; not trimming.'
+            )
+        elif first_after > i0:
+            log.info(
+                f'  {episode_key}: trimmed {first_after - i0} leading frame(s) '
+                f'(~{(first_after - i0) / _measure_rate(gopro_ts):.2f}s) before chirp end.'
+            )
+            i0 = first_after
+
     # Export the frames as recorded — no resampling. UMI's dataset assumes uniform Δt and sets
     # the observation rate itself via obs_down_sample_steps, so the exporter's job is just to
     # hand over the raw native-rate stream. GoPro records at a steady ~59.94 Hz locally; a large
@@ -228,7 +259,32 @@ def _zip_zarr_dir(zarr_dir: pathlib.Path, out_path: pathlib.Path) -> None:
                 zf.write(path, path.relative_to(zarr_dir).as_posix())
 
 
-def _append_scene_episodes(scene_path: pathlib.Path, data_grp: zarr.Group, episode_ends: list[int], total: int) -> int:
+def _check_preprocessing_complete(root: zarr.Group, scene_label: str) -> None:
+    """
+    Raise if the scene is missing any registered preprocessing step.
+
+    The DP export reads the outputs of the whole pipeline (``eef/pose`` from step 5,
+    gripper width from step 4, and the chirp-end marker from step 1), so an incompletely
+    preprocessed scene would silently export a partial/untrimmed dataset. Callers can bypass
+    this with ``enforce_preprocessing=False``.
+    """
+    done = set(preprocessing_steps_done(root))
+    required = {cls.step_number for cls in available_preprocessing_steps()}
+    missing = sorted(required - done)
+    if missing:
+        raise RuntimeError(
+            f'{scene_label}: preprocessing steps {missing} not complete (done={sorted(done)}). '
+            f'Run `pingest pp` first, or export with enforce_preprocessing=False to skip this check.'
+        )
+
+
+def _append_scene_episodes(
+    scene_path: pathlib.Path,
+    data_grp: zarr.Group,
+    episode_ends: list[int],
+    total: int,
+    enforce_preprocessing: bool = True,
+) -> int:
     """Append every EPISODE session of one scene onto ``data_grp``, returning the new running total."""
     zarr_path = SceneFiles.resolve_zarr_path(scene_path)
     if not zarr_path.exists():
@@ -247,6 +303,8 @@ def _append_scene_episodes(scene_path: pathlib.Path, data_grp: zarr.Group, episo
     unusable_dirs = set(manifest.unusable_episodes) if manifest else set()
 
     root = zarr.open_group(str(zarr_path), mode='r')
+    if enforce_preprocessing:
+        _check_preprocessing_complete(root, scene_label)
     n_episodes = int(root.attrs.get('n_episodes', 0))
     for i in range(n_episodes):
         ep_key = f'episode_{i}'
@@ -265,20 +323,28 @@ def _append_scene_episodes(scene_path: pathlib.Path, data_grp: zarr.Group, episo
     return total
 
 
-def export_scene_to_dp(scene_path: pathlib.Path, output_path: pathlib.Path) -> int:
+def export_scene_to_dp(scene_path: pathlib.Path, output_path: pathlib.Path, enforce_preprocessing: bool = True) -> int:
     """
     Export EPISODE sessions of a pzarr scene to a UMI-format ``.zarr.zip`` ReplayBuffer.
 
     Poses come from ``eef/pose`` (preprocessing step 5), which has already resolved the
     optitrack-vs-slam source choice and put the trajectory on the hand frame.
 
+    When ``enforce_preprocessing`` is True (default), the scene must have every registered
+    preprocessing step complete or export raises. This does not by itself guarantee the
+    chirp-end marker is present — a scene preprocessed before that marker was added can still
+    be missing it, in which case the start trim is skipped non-fatally (see ``_export_episode``).
+    Set ``enforce_preprocessing`` False to export a partially preprocessed scene instead.
+
     Returns the number of episodes written. MAPPING sessions and episodes marked unusable
     in ``scene.json`` are skipped.
     """
-    return export_scenes_to_dp([scene_path], output_path)
+    return export_scenes_to_dp([scene_path], output_path, enforce_preprocessing=enforce_preprocessing)
 
 
-def export_scenes_to_dp(scene_paths: list[pathlib.Path], output_path: pathlib.Path) -> int:
+def export_scenes_to_dp(
+    scene_paths: list[pathlib.Path], output_path: pathlib.Path, enforce_preprocessing: bool = True
+) -> int:
     """
     Export EPISODE sessions from one or more pzarr scenes into a single UMI ``.zarr.zip``.
 
@@ -286,7 +352,8 @@ def export_scenes_to_dp(scene_paths: list[pathlib.Path], output_path: pathlib.Pa
     across the whole list — a multi-scene dataset is indistinguishable from a single big scene
     to ``UmiDataset``, which only ever sees one buffer. MAPPING sessions and episodes marked
     unusable in ``scene.json`` are skipped scene by scene, same as the single-scene exporter.
-    Poses come from ``eef/pose`` (preprocessing step 5).
+    Poses come from ``eef/pose`` (preprocessing step 5). ``enforce_preprocessing`` (default
+    True) requires every registered preprocessing step to be complete on each scene.
 
     Returns the total number of episodes written across all scenes.
     """
@@ -302,7 +369,9 @@ def export_scenes_to_dp(scene_paths: list[pathlib.Path], output_path: pathlib.Pa
         episode_ends: list[int] = []
         total = 0
         for scene_path in scene_paths:
-            total = _append_scene_episodes(scene_path, data, episode_ends, total)
+            total = _append_scene_episodes(
+                scene_path, data, episode_ends, total, enforce_preprocessing=enforce_preprocessing
+            )
 
         if not episode_ends:
             raise RuntimeError('no EPISODE sessions to export across the given scene(s).')

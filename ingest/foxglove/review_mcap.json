@@ -3,13 +3,13 @@
     "3D!oah9y3": {
       "cameraState": {
         "perspective": true,
-        "distance": 4.75653770507567,
-        "phi": 64.15066143422517,
-        "thetaOffset": 81.68425293044227,
+        "distance": 8.802533373032816,
+        "phi": 88.94111917862352,
+        "thetaOffset": 169.1858414070775,
         "targetOffset": [
-          1.650753264349346,
-          -0.2316390528999956,
-          -1.4708773164830975e-16
+          1.3493915315382277,
+          -7.259365787179679,
+          -4.1030786173700024e-19
         ],
         "target": [
           0,
@@ -27,7 +27,7 @@
         "far": 5000
       },
       "followMode": "follow-pose",
-      "followTf": "world",
+      "followTf": "slam",
       "scene": {
         "meshUpAxis": "z_up"
       },
@@ -36,10 +36,10 @@
           "visible": false
         },
         "frame:optitrack": {
-          "visible": true
+          "visible": false
         },
         "frame:world": {
-          "visible": false
+          "visible": true
         },
         "frame:gopro": {
           "visible": false
@@ -93,8 +93,7 @@
         "poseEstimateThetaDeviation": 0.26179939
       },
       "synchronize": false,
-      "imageMode": {},
-      "fixedFrame": "world"
+      "imageMode": {}
     },
     "Image!3zkla5f": {
       "cameraState": {
@@ -265,13 +264,13 @@
       ]
     },
     "Audio!3nxj4f9": {
-      "volume": 0,
+      "volume": 0.89,
       "slidingViewWidth": 10,
       "topic": "/gopro/audio",
       "muted": true
     },
     "Audio!2w9y83j": {
-      "volume": 0.94,
+      "volume": 0.98,
       "slidingViewWidth": 10,
       "topic": "/finger/piezo",
       "muted": false
@@ -281,6 +280,13 @@
       "slidingViewWidth": 10,
       "topic": "/finger/air",
       "muted": true
+    },
+    "RosOut!3jpmf8l": {
+      "minLogLevel": 1,
+      "preload": true,
+      "searchTerms": [],
+      "nameFilter": {},
+      "fontSize": 12
     }
   },
   "globalVariables": {},
@@ -294,39 +300,45 @@
   "layout": {
     "first": {
       "first": {
-        "first": "3D!oah9y3",
-        "second": "Image!3zkla5f",
-        "direction": "row"
-      },
-      "second": "Image!24wk5v",
-      "direction": "row",
-      "splitPercentage": 71.28001014564859
-    },
-    "second": {
-      "first": {
-        "first": "Plot!3ahq65t",
-        "second": {
-          "first": "Plot!35segx7",
-          "second": "Plot!3z3pxs",
+        "first": {
+          "first": "3D!oah9y3",
+          "second": "Image!3zkla5f",
           "direction": "row"
         },
+        "second": "Image!24wk5v",
         "direction": "row",
-        "splitPercentage": 33.166770768269835
+        "splitPercentage": 71.28001014564859
       },
       "second": {
         "first": {
-          "first": "Audio!3nxj4f9",
-          "second": "Audio!2w9y83j",
-          "direction": "column"
+          "first": "Plot!3ahq65t",
+          "second": {
+            "first": "Plot!35segx7",
+            "second": "Plot!3z3pxs",
+            "direction": "row"
+          },
+          "direction": "row",
+          "splitPercentage": 33.166770768269835
         },
-        "second": "Audio!1v0aezy",
+        "second": {
+          "first": {
+            "first": "Audio!3nxj4f9",
+            "second": "Audio!2w9y83j",
+            "direction": "column",
+            "splitPercentage": 49.15541131221808
+          },
+          "second": "Audio!1v0aezy",
+          "direction": "column",
+          "splitPercentage": 69.96619345713718
+        },
         "direction": "column",
-        "splitPercentage": 69.96619345713718
+        "splitPercentage": 33.79404020668456
       },
       "direction": "column",
-      "splitPercentage": 33.79404020668456
+      "splitPercentage": 42.63565891472868
     },
+    "second": "RosOut!3jpmf8l",
     "direction": "column",
-    "splitPercentage": 42.63565891472868
+    "splitPercentage": 89.56515507139913
   }
 }

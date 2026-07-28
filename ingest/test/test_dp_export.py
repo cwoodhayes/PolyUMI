@@ -19,9 +19,14 @@ from scipy.spatial.transform import Rotation
 
 from polyumi_ingest.export.dp import export_scene_to_dp, export_scenes_to_dp
 from polyumi_ingest.manifests import SceneManifest
+from polyumi_ingest.preproc import available_preprocessing_steps
 
 RES = 224
 RATE = 59.94
+
+#: The full registered pipeline; a scene must have all of these marked complete to pass the
+#: exporter's enforce_preprocessing check.
+ALL_STEPS = sorted(cls.step_number for cls in available_preprocessing_steps())
 
 
 def _write_gopro_mp4(path: pathlib.Path, n: int, h: int = 240, w: int = 320) -> None:
@@ -51,11 +56,22 @@ def _build_scene(
     n: int = 120,
     session_type: str = 'EPISODE',
     nan_rows: slice | None = None,
+    preprocessing_steps: list[int] | None = ALL_STEPS,
+    gopro_chirp_end_s: float | None = None,
 ) -> pathlib.Path:
-    """Build a one-episode scene.zarr with GoPro-grid frames, eef/pose, and gripper width."""
+    """
+    Build a one-episode scene.zarr with GoPro-grid frames, eef/pose, and gripper width.
+
+    ``preprocessing_steps`` marks the scene's completed steps (defaults to every registered
+    step, so export's enforce_preprocessing check passes out of the box); pass None to omit
+    the attr entirely (simulating a scene that's never been preprocessed). ``gopro_chirp_end_s``
+    writes the step-1 chirp-end marker the exporter uses to trim the start.
+    """
     scene = tmp_path / 'scene.zarr'
     root = zarr.open_group(str(scene), mode='w', zarr_format=2)
     root.attrs['n_episodes'] = 1
+    if preprocessing_steps is not None:
+        root.attrs['preprocessing_steps'] = preprocessing_steps
     ep = root.create_group('episode_0')
     ep.attrs['session_type'] = session_type
     # v3: GoPro frames live in the gopro.mp4 sidecar, resolved via the session_dir attr.
@@ -78,6 +94,9 @@ def _build_scene(
 
     widths = np.linspace(0.02, 0.08, n).astype(np.float32)
     ep.create_group('annotations').create_group('gripper_width').create_array('width_m', data=widths)
+
+    if gopro_chirp_end_s is not None:
+        ep['annotations'].create_group('time_sync').attrs['gopro_chirp_end_s'] = gopro_chirp_end_s
 
     return scene
 
@@ -292,6 +311,79 @@ def test_export_scenes_to_dp_raises_for_missing_scene(tmp_path: pathlib.Path) ->
     with pytest.raises(FileNotFoundError):
         export_scenes_to_dp([scene_a, missing], out)
     assert not out.exists()
+
+
+def test_chirp_end_trims_leading_frames(tmp_path: pathlib.Path) -> None:
+    """Frames before gopro_chirp_end_s (the idle 'waiting for chirp' prefix) are dropped."""
+    n = 120
+    gopro_ts = np.arange(n, dtype=np.float64) / RATE
+    scene = _build_scene(tmp_path, n=n, gopro_chirp_end_s=float(gopro_ts[10]))
+    out = tmp_path / 'buf.zarr.zip'
+
+    export_scene_to_dp(scene, out)
+
+    g = _open_zip(out)
+    t = int(g['meta/episode_ends'][-1])
+    assert t == n - 10
+    # First exported pos is the trajectory's row 10, not row 0 — the chirp prefix is gone.
+    pos = g['data/robot0_eef_pos'][:]
+    expected_first_x = np.linspace(0, 0.5, n)[10]
+    assert pos[0, 0] == pytest.approx(expected_first_x, abs=1e-5)
+    start = g['data/robot0_demo_start_pose'][:]
+    assert start[0, 0] == pytest.approx(expected_first_x, abs=1e-5)
+
+
+def test_chirp_end_beyond_valid_span_is_not_trimmed(tmp_path: pathlib.Path) -> None:
+    """A chirp end past the whole episode (bad detection) is ignored rather than dropping everything."""
+    n = 50
+    scene = _build_scene(tmp_path, n=n, gopro_chirp_end_s=1000.0)
+    out = tmp_path / 'buf.zarr.zip'
+
+    export_scene_to_dp(scene, out)
+
+    assert int(_open_zip(out)['meta/episode_ends'][-1]) == n
+
+
+def test_missing_chirp_end_annotation_exports_without_trim(tmp_path: pathlib.Path) -> None:
+    """No annotations/time_sync group at all (step 1 never ran) — export proceeds untrimmed."""
+    n = 40
+    scene = _build_scene(tmp_path, n=n)  # gopro_chirp_end_s left unset
+    out = tmp_path / 'buf.zarr.zip'
+
+    export_scene_to_dp(scene, out, enforce_preprocessing=False)
+
+    assert int(_open_zip(out)['meta/episode_ends'][-1]) == n
+
+
+def test_enforce_preprocessing_raises_when_step_incomplete(tmp_path: pathlib.Path) -> None:
+    """A scene missing a registered preprocessing step fails fast, naming the missing step."""
+    missing_step = ALL_STEPS[-1]
+    scene = _build_scene(tmp_path, preprocessing_steps=[s for s in ALL_STEPS if s != missing_step])
+    out = tmp_path / 'buf.zarr.zip'
+
+    with pytest.raises(RuntimeError, match=r'preprocessing steps \[' + str(missing_step)):
+        export_scene_to_dp(scene, out)
+    assert not out.exists()
+
+
+def test_enforce_preprocessing_raises_when_never_preprocessed(tmp_path: pathlib.Path) -> None:
+    """A scene with no preprocessing_steps attr at all is treated as fully unprocessed."""
+    scene = _build_scene(tmp_path, preprocessing_steps=None)
+    out = tmp_path / 'buf.zarr.zip'
+
+    with pytest.raises(RuntimeError, match='preprocessing steps'):
+        export_scene_to_dp(scene, out)
+
+
+def test_enforce_preprocessing_false_bypasses_the_check(tmp_path: pathlib.Path) -> None:
+    """--no-enforce-preprocessing exports a partially preprocessed scene instead of raising."""
+    scene = _build_scene(tmp_path, n=30, preprocessing_steps=None)
+    out = tmp_path / 'buf.zarr.zip'
+
+    n_eps = export_scene_to_dp(scene, out, enforce_preprocessing=False)
+
+    assert n_eps == 1
+    assert int(_open_zip(out)['meta/episode_ends'][-1]) == 30
 
 
 def test_export_scenes_to_dp_error_identifies_the_failing_scene(tmp_path: pathlib.Path) -> None:

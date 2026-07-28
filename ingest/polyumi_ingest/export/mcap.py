@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import zarr
 from mcap.writer import Writer
+from polyumi_pi import sync_chirp
 from scipy.spatial.transform import RigidTransform, Rotation
 
 from polyumi_ingest.config import load_gripper_calib
@@ -192,6 +193,22 @@ _SCHEMA_GRIPPER_WIDTH = json.dumps(
     }
 ).encode()
 
+_SCHEMA_LOG = json.dumps(
+    {
+        '$schema': 'https://json-schema.org/draft/2020-12/schema',
+        'title': 'foxglove.Log',
+        'type': 'object',
+        'properties': {
+            'timestamp': _TIME,
+            'level': {'type': 'integer'},
+            'message': {'type': 'string'},
+            'name': {'type': 'string'},
+            'file': {'type': 'string'},
+            'line': {'type': 'integer'},
+        },
+    }
+).encode()
+
 _SCHEMA_IMAGE_ANNOTATIONS = json.dumps(
     {
         '$schema': 'https://json-schema.org/draft/2020-12/schema',
@@ -280,6 +297,7 @@ def _register_channels(
     has_optitrack: bool,
     has_slam: bool,
     has_aruco: bool,
+    has_chirp_marker: bool,
 ) -> dict[str, int]:
     """Register all schemas and channels; return {topic: channel_id}."""
     img_sid = writer.register_schema('foxglove.CompressedImage', 'jsonschema', _SCHEMA_COMPRESSED_IMAGE)
@@ -290,6 +308,7 @@ def _register_channels(
     tf_sid = writer.register_schema('foxglove.FrameTransform', 'jsonschema', _SCHEMA_FRAME_TRANSFORM)
     ann_sid = writer.register_schema('foxglove.ImageAnnotations', 'jsonschema', _SCHEMA_IMAGE_ANNOTATIONS)
     width_sid = writer.register_schema('polyumi.GripperWidth', 'jsonschema', _SCHEMA_GRIPPER_WIDTH)
+    log_sid = writer.register_schema('foxglove.Log', 'jsonschema', _SCHEMA_LOG)
 
     def ch(topic: str, sid: int) -> int:
         return writer.register_channel(topic=topic, message_encoding='json', schema_id=sid)
@@ -318,6 +337,8 @@ def _register_channels(
     if has_aruco:
         channels['/gopro/aruco_annotations'] = ch('/gopro/aruco_annotations', ann_sid)
         channels['/gripper/width'] = ch('/gripper/width', width_sid)
+    if has_chirp_marker:
+        channels['/session/events'] = ch('/session/events', log_sid)
     return channels
 
 
@@ -525,6 +546,31 @@ def _write_static_transform(
     writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
 
 
+#: foxglove.Log Level enum — INFO. See https://docs.foxglove.dev/docs/visualization/message-schemas/log
+_LOG_LEVEL_INFO = 2
+
+
+def _write_log(writer: Writer, channel_id: int, t_s: float, message: str, name: str = '') -> None:
+    """
+    Write a single foxglove.Log message.
+
+    A single message on its own topic shows up as a tick mark on that topic's row in
+    Foxglove's seek bar/timeline (visible without any extra panel), and as a searchable
+    entry if a Log panel is added — the standard way to mark a moment in time in Foxglove.
+    """
+    msg = json.dumps(
+        {
+            'timestamp': _foxglove_time(t_s),
+            'level': _LOG_LEVEL_INFO,
+            'message': message,
+            'name': name,
+            'file': '',
+            'line': 0,
+        }
+    ).encode()
+    writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
+
+
 def _write_slam_poses(
     writer: Writer,
     channel_id: int,
@@ -698,6 +744,9 @@ def export_episode_to_mcap(
     has_time_sync = (
         'annotations/time_sync' in ep_grp and 'gopro_to_finger_offset_s' in ep_grp['annotations/time_sync'].attrs  # type: ignore[index]
     )
+    has_chirp_marker = (
+        'annotations/time_sync' in ep_grp and 'finger_chirp_onset_s' in ep_grp['annotations/time_sync'].attrs  # type: ignore[index]
+    )
 
     # gopro_to_finger_offset_s = gopro_time - finger_time, so subtract it
     # from gopro timestamps to bring them into the finger (Pi) time domain.
@@ -725,6 +774,7 @@ def export_episode_to_mcap(
                 has_optitrack=has_optitrack,
                 has_slam=has_slam,
                 has_aruco=has_aruco,
+                has_chirp_marker=has_chirp_marker,
             )
 
             # Use the earliest timestamp across all streams as the TF anchor so that
@@ -733,6 +783,21 @@ def export_episode_to_mcap(
             t0 = float(ep_grp['timestamps/finger'][0])  # type: ignore
             if 'timestamps/gopro' in ep_grp:
                 t0 = min(t0, float(_gopro_ts('gopro')[0]))
+
+            if has_chirp_marker:
+                # finger_chirp_onset_s is already on the finger clock — the same clock as
+                # t0 and most other channels — so no gopro_to_finger_offset_s conversion
+                # needed. Marks the earliest moment real demonstration could begin.
+                onset_s = float(ep_grp['annotations/time_sync'].attrs['finger_chirp_onset_s'])  # type: ignore[index]
+                chirp_end_s = onset_s + sync_chirp.DURATION_S
+                log.info(f'  session marker: chirp end / episode start at t={chirp_end_s:.3f}s (finger clock)')
+                _write_log(
+                    writer,
+                    ch['/session/events'],
+                    chirp_end_s,
+                    'Sync chirp ended — episode start',
+                    name='chirp_time_sync',
+                )
 
             if has_optitrack:
                 assert root_grp is not None

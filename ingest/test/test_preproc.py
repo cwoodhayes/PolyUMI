@@ -89,5 +89,12 @@ def test_chirp_time_sync_step(tmp_path: pathlib.Path) -> None:
     ChirpTimeSyncStep().run(scene_zarr)
 
     root = zarr.open_group(str(scene_zarr), mode='r')
-    offset = float(root['episode_0/annotations/time_sync'].attrs['gopro_to_finger_offset_s'])  # type: ignore[arg-type]
+    ts_attrs = root['episode_0/annotations/time_sync'].attrs  # type: ignore[index]
+    offset = float(ts_attrs['gopro_to_finger_offset_s'])  # type: ignore[arg-type]
     assert abs(offset - true_offset_s) < 1.0 / sr  # sub-sample accuracy
+
+    # gopro_chirp_end_s is what the DP exporter clamps its start to — must be exactly
+    # DURATION_S past the detected onset, on the GoPro clock.
+    gopro_onset = float(ts_attrs['gopro_chirp_onset_s'])  # type: ignore[arg-type]
+    gopro_chirp_end = float(ts_attrs['gopro_chirp_end_s'])  # type: ignore[arg-type]
+    assert abs(gopro_chirp_end - (gopro_onset + sync_chirp.DURATION_S)) < 1e-9

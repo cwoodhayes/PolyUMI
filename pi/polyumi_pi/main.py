@@ -16,6 +16,7 @@ import os
 import shutil
 import signal
 from multiprocessing.connection import Connection
+from multiprocessing.synchronize import Event as MpEvent
 
 import typer
 import zmq
@@ -28,7 +29,7 @@ from polyumi_pi.files.metadata import SessionType
 from polyumi_pi.files.scene import SceneFiles
 from polyumi_pi.files.session import DEFAULT_RECORDINGS_DIR, SessionFiles
 from polyumi_pi.gopro.gopro_config import GoProConfig, load_gopro_config, save_gopro_config
-from polyumi_pi.gopro.gopro_wrapper import GoProWrapper
+from polyumi_pi.gopro.gopro_wrapper import GoProNotReadyError, GoProWrapper
 from polyumi_pi.led_manager import LEDManager
 from polyumi_pi.optitrack import await_optitrack_esync
 from polyumi_pi.raspi_driver import IndicatorState, RaspiDriver
@@ -116,11 +117,22 @@ async def _record_session_async(
         session.metadata.led_brightness = 1.0
         led.set_brightness(1.0)
 
+        # Set by the camera process once its first frame is captured, so the audio
+        # process can delay the sync chirp until then — the chirp doubles as an
+        # audible "camera is ready, you can start the demonstration" cue.
+        first_frame_event = multiprocessing.Event()
+        # Set below once GoPro recording has actually started (or immediately if there's no
+        # GoPro). ChirpTimeSyncStep detects the chirp in the GoPro's own recorded audio, so
+        # playing it before GoPro recording starts would mean it's never captured there,
+        # silently breaking time-sync for the episode — the audio process must wait for both
+        # this and first_frame_event before playing the chirp.
+        gopro_ready_event = multiprocessing.Event()
+
         log.info('Starting camera streamer...')
         video_parent_conn, video_child_conn = multiprocessing.Pipe(duplex=False)
         cam_process = multiprocessing.Process(
             target=_run_video_streamer,
-            args=(None, session, video_child_conn),
+            args=(None, session, video_child_conn, first_frame_event),
         )
         cam_process.start()
         video_child_conn.close()
@@ -129,7 +141,17 @@ async def _record_session_async(
         audio_parent_conn, audio_child_conn = multiprocessing.Pipe(duplex=False)
         audio_process = multiprocessing.Process(
             target=_run_audio_streamer,
-            args=(None, sample_rate, chunk_ms, channels, session, audio_child_conn, True),
+            args=(
+                None,
+                sample_rate,
+                chunk_ms,
+                channels,
+                session,
+                audio_child_conn,
+                True,
+                first_frame_event,
+                gopro_ready_event,
+            ),
         )
         audio_process.start()
         audio_child_conn.close()
@@ -142,6 +164,7 @@ async def _record_session_async(
             log.info(f'GoPro clock synced to {sync_time.isoformat()}')
             log.info('Starting GoPro recording...')
             await gopro.start_recording()
+        gopro_ready_event.set()
 
         if hat is not None:
             hat.set_indicator(IndicatorState.RECORDING)
@@ -192,6 +215,7 @@ def _run_video_streamer(
     port: int,
     session: SessionFiles | None = None,
     stats_conn: Connection | None = None,
+    first_frame_event: MpEvent | None = None,
 ):
     context = zmq.Context()
     streamer = CameraStreamer(
@@ -199,6 +223,7 @@ def _run_video_streamer(
         zmq_context=context,
         session=session,
         stats_conn=stats_conn,
+        first_frame_event=first_frame_event,
     )
     try:
         streamer.start()
@@ -214,6 +239,8 @@ def _run_audio_streamer(
     session: SessionFiles | None = None,
     stats_conn: Connection | None = None,
     play_sync_chirp: bool = False,
+    first_frame_event: MpEvent | None = None,
+    gopro_ready_event: MpEvent | None = None,
 ):
     context = zmq.Context()
     streamer = AudioStreamer(
@@ -225,6 +252,8 @@ def _run_audio_streamer(
         session=session,
         stats_conn=stats_conn,
         play_sync_chirp=play_sync_chirp,
+        first_frame_event=first_frame_event,
+        gopro_ready_event=gopro_ready_event,
     )
     try:
         streamer.start()
@@ -432,6 +461,9 @@ def record_episode(
                         raise RuntimeError('GoPro identifier was not resolved despite --no-gopro not being set.')
                     gopro = await stack.enter_async_context(GoProWrapper(gopro_identifier, mac_address=gopro_mac))
                     log.info('GoPro connected')
+                    # Refuse to record if the GoPro can't (e.g. no SD card) —
+                    # starting recording in that state hangs the BLE call.
+                    await gopro.ensure_ready_to_record()
                 else:
                     gopro = None
                 await _record_session_async(
@@ -442,6 +474,8 @@ def record_episode(
                     channels=channels,
                     led=led,
                 )
+        except GoProNotReadyError as e:
+            log.error(str(e))
         except (KeyboardInterrupt, asyncio.CancelledError):
             log.info('Recording interrupted.')
         except Exception as e:
@@ -569,6 +603,16 @@ def start_scene(
                     log.info('Press button to start recording...')
                     hat.set_indicator(IndicatorState.READY)
                     await hat.wait_for_press()
+
+                    # Refuse to start a session the GoPro can't record (e.g. no SD
+                    # card) — starting recording in that state hangs the BLE call.
+                    if gopro is not None:
+                        try:
+                            await gopro.ensure_ready_to_record()
+                        except GoProNotReadyError as e:
+                            log.error(f'{e} Not starting a session; press button to retry.')
+                            continue
+
                     session_count += 1
 
                     session = scene.create_session()

@@ -665,6 +665,14 @@ def export_dp(
         '-o',
         help='Output UMI ReplayBuffer path (a .zarr.zip file).',
     ),
+    enforce_preprocessing: bool = typer.Option(
+        True,
+        '--enforce-preprocessing/--no-enforce-preprocessing',
+        help='Require every preprocessing step to be complete before exporting. '
+        'Disable to export a partially preprocessed scene; export can still fail if outputs '
+        '(e.g. eef/pose) are missing, and the post-chirp start trim is applied independently '
+        'whenever the chirp-end marker is present, regardless of this flag.',
+    ),
 ):
     """
     Export a pzarr scene to a UMI-format ReplayBuffer (.zarr.zip).
@@ -676,7 +684,7 @@ def export_dp(
     from polyumi_ingest.export.dp import export_scene_to_dp
 
     try:
-        n = export_scene_to_dp(scene_path, output_path)
+        n = export_scene_to_dp(scene_path, output_path, enforce_preprocessing=enforce_preprocessing)
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         log.error(str(e))
         raise typer.Exit(1)
@@ -696,6 +704,14 @@ def export_dataset(
         '-o',
         help='Output UMI ReplayBuffer path (a .zarr.zip file).',
     ),
+    enforce_preprocessing: bool = typer.Option(
+        True,
+        '--enforce-preprocessing/--no-enforce-preprocessing',
+        help='Require every preprocessing step to be complete on each scene before exporting. '
+        'Disable to export partially preprocessed scenes; export can still fail if outputs '
+        '(e.g. eef/pose) are missing, and the post-chirp start trim is applied independently '
+        'whenever the chirp-end marker is present, regardless of this flag.',
+    ),
 ):
     """
     Export EPISODE sessions from multiple pzarr scenes into a single UMI ReplayBuffer.
@@ -707,7 +723,7 @@ def export_dataset(
     from polyumi_ingest.export.dp import export_scenes_to_dp
 
     try:
-        n = export_scenes_to_dp(scene_paths, output_path)
+        n = export_scenes_to_dp(scene_paths, output_path, enforce_preprocessing=enforce_preprocessing)
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         log.error(str(e))
         raise typer.Exit(1)
