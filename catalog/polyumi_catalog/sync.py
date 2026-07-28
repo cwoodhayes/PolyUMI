@@ -162,6 +162,7 @@ def _sync_scene(db: DBSession, scene_dir: pathlib.Path, now: datetime, force: bo
 
     # upsert sessions and record task conflicts
     unusable_dirs = set(manifest.unusable_episodes) if manifest else set()
+    pose_source_overrides = manifest.pose_source_overrides if manifest else {}
     seen: set[str] = set()
     for sd, meta in metas:
         seen.add(meta.session_id)
@@ -175,6 +176,7 @@ def _sync_scene(db: DBSession, scene_dir: pathlib.Path, now: datetime, force: bo
         row.n_video_frames = meta.n_video_frames
         row.video_dropped_frames = meta.video_dropped_frames
         row.unusable = sd.name in unusable_dirs
+        row.pose_source_override = pose_source_overrides.get(sd.name)
         row.notes = meta.notes
         row.created_at = meta.created_at
         db.add(row)

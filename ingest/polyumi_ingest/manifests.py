@@ -25,6 +25,11 @@ class SceneManifest:
     task: str | None = None
     notes: str | None = None
     unusable_episodes: list[str] = field(default_factory=list)
+    #: Per-session DP-export pose source override, keyed by session directory name (same key
+    #: space as ``unusable_episodes``). Values are 'optitrack' or 'slam'; a session absent from
+    #: this dict exports from its eef.attrs['default_source'] (see EefPoseStep). Written by the
+    #: catalog UI's pose-source selector; consumed by export.dp.buffer.
+    pose_source_overrides: dict[str, str] = field(default_factory=dict)
     file_version: int = 1
 
     @classmethod
@@ -47,6 +52,7 @@ class SceneManifest:
             task=data.get('task'),
             notes=data.get('notes'),
             unusable_episodes=data.get('unusable_episodes', []),
+            pose_source_overrides=data.get('pose_source_overrides', {}),
             file_version=version,
         )
 
@@ -57,6 +63,7 @@ class SceneManifest:
             'task': self.task,
             'notes': self.notes,
             'unusable_episodes': self.unusable_episodes,
+            'pose_source_overrides': self.pose_source_overrides,
             'file_version': self.file_version,
         }
 

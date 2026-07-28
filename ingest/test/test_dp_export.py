@@ -58,14 +58,18 @@ def _build_scene(
     nan_rows: slice | None = None,
     preprocessing_steps: list[int] | None = ALL_STEPS,
     gopro_chirp_end_s: float | None = None,
+    with_slam: bool = False,
 ) -> pathlib.Path:
     """
-    Build a one-episode scene.zarr with GoPro-grid frames, eef/pose, and gripper width.
+    Build a one-episode scene.zarr with GoPro-grid frames, eef/pose_<source>, and gripper width.
 
     ``preprocessing_steps`` marks the scene's completed steps (defaults to every registered
     step, so export's enforce_preprocessing check passes out of the box); pass None to omit
     the attr entirely (simulating a scene that's never been preprocessed). ``gopro_chirp_end_s``
-    writes the step-1 chirp-end marker the exporter uses to trim the start.
+    writes the step-1 chirp-end marker the exporter uses to trim the start. ``eef/pose_optitrack``
+    is always written (and is the default source); ``with_slam`` also writes a distinguishable
+    ``eef/pose_slam`` (offset +10 in x) so tests can tell which source an export actually used.
+    ``nan_rows`` NaNs out the optitrack array only.
     """
     scene = tmp_path / 'scene.zarr'
     root = zarr.open_group(str(scene), mode='w', zarr_format=2)
@@ -86,11 +90,27 @@ def _build_scene(
     pos[:, 0] = np.linspace(0, 0.5, n)
     yaw = np.linspace(0, np.pi / 2, n)
     quat = Rotation.from_rotvec(yaw[:, None] * np.array([0.0, 0.0, 1.0])).as_quat()
-    pose = np.concatenate([pos, quat], axis=1)
+    opti_pose = np.concatenate([pos, quat], axis=1)
     if nan_rows is not None:
-        pose[nan_rows] = np.nan
-    ep.create_group('eef').create_array('pose', data=pose)
-    ep['eef'].attrs['source'] = 'optitrack'
+        opti_pose[nan_rows] = np.nan
+
+    eef_grp = ep.create_group('eef')
+    opti_arr = eef_grp.create_array('pose_optitrack', data=opti_pose)
+    opti_arr.attrs['world_frame'] = 'optitrack'
+    opti_arr.attrs['n_interp_filled'] = 0
+    available = ['optitrack']
+
+    if with_slam:
+        # Offset +10m in x so it's trivially distinguishable from the optitrack trajectory.
+        slam_pose = opti_pose.copy()
+        slam_pose[:, 0] += 10.0
+        slam_arr = eef_grp.create_array('pose_slam', data=slam_pose)
+        slam_arr.attrs['world_frame'] = 'slam'
+        slam_arr.attrs['n_interp_filled'] = 3
+        available.append('slam')
+
+    eef_grp.attrs['available_sources'] = available
+    eef_grp.attrs['default_source'] = available[0]  # optitrack preferred, matches EefPoseStep
 
     widths = np.linspace(0.02, 0.08, n).astype(np.float32)
     ep.create_group('annotations').create_group('gripper_width').create_array('width_m', data=widths)
@@ -111,9 +131,13 @@ def test_export_produces_umi_schema(tmp_path: pathlib.Path) -> None:
     scene = _build_scene(tmp_path, n=120)
     out = tmp_path / 'buf.zarr.zip'
 
-    n_eps = export_scene_to_dp(scene, out)
+    n_eps, provenance = export_scene_to_dp(scene, out)
 
     assert n_eps == 1
+    assert len(provenance) == 1
+    assert provenance[0]['source'] == 'optitrack'
+    assert provenance[0]['episode'] == 'episode_0'
+    assert provenance[0]['session'] == 'session_0'
     g = _open_zip(out)
     ends = g['meta/episode_ends'][:]
     assert ends.dtype == np.int64 and len(ends) == 1
@@ -247,10 +271,11 @@ def test_export_scene_to_dp_is_the_single_scene_case(tmp_path: pathlib.Path) -> 
     out_single = tmp_path / 'single.zarr.zip'
     out_multi = tmp_path / 'multi.zarr.zip'
 
-    n1 = export_scene_to_dp(scene, out_single)
-    n2 = export_scenes_to_dp([scene], out_multi)
+    n1, prov1 = export_scene_to_dp(scene, out_single)
+    n2, prov2 = export_scenes_to_dp([scene], out_multi)
 
     assert n1 == n2 == 1
+    assert prov1 == prov2
     ends_single = _open_zip(out_single)['meta/episode_ends'][:].tolist()
     ends_multi = _open_zip(out_multi)['meta/episode_ends'][:].tolist()
     assert ends_single == ends_multi
@@ -262,9 +287,10 @@ def test_export_scenes_to_dp_concatenates_episode_ends_across_scenes(tmp_path: p
     scene_b = _build_scene(tmp_path / 'b', n=70)
     out = tmp_path / 'combined.zarr.zip'
 
-    n_eps = export_scenes_to_dp([scene_a, scene_b], out)
+    n_eps, provenance = export_scenes_to_dp([scene_a, scene_b], out)
 
     assert n_eps == 2
+    assert [p['scene'] for p in provenance] == ['a', 'b']
     g = _open_zip(out)
     ends = g['meta/episode_ends'][:].tolist()
     assert ends == [50, 120]
@@ -280,9 +306,10 @@ def test_export_scenes_to_dp_skips_mapping_per_scene(tmp_path: pathlib.Path) -> 
     scene_mapping = _build_scene(tmp_path / 'b', n=30, session_type='MAPPING')
     out = tmp_path / 'combined.zarr.zip'
 
-    n_eps = export_scenes_to_dp([scene_a, scene_mapping], out)
+    n_eps, provenance = export_scenes_to_dp([scene_a, scene_mapping], out)
 
     assert n_eps == 1
+    assert [p['scene'] for p in provenance] == ['a']
     assert _open_zip(out)['meta/episode_ends'][:].tolist() == [40]
 
 
@@ -380,7 +407,7 @@ def test_enforce_preprocessing_false_bypasses_the_check(tmp_path: pathlib.Path) 
     scene = _build_scene(tmp_path, n=30, preprocessing_steps=None)
     out = tmp_path / 'buf.zarr.zip'
 
-    n_eps = export_scene_to_dp(scene, out, enforce_preprocessing=False)
+    n_eps, _ = export_scene_to_dp(scene, out, enforce_preprocessing=False)
 
     assert n_eps == 1
     assert int(_open_zip(out)['meta/episode_ends'][-1]) == 30
@@ -405,3 +432,57 @@ def test_export_scenes_to_dp_error_identifies_the_failing_scene(tmp_path: pathli
 
     assert 'b/episode_0' in str(exc_info.value)
     assert 'scene.zarr/episode_0' not in str(exc_info.value)
+
+
+def test_default_pose_source_is_optitrack_when_both_available(tmp_path: pathlib.Path) -> None:
+    """With no override, an episode with both sources exports from its default_source (optitrack)."""
+    scene = _build_scene(tmp_path, n=60, with_slam=True)
+    out = tmp_path / 'buf.zarr.zip'
+
+    n_eps, provenance = export_scene_to_dp(scene, out)
+
+    assert n_eps == 1
+    assert provenance[0]['source'] == 'optitrack'
+    pos = _open_zip(out)['data/robot0_eef_pos'][:]
+    assert pos[0, 0] == pytest.approx(0.0, abs=1e-5)  # optitrack trajectory starts at x=0, not x=10
+
+
+def test_pose_source_override_routes_to_slam(tmp_path: pathlib.Path) -> None:
+    """A scene.json pose_source_overrides entry (keyed by session dir) routes that episode to slam."""
+    scene = _build_scene(tmp_path, n=60, with_slam=True)
+    SceneManifest(scene_id='x', pose_source_overrides={'session_0': 'slam'}).write_to_scene_dir(tmp_path)
+    out = tmp_path / 'buf.zarr.zip'
+
+    n_eps, provenance = export_scene_to_dp(scene, out)
+
+    assert n_eps == 1
+    assert provenance[0]['source'] == 'slam'
+    assert provenance[0]['world_frame'] == 'slam'
+    assert provenance[0]['n_interp_filled'] == 3
+    pos = _open_zip(out)['data/robot0_eef_pos'][:]
+    assert pos[0, 0] == pytest.approx(10.0, abs=1e-5)  # slam trajectory is offset +10 in x
+
+
+def test_pose_source_override_to_unavailable_source_raises(tmp_path: pathlib.Path) -> None:
+    """Overriding to a source the episode never computed (no slam here) fails clearly, not a KeyError."""
+    scene = _build_scene(tmp_path, n=30, with_slam=False)
+    SceneManifest(scene_id='x', pose_source_overrides={'session_0': 'slam'}).write_to_scene_dir(tmp_path)
+    out = tmp_path / 'buf.zarr.zip'
+
+    with pytest.raises(RuntimeError, match='pose_source_overrides'):
+        export_scene_to_dp(scene, out)
+
+
+def test_pose_provenance_embedded_in_meta_attrs(tmp_path: pathlib.Path) -> None:
+    """The .zarr.zip carries the same provenance the function returns, as meta attrs."""
+    scene_a = _build_scene(tmp_path / 'a', n=30, with_slam=True)
+    scene_b = _build_scene(tmp_path / 'b', n=20)
+    SceneManifest(scene_id='a', pose_source_overrides={'session_0': 'slam'}).write_to_scene_dir(tmp_path / 'a')
+    out = tmp_path / 'combined.zarr.zip'
+
+    n_eps, provenance = export_scenes_to_dp([scene_a, scene_b], out)
+
+    assert n_eps == 2
+    meta = _open_zip(out)['meta']
+    assert meta.attrs['pose_provenance'] == provenance
+    assert meta.attrs['episode_pose_source'] == ['slam', 'optitrack']

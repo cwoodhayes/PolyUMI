@@ -155,6 +155,36 @@
         {{ 'Mark usable' if detail.unusable else 'Mark unusable' }}
       </button>
       {% endif %}
+      {% if detail.session_type == 'EPISODE' %}
+      <form class="pose-source-form">
+        <label for="pose-source-select">DP export pose source</label>
+        <select
+          id="pose-source-select"
+          name="source"
+          hx-post="/sessions/{{ detail.session_id }}/pose-source"
+          hx-trigger="change"
+          hx-target="#detail-body"
+          hx-swap="outerHTML"
+        >
+          <option value="default" {% if not detail.pose_source_override %}selected{% endif %}>
+            Default{% if detail.available_pose_sources %} ({{ detail.available_pose_sources[0] }}){% endif %}
+          </option>
+          <option value="optitrack"
+            {% if detail.pose_source_override == 'optitrack' %}selected{% endif %}
+            {% if detail.available_pose_sources is not none and 'optitrack' not in detail.available_pose_sources %}disabled{% endif %}>
+            OptiTrack
+          </option>
+          <option value="slam"
+            {% if detail.pose_source_override == 'slam' %}selected{% endif %}
+            {% if detail.available_pose_sources is not none and 'slam' not in detail.available_pose_sources %}disabled{% endif %}>
+            SLAM
+          </option>
+        </select>
+        {% if detail.available_pose_sources is none %}
+        <p class="muted">Pose sources unknown until preprocessing step 5 (eef-pose) has run.</p>
+        {% endif %}
+      </form>
+      {% endif %}
       <form class="notes-form" hx-post="/sessions/{{ detail.session_id }}/notes" hx-target="#detail-body" hx-swap="outerHTML">
         <label for="session-notes">Notes</label>
         <textarea id="session-notes" name="notes" rows="3" placeholder="Add notes…">{{ detail.notes or '' }}</textarea>

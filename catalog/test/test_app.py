@@ -406,6 +406,40 @@ def test_mark_unusable_unknown_session_returns_400(tmp_path: pathlib.Path):
     assert resp.status_code == 400
 
 
+def test_pose_source_round_trip(tmp_path: pathlib.Path):
+    """Setting a pose-source override then clearing it back to default updates the selector + scene.json."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    session_id = _session_id(rec)
+
+    resp = client.post(f'/sessions/{session_id}/pose-source', data={'source': 'slam'})
+    assert resp.status_code == 200
+    manifest = SceneManifest.from_scene_dir(rec / 'scene_2026-07-26_10-00-00_abcd')
+    assert manifest.pose_source_overrides == {'session_1': 'slam'}
+
+    resp = client.post(f'/sessions/{session_id}/pose-source', data={'source': 'default'})
+    assert resp.status_code == 200
+    manifest = SceneManifest.from_scene_dir(rec / 'scene_2026-07-26_10-00-00_abcd')
+    assert manifest.pose_source_overrides == {}
+
+
+def test_pose_source_unknown_session_returns_400(tmp_path: pathlib.Path):
+    """Setting a pose source on a nonexistent session id is rejected, not a crash."""
+    rec, engine = _seed(tmp_path)
+    resp = TestClient(create_app(engine, recordings_dir=rec)).post(
+        '/sessions/does-not-exist/pose-source', data={'source': 'slam'}
+    )
+    assert resp.status_code == 400
+
+
+def test_pose_source_unknown_value_returns_400(tmp_path: pathlib.Path):
+    """An unrecognized source value is rejected rather than silently accepted."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    resp = client.post(f'/sessions/{_session_id(rec)}/pose-source', data={'source': 'lidar'})
+    assert resp.status_code == 400
+
+
 def test_index_includes_empty_dataset_builder(tmp_path: pathlib.Path):
     """With no scenes added yet, the builder shows its empty state, still offering a task picker."""
     resp = _client(tmp_path).get('/')
@@ -509,7 +543,7 @@ def test_post_build_dataset_success_redirects_and_clears_draft(tmp_path: pathlib
     def fake_export_scenes_to_dp(scene_paths, output_path):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b'fake-zip')
-        return 3
+        return 3, []
 
     monkeypatch.setattr('polyumi_ingest.export.dp.export_scenes_to_dp', fake_export_scenes_to_dp)
 
@@ -542,7 +576,7 @@ def test_post_build_dataset_with_task_id_persists_it(tmp_path: pathlib.Path, mon
     def fake_export_scenes_to_dp(scene_paths, output_path):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b'fake-zip')
-        return 1
+        return 1, []
 
     monkeypatch.setattr('polyumi_ingest.export.dp.export_scenes_to_dp', fake_export_scenes_to_dp)
 

@@ -24,11 +24,25 @@ Deliberately absent:
   ``demo_start_pose``. It is in ``shape_meta`` but must *not* be in the store.
 * tactile (piezo / finger camera) — out of scope for the visuomotor policy.
 
-Poses come from each episode's ``eef/pose`` (preprocessing step 5), already on the canonical
-**hand** body frame and on the GoPro frame grid. Quaternion → rotvec is the only pose
+Poses come from one of each episode's ``eef/pose_<source>`` arrays (preprocessing step 5 writes
+one per available source — ``optitrack`` and/or ``slam``), already on the canonical **hand**
+body frame and on the GoPro frame grid. Step 5 no longer picks a single winner; *this* exporter
+does, per episode: an episode's ``eef.attrs['default_source']`` (OptiTrack if present, else
+SLAM) unless overridden by ``scene.json``'s ``pose_source_overrides`` (keyed by session
+directory name, same pattern as ``unusable_episodes``) — see ``resolve_pose_source``. Changing
+the source is therefore a re-*export*, not a re-preprocess. Quaternion → rotvec is the only pose
 transform here. The world frame is left as-is: it cancels out of the relative trajectory the
 policy trains on, whereas the body frame does not — which is why step 5 exists. See
 ``EefPoseStep`` and ``transforms.retarget_body_frame``.
+
+Each exported episode's resolved source is recorded as **provenance**: alongside the returned
+episode count, ``export_scenes_to_dp``/``export_scene_to_dp`` return a list of per-episode
+provenance dicts (scene, session, episode, source, world_frame, n_steps, n_interp_filled), which
+callers can persist externally (see ``main.py``'s ``<output>.provenance.json`` sidecar and the
+catalog's ``DatasetManifest``). The same information is also written into the ``.zarr.zip``
+itself, as ``meta.attrs['pose_provenance']`` (the full list) and ``meta.attrs['episode_pose_source']``
+(just the per-episode source strings, aligned with ``episode_ends``) — ``UmiDataset`` only ever
+reads ``meta/episode_ends``, so these extra attrs are inert cargo it ignores.
 
 Frames are exported at the **native GoPro rate** (~59.94 Hz), not down-sampled here. UMI's
 dataset assumes uniform Δt and sets the effective observation rate itself via
@@ -155,12 +169,48 @@ def _append(data_grp: zarr.Group, arrays: dict[str, np.ndarray]) -> None:
             a[old:] = value
 
 
-def _export_episode(ep: zarr.Group, data_grp: zarr.Group, episode_key: str, scene_zarr: pathlib.Path) -> int:
-    """Export one episode's longest valid span at native rate and append it. Returns step count T."""
-    if 'eef/pose' not in ep:
-        raise RuntimeError(f'{episode_key}: no eef/pose — run preprocessing step 5 (eef-pose) before exporting.')
+def resolve_pose_source(ep: zarr.Group, episode_key: str, override: str | None) -> str:
+    """
+    Resolve which pose source ``episode_key`` should export from.
+
+    ``override`` (from ``scene.json``'s ``pose_source_overrides``, keyed by session directory
+    name) wins when set; otherwise falls back to ``eef.attrs['default_source']`` (OptiTrack if
+    the episode has it, else SLAM — see ``EefPoseStep``). Raises if step 5 hasn't run at all, or
+    if the resolved source's array isn't one the episode actually has.
+    """
+    if 'eef' not in ep:
+        raise RuntimeError(f'{episode_key}: no eef group — run preprocessing step 5 (eef-pose) before exporting.')
+    eef_grp = grp(ep, 'eef')
+    available = list(eef_grp.attrs.get('available_sources', []))
+    if override is not None:
+        source = override
+        if source not in available:
+            raise RuntimeError(
+                f'{episode_key}: pose_source_overrides requests {source!r}, but this episode only '
+                f'has {available} (run `pingest pp 5 --force` if it should have more).'
+            )
+    else:
+        source = eef_grp.attrs.get('default_source')
+        if source is None or f'pose_{source}' not in eef_grp:
+            raise RuntimeError(
+                f'{episode_key}: eef has no default_source / eef/pose_{source} — '
+                f're-run preprocessing step 5 (eef-pose) before exporting.'
+            )
+    return source
+
+
+def _export_episode(
+    ep: zarr.Group, data_grp: zarr.Group, episode_key: str, scene_zarr: pathlib.Path, pose_source: str
+) -> tuple[int, dict]:
+    """Export one episode's longest valid span at native rate and append it. Returns (T, provenance)."""
+    array_name = f'pose_{pose_source}'
+    if 'eef' not in ep or array_name not in grp(ep, 'eef'):
+        raise RuntimeError(
+            f'{episode_key}: no eef/{array_name} — run preprocessing step 5 (eef-pose) before exporting.'
+        )
+    pose_attrs = arr(ep, f'eef/{array_name}').attrs
     gopro_ts = np.asarray(arr(ep, 'timestamps/gopro')[:], dtype=np.float64)
-    pose = np.asarray(arr(ep, 'eef/pose')[:], dtype=np.float64)  # (N,7) [xyz, quat] hand frame
+    pose = np.asarray(arr(ep, f'eef/{array_name}')[:], dtype=np.float64)  # (N,7) [xyz, quat] hand frame
     gripper = np.asarray(arr(ep, 'annotations/gripper_width/width_m')[:], dtype=np.float64)
     frames = open_gopro_frames(ep, scene_zarr)
 
@@ -168,8 +218,8 @@ def _export_episode(ep: zarr.Group, data_grp: zarr.Group, episode_key: str, scen
     if not (len(pose) == len(gripper) == frames.shape[0] == n):
         raise RuntimeError(
             f'{episode_key}: GoPro-grid arrays disagree in length — '
-            f'gopro_ts={n}, eef/pose={len(pose)}, gripper={len(gripper)}, frames={frames.shape[0]}. '
-            f'eef/pose and gripper_width must be on the GoPro grid (steps 4 and 5).'
+            f'gopro_ts={n}, eef/{array_name}={len(pose)}, gripper={len(gripper)}, frames={frames.shape[0]}. '
+            f'eef/{array_name} and gripper_width must be on the GoPro grid (steps 4 and 5).'
         )
 
     # Valid window: the longest gap-free run where both pose and gripper are non-NaN. This is
@@ -246,9 +296,17 @@ def _export_episode(ep: zarr.Group, data_grp: zarr.Group, episode_key: str, scen
             f'{_ROBOT}_demo_end_pose': np.broadcast_to(tcp6[-1], (t, 6)).copy(),
         },
     )
-    source = grp(ep, 'eef').attrs.get('source', 'unknown')
-    log.info(f'  {episode_key}: {t} steps @ {rate:.2f} Hz (pose={source})')
-    return t
+    log.info(f'  {episode_key}: {t} steps @ {rate:.2f} Hz (pose={pose_source})')
+    # 'episode'/'scene'/'session' are filled in by the caller (_append_scene_episodes), which
+    # knows the plain episode key ('episode_0') and scene/session names — episode_key here is
+    # the combined 'scene_label/episode_0' string used only for log/error messages.
+    provenance = {
+        'source': pose_source,
+        'world_frame': pose_attrs.get('world_frame'),
+        'n_steps': t,
+        'n_interp_filled': pose_attrs.get('n_interp_filled', 0),
+    }
+    return t, provenance
 
 
 def _zip_zarr_dir(zarr_dir: pathlib.Path, out_path: pathlib.Path) -> None:
@@ -283,6 +341,7 @@ def _append_scene_episodes(
     data_grp: zarr.Group,
     episode_ends: list[int],
     total: int,
+    provenance: list[dict],
     enforce_preprocessing: bool = True,
 ) -> int:
     """Append every EPISODE session of one scene onto ``data_grp``, returning the new running total."""
@@ -295,12 +354,14 @@ def _append_scene_episodes(
     # apart in logs/errors (otherwise every scene logs as e.g. 'scene.zarr/episode_0').
     scene_label = zarr_path.parent.name
 
-    # scene.json (not the pzarr) is the canonical home of the unusable-episode marker set from
-    # the catalog UI, so it's checked here rather than baked into pzarr at build time.
-    # zarr_path.parent is the scene root regardless of whether scene_path itself was given as
-    # the scene root or as a direct .zarr path (see resolve_zarr_path).
+    # scene.json (not the pzarr) is the canonical home of the unusable-episode marker set and
+    # the pose-source override, both from the catalog UI, so it's checked here rather than
+    # baked into pzarr at build time. zarr_path.parent is the scene root regardless of whether
+    # scene_path itself was given as the scene root or as a direct .zarr path (see
+    # resolve_zarr_path).
     manifest = SceneManifest.from_scene_dir(zarr_path.parent)
     unusable_dirs = set(manifest.unusable_episodes) if manifest else set()
+    pose_source_overrides = manifest.pose_source_overrides if manifest else {}
 
     root = zarr.open_group(str(zarr_path), mode='r')
     if enforce_preprocessing:
@@ -315,20 +376,27 @@ def _append_scene_episodes(
         if ep.attrs.get('session_type') == 'MAPPING':
             log.info(f'  {scene_label}/{ep_key}: MAPPING session, skipping.')
             continue
-        if ep.attrs.get('session_dir') in unusable_dirs:
+        session_dir = ep.attrs.get('session_dir')
+        if session_dir in unusable_dirs:
             log.info(f'  {scene_label}/{ep_key}: marked unusable, skipping.')
             continue
-        total += _export_episode(ep, data_grp, f'{scene_label}/{ep_key}', zarr_path)
+        pose_source = resolve_pose_source(ep, f'{scene_label}/{ep_key}', pose_source_overrides.get(session_dir))
+        t, ep_provenance = _export_episode(ep, data_grp, f'{scene_label}/{ep_key}', zarr_path, pose_source)
+        total += t
         episode_ends.append(total)
+        provenance.append({'scene': scene_label, 'session': session_dir, 'episode': ep_key, **ep_provenance})
     return total
 
 
-def export_scene_to_dp(scene_path: pathlib.Path, output_path: pathlib.Path, enforce_preprocessing: bool = True) -> int:
+def export_scene_to_dp(
+    scene_path: pathlib.Path, output_path: pathlib.Path, enforce_preprocessing: bool = True
+) -> tuple[int, list[dict]]:
     """
     Export EPISODE sessions of a pzarr scene to a UMI-format ``.zarr.zip`` ReplayBuffer.
 
-    Poses come from ``eef/pose`` (preprocessing step 5), which has already resolved the
-    optitrack-vs-slam source choice and put the trajectory on the hand frame.
+    Poses come from ``eef/pose_<source>`` (preprocessing step 5, which writes one array per
+    available source); *this* function resolves the optitrack-vs-slam choice per episode — see
+    ``resolve_pose_source`` — and puts the trajectory on the hand frame.
 
     When ``enforce_preprocessing`` is True (default), the scene must have every registered
     preprocessing step complete or export raises. This does not by itself guarantee the
@@ -336,15 +404,16 @@ def export_scene_to_dp(scene_path: pathlib.Path, output_path: pathlib.Path, enfo
     be missing it, in which case the start trim is skipped non-fatally (see ``_export_episode``).
     Set ``enforce_preprocessing`` False to export a partially preprocessed scene instead.
 
-    Returns the number of episodes written. MAPPING sessions and episodes marked unusable
-    in ``scene.json`` are skipped.
+    Returns ``(n_episodes, provenance)`` — the episode count and a per-episode pose-source
+    provenance list (also embedded in the ``.zarr.zip``'s ``meta`` attrs; see module docstring).
+    MAPPING sessions and episodes marked unusable in ``scene.json`` are skipped.
     """
     return export_scenes_to_dp([scene_path], output_path, enforce_preprocessing=enforce_preprocessing)
 
 
 def export_scenes_to_dp(
     scene_paths: list[pathlib.Path], output_path: pathlib.Path, enforce_preprocessing: bool = True
-) -> int:
+) -> tuple[int, list[dict]]:
     """
     Export EPISODE sessions from one or more pzarr scenes into a single UMI ``.zarr.zip``.
 
@@ -352,10 +421,13 @@ def export_scenes_to_dp(
     across the whole list — a multi-scene dataset is indistinguishable from a single big scene
     to ``UmiDataset``, which only ever sees one buffer. MAPPING sessions and episodes marked
     unusable in ``scene.json`` are skipped scene by scene, same as the single-scene exporter.
-    Poses come from ``eef/pose`` (preprocessing step 5). ``enforce_preprocessing`` (default
-    True) requires every registered preprocessing step to be complete on each scene.
+    Poses come from ``eef/pose_<source>`` (preprocessing step 5); the per-episode source choice
+    is resolved here (see ``resolve_pose_source``). ``enforce_preprocessing`` (default True)
+    requires every registered preprocessing step to be complete on each scene.
 
-    Returns the total number of episodes written across all scenes.
+    Returns ``(n_episodes, provenance)`` — the total episode count across all scenes and a
+    per-episode pose-source provenance list, in export order (also embedded in the ``.zarr.zip``
+    as ``meta.attrs['pose_provenance']`` / ``meta.attrs['episode_pose_source']``).
     """
     if not scene_paths:
         raise ValueError('No scenes given to export.')
@@ -367,18 +439,24 @@ def export_scenes_to_dp(
         data = out.create_group('data')
 
         episode_ends: list[int] = []
+        provenance: list[dict] = []
         total = 0
         for scene_path in scene_paths:
             total = _append_scene_episodes(
-                scene_path, data, episode_ends, total, enforce_preprocessing=enforce_preprocessing
+                scene_path, data, episode_ends, total, provenance, enforce_preprocessing=enforce_preprocessing
             )
 
         if not episode_ends:
             raise RuntimeError('no EPISODE sessions to export across the given scene(s).')
 
         meta.create_array('episode_ends', data=np.array(episode_ends, dtype=np.int64), compressor=_BLOSC)
+        # Inert cargo for UmiDataset (it only reads meta/episode_ends) — lets anyone who opens
+        # the .zarr.zip directly see which pose source produced each episode without needing the
+        # external manifest/sidecar too. See module docstring.
+        meta.attrs['pose_provenance'] = provenance
+        meta.attrs['episode_pose_source'] = [p['source'] for p in provenance]
         output_path.parent.mkdir(parents=True, exist_ok=True)
         _zip_zarr_dir(build_dir, output_path)
 
     log.info(f'Wrote {len(episode_ends)} episode(s) from {len(scene_paths)} scene(s), {total} steps → {output_path}')
-    return len(episode_ends)
+    return len(episode_ends), provenance

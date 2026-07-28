@@ -5,6 +5,7 @@ See docs/data-format.md for an overview of the pzarr format.
 """
 
 import inspect
+import json
 import logging
 import os
 import pathlib
@@ -653,6 +654,19 @@ def export_mcap(
         log.info(f'  {path}')
 
 
+def _write_provenance_sidecar(output_path: pathlib.Path, provenance: list[dict]) -> pathlib.Path:
+    """Write ``<output>.provenance.json`` beside a DP export, recording each episode's pose source."""
+    sidecar_path = output_path.with_suffix(output_path.suffix + '.provenance.json')
+    sidecar_path.write_text(json.dumps(provenance, indent=2))
+    return sidecar_path
+
+
+def _log_pose_source_summary(provenance: list[dict]) -> None:
+    """Log a one-line-per-episode summary of which pose source each episode exported from."""
+    for p in provenance:
+        log.info(f'  {p["scene"]}/{p["episode"]}: pose={p["source"]} ({p["n_steps"]} steps)')
+
+
 @app.command(name='export-dp')
 def export_dp(
     scene_path: pathlib.Path = typer.Argument(
@@ -670,26 +684,32 @@ def export_dp(
         '--enforce-preprocessing/--no-enforce-preprocessing',
         help='Require every preprocessing step to be complete before exporting. '
         'Disable to export a partially preprocessed scene; export can still fail if outputs '
-        '(e.g. eef/pose) are missing, and the post-chirp start trim is applied independently '
+        '(e.g. eef/pose_<source>) are missing, and the post-chirp start trim is applied independently '
         'whenever the chirp-end marker is present, regardless of this flag.',
     ),
 ):
     """
     Export a pzarr scene to a UMI-format ReplayBuffer (.zarr.zip).
 
-    Poses come from eef/pose, so run preprocessing step 5 (eef-pose) first; that step also
-    picks the optitrack-vs-slam source. Frames are exported at the native GoPro rate; the
-    training config sets the observation rate via obs_down_sample_steps.
+    Poses come from eef/pose_<source>, written by preprocessing step 5 (eef-pose) for each
+    source the scene has (optitrack and/or slam); run that first. This command then resolves
+    which source each episode exports from — its eef.attrs['default_source'] (optitrack if
+    present, else slam) unless overridden per-session in scene.json's pose_source_overrides.
+    Frames are exported at the native GoPro rate; the training config sets the observation rate
+    via obs_down_sample_steps. A per-episode pose-source provenance record is written to
+    <output>.provenance.json and embedded in the .zarr.zip's meta attrs.
     """
     from polyumi_ingest.export.dp import export_scene_to_dp
 
     try:
-        n = export_scene_to_dp(scene_path, output_path, enforce_preprocessing=enforce_preprocessing)
+        n, provenance = export_scene_to_dp(scene_path, output_path, enforce_preprocessing=enforce_preprocessing)
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         log.error(str(e))
         raise typer.Exit(1)
 
-    log.info(f'Exported {n} episode(s) → {output_path}')
+    _log_pose_source_summary(provenance)
+    sidecar_path = _write_provenance_sidecar(output_path, provenance)
+    log.info(f'Exported {n} episode(s) → {output_path} (provenance: {sidecar_path})')
 
 
 @app.command(name='export-dataset')
@@ -709,7 +729,7 @@ def export_dataset(
         '--enforce-preprocessing/--no-enforce-preprocessing',
         help='Require every preprocessing step to be complete on each scene before exporting. '
         'Disable to export partially preprocessed scenes; export can still fail if outputs '
-        '(e.g. eef/pose) are missing, and the post-chirp start trim is applied independently '
+        '(e.g. eef/pose_<source>) are missing, and the post-chirp start trim is applied independently '
         'whenever the chirp-end marker is present, regardless of this flag.',
     ),
 ):
@@ -718,17 +738,20 @@ def export_dataset(
 
     Scenes are concatenated in the order given; episode_ends accumulates across all of them,
     so the result is indistinguishable from a single big scene to UmiDataset. Each scene needs
-    preprocessing step 5 (eef-pose) run first, same as `export-dp`.
+    preprocessing step 5 (eef-pose) run first, same as `export-dp`; the per-episode pose-source
+    resolution (default vs. scene.json override) and provenance sidecar work the same way too.
     """
     from polyumi_ingest.export.dp import export_scenes_to_dp
 
     try:
-        n = export_scenes_to_dp(scene_paths, output_path, enforce_preprocessing=enforce_preprocessing)
+        n, provenance = export_scenes_to_dp(scene_paths, output_path, enforce_preprocessing=enforce_preprocessing)
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         log.error(str(e))
         raise typer.Exit(1)
 
-    log.info(f'Exported {n} episode(s) from {len(scene_paths)} scene(s) → {output_path}')
+    _log_pose_source_summary(provenance)
+    sidecar_path = _write_provenance_sidecar(output_path, provenance)
+    log.info(f'Exported {n} episode(s) from {len(scene_paths)} scene(s) → {output_path} (provenance: {sidecar_path})')
 
 
 def _step_summary(step_cls: type) -> str:

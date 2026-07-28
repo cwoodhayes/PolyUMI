@@ -229,6 +229,41 @@ def test_session_detail_includes_pzarr_streams_when_available(tmp_path: pathlib.
     assert 'finger/frames' in labels
 
 
+def test_session_detail_exposes_pose_source_override_and_available_sources(tmp_path: pathlib.Path):
+    """session_detail surfaces the DB-cached override and the pzarr's available_sources."""
+    engine = _populated_engine(tmp_path)
+    with DBSession(engine) as db:
+        scene = queries.scene_detail(db, 'scene-1')
+        sessions = queries.list_sessions(db, 'scene-1')
+        session_id = next(s['session_id'] for s in sessions if s['session_type'] == 'EPISODE')
+    scene_dir = pathlib.Path(scene['dir'])
+
+    with DBSession(engine) as db:
+        detail = queries.session_detail(db, session_id)
+    assert detail['pose_source_override'] is None
+    assert detail['available_pose_sources'] is None  # no pzarr yet — unknown, not empty
+
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 1
+    ep = root.require_group('episode_0')
+    ep.attrs['session_dir'] = 'session_2'
+    eef_grp = ep.require_group('eef')
+    eef_grp.attrs['available_sources'] = ['optitrack', 'slam']
+
+    with DBSession(engine) as db:
+        detail = queries.session_detail(db, session_id)
+    assert detail['available_pose_sources'] == ['optitrack', 'slam']
+
+    with DBSession(engine) as db:
+        row = db.get(Session, session_id)
+        row.pose_source_override = 'slam'
+        db.add(row)
+        db.commit()
+
+    with DBSession(engine) as db:
+        assert queries.session_detail(db, session_id)['pose_source_override'] == 'slam'
+
+
 def test_scene_detail_includes_quality_summary(tmp_path: pathlib.Path):
     """scene_detail aggregates SLAM quality and total dropped video frames across sessions."""
     engine = _populated_engine(tmp_path)

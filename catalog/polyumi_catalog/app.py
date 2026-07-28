@@ -76,6 +76,7 @@ from polyumi_catalog.mutations import (
     rename_task,
     set_scene_notes,
     set_session_notes,
+    set_session_pose_source,
     set_session_unusable,
     set_task_description,
 )
@@ -357,6 +358,15 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
     @app.post('/sessions/{session_id}/mark-usable', response_class=HTMLResponse)
     def post_mark_usable(session_id: str) -> HTMLResponse:
         return _post_mark_usable(session_id, False)
+
+    @app.post('/sessions/{session_id}/pose-source', response_class=HTMLResponse)
+    def post_pose_source(session_id: str, source: str = Form(...)) -> HTMLResponse:
+        with DBSession(engine) as db:
+            try:
+                set_session_pose_source(db, session_id, source)
+            except MutationError as err:
+                return PlainTextResponse(str(err), status_code=400)
+            return _detail_with_episodes_oob(db, session_id)
 
     @app.post('/scenes/{scene_id}/run-pp', response_class=HTMLResponse)
     def post_run_pp(request: Request, scene_id: str) -> HTMLResponse:

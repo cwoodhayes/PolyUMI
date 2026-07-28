@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import pathlib
 
+import zarr
+
 from polyumi_catalog.mcap_tools import resolve_episode_index
 
 # (EpisodeInfo attribute name, display label) — same order/labels as `pingest inspect-zarr`.
@@ -40,6 +42,26 @@ def _fmt_ts_range(ts_range: tuple[float, float] | None) -> str | None:
     if ts_range is None:
         return None
     return f'{ts_range[0]:.3f} → {ts_range[1]:.3f} s'
+
+
+def available_pose_sources(scene_dir: pathlib.Path, session_dirname: str) -> list[str] | None:
+    """
+    Return this session's ``eef.attrs['available_sources']`` (preprocessing step 5), or ``None``.
+
+    ``None`` means "unknown" — no pzarr yet, no matching episode, or step 5 hasn't run for it —
+    distinct from an empty list, which can't actually happen (step 5 skips episodes with no
+    source at all rather than writing an empty ``eef`` group). Callers should treat ``None`` as
+    "don't restrict the pose-source choice", not "no sources".
+    """
+    idx = resolve_episode_index(scene_dir, session_dirname)
+    if idx is None:
+        return None
+    zarr_path = scene_dir / 'scene.zarr'
+    ep = zarr.open_group(str(zarr_path / f'episode_{idx}'), mode='r')
+    if 'eef' not in ep:
+        return None
+    available = ep['eef'].attrs.get('available_sources')  # type: ignore[union-attr]
+    return list(available) if available else None
 
 
 def session_pzarr_streams(scene_dir: pathlib.Path, session_dirname: str) -> dict | None:

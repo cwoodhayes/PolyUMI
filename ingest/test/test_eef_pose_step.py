@@ -141,36 +141,54 @@ def _build_scene(tmp_path: pathlib.Path, *, with_optitrack: bool, with_slam: boo
     return scene_zarr
 
 
-def test_eef_pose_step_prefers_optitrack_and_resamples(tmp_path: pathlib.Path) -> None:
-    """With both sources present, optitrack wins and lands on the gopro grid."""
+def test_eef_pose_step_writes_both_alternates_when_available(tmp_path: pathlib.Path) -> None:
+    """With both sources present, both eef/pose_<source> arrays are written on the gopro grid."""
     scene_zarr = _build_scene(tmp_path, with_optitrack=True, with_slam=True)
 
     EefPoseStep().run_step(scene_zarr)
 
     ep = zarr.open_group(str(scene_zarr / 'episode_0'), mode='r')
-    assert ep['eef/pose'].shape == (10, 7)  # resampled onto the 10-frame gopro grid
-    assert ep['eef'].attrs['source'] == 'optitrack'
-    assert ep['eef'].attrs['world_frame'] == 'optitrack'
+    assert ep['eef/pose_optitrack'].shape == (10, 7)  # resampled onto the 10-frame gopro grid
+    assert ep['eef/pose_slam'].shape == (10, 7)
+    assert ep['eef/pose_optitrack'].attrs['world_frame'] == 'optitrack'
+    assert ep['eef/pose_slam'].attrs['world_frame'] == 'slam'
+    assert ep['eef/pose_optitrack'].attrs['body_frame'] == 'hand'
+    assert ep['eef'].attrs['available_sources'] == ['optitrack', 'slam']
+    assert ep['eef'].attrs['default_source'] == 'optitrack'  # _SOURCE_PREFERENCE order
     assert ep['eef'].attrs['body_frame'] == 'hand'
 
 
-def test_eef_pose_step_falls_back_to_slam(tmp_path: pathlib.Path) -> None:
-    """Without optitrack, slam is used and the GoPro→hand hop is applied to it."""
+def test_eef_pose_step_writes_only_slam_when_optitrack_absent(tmp_path: pathlib.Path) -> None:
+    """Without optitrack, only eef/pose_slam is written; the GoPro→hand hop is applied to it."""
     scene_zarr = _build_scene(tmp_path, with_optitrack=False, with_slam=True)
 
     EefPoseStep().run_step(scene_zarr)
 
     ep = zarr.open_group(str(scene_zarr / 'episode_0'), mode='r')
-    assert ep['eef'].attrs['source'] == 'slam'
-    assert ep['eef'].attrs['body_frame'] == 'hand'
-    assert ep['eef'].attrs['n_nan'] == 0
+    assert 'eef/pose_optitrack' not in ep
+    assert ep['eef'].attrs['available_sources'] == ['slam']
+    assert ep['eef'].attrs['default_source'] == 'slam'
+    assert ep['eef/pose_slam'].attrs['body_frame'] == 'hand'
+    assert ep['eef/pose_slam'].attrs['n_nan'] == 0
 
     # SLAM poses here have identity rotation, so the hand offset applies unrotated and the
     # expected trajectory is the slide plus T_gp_hand's translation. Derived from the live
     # calibration rather than hardcoded, so recalibrating doesn't spuriously fail this.
     T_gp_hand = gopro_to_hand_transform(load_gripper_calib())
     expected = np.linspace(0, 1, 10)[:, None] * np.array([1.0, 0, 0]) + T_gp_hand.translation
-    np.testing.assert_allclose(ep['eef/pose'][:][:, :3], expected, atol=1e-9)
+    np.testing.assert_allclose(ep['eef/pose_slam'][:][:, :3], expected, atol=1e-9)
+
+
+def test_eef_pose_step_writes_only_optitrack_when_slam_absent(tmp_path: pathlib.Path) -> None:
+    """Without slam, only eef/pose_optitrack is written."""
+    scene_zarr = _build_scene(tmp_path, with_optitrack=True, with_slam=False)
+
+    EefPoseStep().run_step(scene_zarr)
+
+    ep = zarr.open_group(str(scene_zarr / 'episode_0'), mode='r')
+    assert 'eef/pose_slam' not in ep
+    assert ep['eef'].attrs['available_sources'] == ['optitrack']
+    assert ep['eef'].attrs['default_source'] == 'optitrack'
 
 
 def test_eef_pose_step_skips_episode_without_source(tmp_path: pathlib.Path) -> None:
@@ -180,19 +198,47 @@ def test_eef_pose_step_skips_episode_without_source(tmp_path: pathlib.Path) -> N
     EefPoseStep().run_step(scene_zarr)
 
     ep = zarr.open_group(str(scene_zarr / 'episode_0'), mode='r')
-    assert 'eef/pose' not in ep
+    assert 'eef' not in ep
 
 
 def test_eef_pose_step_is_idempotent_without_force(tmp_path: pathlib.Path) -> None:
-    """Re-running leaves existing eef/pose alone unless force is set."""
+    """Re-running leaves existing eef/pose_<source> alone unless force is set."""
     scene_zarr = _build_scene(tmp_path, with_optitrack=False, with_slam=True)
     EefPoseStep().run_step(scene_zarr)
 
     ep = zarr.open_group(str(scene_zarr / 'episode_0'), mode='a')
-    ep['eef/pose'][0, 0] = 42.0  # sentinel
+    ep['eef/pose_slam'][0, 0] = 42.0  # sentinel
 
     EefPoseStep().run_step(scene_zarr)
-    assert zarr.open_group(str(scene_zarr / 'episode_0'), mode='r')['eef/pose'][0, 0] == 42.0
+    assert zarr.open_group(str(scene_zarr / 'episode_0'), mode='r')['eef/pose_slam'][0, 0] == 42.0
 
     EefPoseStep().run_step(scene_zarr, force=True)
-    assert zarr.open_group(str(scene_zarr / 'episode_0'), mode='r')['eef/pose'][0, 0] != 42.0
+    assert zarr.open_group(str(scene_zarr / 'episode_0'), mode='r')['eef/pose_slam'][0, 0] != 42.0
+
+
+def test_eef_pose_step_force_adds_newly_available_source(tmp_path: pathlib.Path) -> None:
+    """
+    --force recomputes even when only a new source became available since the last run.
+
+    Without force, a scene that gained an optitrack recording after an earlier slam-only
+    eef-pose run should still need --force to pick it up (available_sources doesn't
+    superset the newly-available set until forced).
+    """
+    scene_zarr = _build_scene(tmp_path, with_optitrack=False, with_slam=True)
+    EefPoseStep().run_step(scene_zarr)
+    ep = zarr.open_group(str(scene_zarr / 'episode_0'), mode='r')
+    assert ep['eef'].attrs['available_sources'] == ['slam']
+
+    # optitrack becomes available (e.g. re-synced into the scene)
+    opti_ts = np.arange(20, dtype=np.float64) / 120.0
+    opti = zarr.open_group(str(scene_zarr), mode='a').require_group('optitrack')
+    opti.create_array('timestamps', data=opti_ts)
+    opti.create_array(
+        'pose',
+        data=_pose_array(RigidTransform.from_components(translation=np.zeros((20, 3)), rotation=Rotation.identity(20))),
+    )
+
+    EefPoseStep().run_step(scene_zarr, force=True)
+    ep = zarr.open_group(str(scene_zarr / 'episode_0'), mode='r')
+    assert set(ep['eef'].attrs['available_sources']) == {'optitrack', 'slam'}
+    assert 'eef/pose_optitrack' in ep

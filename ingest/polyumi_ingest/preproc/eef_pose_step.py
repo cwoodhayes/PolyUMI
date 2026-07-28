@@ -46,7 +46,7 @@ def _gopro_ts_in_finger_clock(ep: zarr.Group) -> np.ndarray:
 @register_preprocessing_step(step_number=5, step_name='eef-pose')
 class EefPoseStep(PreprocessingStep):
     """
-    Re-express each episode's pose trajectory onto the canonical hand frame as ``eef/pose``.
+    Re-express each episode's pose trajectory onto the canonical hand frame.
 
     Neither raw pose source is in a frame the policy can use. OptiTrack reports the pose of the
     marker *rigid body*, whose origin Motive places at the marker centroid — an arbitrary point
@@ -55,8 +55,12 @@ class EefPoseStep(PreprocessingStep):
     same frame as each other, so models trained from different sources are not comparable.
 
     Both sources are converted onto one canonical **body** frame — the hand — and written to
-    ``<episode>/eef/pose`` on the GoPro frame grid (the same grid as ``gopro/frames`` and
-    ``annotations/gripper_width``, so a single index serves all three downstream).
+    **one array per available source**, ``<episode>/eef/pose_optitrack`` and/or
+    ``<episode>/eef/pose_slam``, on the GoPro frame grid (the same grid as ``gopro/frames`` and
+    ``annotations/gripper_width``, so a single index serves all three downstream). Writing both
+    alternates (rather than baking in a single winner) lets pose-source selection move to
+    **export time** — see ``export.dp.buffer`` — instead of being frozen at preprocessing time.
+    ``eef.attrs['default_source']`` records which one export uses absent an override.
 
     The chain routes both sources through the **GoPro frame** and then applies one shared
     ``T_gopro_to_hand`` hop::
@@ -92,7 +96,7 @@ class EefPoseStep(PreprocessingStep):
     """
 
     def run_step(self, scene_zarr: pathlib.Path, force: bool = False) -> None:
-        """Write ``eef/pose`` for every episode that has a usable pose source."""
+        """Write ``eef/pose_<source>`` for every source each episode can supply."""
         root = zarr.open_group(str(scene_zarr), mode='a')
         episodes = sorted(k for k in root.keys() if k.startswith('episode_'))
         if not episodes:
@@ -131,58 +135,73 @@ class EefPoseStep(PreprocessingStep):
         source_to_hand: dict,
         force: bool,
     ) -> None:
-        """Resolve one episode's pose source, convert it to the hand frame, and write eef/pose."""
-        if 'eef/pose' in ep and not force:
-            log.info(f'  {episode_key}: eef/pose already present; use --force to recompute.')
-            return
-
+        """Resolve this episode's available pose sources and write one eef/pose_<source> each."""
         sources = self._available_sources(root, ep)
         if not sources:
             log.warning(f'  {episode_key}: no optitrack or slam pose source; skipping.')
             return
-        source = sources[0]
+
+        existing = set(ep['eef'].attrs.get('available_sources', [])) if 'eef' in ep else set()
+        if not force and existing.issuperset(sources):
+            log.info(f'  {episode_key}: eef/pose_* already present for {sources}; use --force to recompute.')
+            return
 
         gopro_ts = _gopro_ts_in_finger_clock(ep)
-        n_interp = 0
-
-        if source == 'optitrack':
-            # OptiTrack runs on its own clock and rate; resample it onto the GoPro frame grid
-            # so eef/pose shares one index with the frames and the gripper width.
-            opti_ts = np.asarray(arr(root, 'optitrack/timestamps')[:], dtype=np.float64)
-            opti_poses = np.asarray(arr(root, 'optitrack/pose')[:], dtype=np.float64)
-            raw = opti_poses[nearest_idx(opti_ts, gopro_ts)]
-            world_frame = 'optitrack'
-        else:
-            # SLAM leaves NaN rows wherever tracking was lost. Fill short interior gaps
-            # (Slerp rotation + linear translation) so a brief dropout doesn't truncate the
-            # usable span; long gaps and the leading/trailing NaN stay NaN by design.
-            raw = np.asarray(arr(ep, 'gopro/slam_poses')[:], dtype=np.float64)
-            raw, filled = interpolate_se3_gaps(raw, max_gap_frames=_SLAM_MAX_GAP_FRAMES)
-            n_interp = int(filled.sum())
-            world_frame = 'slam'
-
-        if len(raw) != len(gopro_ts):
-            raise RuntimeError(
-                f'{episode_key}: pose source {source!r} has {len(raw)} rows but the gopro grid '
-                f'has {len(gopro_ts)}; refusing to write a misaligned eef/pose.'
-            )
-
-        pose = retarget_body_frame(raw, source_to_hand[source])
-
-        n_nan = int(np.isnan(pose[:, 0]).sum())
         out_grp = ep.require_group('eef')
+
+        # Clean up the pre-dual-source schema: a scene preprocessed by the old EefPoseStep (a
+        # single eef/pose array plus group-level 'source'/'world_frame'/'n_nan' attrs) leaves
+        # both behind on a --force re-run otherwise, since neither is part of the new schema
+        # and nothing above would ever remove them.
         if 'pose' in out_grp:
             del out_grp['pose']
-        out_grp.create_array('pose', data=pose, compressor=_BLOSC)
-        out_grp.attrs['source'] = source
-        out_grp.attrs['world_frame'] = world_frame
+        for stale_attr in ('source', 'world_frame', 'n_nan'):
+            out_grp.attrs.pop(stale_attr, None)
+
+        for source in sources:
+            n_interp = 0
+            if source == 'optitrack':
+                # OptiTrack runs on its own clock and rate; resample it onto the GoPro frame
+                # grid so eef/pose_optitrack shares one index with the frames and gripper width.
+                opti_ts = np.asarray(arr(root, 'optitrack/timestamps')[:], dtype=np.float64)
+                opti_poses = np.asarray(arr(root, 'optitrack/pose')[:], dtype=np.float64)
+                raw = opti_poses[nearest_idx(opti_ts, gopro_ts)]
+                world_frame = 'optitrack'
+            else:
+                # SLAM leaves NaN rows wherever tracking was lost. Fill short interior gaps
+                # (Slerp rotation + linear translation) so a brief dropout doesn't truncate the
+                # usable span; long gaps and the leading/trailing NaN stay NaN by design.
+                raw = np.asarray(arr(ep, 'gopro/slam_poses')[:], dtype=np.float64)
+                raw, filled = interpolate_se3_gaps(raw, max_gap_frames=_SLAM_MAX_GAP_FRAMES)
+                n_interp = int(filled.sum())
+                world_frame = 'slam'
+
+            if len(raw) != len(gopro_ts):
+                raise RuntimeError(
+                    f'{episode_key}: pose source {source!r} has {len(raw)} rows but the gopro '
+                    f'grid has {len(gopro_ts)}; refusing to write a misaligned eef/pose_{source}.'
+                )
+
+            pose = retarget_body_frame(raw, source_to_hand[source])
+            n_nan = int(np.isnan(pose[:, 0]).sum())
+
+            array_name = f'pose_{source}'
+            if array_name in out_grp:
+                del out_grp[array_name]
+            pose_arr = out_grp.create_array(array_name, data=pose, compressor=_BLOSC)
+            pose_arr.attrs['world_frame'] = world_frame
+            pose_arr.attrs['body_frame'] = 'hand'
+            pose_arr.attrs['grid'] = 'gopro'
+            pose_arr.attrs['n_nan'] = n_nan
+            pose_arr.attrs['n_interp_filled'] = n_interp
+
+            interp_note = f', {n_interp} interp-filled' if n_interp else ''
+            log.info(
+                f'  {episode_key}: eef/pose_{source} {pose.shape} '
+                f'(world={world_frame}, body=hand, {n_nan}/{len(pose)} NaN{interp_note})'
+            )
+
+        out_grp.attrs['available_sources'] = sources
+        out_grp.attrs['default_source'] = sources[0]  # _SOURCE_PREFERENCE order
         out_grp.attrs['body_frame'] = 'hand'
         out_grp.attrs['grid'] = 'gopro'
-        out_grp.attrs['n_nan'] = n_nan
-        out_grp.attrs['n_interp_filled'] = n_interp
-
-        interp_note = f', {n_interp} interp-filled' if n_interp else ''
-        log.info(
-            f'  {episode_key}: eef/pose {pose.shape} from {source} '
-            f'(world={world_frame}, body=hand, {n_nan}/{len(pose)} NaN{interp_note})'
-        )

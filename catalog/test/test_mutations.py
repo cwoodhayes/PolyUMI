@@ -22,6 +22,7 @@ from polyumi_catalog.mutations import (
     rename_task,
     set_scene_notes,
     set_session_notes,
+    set_session_pose_source,
     set_session_unusable,
     set_task_description,
 )
@@ -160,6 +161,92 @@ def test_set_session_unusable_rejects_unknown_session(tmp_path: pathlib.Path):
     with DBSession(engine) as db:
         with pytest.raises(MutationError):
             set_session_unusable(db, 'no-such-session', True)
+
+
+def test_set_session_pose_source_writes_scene_json_and_survives_resync(tmp_path: pathlib.Path):
+    """Setting a pose-source override rewrites scene.json; a dropped-and-resynced DB recovers it."""
+    rec = tmp_path / 'recordings'
+    scene_dir = _make_scene(rec, 'scene_2026-07-28_10-00-00_pose1', scene_id='scene-pose-1', task=None)
+
+    engine = get_engine(tmp_path / 'catalog.db')
+    sync_recordings(rec, engine)
+    with DBSession(engine) as db:
+        session_id = db.exec(select(Session).where(Session.scene_id == 'scene-pose-1')).first().session_id
+        set_session_pose_source(db, session_id, 'slam')
+        assert db.get(Session, session_id).pose_source_override == 'slam'
+
+    manifest = SceneManifest.from_scene_dir(scene_dir)
+    assert manifest.pose_source_overrides == {'session_1': 'slam'}
+
+    rebuilt = get_engine(tmp_path / 'catalog2.db')
+    sync_recordings(rec, rebuilt)
+    with DBSession(rebuilt) as db:
+        row = db.exec(select(Session).where(Session.scene_id == 'scene-pose-1')).first()
+        assert row.pose_source_override == 'slam'
+
+
+def test_set_session_pose_source_default_clears_override(tmp_path: pathlib.Path):
+    """Setting the source back to 'default' removes the scene.json entry entirely."""
+    rec = tmp_path / 'recordings'
+    scene_dir = _make_scene(rec, 'scene_2026-07-28_11-00-00_pose2', scene_id='scene-pose-2', task=None)
+    SceneManifest(scene_id='scene-pose-2', pose_source_overrides={'session_1': 'optitrack'}).write_to_scene_dir(
+        scene_dir
+    )
+
+    engine = get_engine(tmp_path / 'catalog.db')
+    sync_recordings(rec, engine)
+    with DBSession(engine) as db:
+        session_id = db.exec(select(Session).where(Session.scene_id == 'scene-pose-2')).first().session_id
+        assert db.get(Session, session_id).pose_source_override == 'optitrack'
+        set_session_pose_source(db, session_id, 'default')
+        assert db.get(Session, session_id).pose_source_override is None
+
+    manifest = SceneManifest.from_scene_dir(scene_dir)
+    assert manifest.pose_source_overrides == {}
+
+
+def test_set_session_pose_source_rejects_unknown_session(tmp_path: pathlib.Path):
+    """An unknown session_id raises MutationError instead of silently no-op'ing."""
+    engine = get_engine(tmp_path / 'catalog.db')
+    with DBSession(engine) as db:
+        with pytest.raises(MutationError):
+            set_session_pose_source(db, 'no-such-session', 'slam')
+
+
+def test_set_session_pose_source_rejects_unknown_value(tmp_path: pathlib.Path):
+    """A source outside {'default', 'optitrack', 'slam'} is rejected before touching any state."""
+    rec = tmp_path / 'recordings'
+    _make_scene(rec, 'scene_2026-07-28_12-00-00_pose3', scene_id='scene-pose-3', task=None)
+    engine = get_engine(tmp_path / 'catalog.db')
+    sync_recordings(rec, engine)
+    with DBSession(engine) as db:
+        session_id = db.exec(select(Session).where(Session.scene_id == 'scene-pose-3')).first().session_id
+        with pytest.raises(MutationError):
+            set_session_pose_source(db, session_id, 'lidar')
+
+
+def test_set_session_pose_source_rejects_source_episode_cannot_supply(tmp_path: pathlib.Path):
+    """Overriding to a source the episode's pzarr never computed (no slam here) is rejected."""
+    import zarr
+
+    rec = tmp_path / 'recordings'
+    scene_dir = _make_scene(rec, 'scene_2026-07-28_13-00-00_pose4', scene_id='scene-pose-4', task=None)
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w', zarr_format=2)
+    root.attrs['n_episodes'] = 1
+    ep = root.create_group('episode_0')
+    ep.attrs['session_dir'] = 'session_1'
+    eef = ep.create_group('eef')
+    eef.attrs['available_sources'] = ['optitrack']  # no slam
+
+    engine = get_engine(tmp_path / 'catalog.db')
+    sync_recordings(rec, engine)
+    with DBSession(engine) as db:
+        session_id = db.exec(select(Session).where(Session.scene_id == 'scene-pose-4')).first().session_id
+        with pytest.raises(MutationError, match='optitrack'):
+            set_session_pose_source(db, session_id, 'slam')
+        # optitrack IS available, so that override succeeds
+        set_session_pose_source(db, session_id, 'optitrack')
+        assert db.get(Session, session_id).pose_source_override == 'optitrack'
 
 
 def test_set_scene_notes_writes_scene_json_and_survives_resync(tmp_path: pathlib.Path):

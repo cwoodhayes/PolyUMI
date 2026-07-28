@@ -54,6 +54,11 @@ class DatasetManifest:
     polyumi_version: str | None = None
     export_params: dict = field(default_factory=dict)
     members: list[DatasetMemberSpec] = field(default_factory=list)
+    #: Per-episode pose-source provenance from the export (scene, session, episode, source,
+    #: world_frame, n_steps, n_interp_filled) — see export.dp.buffer's module docstring. Also
+    #: embedded in the .zarr.zip's meta attrs; kept here too so it's readable without opening
+    #: the buffer.
+    pose_provenance: list[dict] = field(default_factory=list)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     file_version: int = 1
 
@@ -72,6 +77,7 @@ class DatasetManifest:
             polyumi_version=data.get('polyumi_version'),
             export_params=data.get('export_params', {}),
             members=[DatasetMemberSpec.from_dict(m) for m in data.get('members', [])],
+            pose_provenance=data.get('pose_provenance', []),
             created_at=datetime.fromisoformat(data['created_at']),
             file_version=version,
         )
@@ -85,6 +91,7 @@ class DatasetManifest:
             'polyumi_version': self.polyumi_version,
             'export_params': self.export_params,
             'members': [m.to_dict() for m in self.members],
+            'pose_provenance': self.pose_provenance,
             'output': self.output,
             'n_episodes': self.n_episodes,
             'file_version': self.file_version,

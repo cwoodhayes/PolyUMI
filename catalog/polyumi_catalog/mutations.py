@@ -151,6 +151,64 @@ def set_session_unusable(db: DBSession, session_id: str, unusable: bool) -> Sess
     return session
 
 
+#: Valid values POST'd to /sessions/{id}/pose-source. 'default' clears the override (falls back
+#: to the episode's eef.attrs['default_source'] at export time), matching pose_source_overrides
+#: not having an entry at all for this session.
+_POSE_SOURCES = ('default', 'optitrack', 'slam')
+
+
+def _write_session_pose_source(scene: Scene, session_dir_name: str, source: str) -> None:
+    """Rewrite ``scene.json`` for ``scene``, setting/clearing ``session_dir_name``'s pose source."""
+    with _SCENE_JSON_LOCK:
+        scene_dir = pathlib.Path(scene.dir)
+        manifest = _load_scene_manifest(scene)
+        overrides = dict(manifest.pose_source_overrides)
+        if source == 'default':
+            overrides.pop(session_dir_name, None)
+        else:
+            overrides[session_dir_name] = source
+        manifest.pose_source_overrides = overrides
+        manifest.write_to_scene_dir(scene_dir)
+
+
+def set_session_pose_source(db: DBSession, session_id: str, source: str) -> Session:
+    """
+    Set (or clear, via ``'default'``) a session's DP-export pose-source override.
+
+    Writes scene.json's ``pose_source_overrides`` + the DB row, mirroring
+    ``set_session_unusable``. Rejects an unknown ``source`` value outright; when the episode's
+    available pose sources are known (pzarr built, step 5 has run), also rejects overriding to
+    a source the episode never computed — same guard ``resolve_pose_source`` applies at export
+    time, surfaced here instead of silently accepted and failing later.
+    """
+    if source not in _POSE_SOURCES:
+        raise MutationError(f'Unknown pose source {source!r}; must be one of {_POSE_SOURCES}.')
+    session = db.get(Session, session_id)
+    if session is None:
+        raise MutationError(f'No such session: {session_id}')
+    scene = db.get(Scene, session.scene_id)
+    if scene is None:
+        raise MutationError(f'No such scene: {session.scene_id}')
+
+    if source != 'default':
+        from polyumi_catalog.pzarr_inspect import available_pose_sources
+
+        session_dirname = pathlib.Path(session.dir).name
+        available = available_pose_sources(pathlib.Path(scene.dir), session_dirname)
+        if available is not None and source not in available:
+            raise MutationError(
+                f'{session_dirname} only has pose source(s) {available} — run `pingest pp 5 '
+                f'--force` if it should have {source!r} too.'
+            )
+
+    _write_session_pose_source(scene, pathlib.Path(session.dir).name, source)
+    session.pose_source_override = None if source == 'default' else source
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return session
+
+
 def set_scene_notes(db: DBSession, scene_id: str, notes: str | None) -> Scene:
     """Set a scene's notes, writing scene.json + the DB row. A blank/whitespace value clears them."""
     scene = db.get(Scene, scene_id)

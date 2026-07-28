@@ -279,6 +279,9 @@ def session_detail(db: DBSession, session_id: str) -> dict:
     mcap_path = mcap_tools.mcap_path_for_session(pathlib.Path(scene.dir), session_dirname) if pzarr_ok else None
     slam = episode_quality.session_quality(pathlib.Path(scene.dir), session_dirname) if pzarr_ok else None
     pzarr_streams = pzarr_inspect.session_pzarr_streams(pathlib.Path(scene.dir), session_dirname) if pzarr_ok else None
+    available_pose_sources = (
+        pzarr_inspect.available_pose_sources(pathlib.Path(scene.dir), session_dirname) if pzarr_ok else None
+    )
     return {
         'kind': 'session',
         'session_id': s.session_id,
@@ -298,6 +301,10 @@ def session_detail(db: DBSession, session_id: str) -> dict:
         'mcap_exists': mcap_path is not None,
         'slam': slam,
         'pzarr_streams': pzarr_streams,
+        'pose_source_override': s.pose_source_override,
+        # None means "unknown" (no pzarr yet / step 5 hasn't run) — the template renders both
+        # options enabled in that case rather than guessing which the episode can supply.
+        'available_pose_sources': available_pose_sources,
         # read straight from the gopro.mp4 sidecar, independent of pzarr build state
         'gopro_fps': thumbnails.gopro_fps(pathlib.Path(s.dir)),
     }

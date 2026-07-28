@@ -88,7 +88,7 @@ def build_dataset(
     manifest_path = output_dir / f'{name}.dataset.json'
 
     try:
-        n_episodes = export_scenes_to_dp([pathlib.Path(s.dir) for s in scenes], output_path)
+        n_episodes, pose_provenance = export_scenes_to_dp([pathlib.Path(s.dir) for s in scenes], output_path)
     except (FileNotFoundError, ValueError, RuntimeError) as err:
         raise DatasetBuildError(str(err)) from err
 
@@ -99,6 +99,7 @@ def build_dataset(
         n_episodes=n_episodes,
         polyumi_version=_repo_git_hash(),
         members=[DatasetMemberSpec(scene_id=s.scene_id, scene_dir=s.dir, episodes='all') for s in scenes],
+        pose_provenance=pose_provenance,
     )
     manifest.to_file(manifest_path)
 
