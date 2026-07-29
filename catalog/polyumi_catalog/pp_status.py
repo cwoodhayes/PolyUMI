@@ -67,9 +67,16 @@ def missing_gopro_mp4s(scene_dir: pathlib.Path) -> list[str]:
     return [s.path.name for s in scene.sessions if not (s.path / GOPRO_MP4).exists()]
 
 
-def run_full_pipeline(scene_dir: pathlib.Path) -> None:
+def run_full_pipeline(scene_dir: pathlib.Path, force: bool = False) -> None:
     """
     Run the complete preprocessing pipeline on scene_dir, building pzarr first if needed.
+
+    ``force`` is passed straight through to ``run_preprocessing``: without it, a step
+    already marked complete is skipped (the "continue" button — safe to click even on a
+    fully-processed scene, since it's then a no-op); with it, every step re-runs from
+    scratch regardless of completion, discarding whatever it previously wrote (the
+    "re-run" button — e.g. to pick up a preprocessing code change on an already-processed
+    scene).
 
     Blocks for as long as the pipeline takes — SLAM in particular can take minutes —
     so callers should run this on a background thread rather than the request thread.
@@ -92,4 +99,4 @@ def run_full_pipeline(scene_dir: pathlib.Path) -> None:
         log.info(f'No scene.zarr found for {scene_dir.name}; building pzarr first...')
         build_pzarr(scene_dir)
 
-    run_preprocessing(scene_dir, step_number=None)
+    run_preprocessing(scene_dir, step_number=None, force=force)

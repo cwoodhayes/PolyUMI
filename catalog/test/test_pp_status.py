@@ -164,3 +164,21 @@ def test_run_full_pipeline_skips_build_when_pzarr_exists(tmp_path: pathlib.Path,
     pp_status.run_full_pipeline(scene_dir)
 
     assert calls == ['run_preprocessing']
+
+
+def test_run_full_pipeline_passes_force_through_to_run_preprocessing(tmp_path: pathlib.Path, monkeypatch):
+    """force=True must reach run_preprocessing, not get silently dropped along the way."""
+    scene_dir = tmp_path / 'scene_g'
+    scene_dir.mkdir()
+    zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+
+    forces_seen = []
+    monkeypatch.setattr(
+        'polyumi_ingest.preproc.run_preprocessing',
+        lambda *a, force=False, **k: forces_seen.append(force),
+    )
+
+    pp_status.run_full_pipeline(scene_dir, force=True)
+    pp_status.run_full_pipeline(scene_dir)  # default
+
+    assert forces_seen == [True, False]

@@ -103,17 +103,35 @@
       {% else %}
       {% set fully_processed = detail.pp_status.pzarr_exists and detail.pp_status.n_total > 0
          and detail.pp_status.n_complete == detail.pp_status.n_total %}
+      {% set has_progress = detail.pp_status.n_complete > 0 %}
+      {% if not fully_processed %}
       <button
         hx-post="/scenes/{{ detail.scene_id }}/run-pp"
+        hx-vals='{"force": false}'
         hx-target="#detail-body"
         hx-swap="outerHTML"
         hx-disabled-elt="this"
-        {% if fully_processed %}
-        hx-confirm="This scene has already completed all {{ detail.pp_status.n_total }} preprocessing steps. Run the pipeline again anyway?"
-        {% endif %}
       >
         Run full pipeline
       </button>
+      {% endif %}
+      {% if has_progress %}
+      <button
+        hx-post="/scenes/{{ detail.scene_id }}/run-pp"
+        hx-vals='{"force": true}'
+        hx-target="#detail-body"
+        hx-swap="outerHTML"
+        hx-disabled-elt="this"
+        class="warn"
+        {% if fully_processed %}
+        hx-confirm="This scene has already completed all {{ detail.pp_status.n_total }} preprocessing steps. Re-run every step from scratch anyway?"
+        {% else %}
+        hx-confirm="This will discard the {{ detail.pp_status.n_complete }} already-completed step(s) and re-run the entire pipeline from scratch. Continue?"
+        {% endif %}
+      >
+        Re-run pipeline
+      </button>
+      {% endif %}
       {% if detail.pp_error %}<p class="warn">Last run failed: {{ detail.pp_error }}</p>{% endif %}
       {% endif %}
     </div>

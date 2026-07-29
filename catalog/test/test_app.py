@@ -680,7 +680,7 @@ def test_run_pp_shows_running_then_done(tmp_path: pathlib.Path, monkeypatch):
     started = threading.Event()
     finish = threading.Event()
 
-    def fake_run_full_pipeline(scene_dir):
+    def fake_run_full_pipeline(scene_dir, force=False):
         started.set()
         finish.wait(timeout=5)
 
@@ -704,7 +704,7 @@ def test_run_pp_records_error_on_failure(tmp_path: pathlib.Path, monkeypatch):
     """A failing pipeline run surfaces its error message instead of leaving status stuck."""
     rec, engine = _seed(tmp_path)
 
-    def failing(scene_dir):
+    def failing(scene_dir, force=False):
         raise RuntimeError('missing gopro.mp4 in session_1')
 
     monkeypatch.setattr('polyumi_catalog.pp_status.run_full_pipeline', failing)
@@ -723,7 +723,7 @@ def test_run_pp_is_idempotent_while_already_running(tmp_path: pathlib.Path, monk
     started = threading.Event()
     finish = threading.Event()
 
-    def fake_run_full_pipeline(scene_dir):
+    def fake_run_full_pipeline(scene_dir, force=False):
         calls.append(scene_dir)
         started.set()
         finish.wait(timeout=5)
@@ -768,6 +768,68 @@ def test_run_pp_button_confirms_when_scene_already_fully_processed(tmp_path: pat
     resp = TestClient(create_app(engine, recordings_dir=rec)).get('/select/scene/scene-1')
     assert 'hx-confirm=' in resp.text
     assert 'already completed all' in resp.text
+    # "Run full pipeline" would be a no-op here (nothing left to continue) — hidden.
+    assert 'Run full pipeline' not in resp.text
+    assert 'Re-run pipeline' in resp.text
+
+
+def test_run_pp_no_rerun_button_when_nothing_complete_yet(tmp_path: pathlib.Path):
+    """With zero steps done, there's nothing to force-redo, so only the plain button shows."""
+    resp = _client(tmp_path).get('/select/scene/scene-1')
+    assert 'Run full pipeline' in resp.text
+    assert 'Re-run pipeline' not in resp.text
+
+
+def test_run_pp_both_buttons_and_no_confirm_wording_when_partially_complete(tmp_path: pathlib.Path):
+    """Some-but-not-all steps done: both buttons show; re-run confirms without the 'all N' wording."""
+    from polyumi_ingest.preproc import available_preprocessing_steps
+
+    rec, engine = _seed(tmp_path)
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 0
+    all_steps = [s.step_number for s in available_preprocessing_steps()]
+    root.attrs['preprocessing_steps'] = all_steps[:1]  # partial completion
+
+    resp = TestClient(create_app(engine, recordings_dir=rec)).get('/select/scene/scene-1')
+    assert 'Run full pipeline' in resp.text
+    assert 'Re-run pipeline' in resp.text
+    assert 'already completed all' not in resp.text
+    assert 'discard the 1 already-completed step' in resp.text
+
+
+def test_run_pp_force_true_is_passed_through_to_run_full_pipeline(tmp_path: pathlib.Path, monkeypatch):
+    """Posting force=true reaches pp_status.run_full_pipeline as force=True, not silently dropped."""
+    rec, engine = _seed(tmp_path)
+    calls = []
+
+    def fake_run_full_pipeline(scene_dir, force=False):
+        calls.append(force)
+
+    monkeypatch.setattr('polyumi_catalog.pp_status.run_full_pipeline', fake_run_full_pipeline)
+
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    client.post('/scenes/scene-1/run-pp', data={'force': 'true'})
+    _wait_until(lambda: len(calls) == 1)
+
+    assert calls == [True]
+
+
+def test_run_pp_omitted_force_defaults_to_false(tmp_path: pathlib.Path, monkeypatch):
+    """The plain 'continue' button (no force field posted) must not force a redo."""
+    rec, engine = _seed(tmp_path)
+    calls = []
+
+    def fake_run_full_pipeline(scene_dir, force=False):
+        calls.append(force)
+
+    monkeypatch.setattr('polyumi_catalog.pp_status.run_full_pipeline', fake_run_full_pipeline)
+
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    client.post('/scenes/scene-1/run-pp')
+    _wait_until(lambda: len(calls) == 1)
+
+    assert calls == [False]
 
 
 def test_run_pp_lock_prevents_concurrent_duplicate_runs(tmp_path: pathlib.Path, monkeypatch):
@@ -786,7 +848,7 @@ def test_run_pp_lock_prevents_concurrent_duplicate_runs(tmp_path: pathlib.Path, 
     barrier = threading.Barrier(n_threads)
     finish = threading.Event()
 
-    def fake_run_full_pipeline(scene_dir):
+    def fake_run_full_pipeline(scene_dir, force=False):
         with calls_lock:
             calls.append(scene_dir)
         finish.wait(timeout=5)

@@ -35,7 +35,14 @@ that process already configures, so nothing extra was needed for that. Starting 
 is a check-then-set on that shared dict, so it's guarded by ``app.state.pp_runs_lock``
 (a plain ``threading.Lock``) to keep two near-simultaneous POSTs (e.g. a fast double
 click before the button disables) from both passing the "not already running" check
-and starting two pipeline runs against the same scene.zarr concurrently.
+and starting two pipeline runs against the same scene.zarr concurrently. The pane
+actually renders up to two buttons over that one route: "Run full pipeline" (the
+original; ``force=false``, skips steps already marked complete — hidden once every
+step is done, since it would then be a no-op) and "Re-run pipeline" (``force=true``,
+re-runs every step from scratch regardless of completion — only shown once at least
+one step is complete, i.e. there's actually something it would discard). Both post to
+the same ``run-pp`` route with an ``hx-vals``-supplied ``force`` field; the route
+itself is agnostic to which button fired it.
 Phase 5 adds marking an episode unusable (excluded from dataset exports): a plain HTMX POST
 from the session detail pane, same in-place-swap style as MCAP export, except it also
 out-of-band-updates the Episodes column (``_detail_with_episodes_oob``) so that column's
@@ -369,7 +376,7 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
             return _detail_with_episodes_oob(db, session_id)
 
     @app.post('/scenes/{scene_id}/run-pp', response_class=HTMLResponse)
-    def post_run_pp(request: Request, scene_id: str) -> HTMLResponse:
+    def post_run_pp(request: Request, scene_id: str, force: bool = Form(False)) -> HTMLResponse:
         with DBSession(engine) as db:
             scene = db.get(Scene, scene_id)
             if scene is None:
@@ -391,7 +398,7 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
                 # failures) must be captured here or the run status is stuck at
                 # "running" forever with no way to observe what happened.
                 try:
-                    pp_status.run_full_pipeline(scene_dir)
+                    pp_status.run_full_pipeline(scene_dir, force=force)
                     with app.state.pp_runs_lock:
                         app.state.pp_runs[scene_id] = {'status': 'done', 'error': None}
                 except Exception as exc:
