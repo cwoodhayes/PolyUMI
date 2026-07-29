@@ -16,6 +16,7 @@ from polyumi_ingest.preproc.slam_step import (
     OrbSlam3Step,
     _export_telemetry_json,
     _make_temp_settings_yaml,
+    _merge_forward_reverse,
     _parse_and_reconcile_trajectory,
 )
 
@@ -286,6 +287,114 @@ def test_parse_and_reconcile_trajectory_aligns_and_marks_lost(tmp_path: pathlib.
     for i in range(2, n):
         np.testing.assert_array_almost_equal(poses[i, :3], [0.1, 0.2, 0.3], decimal=5)
         np.testing.assert_array_almost_equal(poses[i, 3:], [0.0, 0.0, 0.0, 1.0], decimal=5)
+
+
+def _make_euroc_trajectory_reversed(
+    path: pathlib.Path,
+    frame_ts: np.ndarray,
+    tracked_mask: np.ndarray,
+) -> None:
+    """
+    Write a fake EuRoC trajectory as the localizer's *reverse* sweep would.
+
+    The reverse sweep runs frames back-to-front on a flipped video clock
+    ``tframe' = D - (frame_ts - frame_ts[0])`` where ``D = frame_ts[-1] -
+    frame_ts[0]``, so timestamps still increase as ORB-SLAM3 requires; see
+    ``mono_inertial_gopro_vi_localize.cc``'s ``RunLocalizationPass``. This
+    mirrors that transform so ``reversed_clock=True`` can be tested without
+    the real binary.
+    """
+    t0 = float(frame_ts[0])
+    span = float(frame_ts[-1] - t0)
+    with open(path, 'w') as fh:
+        for i, ts in enumerate(frame_ts):
+            if not tracked_mask[i]:
+                continue
+            t_ns = (span - (float(ts) - t0)) * 1e9
+            fh.write(f'{t_ns:.6f} 0.1 0.2 0.3 0.0 0.0 0.0 1.0\n')
+
+
+def test_parse_and_reconcile_trajectory_reversed_clock_lands_on_original_frames(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A reverse-pass trajectory (flipped clock) reconciles back onto the original frame grid."""
+    n = 6
+    frame_ts = 1000.0 + np.arange(n, dtype=np.float64) / 60.0
+    tracked = np.array([True, True, True, True, False, False])  # reverse loses the tail
+    traj_path = tmp_path / 'traj_rev.txt'
+    _make_euroc_trajectory_reversed(traj_path, frame_ts, tracked)
+
+    poses = _parse_and_reconcile_trajectory(traj_path, frame_ts, reversed_clock=True)
+
+    assert poses.shape == (n, 7)
+    for i in range(4):
+        np.testing.assert_array_almost_equal(poses[i, :3], [0.1, 0.2, 0.3], decimal=5)
+    for i in range(4, n):
+        assert np.all(np.isnan(poses[i]))
+
+
+# ---------------------------------------------------------------------------
+# _merge_forward_reverse
+# ---------------------------------------------------------------------------
+
+
+def _poses_from_valid(valid: np.ndarray, xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> np.ndarray:
+    """(N,7) pose array: valid rows get a fixed pose at ``xyz``, others NaN."""
+    n = len(valid)
+    poses = np.full((n, 7), np.nan, dtype=np.float64)
+    poses[valid, :3] = xyz
+    poses[valid, 3:] = [0.0, 0.0, 0.0, 1.0]
+    return poses
+
+
+def test_merge_forward_reverse_fills_forward_gaps_with_reverse() -> None:
+    """Reverse should fill exactly the frames forward lost, when both passes agree."""
+    # forward lost {0,1,7}; reverse lost {5,6,7} -> overlap (both tracked) = {2,3,4};
+    # forward-only-lost, reverse-recoverable = {0,1}; lost by both = {7}.
+    fwd_valid = np.array([False, False, True, True, True, True, True, False])
+    rev_valid = np.array([True, True, True, True, True, False, False, False])
+    fwd = _poses_from_valid(fwd_valid)
+    rev = _poses_from_valid(rev_valid)  # same pose everywhere -> zero disagreement in overlap
+
+    merged, stats = _merge_forward_reverse(fwd, rev)
+
+    assert not np.any(np.isnan(merged[0]))  # forward lost, reverse filled it
+    assert not np.any(np.isnan(merged[1]))
+    for i in range(2, 7):
+        assert not np.any(np.isnan(merged[i]))  # tracked by at least one pass
+    assert np.all(np.isnan(merged[7]))  # lost by both — stays NaN
+    assert stats['merged'] is True
+    assert stats['n_reverse_filled'] == 2
+    assert stats['n_overlap'] == 3
+    assert stats['overlap_median_mm'] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_merge_forward_reverse_never_overwrites_a_tracked_forward_frame() -> None:
+    """Even where reverse disagrees, a forward-tracked frame keeps its forward pose."""
+    fwd_valid = np.array([True, True, True])
+    rev_valid = np.array([True, True, True])
+    fwd = _poses_from_valid(fwd_valid, xyz=(0.0, 0.0, 0.0))
+    rev = _poses_from_valid(rev_valid, xyz=(1.0, 0.0, 0.0))  # 1m off — well past the guard
+
+    merged, stats = _merge_forward_reverse(fwd, rev)
+
+    # Guard trips (1m >> 50mm threshold) -> reverse discarded, forward unchanged.
+    np.testing.assert_array_almost_equal(merged[:, :3], fwd[:, :3])
+    assert stats['merged'] is False
+    assert stats['overlap_median_mm'] == pytest.approx(1000.0, abs=1.0)
+
+
+def test_merge_forward_reverse_no_reverse_tracking_is_a_noop() -> None:
+    """If the reverse pass tracked nothing, the merge returns forward unchanged."""
+    fwd_valid = np.array([True, False, True])
+    fwd = _poses_from_valid(fwd_valid)
+    rev = np.full((3, 7), np.nan)
+
+    merged, stats = _merge_forward_reverse(fwd, rev)
+
+    np.testing.assert_array_equal(merged, fwd)
+    assert stats['n_reverse'] == 0
+    assert stats['n_reverse_filled'] == 0
 
 
 # ---------------------------------------------------------------------------

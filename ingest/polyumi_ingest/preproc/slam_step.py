@@ -43,7 +43,13 @@ _DEFAULT_SETTINGS_YAML = _DEFAULT_ORB_SLAM3_DIR / 'Examples' / 'Monocular-Inerti
 # reconciling the C++ output back onto our frame index.
 _TRAJ_TOLERANCE_FRAC = 0.5
 
-
+# When merging the reverse pass into the forward one, refuse the merge if the two
+# passes disagree by more than this (median position error, mm) on the frames
+# both tracked.  They localize against the same atlas, so a consistent pair
+# agrees to well under a millimetre (validated: ~0.8-1.0 mm median); a large
+# median means the reverse pass landed on a different alignment (e.g. a new map
+# it created after losing the loaded one) and its poses must not be trusted.
+_REVERSE_MERGE_MAX_OVERLAP_MM = 50.0
 
 
 def _export_telemetry_json(
@@ -167,6 +173,7 @@ def _make_temp_settings_yaml(
 def _parse_and_reconcile_trajectory(
     traj_path: pathlib.Path,
     frame_ts: np.ndarray,
+    reversed_clock: bool = False,
 ) -> np.ndarray:
     """
     Parse an ORB-SLAM3 EuRoC-format trajectory and align it to ``frame_ts``.
@@ -183,6 +190,12 @@ def _parse_and_reconcile_trajectory(
     C++ binary computes tframe from ``cap.get(CAP_PROP_POS_MSEC)``), so we
     add ``frame_ts[0]`` to bring them back to UTC before matching.
 
+    When ``reversed_clock`` is True the trajectory came from the localizer's
+    reverse pass, whose timestamps run on the flipped clock
+    ``t' = t_last_video - t_video``; we undo that with ``t_utc = frame_ts[0]
+    + (D - t')`` where ``D = frame_ts[-1] - frame_ts[0]``, landing each reverse
+    entry back on its original frame index.
+
     Returns ``poses`` shaped (N,7) float64 ``[x,y,z, qx,qy,qz,qw]``. Lost
     rows are all-NaN.
     """
@@ -193,6 +206,7 @@ def _parse_and_reconcile_trajectory(
         return poses
 
     t_ref = float(frame_ts[0])
+    span = float(frame_ts[-1] - frame_ts[0])
     period = float(np.median(np.diff(frame_ts)))
     tolerance = _TRAJ_TOLERANCE_FRAC * period
 
@@ -209,7 +223,7 @@ def _parse_and_reconcile_trajectory(
                 continue
             t_ns = float(parts[0])
             tx, ty, tz, qx, qy, qz, qw = (float(p) for p in parts[1:])
-            t_utc = t_ref + t_ns / 1e9
+            t_utc = t_ref + (span - t_ns / 1e9) if reversed_clock else t_ref + t_ns / 1e9
 
             idx_right = int(np.searchsorted(frame_ts, t_utc))
             candidates = []
@@ -234,11 +248,74 @@ def _parse_and_reconcile_trajectory(
     return poses
 
 
+def _merge_forward_reverse(fwd: np.ndarray, rev: np.ndarray) -> tuple[np.ndarray, dict]:
+    """
+    Merge a reverse-pass trajectory into the forward one, filling forward's gaps.
+
+    Both trajectories are ``(N,7)`` on the same frame grid, all-NaN where their
+    pass lost tracking, and — because both localize against the same atlas — in
+    the same world frame.  The forward pass is authoritative wherever it tracked
+    (it needs no motion prior to trust); the reverse pass only *fills* frames the
+    forward pass lost, which is overwhelmingly the lead-in gap before forward can
+    relocalize.
+
+    Guard: on the frames both passes tracked, the median position disagreement
+    must stay under ``_REVERSE_MERGE_MAX_OVERLAP_MM``; otherwise the reverse pass
+    is on a different alignment and is discarded (forward returned unchanged).
+    Frames both lost stay NaN; the few frames forward tracked but reverse
+    disagrees on are left as forward's (we never overwrite a tracked forward
+    frame), so a forward boundary outlier is no worse than the baseline.
+
+    Returns ``(merged, stats)`` where stats records the merge outcome.
+    """
+    fwd_valid = ~np.isnan(fwd[:, 0])
+    rev_valid = ~np.isnan(rev[:, 0])
+    both = fwd_valid & rev_valid
+
+    stats: dict = {
+        'n_forward': int(fwd_valid.sum()),
+        'n_reverse': int(rev_valid.sum()),
+        'n_overlap': int(both.sum()),
+        'overlap_median_mm': float('nan'),
+        'n_reverse_filled': 0,
+        'merged': False,
+    }
+
+    if both.sum() >= 3:
+        overlap_mm = np.linalg.norm(fwd[both, :3] - rev[both, :3], axis=1) * 1000.0
+        stats['overlap_median_mm'] = float(np.median(overlap_mm))
+        if stats['overlap_median_mm'] > _REVERSE_MERGE_MAX_OVERLAP_MM:
+            log.warning(
+                f'  Reverse pass disagrees with forward by median '
+                f'{stats["overlap_median_mm"]:.1f}mm > {_REVERSE_MERGE_MAX_OVERLAP_MM:.0f}mm '
+                f'on {int(both.sum())} shared frames — discarding reverse pass, using forward only.'
+            )
+            return fwd.copy(), stats
+    elif rev_valid.any():
+        log.warning(
+            '  Reverse pass shares <3 frames with forward; cannot verify alignment. '
+            'Filling forward gaps with reverse anyway (same-atlas world frame).'
+        )
+
+    merged = fwd.copy()
+    fill = rev_valid & ~fwd_valid
+    merged[fill] = rev[fill]
+    stats['n_reverse_filled'] = int(fill.sum())
+    stats['merged'] = True
+    log.info(
+        f'  Reverse merge: forward {stats["n_forward"]}, reverse {stats["n_reverse"]}, '
+        f'overlap {stats["n_overlap"]} (median {stats["overlap_median_mm"]:.2f}mm), '
+        f'+{stats["n_reverse_filled"]} frames filled from reverse.'
+    )
+    return merged, stats
+
+
 def _write_slam_results(
     ep_grp: zarr.Group,
     poses: np.ndarray,
     settings_path: pathlib.Path,
     atlas_path: pathlib.Path,
+    merge_stats: dict | None = None,
 ) -> None:
     """Write SLAM poses and summary annotations back into ep_grp."""
     gopro_grp = ep_grp.require_group('gopro')
@@ -261,6 +338,15 @@ def _write_slam_results(
     slam_grp.attrs['n_relocalization_events'] = transitions
     slam_grp.attrs['orb_slam3_settings_path'] = str(settings_path.resolve())
     slam_grp.attrs['atlas_path'] = str(atlas_path.resolve())
+
+    # Provenance of the reverse-pass merge (absent when reverse_pass is off).
+    slam_grp.attrs['reverse_pass'] = merge_stats is not None
+    if merge_stats is not None:
+        slam_grp.attrs['reverse_merged'] = bool(merge_stats['merged'])
+        slam_grp.attrs['reverse_n_filled'] = int(merge_stats['n_reverse_filled'])
+        slam_grp.attrs['reverse_n_forward_only'] = int(merge_stats['n_forward'])
+        slam_grp.attrs['reverse_overlap_frames'] = int(merge_stats['n_overlap'])
+        slam_grp.attrs['reverse_overlap_median_mm'] = float(merge_stats['overlap_median_mm'])
 
     log.info(
         f'  SLAM results: {n_total} frames, {n_lost} lost '
@@ -335,6 +421,7 @@ class OrbSlam3Step(PreprocessingStep):
         localizer_bin: str = 'mono_inertial_gopro_vi_localize',
         bin_subdir: str | None = None,
         timeout_s: float | None = None,
+        reverse_pass: bool = True,
     ) -> None:
         """
         Initialize the ORB-SLAM3 step.
@@ -355,6 +442,12 @@ class OrbSlam3Step(PreprocessingStep):
             ORB_SLAM3_PolyUMI build layout.
         timeout_s:
             Per-episode subprocess timeout; None = no timeout.
+        reverse_pass:
+            When True, each episode is localized both forward and in reverse
+            against the same atlas (one binary invocation, one decode) and the
+            two trajectories merged.  The reverse pass recovers the lead-in
+            frames the forward pass loses before it can relocalize.  See
+            ``_merge_forward_reverse``.
 
         """
         if orb_slam3_dir is None:
@@ -366,6 +459,7 @@ class OrbSlam3Step(PreprocessingStep):
         self.map_builder_bin = self.orb_slam3_dir / bin_subdir / map_builder_bin
         self.localizer_bin = self.orb_slam3_dir / bin_subdir / localizer_bin
         self.timeout_s = timeout_s
+        self.reverse_pass = reverse_pass
 
     @property
     def _vocab_path(self) -> pathlib.Path:
@@ -471,6 +565,7 @@ class OrbSlam3Step(PreprocessingStep):
                 load_atlas=atlas_path,
             )
             traj_out = tmp_dir / 'trajectory.txt'
+            traj_out_reverse = tmp_dir / 'trajectory_reverse.txt'
             cmd = [
                 str(self.localizer_bin),
                 str(self._vocab_path),
@@ -479,6 +574,11 @@ class OrbSlam3Step(PreprocessingStep):
                 str(json_path),
                 str(traj_out),
             ]
+            # The optional 6th arg makes the binary run a second reverse-order
+            # pass against the same atlas (one decode, in memory) and write it
+            # here; we reconcile that flipped-clock trajectory and merge it in.
+            if self.reverse_pass:
+                cmd.append(str(traj_out_reverse))
             self._run_subprocess(
                 cmd,
                 log_dir / f'episode_{episode_index}_slam.stdout',
@@ -490,7 +590,15 @@ class OrbSlam3Step(PreprocessingStep):
                 raise RuntimeError(f'ORB-SLAM3 localizer completed but trajectory file not found: {traj_out}')
 
             poses = _parse_and_reconcile_trajectory(traj_out, frame_ts)
-            _write_slam_results(ep_grp, poses, self.settings_yaml, atlas_path)
+            merge_stats: dict | None = None
+            if self.reverse_pass:
+                if not traj_out_reverse.exists():
+                    raise RuntimeError(
+                        f'ORB-SLAM3 localizer completed but reverse trajectory not found: {traj_out_reverse}'
+                    )
+                rev_poses = _parse_and_reconcile_trajectory(traj_out_reverse, frame_ts, reversed_clock=True)
+                poses, merge_stats = _merge_forward_reverse(poses, rev_poses)
+            _write_slam_results(ep_grp, poses, self.settings_yaml, atlas_path, merge_stats=merge_stats)
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
             log.error(f'Localization failed; temp dir preserved: {tmp_dir}')
