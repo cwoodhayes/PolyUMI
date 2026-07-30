@@ -270,7 +270,12 @@ def test_scene_detail_includes_quality_summary(tmp_path: pathlib.Path):
     with DBSession(engine) as db:
         scene = queries.scene_detail(db, 'scene-1')
     scene_dir = pathlib.Path(scene['dir'])
-    assert scene['quality'] == {'n_episodes_with_slam': 0, 'avg_tracking_ratio': None, 'n_low_quality': 0}
+    assert scene['quality'] == {
+        'n_episodes_with_slam': 0,
+        'avg_tracking_ratio': None,
+        'n_low_quality': 0,
+        'n_auto_unusable': 0,
+    }
     assert scene['total_dropped_video_frames'] == 3  # from the EPISODE session's metadata
 
     _add_slam_quality(scene_dir, 'session_2', n_total=100, n_lost=10)

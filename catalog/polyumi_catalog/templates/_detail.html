@@ -59,6 +59,11 @@
         <dd>{{ '%.1f%%' % (detail.quality.avg_tracking_ratio * 100) if detail.quality.avg_tracking_ratio is not none else '—' }}</dd>
         <dt>Low-tracking episodes</dt>
         <dd>{{ detail.quality.n_low_quality }} / {{ detail.quality.n_episodes_with_slam }}</dd>
+        <dt title="Automatically excluded from exports by the quality thresholds in ingest/config/quality_thresholds.yaml">Auto-unusable</dt>
+        <dd>
+          {{ detail.quality.n_auto_unusable }} / {{ detail.quality.n_episodes_with_slam }}
+          {% if detail.quality.n_auto_unusable %}<span class="badge warn">excluded</span>{% endif %}
+        </dd>
         <dt>Dropped video frames</dt>
         <dd>{{ detail.total_dropped_video_frames }}</dd>
       </dl>
@@ -218,7 +223,25 @@
         </dd>
         <dt>Frames lost</dt><dd>{{ detail.slam.n_frames_lost }} / {{ detail.slam.n_frames_total }}</dd>
         <dt>Relocalizations</dt><dd>{{ detail.slam.n_relocalization_events }}</dd>
+        {% if detail.slam.reverse_overlap_median_mm is not none %}
+        <dt title="Median disagreement between the forward and reverse SLAM passes on frames both tracked. Both localize against the same atlas, so this is a self-consistency check needing no ground truth.">Fwd/rev agreement</dt>
+        <dd>
+          {{ '%.2f mm' % detail.slam.reverse_overlap_median_mm }}
+          {% if detail.slam.reverse_merged is false %}<span class="badge warn" title="reverse pass discarded by the merge consistency gate">reverse discarded</span>{% endif %}
+        </dd>
+        {% endif %}
+        {% if detail.slam.has_optitrack %}
+        <dt>OptiTrack</dt><dd>available — exempt from SLAM-based exclusion</dd>
+        {% endif %}
       </dl>
+      {% if detail.slam.auto_unusable %}
+      <p class="muted">
+        <span class="badge warn">auto-unusable</span>
+        Excluded from dataset exports: {{ detail.slam.auto_unusable_reasons | join('; ') }}.
+        Thresholds live in <code>ingest/config/quality_thresholds.yaml</code>; this verdict is
+        recomputed on read, so changing them reclassifies without reprocessing.
+      </p>
+      {% endif %}
       {% elif detail.pzarr_exists %}
       <p class="muted">No SLAM results for this session yet (run <code>pingest pp 2</code>).</p>
       {% endif %}

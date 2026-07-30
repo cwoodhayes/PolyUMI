@@ -9,6 +9,9 @@ INGEST_ROOT = pathlib.Path(__file__).parent.parent
 
 GRIPPER_CALIB_YAML = INGEST_ROOT / 'config' / 'gripper_calib.yaml'
 GOPRO_INTRINSICS_JSON = INGEST_ROOT / 'config' / 'gopro_intrinsics.json'
+#: Thresholds for auto-flagging episodes unusable. Policy, not data — verdicts are
+#: derived at read time (see polyumi_ingest.quality), never written into the pzarr.
+QUALITY_THRESHOLDS_YAML = INGEST_ROOT / 'config' / 'quality_thresholds.yaml'
 
 
 def load_gripper_calib() -> dict:

@@ -167,7 +167,14 @@ def list_sessions(db: DBSession, scene_id: str) -> list[dict]:
                 'video_dropped_frames': s.video_dropped_frames,
                 'task_meta': s.task_meta,
                 'created_at': s.created_at,
-                'unusable': s.unusable,
+                # Effective unusable = the human's explicit scene.json marking OR the
+                # threshold-derived verdict. Kept as separate fields too so the UI can
+                # say *why* it's excluded and distinguish "someone decided this" from
+                # "the metrics say so" (the latter flips if thresholds change).
+                'unusable': s.unusable or (quality['auto_unusable'] if quality else False),
+                'unusable_manual': s.unusable,
+                'auto_unusable': quality['auto_unusable'] if quality else False,
+                'auto_unusable_reasons': quality['auto_unusable_reasons'] if quality else [],
                 'slam_tracking_ratio': quality['tracking_ratio'] if quality else None,
                 'slam_low_quality': quality['low_quality'] if quality else False,
             }

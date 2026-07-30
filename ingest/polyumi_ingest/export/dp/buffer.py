@@ -78,6 +78,7 @@ import zarr
 from numcodecs import Blosc
 from scipy.spatial.transform import Rotation
 
+from polyumi_ingest import quality
 from polyumi_ingest.camera_preproc import CAMERA0_RGB_RESOLUTION, resize_camera0_rgb
 from polyumi_ingest.manifests import SceneManifest
 from polyumi_ingest.preproc import available_preprocessing_steps, preprocessing_steps_done
@@ -167,6 +168,27 @@ def _append(data_grp: zarr.Group, arrays: dict[str, np.ndarray]) -> None:
             old = a.shape[0]
             a.resize((old + t,) + a.shape[1:])
             a[old:] = value
+
+
+def _auto_unusable_reasons_for_episode(ep: zarr.Group) -> list[str]:
+    """
+    Threshold-derived reasons to exclude ``ep``; empty list means keep it.
+
+    Thin adapter over ``polyumi_ingest.quality.auto_unusable_reasons`` that pulls the
+    two inputs off the episode group: the SLAM metrics written by step 2, and whether
+    OptiTrack is among step 5's ``available_sources`` (in which case the episode's
+    poses don't come from SLAM and the SLAM-derived checks don't apply).
+
+    Missing groups mean "nothing to judge" — an episode whose preprocessing hasn't run
+    isn't excluded here; ``resolve_pose_source`` raises on that separately.
+    """
+    if 'annotations' not in ep or 'slam' not in grp(ep, 'annotations'):
+        return []
+    slam_attrs = dict(grp(grp(ep, 'annotations'), 'slam').attrs)
+    has_optitrack = False
+    if 'eef' in ep:
+        has_optitrack = 'optitrack' in list(grp(ep, 'eef').attrs.get('available_sources', []))
+    return quality.auto_unusable_reasons(slam_attrs, has_optitrack=has_optitrack)
 
 
 def resolve_pose_source(ep: zarr.Group, episode_key: str, override: str | None) -> str:
@@ -379,6 +401,13 @@ def _append_scene_episodes(
         session_dir = ep.attrs.get('session_dir')
         if session_dir in unusable_dirs:
             log.info(f'  {scene_label}/{ep_key}: marked unusable, skipping.')
+            continue
+        # Threshold-derived exclusion, on top of the explicit scene.json set above.
+        # Same function the catalog UI calls, so what the UI shows as excluded is
+        # exactly what's skipped here. Thresholds: config/quality_thresholds.yaml.
+        auto_reasons = _auto_unusable_reasons_for_episode(ep)
+        if auto_reasons:
+            log.info(f'  {scene_label}/{ep_key}: unusable ({"; ".join(auto_reasons)}), skipping.')
             continue
         pose_source = resolve_pose_source(ep, f'{scene_label}/{ep_key}', pose_source_overrides.get(session_dir))
         t, ep_provenance = _export_episode(ep, data_grp, f'{scene_label}/{ep_key}', zarr_path, pose_source)

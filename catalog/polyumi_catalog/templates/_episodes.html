@@ -15,7 +15,11 @@
     <span class="item-name" title="{{ s.name }}">{{ s.name }}</span>
     <span class="badges">
       <span class="badge type-{{ s.session_type | lower }}">{{ s.session_type }}</span>
-      {% if s.unusable %}<span class="badge warn" title="excluded from dataset exports">unusable</span>{% endif %}
+      {% if s.unusable %}
+      <span class="badge warn" title="excluded from dataset exports{% if s.auto_unusable_reasons %} — {{ s.auto_unusable_reasons | join('; ') }}{% endif %}">
+        unusable{% if s.auto_unusable and not s.unusable_manual %} (auto){% endif %}
+      </span>
+      {% endif %}
       {% if s.video_dropped_frames %}<span class="badge warn" title="dropped video frames">⚠ {{ s.video_dropped_frames }}</span>{% endif %}
       {% if s.slam_tracking_ratio is not none %}
       <span class="badge{% if s.slam_low_quality %} warn{% endif %}" title="SLAM tracking ratio">

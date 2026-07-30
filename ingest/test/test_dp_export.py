@@ -17,6 +17,7 @@ import pytest
 import zarr
 from scipy.spatial.transform import Rotation
 
+from polyumi_catalog import episode_quality
 from polyumi_ingest.export.dp import export_scene_to_dp, export_scenes_to_dp
 from polyumi_ingest.manifests import SceneManifest
 from polyumi_ingest.preproc import available_preprocessing_steps
@@ -230,6 +231,91 @@ def test_skips_episode_marked_unusable_in_scene_json(tmp_path: pathlib.Path) -> 
     out = tmp_path / 'buf.zarr.zip'
     with pytest.raises(RuntimeError, match='no EPISODE sessions'):
         export_scene_to_dp(scene, out)
+
+
+def _make_slam_only(scene: pathlib.Path, **slam_attrs: object) -> None:
+    """
+    Strip OptiTrack from the built scene and give it SLAM quality attrs.
+
+    ``_build_scene`` always writes ``pose_optitrack`` and lists it in
+    ``available_sources``, which exempts the episode from the SLAM-derived usability
+    checks — so a test of those checks has to remove it first.
+    """
+    root = zarr.open_group(str(scene), mode='a')
+    ep = root['episode_0']
+    eef = ep['eef']
+    if 'pose_optitrack' in eef:
+        del eef['pose_optitrack']
+    eef.attrs['available_sources'] = ['slam']
+    eef.attrs['default_source'] = 'slam'
+    ep['annotations'].require_group('slam').attrs.update(slam_attrs)
+
+
+def test_skips_episode_failing_the_quality_thresholds(tmp_path: pathlib.Path) -> None:
+    """
+    An episode whose stored SLAM metrics fail config/quality_thresholds.yaml is skipped.
+
+    Full coverage but a large forward/reverse disagreement — the 74ee episode_3 shape,
+    where 100% of frames had a pose yet those poses were ~220 mm wrong. Coverage alone
+    would have let this through.
+    """
+    scene = _build_scene(tmp_path, with_slam=True)
+    _make_slam_only(scene, tracking_ratio=1.0, reverse_overlap_median_mm=453.85)
+    with pytest.raises(RuntimeError, match='no EPISODE sessions'):
+        export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
+
+
+def test_skips_episode_below_the_tracking_ratio_threshold(tmp_path: pathlib.Path) -> None:
+    """Coverage under the configured minimum excludes the episode from export."""
+    scene = _build_scene(tmp_path, with_slam=True)
+    _make_slam_only(scene, tracking_ratio=0.42, reverse_overlap_median_mm=1.0)
+    with pytest.raises(RuntimeError, match='no EPISODE sessions'):
+        export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
+
+
+def test_exports_episode_that_passes_the_quality_thresholds(tmp_path: pathlib.Path) -> None:
+    """The converse: healthy SLAM metrics must not be excluded by the new checks."""
+    scene = _build_scene(tmp_path, with_slam=True)
+    _make_slam_only(scene, tracking_ratio=1.0, reverse_overlap_median_mm=0.55)
+    n_eps, _ = export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
+    assert n_eps == 1
+
+
+def test_optitrack_episode_is_exempt_from_slam_quality_thresholds(tmp_path: pathlib.Path) -> None:
+    """
+    An episode with OptiTrack available exports even with terrible SLAM metrics.
+
+    Its poses don't come from SLAM, so the SLAM-derived verdict must not exclude it.
+    """
+    scene = _build_scene(tmp_path, with_slam=True)  # keeps pose_optitrack + available_sources
+    root = zarr.open_group(str(scene), mode='a')
+    root['episode_0']['annotations'].require_group('slam').attrs.update(
+        {'tracking_ratio': 0.0, 'reverse_overlap_median_mm': 999.0}
+    )
+    n_eps, _ = export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
+    assert n_eps == 1
+
+
+def test_export_and_catalog_agree_on_which_episodes_are_unusable(tmp_path: pathlib.Path) -> None:
+    """
+    The exporter's skip decision and the catalog's badge come from the same function.
+
+    Regression guard against the two drifting apart: if the UI says an episode is
+    excluded, export must actually skip it, and vice versa. Both paths read the same
+    stored attrs and call ``quality.auto_unusable_reasons``.
+    """
+    from polyumi_ingest.export.dp.buffer import _auto_unusable_reasons_for_episode
+
+    scene = _build_scene(tmp_path, with_slam=True)
+    _make_slam_only(scene, tracking_ratio=1.0, reverse_overlap_median_mm=453.85)
+    ep = zarr.open_group(str(scene / 'episode_0'), mode='r')
+
+    export_reasons = _auto_unusable_reasons_for_episode(ep)
+    catalog_quality = episode_quality.scene_quality_by_session_dir(tmp_path)['session_0']
+
+    assert export_reasons  # export would skip it
+    assert catalog_quality['auto_unusable'] is True  # ...and the UI says so
+    assert catalog_quality['auto_unusable_reasons'] == export_reasons  # for the same reason
 
 
 def test_missing_eef_pose_raises(tmp_path: pathlib.Path) -> None:

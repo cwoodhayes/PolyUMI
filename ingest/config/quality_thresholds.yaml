@@ -1,0 +1,36 @@
+# Thresholds for automatically flagging an episode as unusable.
+#
+# These are POLICY, not data. Verdicts are derived at read time from the metrics
+# already stored in each episode's `annotations/slam` attrs, so editing this file
+# reclassifies every scene immediately — nothing is written into the pzarr and no
+# reprocessing is needed. Consumed by the catalog UI (episode_quality.py) and by
+# DP export (export/dp/buffer.py), which share one rule so the UI can't disagree
+# with what actually gets exported.
+#
+# An episode explicitly listed in a scene's scene.json `unusable_episodes` is
+# unusable regardless of what's here; these thresholds only add to that set.
+
+# Minimum fraction of frames with a pose. Below this the episode is unusable.
+min_tracking_ratio: 0.80
+
+# Maximum median forward/reverse disagreement (mm) on frames both passes tracked.
+# The two passes localize against the same atlas independently, so this is a
+# reference-free self-consistency check — no ground truth needed. Matches
+# slam_step's _REVERSE_MERGE_MAX_OVERLAP_MM, the point at which the merge already
+# refuses to trust the reverse pass.
+#
+# Known limits, measured over 5 scenes (see notebooks/slam_tuning_explore.ipynb §7):
+#  - False positives happen: one episode disagreed by 213 mm yet its poses were
+#    fine. Flagging it for review is cheap, so that's an acceptable trade.
+#  - False negatives happen too: an episode whose passes agreed to 0.8 mm was
+#    still ~10 mm off. Passing this check is NOT proof of correctness.
+max_reverse_overlap_mm: 50.0
+
+# Episodes with OptiTrack poses available (eef.attrs['available_sources']) skip
+# the checks above entirely — their pose source doesn't depend on SLAM.
+optitrack_always_usable: true
+
+# Advisory only: drives the "low" badge in the catalog UI. Does NOT make an
+# episode unusable. Kept separate so the warning threshold and the exclusion
+# threshold can move independently.
+low_tracking_ratio: 0.90
