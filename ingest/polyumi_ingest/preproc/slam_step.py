@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -174,6 +175,7 @@ def _parse_and_reconcile_trajectory(
     traj_path: pathlib.Path,
     frame_ts: np.ndarray,
     reversed_clock: bool = False,
+    reverse_anchor_ts: float | None = None,
 ) -> np.ndarray:
     """
     Parse an ORB-SLAM3 EuRoC-format trajectory and align it to ``frame_ts``.
@@ -192,9 +194,19 @@ def _parse_and_reconcile_trajectory(
 
     When ``reversed_clock`` is True the trajectory came from the localizer's
     reverse pass, whose timestamps run on the flipped clock
-    ``t' = t_last_video - t_video``; we undo that with ``t_utc = frame_ts[0]
-    + (D - t')`` where ``D = frame_ts[-1] - frame_ts[0]``, landing each reverse
-    entry back on its original frame index.
+    ``t' = t_anchor_video - t_video``, so we undo it with
+    ``t_utc = t_anchor_utc - t'``.
+
+    ``t_anchor`` is the **last frame the binary actually decoded**
+    (``frameTimes.back()`` in ``RunLocalizationPass``), which is *not*
+    necessarily ``frame_ts[-1]``: the decoder can stop early, and a
+    frame-decimating run keeps only every Nth frame so its last kept frame may
+    fall short of the grid's end.  Getting this wrong is silently corrupting
+    rather than loud — a whole-frame offset still lands inside the matching
+    tolerance of the *wrong* frame, so every reverse pose shifts with no
+    warning.  Pass ``reverse_anchor_ts`` (a UTC timestamp from ``frame_ts``)
+    whenever the decode may not have covered the full grid; it defaults to
+    ``frame_ts[-1]``, which is correct when every frame was decoded.
 
     Returns ``poses`` shaped (N,7) float64 ``[x,y,z, qx,qy,qz,qw]``. Lost
     rows are all-NaN.
@@ -206,7 +218,7 @@ def _parse_and_reconcile_trajectory(
         return poses
 
     t_ref = float(frame_ts[0])
-    span = float(frame_ts[-1] - frame_ts[0])
+    t_anchor = float(frame_ts[-1]) if reverse_anchor_ts is None else float(reverse_anchor_ts)
     period = float(np.median(np.diff(frame_ts)))
     tolerance = _TRAJ_TOLERANCE_FRAC * period
 
@@ -223,7 +235,7 @@ def _parse_and_reconcile_trajectory(
                 continue
             t_ns = float(parts[0])
             tx, ty, tz, qx, qy, qz, qw = (float(p) for p in parts[1:])
-            t_utc = t_ref + (span - t_ns / 1e9) if reversed_clock else t_ref + t_ns / 1e9
+            t_utc = t_anchor - t_ns / 1e9 if reversed_clock else t_ref + t_ns / 1e9
 
             idx_right = int(np.searchsorted(frame_ts, t_utc))
             candidates = []
@@ -246,6 +258,26 @@ def _parse_and_reconcile_trajectory(
 
     log.info(f'  Trajectory reconciliation: {n_matched} matched, {n_skipped} skipped')
     return poses
+
+
+def _parse_decoded_frame_count(stdout_log: pathlib.Path) -> int | None:
+    """
+    Read the localizer's ``Decoded N frames into memory`` line from its stdout log.
+
+    The reverse pass flips its clock about the last frame the binary *decoded*,
+    so the reconciliation needs that count to pick the right anchor (see
+    ``_parse_and_reconcile_trajectory``).  Returns None if the line is absent,
+    in which case callers should fall back to assuming a full decode.
+    """
+    try:
+        text = stdout_log.read_text()
+    except OSError:
+        return None
+    matches = re.findall(r'Decoded (\d+) frames into memory', text)
+    if not matches:
+        return None
+    # Both passes share one decode, so the line appears once; take the last if not.
+    return int(matches[-1])
 
 
 def _merge_forward_reverse(fwd: np.ndarray, rev: np.ndarray) -> tuple[np.ndarray, dict]:
@@ -579,9 +611,10 @@ class OrbSlam3Step(PreprocessingStep):
             # here; we reconcile that flipped-clock trajectory and merge it in.
             if self.reverse_pass:
                 cmd.append(str(traj_out_reverse))
+            stdout_log = log_dir / f'episode_{episode_index}_slam.stdout'
             self._run_subprocess(
                 cmd,
-                log_dir / f'episode_{episode_index}_slam.stdout',
+                stdout_log,
                 log_dir / f'episode_{episode_index}_slam.stderr',
                 label=f'ORB-SLAM3 localizer (episode {episode_index})',
                 cwd=log_dir,
@@ -596,7 +629,22 @@ class OrbSlam3Step(PreprocessingStep):
                     raise RuntimeError(
                         f'ORB-SLAM3 localizer completed but reverse trajectory not found: {traj_out_reverse}'
                     )
-                rev_poses = _parse_and_reconcile_trajectory(traj_out_reverse, frame_ts, reversed_clock=True)
+                # The reverse clock is flipped about the last frame the binary
+                # decoded, which is normally the last frame of the grid but isn't
+                # guaranteed to be (an early decoder stop shifts it).  Take the
+                # anchor from the binary's own report rather than assuming.
+                n_decoded = _parse_decoded_frame_count(stdout_log)
+                anchor_ts: float | None = None
+                if n_decoded is not None and 0 < n_decoded <= len(frame_ts):
+                    anchor_ts = float(frame_ts[n_decoded - 1])
+                    if n_decoded != len(frame_ts):
+                        log.warning(
+                            f'  Localizer decoded {n_decoded} of {len(frame_ts)} frames; '
+                            f'anchoring the reverse trajectory on frame {n_decoded - 1}.'
+                        )
+                rev_poses = _parse_and_reconcile_trajectory(
+                    traj_out_reverse, frame_ts, reversed_clock=True, reverse_anchor_ts=anchor_ts
+                )
                 poses, merge_stats = _merge_forward_reverse(poses, rev_poses)
             _write_slam_results(ep_grp, poses, self.settings_yaml, atlas_path, merge_stats=merge_stats)
             shutil.rmtree(tmp_dir, ignore_errors=True)

@@ -18,6 +18,7 @@ from polyumi_ingest.preproc.slam_step import (
     _make_temp_settings_yaml,
     _merge_forward_reverse,
     _parse_and_reconcile_trajectory,
+    _parse_decoded_frame_count,
 )
 
 _BLOSC = Blosc(cname='zstd', clevel=5, shuffle=Blosc.SHUFFLE)
@@ -293,24 +294,30 @@ def _make_euroc_trajectory_reversed(
     path: pathlib.Path,
     frame_ts: np.ndarray,
     tracked_mask: np.ndarray,
+    anchor_idx: int | None = None,
 ) -> None:
     """
     Write a fake EuRoC trajectory as the localizer's *reverse* sweep would.
 
     The reverse sweep runs frames back-to-front on a flipped video clock
-    ``tframe' = D - (frame_ts - frame_ts[0])`` where ``D = frame_ts[-1] -
-    frame_ts[0]``, so timestamps still increase as ORB-SLAM3 requires; see
+    ``tframe' = t_anchor - (frame_ts - frame_ts[0])``, so timestamps still
+    increase as ORB-SLAM3 requires; see
     ``mono_inertial_gopro_vi_localize.cc``'s ``RunLocalizationPass``. This
     mirrors that transform so ``reversed_clock=True`` can be tested without
     the real binary.
+
+    ``anchor_idx`` is the index of the last frame the binary decoded (the frame
+    its clock is flipped about); it defaults to the last frame of the grid.
+    Pass a smaller index to simulate a decode that stopped early.
     """
     t0 = float(frame_ts[0])
-    span = float(frame_ts[-1] - t0)
+    idx = len(frame_ts) - 1 if anchor_idx is None else anchor_idx
+    anchor_video = float(frame_ts[idx] - t0)
     with open(path, 'w') as fh:
         for i, ts in enumerate(frame_ts):
             if not tracked_mask[i]:
                 continue
-            t_ns = (span - (float(ts) - t0)) * 1e9
+            t_ns = (anchor_video - (float(ts) - t0)) * 1e9
             fh.write(f'{t_ns:.6f} 0.1 0.2 0.3 0.0 0.0 0.0 1.0\n')
 
 
@@ -331,6 +338,87 @@ def test_parse_and_reconcile_trajectory_reversed_clock_lands_on_original_frames(
         np.testing.assert_array_almost_equal(poses[i, :3], [0.1, 0.2, 0.3], decimal=5)
     for i in range(4, n):
         assert np.all(np.isnan(poses[i]))
+
+
+def test_parse_and_reconcile_trajectory_reversed_clock_honours_explicit_anchor(
+    tmp_path: pathlib.Path,
+) -> None:
+    """
+    A reverse pass anchored short of the grid's end still lands on the right frames.
+
+    The binary flips its reverse clock about the last frame it *decoded*, which
+    isn't always the last frame of the grid (an early decoder stop, or a
+    frame-decimating run, leaves it short).  Given that anchor, every reverse
+    entry must still reconcile onto its original frame index.
+    """
+    n = 10
+    frame_ts = 1000.0 + np.arange(n, dtype=np.float64) / 60.0
+    anchor_idx = 7  # decode stopped 2 frames early
+    tracked = np.zeros(n, dtype=bool)
+    tracked[:8] = True  # reverse tracked everything it was given
+    traj_path = tmp_path / 'traj_rev.txt'
+    _make_euroc_trajectory_reversed(traj_path, frame_ts, tracked, anchor_idx=anchor_idx)
+
+    poses = _parse_and_reconcile_trajectory(
+        traj_path, frame_ts, reversed_clock=True, reverse_anchor_ts=float(frame_ts[anchor_idx])
+    )
+
+    for i in range(8):
+        np.testing.assert_array_almost_equal(poses[i, :3], [0.1, 0.2, 0.3], decimal=5)
+    for i in range(8, n):
+        assert np.all(np.isnan(poses[i]))
+
+
+def test_parse_and_reconcile_trajectory_reversed_clock_wrong_anchor_shifts_silently(
+    tmp_path: pathlib.Path,
+) -> None:
+    """
+    Regression guard: assuming frame_ts[-1] as the anchor mis-maps a short decode.
+
+    This is why ``reverse_anchor_ts`` exists.  A whole-frame offset still falls
+    inside the matching tolerance of the *wrong* frame, so the old behaviour
+    produced silently shifted poses rather than skipped entries — no warning to
+    notice.  Pinning that here keeps the failure mode from quietly returning.
+    """
+    n = 10
+    frame_ts = 1000.0 + np.arange(n, dtype=np.float64) / 60.0
+    anchor_idx = 7
+    tracked = np.zeros(n, dtype=bool)
+    tracked[:8] = True
+    traj_path = tmp_path / 'traj_rev.txt'
+    _make_euroc_trajectory_reversed(traj_path, frame_ts, tracked, anchor_idx=anchor_idx)
+
+    # Default anchor (frame_ts[-1]) is wrong by 2 frames for this trajectory.
+    poses = _parse_and_reconcile_trajectory(traj_path, frame_ts, reversed_clock=True)
+
+    # Every pose is shifted 2 frames later, and nothing warns about it: frames
+    # 0..1 come out empty while 8..9 get poses they should never have had.
+    assert np.all(np.isnan(poses[0]))
+    assert np.all(np.isnan(poses[1]))
+    np.testing.assert_array_almost_equal(poses[9, :3], [0.1, 0.2, 0.3], decimal=5)
+    # ...whereas the explicit anchor puts them back where they belong.
+    fixed = _parse_and_reconcile_trajectory(
+        traj_path, frame_ts, reversed_clock=True, reverse_anchor_ts=float(frame_ts[anchor_idx])
+    )
+    np.testing.assert_array_almost_equal(fixed[0, :3], [0.1, 0.2, 0.3], decimal=5)
+    assert np.all(np.isnan(fixed[9]))
+
+
+def test_parse_decoded_frame_count_reads_the_binarys_report(tmp_path: pathlib.Path) -> None:
+    """The decoded-frame count is picked out of the localizer's stdout log."""
+    log_path = tmp_path / 'slam.stdout'
+    log_path.write_text(
+        'Loading ORB Vocabulary...\nDecoded 405 frames into memory\n[localizer:forward] tracked 100/405 frames\n'
+    )
+    assert _parse_decoded_frame_count(log_path) == 405
+
+
+def test_parse_decoded_frame_count_returns_none_when_absent(tmp_path: pathlib.Path) -> None:
+    """A log without the line (or no log at all) yields None so callers can fall back."""
+    log_path = tmp_path / 'slam.stdout'
+    log_path.write_text('Loading ORB Vocabulary...\nnothing useful here\n')
+    assert _parse_decoded_frame_count(log_path) is None
+    assert _parse_decoded_frame_count(tmp_path / 'does_not_exist.stdout') is None
 
 
 # ---------------------------------------------------------------------------
