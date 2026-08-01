@@ -17,6 +17,7 @@ import numpy as np
 import zarr
 from numcodecs import Blosc
 
+from polyumi_ingest.config import load_slam_config
 from polyumi_ingest.preproc.step_base import (
     PreprocessingStep,
     register_preprocessing_step,
@@ -39,9 +40,15 @@ _DEFAULT_ORB_SLAM3_DIR = _REPO_ROOT / 'external' / 'ORB_SLAM3_PolyUMI'
 
 _DEFAULT_SETTINGS_YAML = _DEFAULT_ORB_SLAM3_DIR / 'Examples' / 'Monocular-Inertial' / 'gopro_hero12_slam.yaml'
 
+# Tunables live in config/slam.yaml so resolution/frame-rate settings are visible
+# next to the other ingest config rather than buried in code; the values below are
+# fallbacks used only if that file is missing or omits a key.
+_SLAM_CONFIG = load_slam_config()
+
 # Maximum acceptable distance (as a fraction of a frame period) between a
 # trajectory entry's timestamp and the nearest frame timestamp when
-# reconciling the C++ output back onto our frame index.
+# reconciling the C++ output back onto our frame index.  Internal to the matching
+# algorithm rather than a tuning knob, so deliberately not in slam.yaml.
 _TRAJ_TOLERANCE_FRAC = 0.5
 
 # When merging the reverse pass into the forward one, refuse the merge if the two
@@ -50,7 +57,8 @@ _TRAJ_TOLERANCE_FRAC = 0.5
 # agrees to well under a millimetre (validated: ~0.8-1.0 mm median); a large
 # median means the reverse pass landed on a different alignment (e.g. a new map
 # it created after losing the loaded one) and its poses must not be trusted.
-_REVERSE_MERGE_MAX_OVERLAP_MM = 50.0
+# Configurable via config/slam.yaml's reverse_merge_max_overlap_mm.
+_REVERSE_MERGE_MAX_OVERLAP_MM = float(_SLAM_CONFIG.get('reverse_merge_max_overlap_mm', 50.0))
 
 
 def _export_telemetry_json(
@@ -143,12 +151,57 @@ def _export_episode(
     return video_path, json_path, gopro_ts
 
 
+#: Settings keys that scale linearly with image size.  ``Camera.k1..k4`` deliberately
+#: do NOT appear here: KannalaBrandt's distortion polynomial acts on the incidence
+#: angle theta, which is dimensionless and independent of resolution.
+_RESOLUTION_SCALED_KEYS = (
+    'Camera.fx',
+    'Camera.fy',
+    'Camera.cx',
+    'Camera.cy',
+    'Camera.width',
+    'Camera.height',
+)
+
+
+def _downsample_settings(content: str, res_div: int, fps_div: int) -> str:
+    """
+    Rewrite a settings YAML for reduced resolution and/or frame rate.
+
+    Derived from the canonical YAML rather than kept as a second checked-in file:
+    ``gopro_hero12_slam.yaml`` is the calibration source of truth, and a
+    hand-maintained half-res copy would silently drift the next time the camera is
+    recalibrated.
+
+    ``res_div`` scales the intrinsics and image size (see
+    ``_RESOLUTION_SCALED_KEYS``); ``fps_div`` divides ``Camera.fps``, which
+    ORB-SLAM3 turns into its keyframe-insertion window (``mMaxFrames``), so a
+    decimated run must declare its true rate or keyframes are inserted on the wrong
+    cadence.  Both default to 1 (no change) at the call sites that don't downsample.
+    """
+    if res_div == 1 and fps_div == 1:
+        return content
+    out = []
+    for line in content.splitlines(keepends=True):
+        m = re.match(r'^(\s*)([\w.]+)\s*:\s*([-\d.eE+]+)(.*)$', line)
+        if m:
+            indent, key, value, rest = m.groups()
+            if res_div != 1 and key in _RESOLUTION_SCALED_KEYS:
+                line = f'{indent}{key}: {float(value) / res_div:.10f}{rest}\n'
+            elif fps_div != 1 and key == 'Camera.fps':
+                line = f'{indent}{key}: {float(value) / fps_div:.6f}  # /{fps_div} from {value}{rest}\n'
+        out.append(line)
+    return ''.join(out)
+
+
 def _make_temp_settings_yaml(
     src: pathlib.Path,
     tmp_dir: pathlib.Path,
     save_atlas: pathlib.Path | None = None,
     load_atlas: pathlib.Path | None = None,
     viewer: bool = False,
+    res_div: int = 1,
+    fps_div: int = 1,
 ) -> pathlib.Path:
     """
     Copy ``src`` settings YAML to ``tmp_dir`` with atlas paths appended.
@@ -157,8 +210,11 @@ def _make_temp_settings_yaml(
     (``System.SaveAtlasToFile`` / ``System.LoadAtlasFromFile``); the binary
     has no CLI flag for them. We inject the right key here so the canonical
     config file stays untouched.
+
+    ``res_div`` / ``fps_div`` optionally downsample the camera settings first; see
+    ``_downsample_settings``.
     """
-    content = src.read_text()
+    content = _downsample_settings(src.read_text(), res_div, fps_div)
     if not content.endswith('\n'):
         content += '\n'
     content += f'\nSystem.Viewer: {1 if viewer else 0}\n'
@@ -348,14 +404,42 @@ def _write_slam_results(
     settings_path: pathlib.Path,
     atlas_path: pathlib.Path,
     merge_stats: dict | None = None,
+    frame_stride: int = 1,
+    forward_poses: np.ndarray | None = None,
+    reverse_poses: np.ndarray | None = None,
 ) -> None:
-    """Write SLAM poses and summary annotations back into ep_grp."""
+    """
+    Write SLAM poses and summary annotations back into ep_grp.
+
+    ``gopro/slam_poses`` is the merged result the rest of the pipeline consumes.
+    When the reverse pass ran, the two un-merged passes are *also* stored as
+    ``gopro/slam_poses_forward`` and ``gopro/slam_poses_reverse`` so the merge can
+    be re-derived, audited or replaced in Python without re-running SLAM -- the
+    merge is lossy (a union keeps no record of which pass supplied a frame, nor of
+    what the discarded pass said). Same (N,7) layout, NaN rows where that pass lost
+    tracking. Costs ~10 kB compressed per array against a ~100 MB mp4.
+
+    ``tracking_ratio`` is computed over the frames SLAM was actually *fed*
+    (``0, stride, 2*stride, ...``), not over every frame.  Under decimation the
+    skipped frames have no pose by construction, so an all-frames ratio would read
+    ~1/stride for even a perfect run and every consumer's threshold -- notably
+    ``polyumi_ingest.quality``'s 80% floor -- would condemn the whole corpus.  At
+    stride 1 the two definitions coincide, so already-processed scenes keep their
+    existing meaning and no consumer needs changing.
+    """
     gopro_grp = ep_grp.require_group('gopro')
 
-    if 'slam_poses' in gopro_grp:
-        del gopro_grp['slam_poses']
-
-    gopro_grp.create_array('slam_poses', data=poses, compressor=_BLOSC)
+    for name, data in (
+        ('slam_poses', poses),
+        ('slam_poses_forward', forward_poses),
+        ('slam_poses_reverse', reverse_poses),
+    ):
+        # Always delete first: a re-run with reverse_pass off must not leave a stale
+        # forward/reverse array behind claiming to describe the current poses.
+        if name in gopro_grp:
+            del gopro_grp[name]
+        if data is not None:
+            gopro_grp.create_array(name, data=data, compressor=_BLOSC)
 
     is_lost = np.isnan(poses[:, 0])
     n_total = int(len(is_lost))
@@ -363,10 +447,16 @@ def _write_slam_results(
     # count transitions lost→tracked (each run of tracked frames after a gap)
     transitions = int(np.count_nonzero(np.diff(is_lost.astype(np.int8)) == -1))
 
+    fed_idx = np.arange(0, n_total, frame_stride)
+    n_fed = int(len(fed_idx))
+    n_fed_tracked = int((~is_lost[fed_idx]).sum()) if n_fed else 0
+
     slam_grp = ep_grp.require_group('annotations').require_group('slam')
     slam_grp.attrs['n_frames_total'] = n_total
     slam_grp.attrs['n_frames_lost'] = n_lost
-    slam_grp.attrs['tracking_ratio'] = float(n_total - n_lost) / n_total if n_total > 0 else 0.0
+    slam_grp.attrs['frame_stride'] = int(frame_stride)
+    slam_grp.attrs['n_frames_fed'] = n_fed
+    slam_grp.attrs['tracking_ratio'] = float(n_fed_tracked) / n_fed if n_fed > 0 else 0.0
     slam_grp.attrs['n_relocalization_events'] = transitions
     slam_grp.attrs['orb_slam3_settings_path'] = str(settings_path.resolve())
     slam_grp.attrs['atlas_path'] = str(atlas_path.resolve())
@@ -381,8 +471,11 @@ def _write_slam_results(
         slam_grp.attrs['reverse_overlap_median_mm'] = float(merge_stats['overlap_median_mm'])
 
     log.info(
-        f'  SLAM results: {n_total} frames, {n_lost} lost '
-        f'({100.0 * n_lost / n_total:.1f}%), {transitions} relocalization events'
+        f'  SLAM results: {n_fed_tracked}/{n_fed} fed frames tracked '
+        f'({100.0 * slam_grp.attrs["tracking_ratio"]:.1f}%)'
+        + (f' at stride {frame_stride}' if frame_stride != 1 else '')
+        + f'; {n_lost}/{n_total} frames without a pose overall, '
+        f'{transitions} relocalization events'
     )
 
 
@@ -454,6 +547,8 @@ class OrbSlam3Step(PreprocessingStep):
         bin_subdir: str | None = None,
         timeout_s: float | None = None,
         reverse_pass: bool = True,
+        resolution_divisor: int | None = None,
+        localization_frame_stride: int | None = None,
     ) -> None:
         """
         Initialize the ORB-SLAM3 step.
@@ -480,6 +575,21 @@ class OrbSlam3Step(PreprocessingStep):
             two trajectories merged.  The reverse pass recovers the lead-in
             frames the forward pass loses before it can relocalize.  See
             ``_merge_forward_reverse``.
+        resolution_divisor:
+            Downsample factor applied to the camera settings for *both* passes
+            (default 2 = half resolution, 676x507).  Map building and localization
+            must use the same value: ORB descriptors and the scale pyramid are
+            resolution-dependent, so localizing against a resolution-mismatched
+            atlas makes relocalization unreliable.  Defaults from
+            ``POLYUMI_SLAM_RES_DIV``.
+        localization_frame_stride:
+            Feed every Nth frame to the *localizer* (default 2 ~= 30 fps from
+            59.94 fps source).  Map building is deliberately left at full rate --
+            decimating it measured no benefit and 20 fps mapping failed outright.
+            Defaults from ``POLYUMI_SLAM_LOC_STRIDE``.
+
+            Setting both this and ``resolution_divisor`` to 1 restores the
+            pre-migration behaviour exactly; that is the rollback path.
 
         """
         if orb_slam3_dir is None:
@@ -492,6 +602,22 @@ class OrbSlam3Step(PreprocessingStep):
         self.localizer_bin = self.orb_slam3_dir / bin_subdir / localizer_bin
         self.timeout_s = timeout_s
         self.reverse_pass = reverse_pass
+        # Precedence: explicit argument > environment override > config/slam.yaml >
+        # in-code fallback.  The config file is the documented home for these; the
+        # env vars exist so an experiment can vary them without editing it.
+        if resolution_divisor is None:
+            resolution_divisor = int(os.environ.get('POLYUMI_SLAM_RES_DIV', _SLAM_CONFIG.get('resolution_divisor', 2)))
+        if localization_frame_stride is None:
+            localization_frame_stride = int(
+                os.environ.get('POLYUMI_SLAM_LOC_STRIDE', _SLAM_CONFIG.get('localization_frame_stride', 2))
+            )
+        if resolution_divisor < 1 or localization_frame_stride < 1:
+            raise ValueError(
+                f'resolution_divisor and localization_frame_stride must be >= 1, got '
+                f'{resolution_divisor} and {localization_frame_stride}'
+            )
+        self.resolution_divisor = resolution_divisor
+        self.localization_frame_stride = localization_frame_stride
 
     @property
     def _vocab_path(self) -> pathlib.Path:
@@ -515,6 +641,7 @@ class OrbSlam3Step(PreprocessingStep):
         stderr_log: pathlib.Path,
         label: str,
         cwd: pathlib.Path | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
         log.info(f'  Running: {" ".join(cmd)}')
         with open(stdout_log, 'w') as fout, open(stderr_log, 'w') as ferr:
@@ -524,6 +651,7 @@ class OrbSlam3Step(PreprocessingStep):
                 stderr=ferr,
                 timeout=self.timeout_s,
                 cwd=cwd,
+                env=env,
             )
         if result.returncode != 0:
             raise RuntimeError(
@@ -541,10 +669,14 @@ class OrbSlam3Step(PreprocessingStep):
         tmp_dir = pathlib.Path(tempfile.mkdtemp(prefix='polyumi_slam_map_'))
         try:
             video_path, json_path, frame_ts = _export_episode(ep_grp, tmp_dir, gopro_mp4)
+            # Half resolution, but full frame rate: decimating the mapping pass
+            # measured no benefit and 20 fps mapping failed to initialise a map at
+            # all, so only the resolution is reduced here.
             settings_path = _make_temp_settings_yaml(
                 self.settings_yaml,
                 tmp_dir,
                 save_atlas=atlas_path,
+                res_div=self.resolution_divisor,
             )
             traj_out = log_dir / 'mapping_trajectory.txt'
             cmd = [
@@ -591,10 +723,15 @@ class OrbSlam3Step(PreprocessingStep):
         tmp_dir = pathlib.Path(tempfile.mkdtemp(prefix=f'polyumi_slam_ep{episode_index}_'))
         try:
             video_path, json_path, frame_ts = _export_episode(ep_grp, tmp_dir, gopro_mp4)
+            # Resolution must match the atlas the map builder produced; the frame
+            # rate is additionally divided by the stride so ORB-SLAM3's
+            # keyframe-insertion window matches the rate it's actually being fed.
             settings_path = _make_temp_settings_yaml(
                 self.settings_yaml,
                 tmp_dir,
                 load_atlas=atlas_path,
+                res_div=self.resolution_divisor,
+                fps_div=self.localization_frame_stride,
             )
             traj_out = tmp_dir / 'trajectory.txt'
             traj_out_reverse = tmp_dir / 'trajectory_reverse.txt'
@@ -618,12 +755,18 @@ class OrbSlam3Step(PreprocessingStep):
                 log_dir / f'episode_{episode_index}_slam.stderr',
                 label=f'ORB-SLAM3 localizer (episode {episode_index})',
                 cwd=log_dir,
+                env={
+                    **os.environ,
+                    'POLYUMI_SLAM_FRAME_STRIDE': str(self.localization_frame_stride),
+                },
             )
             if not traj_out.exists():
                 raise RuntimeError(f'ORB-SLAM3 localizer completed but trajectory file not found: {traj_out}')
 
             poses = _parse_and_reconcile_trajectory(traj_out, frame_ts)
             merge_stats: dict | None = None
+            forward_poses: np.ndarray | None = None
+            rev_poses: np.ndarray | None = None
             if self.reverse_pass:
                 if not traj_out_reverse.exists():
                     raise RuntimeError(
@@ -631,22 +774,48 @@ class OrbSlam3Step(PreprocessingStep):
                     )
                 # The reverse clock is flipped about the last frame the binary
                 # decoded, which is normally the last frame of the grid but isn't
-                # guaranteed to be (an early decoder stop shifts it).  Take the
-                # anchor from the binary's own report rather than assuming.
+                # guaranteed to be (an early decoder stop shifts it, and under
+                # decimation the last kept frame can fall short of the end).  Take
+                # the anchor from the binary's own report rather than assuming.
+                #
+                # Decoded frame k is original frame index k * stride, so the last
+                # decoded frame is (n_decoded - 1) * stride -- NOT n_decoded - 1.
+                # Getting this wrong is silently corrupting rather than loud: a
+                # whole-frame offset still lands inside the matching tolerance of
+                # the wrong frame, shifting every reverse pose with no warning.
                 n_decoded = _parse_decoded_frame_count(stdout_log)
                 anchor_ts: float | None = None
-                if n_decoded is not None and 0 < n_decoded <= len(frame_ts):
-                    anchor_ts = float(frame_ts[n_decoded - 1])
-                    if n_decoded != len(frame_ts):
+                if n_decoded is not None and n_decoded > 0:
+                    anchor_idx = (n_decoded - 1) * self.localization_frame_stride
+                    if anchor_idx < len(frame_ts):
+                        anchor_ts = float(frame_ts[anchor_idx])
+                        if anchor_idx != len(frame_ts) - 1:
+                            log.warning(
+                                f'  Localizer decoded {n_decoded} frames (stride '
+                                f'{self.localization_frame_stride}); anchoring the reverse '
+                                f'trajectory on frame {anchor_idx} of {len(frame_ts)}.'
+                            )
+                    else:
                         log.warning(
-                            f'  Localizer decoded {n_decoded} of {len(frame_ts)} frames; '
-                            f'anchoring the reverse trajectory on frame {n_decoded - 1}.'
+                            f'  Localizer reported {n_decoded} decoded frames, implying frame '
+                            f'{anchor_idx} at stride {self.localization_frame_stride}, which is '
+                            f'past the {len(frame_ts)}-frame grid; falling back to the last frame.'
                         )
                 rev_poses = _parse_and_reconcile_trajectory(
                     traj_out_reverse, frame_ts, reversed_clock=True, reverse_anchor_ts=anchor_ts
                 )
+                forward_poses = poses.copy()  # keep the un-merged pass for the store
                 poses, merge_stats = _merge_forward_reverse(poses, rev_poses)
-            _write_slam_results(ep_grp, poses, self.settings_yaml, atlas_path, merge_stats=merge_stats)
+            _write_slam_results(
+                ep_grp,
+                poses,
+                self.settings_yaml,
+                atlas_path,
+                merge_stats=merge_stats,
+                frame_stride=self.localization_frame_stride,
+                forward_poses=forward_poses,
+                reverse_poses=rev_poses,
+            )
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
             log.error(f'Localization failed; temp dir preserved: {tmp_dir}')

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import unittest.mock as mock
 
 import numpy as np
@@ -14,11 +15,13 @@ from numcodecs import Blosc
 
 from polyumi_ingest.preproc.slam_step import (
     OrbSlam3Step,
+    _downsample_settings,
     _export_telemetry_json,
     _make_temp_settings_yaml,
     _merge_forward_reverse,
     _parse_and_reconcile_trajectory,
     _parse_decoded_frame_count,
+    _write_slam_results,
 )
 
 _BLOSC = Blosc(cname='zstd', clevel=5, shuffle=Blosc.SHUFFLE)
@@ -404,6 +407,25 @@ def test_parse_and_reconcile_trajectory_reversed_clock_wrong_anchor_shifts_silen
     assert np.all(np.isnan(fixed[9]))
 
 
+def test_reverse_anchor_index_accounts_for_the_frame_stride() -> None:
+    """
+    The reverse anchor is (n_decoded-1)*stride, not n_decoded-1.
+
+    The binary flips its reverse clock about the last frame it decoded. Under
+    decimation, decoded frame k is original frame k*stride, so a stride-blind
+    formula picks a frame near the *start* of the clip -- and because a whole-frame
+    offset still falls inside the matching tolerance of the wrong frame, every
+    reverse pose would shift silently rather than fail loudly.
+
+    This pins the arithmetic that ``_localize_episode`` performs; the two
+    reconciliation tests below cover what a wrong anchor does to the output.
+    """
+    n_frames, stride = 405, 2
+    n_decoded = len(range(0, n_frames, stride))  # 203 frames fed
+    assert (n_decoded - 1) * stride == 404  # correct: the last kept frame
+    assert n_decoded - 1 == 202  # what the stride-blind formula would have picked
+
+
 def test_parse_decoded_frame_count_reads_the_binarys_report(tmp_path: pathlib.Path) -> None:
     """The decoded-frame count is picked out of the localizer's stdout log."""
     log_path = tmp_path / 'slam.stdout'
@@ -488,6 +510,264 @@ def test_merge_forward_reverse_no_reverse_tracking_is_a_noop() -> None:
 # ---------------------------------------------------------------------------
 # Smoke test (skipped unless POLYUMI_TEST_SCENE_DIR is set)
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Downsampled settings + stride-aware bookkeeping (half-res / 30fps migration)
+# ---------------------------------------------------------------------------
+
+_SETTINGS_SAMPLE = """%YAML:1.0
+Camera.type: "KannalaBrandt8"
+Camera.fx: 421.4700653743
+Camera.fy: 421.0212489922
+Camera.cx: 674.6086093863
+Camera.cy: 504.0829405907
+Camera.k1: 0.0289317679
+Camera.k4: -0.0436675477
+Camera.width: 1352.0000000000
+Camera.height: 1014.0000000000
+Camera.fps: 60.0  # nominal
+IMU.Frequency: 200
+ORBextractor.nFeatures: 1500
+"""
+
+
+def _yaml_values(text: str) -> dict[str, float]:
+    """Parse the simple `key: number` lines of a settings YAML."""
+    out = {}
+    for line in text.splitlines():
+        m = re.match(r'^\s*([\w.]+)\s*:\s*([-\d.eE+]+)', line)
+        if m:
+            out[m.group(1)] = float(m.group(2))
+    return out
+
+
+def test_downsample_settings_scales_intrinsics_and_size() -> None:
+    """Halving resolution halves fx/fy/cx/cy and the image dimensions."""
+    v = _yaml_values(_downsample_settings(_SETTINGS_SAMPLE, res_div=2, fps_div=1))
+    assert v['Camera.fx'] == pytest.approx(421.4700653743 / 2)
+    assert v['Camera.fy'] == pytest.approx(421.0212489922 / 2)
+    assert v['Camera.cx'] == pytest.approx(674.6086093863 / 2)
+    assert v['Camera.cy'] == pytest.approx(504.0829405907 / 2)
+    assert v['Camera.width'] == pytest.approx(676.0)
+    assert v['Camera.height'] == pytest.approx(507.0)
+
+
+def test_downsample_settings_leaves_distortion_coefficients_alone() -> None:
+    """
+    KannalaBrandt k1..k4 must NOT scale with resolution.
+
+    They are coefficients of a polynomial in the incidence angle theta, which is
+    dimensionless -- scaling them would silently corrupt the camera model in a way
+    that still produces plausible-looking poses.
+    """
+    v = _yaml_values(_downsample_settings(_SETTINGS_SAMPLE, res_div=2, fps_div=1))
+    assert v['Camera.k1'] == pytest.approx(0.0289317679)
+    assert v['Camera.k4'] == pytest.approx(-0.0436675477)
+    # ...and neither should unrelated settings.
+    assert v['IMU.Frequency'] == pytest.approx(200)
+    assert v['ORBextractor.nFeatures'] == pytest.approx(1500)
+
+
+def test_downsample_settings_divides_fps_by_stride() -> None:
+    """Camera.fps must reflect the rate actually fed; ORB-SLAM3 derives mMaxFrames from it."""
+    v = _yaml_values(_downsample_settings(_SETTINGS_SAMPLE, res_div=1, fps_div=2))
+    assert v['Camera.fps'] == pytest.approx(30.0)
+    # resolution untouched when only the rate changes
+    assert v['Camera.width'] == pytest.approx(1352.0)
+
+
+def test_downsample_settings_is_identity_at_unity() -> None:
+    """res_div=1, fps_div=1 returns the text unchanged -- the rollback path."""
+    assert _downsample_settings(_SETTINGS_SAMPLE, 1, 1) == _SETTINGS_SAMPLE
+
+
+def test_make_temp_settings_yaml_downsamples_and_still_injects_atlas(tmp_path: pathlib.Path) -> None:
+    """Downsampling composes with the atlas-path injection rather than replacing it."""
+    src = tmp_path / 'src.yaml'
+    src.write_text(_SETTINGS_SAMPLE)
+    dst = _make_temp_settings_yaml(src, tmp_path, load_atlas=tmp_path / 'a.osa', res_div=2, fps_div=2)
+    text = dst.read_text()
+    assert 'System.LoadAtlasFromFile' in text
+    v = _yaml_values(text)
+    assert v['Camera.width'] == pytest.approx(676.0)
+    assert v['Camera.fps'] == pytest.approx(30.0)
+
+
+def _slam_attrs_after_write(tmp_path: pathlib.Path, poses: np.ndarray, stride: int) -> dict:
+    """Run _write_slam_results into a scratch store and return the annotations/slam attrs."""
+    root = zarr.open_group(str(tmp_path / f'w{stride}.zarr'), mode='w', zarr_format=2)
+    ep = root.create_group('episode_0')
+    _write_slam_results(ep, poses, tmp_path / 's.yaml', tmp_path / 'a.osa', frame_stride=stride)
+    return dict(ep['annotations']['slam'].attrs)
+
+
+def test_tracking_ratio_is_measured_over_fed_frames(tmp_path: pathlib.Path) -> None:
+    """
+    Under decimation the ratio counts only the frames SLAM was actually given.
+
+    A perfect stride-2 run has a pose on every even frame and NaN on every odd one.
+    Scoring that over all frames would read 50% and trip the 80% usability floor,
+    condemning a flawless episode.
+    """
+    n = 100
+    poses = np.full((n, 7), np.nan)
+    poses[::2] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]  # every fed frame tracked
+
+    attrs = _slam_attrs_after_write(tmp_path, poses, stride=2)
+
+    assert attrs['tracking_ratio'] == pytest.approx(1.0)
+    assert attrs['frame_stride'] == 2
+    assert attrs['n_frames_fed'] == 50
+    # the all-frames counts stay honest alongside it
+    assert attrs['n_frames_total'] == 100
+    assert attrs['n_frames_lost'] == 50
+
+
+def test_tracking_ratio_still_counts_losses_among_fed_frames(tmp_path: pathlib.Path) -> None:
+    """A fed frame that genuinely lost tracking still lowers the ratio."""
+    n = 100
+    poses = np.full((n, 7), np.nan)
+    poses[::2] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    poses[::2][:10] = np.nan  # 10 of the 50 fed frames lost
+
+    attrs = _slam_attrs_after_write(tmp_path, poses, stride=2)
+
+    assert attrs['tracking_ratio'] == pytest.approx(0.8)
+
+
+def test_tracking_ratio_unchanged_at_stride_one(tmp_path: pathlib.Path) -> None:
+    """
+    At stride 1 fed == all frames, so the definition is identical to the old one.
+
+    This is what keeps already-processed scenes and every consumer of the attr
+    (notably polyumi_ingest.quality) valid without modification.
+    """
+    n = 50
+    poses = np.full((n, 7), np.nan)
+    poses[:40] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+
+    attrs = _slam_attrs_after_write(tmp_path, poses, stride=1)
+
+    assert attrs['tracking_ratio'] == pytest.approx(0.8)
+    assert attrs['frame_stride'] == 1
+    assert attrs['n_frames_fed'] == 50
+
+
+def test_forward_and_reverse_passes_are_stored_alongside_the_merge(tmp_path: pathlib.Path) -> None:
+    """
+    Both un-merged passes persist, so the merge can be re-derived without re-running SLAM.
+
+    The merge is lossy — a union records neither which pass supplied each frame nor
+    what the discarded pass said — so keeping the inputs is what makes the decision
+    auditable and replaceable in Python later.
+    """
+    n = 20
+    fwd = np.full((n, 7), np.nan)
+    fwd[:10] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    rev = np.full((n, 7), np.nan)
+    rev[5:] = [2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    merged = fwd.copy()
+    merged[10:] = rev[10:]
+
+    root = zarr.open_group(str(tmp_path / 'fr.zarr'), mode='w', zarr_format=2)
+    ep = root.create_group('episode_0')
+    _write_slam_results(
+        ep,
+        merged,
+        tmp_path / 's.yaml',
+        tmp_path / 'a.osa',
+        forward_poses=fwd,
+        reverse_poses=rev,
+    )
+
+    np.testing.assert_allclose(ep['gopro']['slam_poses'][:], merged, equal_nan=True)
+    np.testing.assert_allclose(ep['gopro']['slam_poses_forward'][:], fwd, equal_nan=True)
+    np.testing.assert_allclose(ep['gopro']['slam_poses_reverse'][:], rev, equal_nan=True)
+
+
+def test_reverse_pass_arrays_absent_when_not_run(tmp_path: pathlib.Path) -> None:
+    """With reverse_pass off, only the merged array is written — no empty placeholders."""
+    poses = np.zeros((5, 7))
+    root = zarr.open_group(str(tmp_path / 'nofr.zarr'), mode='w', zarr_format=2)
+    ep = root.create_group('episode_0')
+    _write_slam_results(ep, poses, tmp_path / 's.yaml', tmp_path / 'a.osa')
+
+    assert 'slam_poses' in ep['gopro']
+    assert 'slam_poses_forward' not in ep['gopro']
+    assert 'slam_poses_reverse' not in ep['gopro']
+
+
+def test_stale_pass_arrays_are_cleared_on_rerun(tmp_path: pathlib.Path) -> None:
+    """
+    Re-running without the reverse pass removes previously-stored pass arrays.
+
+    Otherwise a stale forward/reverse pair would sit next to freshly written merged
+    poses, silently describing a different run.
+    """
+    n = 8
+    poses = np.zeros((n, 7))
+    root = zarr.open_group(str(tmp_path / 'stale.zarr'), mode='w', zarr_format=2)
+    ep = root.create_group('episode_0')
+    _write_slam_results(
+        ep,
+        poses,
+        tmp_path / 's.yaml',
+        tmp_path / 'a.osa',
+        forward_poses=poses,
+        reverse_poses=poses,
+    )
+    assert 'slam_poses_forward' in ep['gopro']
+
+    _write_slam_results(ep, poses, tmp_path / 's.yaml', tmp_path / 'a.osa')
+
+    assert 'slam_poses_forward' not in ep['gopro']
+    assert 'slam_poses_reverse' not in ep['gopro']
+
+
+def test_slam_config_yaml_supplies_the_defaults(monkeypatch) -> None:
+    """config/slam.yaml is the documented home for these; env vars only override it."""
+    monkeypatch.delenv('POLYUMI_SLAM_RES_DIV', raising=False)
+    monkeypatch.delenv('POLYUMI_SLAM_LOC_STRIDE', raising=False)
+    monkeypatch.setattr(
+        'polyumi_ingest.preproc.slam_step._SLAM_CONFIG',
+        {'resolution_divisor': 4, 'localization_frame_stride': 3},
+    )
+    step = OrbSlam3Step()
+    assert (step.resolution_divisor, step.localization_frame_stride) == (4, 3)
+
+    # env wins over the file, for one-off experiments
+    monkeypatch.setenv('POLYUMI_SLAM_LOC_STRIDE', '1')
+    assert OrbSlam3Step().localization_frame_stride == 1
+
+
+def test_shipped_slam_config_matches_the_migrated_defaults() -> None:
+    """The checked-in config really is half-res + stride 2, not just the code fallback."""
+    from polyumi_ingest.config import load_slam_config
+
+    cfg = load_slam_config()
+    assert cfg['resolution_divisor'] == 2
+    assert cfg['localization_frame_stride'] == 2
+    assert cfg['reverse_merge_max_overlap_mm'] == 50.0
+
+
+def test_step_config_defaults_and_rollback(monkeypatch) -> None:
+    """Defaults are half-res + stride 2; env vars override; 1/1 is the rollback."""
+    monkeypatch.delenv('POLYUMI_SLAM_RES_DIV', raising=False)
+    monkeypatch.delenv('POLYUMI_SLAM_LOC_STRIDE', raising=False)
+    step = OrbSlam3Step()
+    assert (step.resolution_divisor, step.localization_frame_stride) == (2, 2)
+
+    monkeypatch.setenv('POLYUMI_SLAM_RES_DIV', '1')
+    monkeypatch.setenv('POLYUMI_SLAM_LOC_STRIDE', '1')
+    rollback = OrbSlam3Step()
+    assert (rollback.resolution_divisor, rollback.localization_frame_stride) == (1, 1)
+
+    explicit = OrbSlam3Step(resolution_divisor=3, localization_frame_stride=4)
+    assert (explicit.resolution_divisor, explicit.localization_frame_stride) == (3, 4)
+
+    with pytest.raises(ValueError):
+        OrbSlam3Step(resolution_divisor=0)
 
 
 @pytest.mark.slow

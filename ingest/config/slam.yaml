@@ -1,0 +1,57 @@
+# Tunables for the ORB-SLAM3 preprocessing step (step 2).
+#
+# This file holds the knobs that decide *how much data* SLAM is fed. The camera
+# model itself (intrinsics, distortion, IMU noise, ORB extractor settings) lives
+# separately in the ORB-SLAM3 settings YAML -- see `camera_settings_note` below --
+# because ORB-SLAM3 reads that file directly and it is the calibration artifact.
+#
+# Values here are defaults. Each can be overridden by an environment variable for
+# one-off experiments without editing the file; the env var always wins.
+
+# Downsample factor applied to the camera settings (width/height and the fx/fy/cx/cy
+# intrinsics; the KannalaBrandt k1..k4 distortion coefficients act on a dimensionless
+# angle and are deliberately not scaled).
+#
+# 2 => 2704x2028 source decoded to 676x507 for tracking.
+#
+# Applies to BOTH map building and localization, and they must stay equal: ORB
+# descriptors and the scale pyramid are resolution-dependent, so localizing against
+# an atlas built at a different resolution makes relocalization unreliable
+# (bistable: some episodes track 100%, others 0%, with no middle ground).
+#
+# Env override: POLYUMI_SLAM_RES_DIV
+resolution_divisor: 2
+
+# Feed every Nth frame to the LOCALIZER. 2 => ~30 fps from the 59.94 fps source.
+#
+# Map building is deliberately NOT decimated (it always runs at full frame rate):
+# decimating it measured no reliable benefit, and at stride 3 one scene failed to
+# initialise a map at all. Mapping is only ~10% of per-scene cost, so there is
+# nothing to gain against that risk.
+#
+# Set this and resolution_divisor both to 1 to restore the pre-migration behaviour
+# exactly -- that is the rollback path.
+#
+# Env override: POLYUMI_SLAM_LOC_STRIDE
+localization_frame_stride: 2
+
+# Maximum median position disagreement (mm) between the forward and reverse passes,
+# measured on frames both tracked, before the reverse pass is discarded from the
+# merge and the forward-only trajectory is kept.
+#
+# NOTE: `max_reverse_overlap_mm` in quality_thresholds.yaml is the *same decision
+# boundary applied a second time* -- there it decides whether to flag the episode
+# unusable, here it decides whether to trust the reverse poses. Keep the two in
+# sync unless you specifically want an episode whose reverse pass was discarded to
+# still count as usable.
+reverse_merge_max_overlap_mm: 50.0
+
+# Where the camera/IMU calibration actually lives. Not loaded from here -- recorded
+# so this file is a complete map of SLAM configuration.
+#
+#   external/ORB_SLAM3_PolyUMI/Examples/Monocular-Inertial/gopro_hero12_slam.yaml
+#
+# It sits inside the git submodule because ORB-SLAM3 reads it directly, which means
+# a `git submodule update` can clobber it. Regenerate with
+# `ingest/integration/populate_slam_yaml.py`; see docs/camera-calibration.md.
+camera_settings_note: external/ORB_SLAM3_PolyUMI/Examples/Monocular-Inertial/gopro_hero12_slam.yaml
