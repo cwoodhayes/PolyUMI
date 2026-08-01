@@ -68,6 +68,30 @@
         <dd>{{ detail.total_dropped_video_frames }}</dd>
       </dl>
       {% endif %}
+      <h3>Provenance</h3>
+      <dl>
+        <dt title="Commit of polyumi running on the Pi when these sessions were recorded (metadata.json polyumi_version)">Recorded by</dt>
+        <dd>
+          {% if detail.provenance.pi_versions %}
+          {% for v in detail.provenance.pi_versions %}
+          <span class="mono" title="{{ v }}">{{ v | short_sha or v }}</span>{% if not loop.last %}, {% endif %}
+          {% endfor %}
+          {% if detail.provenance.pi_versions | length > 1 %}
+          <span class="badge warn" title="Sessions in this scene were recorded under different Pi deploys">mixed</span>
+          {% endif %}
+          {% else %}—{% endif %}
+        </dd>
+        <dt title="Commit that built scene.zarr (root git_sha attr). Individual preprocessing steps may have re-run later — see the pipeline list.">pzarr built by</dt>
+        <dd>
+          {% if detail.provenance.pzarr_git_sha | short_sha %}
+          <span class="mono" title="{{ detail.provenance.pzarr_git_sha }}">{{ detail.provenance.pzarr_git_sha | short_sha }}</span>
+          {% else %}—{% endif %}
+        </dd>
+        <dt>Ingest version</dt>
+        <dd>{{ detail.provenance.pipeline_version or '—' }}</dd>
+        <dt>pzarr built</dt>
+        <dd>{{ detail.provenance.pzarr_created_at or '—' }}</dd>
+      </dl>
       {% if detail.conflicts %}
       <div class="conflict-box">
         <strong>⚠ Task conflicts</strong>
@@ -92,6 +116,13 @@
         {% for step in detail.pp_status.steps %}
         <li class="{{ 'pp-step-done' if step.complete else 'pp-step-pending' }}">
           {{ '✓' if step.complete else '○' }} {{ step.number }}. {{ step.name }}
+          {% if step.complete %}
+          {% if step.git_sha | short_sha %}
+          <span class="mono pp-step-sha" title="Run at {{ step.completed_at or 'unknown time' }} on commit {{ step.git_sha }}">{{ step.git_sha | short_sha }}</span>
+          {% else %}
+          <span class="pp-step-sha muted" title="This step completed before per-step commit provenance was recorded; re-run it to stamp one">—</span>
+          {% endif %}
+          {% endif %}
         </li>
         {% endfor %}
       </ul>

@@ -17,6 +17,7 @@ from imagecodecs.numcodecs import Jpegxl
 from numcodecs import Blosc
 from polyumi_pi.files.session import SessionFiles
 
+from polyumi_ingest.gitinfo import git_sha
 from polyumi_ingest.gopro_fetch import _recording_start_time
 from polyumi_ingest.gpmf_parse import extract_gpmf_binary, parse_imu
 from polyumi_ingest.pzarr.optitrack import find_optitrack_csv, write_optitrack
@@ -31,13 +32,6 @@ log = logging.getLogger('pzarr')
 # effort=1: fastest encode; distance default (1.0) is perceptually lossless
 _JPEGXL = Jpegxl(effort=1)
 _BLOSC = Blosc(cname='zstd', clevel=5, shuffle=Blosc.SHUFFLE)
-
-
-def _git_sha() -> str:
-    try:
-        return subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
-    except Exception:
-        return 'unknown'
 
 
 def arr(grp: zarr.Group, path: str) -> zarr.Array:
@@ -348,7 +342,7 @@ def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.P
             'n_episodes': len(sessions),
             'location': None,
             'pipeline_version': importlib.metadata.version('polyumi_ingest'),
-            'git_sha': _git_sha(),
+            'git_sha': git_sha(),
             'created_at': dt.datetime.now(dt.timezone.utc).isoformat(),
             'alignment_refs': [],
             'pzarr_version': PZARR_VERSION,

@@ -14,7 +14,7 @@ from sqlalchemy import func
 from sqlmodel import Session as DBSession
 from sqlmodel import select
 
-from polyumi_catalog import episode_quality, mcap_tools, pp_status, pzarr_inspect, thumbnails
+from polyumi_catalog import episode_quality, mcap_tools, pp_status, provenance, pzarr_inspect, thumbnails
 from polyumi_catalog.models import Dataset, DatasetMember, Scene, Session, Task
 
 # Sentinel task filters used by the UI's pseudo-rows in the Tasks column.
@@ -272,6 +272,7 @@ def scene_detail(db: DBSession, scene_id: str) -> dict:
         'quality': quality,
         'total_dropped_video_frames': sum(s.video_dropped_frames or 0 for s in sessions),
         'pp_status': pp_status.scene_pp_status(pathlib.Path(scene.dir)),
+        'provenance': provenance.scene_provenance(pathlib.Path(scene.dir)),
     }
 
 

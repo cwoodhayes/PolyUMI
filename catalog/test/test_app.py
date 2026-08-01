@@ -869,3 +869,106 @@ def test_run_pp_lock_prevents_concurrent_duplicate_runs(tmp_path: pathlib.Path, 
     finish.set()
 
     assert len(calls) == 1
+
+
+def test_scene_detail_shows_recording_and_pzarr_commits(tmp_path: pathlib.Path):
+    """The scene pane surfaces both lineages: what recorded the sessions and what built the pzarr."""
+    rec, engine = _seed(tmp_path)
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 0
+    root.attrs['git_sha'] = 'c' * 40
+    root.attrs['pipeline_version'] = '0.1.0'
+
+    resp = TestClient(create_app(engine, recordings_dir=rec)).get('/select/scene/scene-1')
+
+    assert 'Recorded by' in resp.text
+    assert 'pzarr built by' in resp.text
+    # abbreviated in the text, full sha available on hover
+    assert 'c' * 12 in resp.text
+    assert 'c' * 40 in resp.text
+    assert '0.1.0' in resp.text
+
+
+def test_scene_detail_shows_per_step_commit_for_completed_steps(tmp_path: pathlib.Path):
+    """Each completed step renders the commit it was run under, so a mixed corpus is visible."""
+    rec, engine = _seed(tmp_path)
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 0
+    root.attrs['preprocessing_steps'] = [2]
+    root.attrs['preprocessing_step_versions'] = {
+        '2': {'git_sha': 'd' * 40, 'completed_at': '2026-08-01T00:00:00+00:00'},
+    }
+
+    resp = TestClient(create_app(engine, recordings_dir=rec)).get('/select/scene/scene-1')
+
+    assert 'd' * 12 in resp.text
+    assert '2026-08-01T00:00:00+00:00' in resp.text
+
+
+def test_scene_detail_renders_without_provenance_attrs(tmp_path: pathlib.Path):
+    """A store predating provenance still renders; the fields fall back to a dash."""
+    rec, engine = _seed(tmp_path)
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 0
+    root.attrs['preprocessing_steps'] = [2]
+
+    resp = TestClient(create_app(engine, recordings_dir=rec)).get('/select/scene/scene-1')
+
+    assert resp.status_code == 200
+    assert 'Provenance' in resp.text
+
+
+def test_run_pp_force_resets_steps_before_the_response_is_rendered(tmp_path: pathlib.Path, monkeypatch):
+    """
+    Clicking "Re-run pipeline" immediately shows 0/N, without waiting for the first poll.
+
+    The reset is what makes it obvious the scene is being worked on; if it only happened
+    on the background thread, this response could still claim every step was complete.
+    """
+    rec, engine = _seed(tmp_path)
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 0
+    root.attrs['preprocessing_steps'] = [1, 2]
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_run_full_pipeline(scene_dir, force=False):
+        started.set()
+        release.wait(timeout=5)
+
+    monkeypatch.setattr('polyumi_catalog.pp_status.run_full_pipeline', fake_run_full_pipeline)
+
+    from polyumi_ingest.preproc import available_preprocessing_steps
+
+    n_steps = len(available_preprocessing_steps())
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    try:
+        resp = client.post('/scenes/scene-1/run-pp', data={'force': 'true'})
+        assert zarr.open_group(str(scene_dir / 'scene.zarr'), mode='r').attrs['preprocessing_steps'] == []
+        assert f'0 / {n_steps}' in resp.text
+        assert 'pp-step-done' not in resp.text
+        assert 'Running pipeline' in resp.text
+    finally:
+        release.set()
+        started.wait(timeout=5)
+
+
+def test_run_pp_without_force_leaves_completed_steps_ticked(tmp_path: pathlib.Path, monkeypatch):
+    """The "continue" run must not reset — it exists precisely to skip what's already done."""
+    rec, engine = _seed(tmp_path)
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 0
+    root.attrs['preprocessing_steps'] = [1, 2]
+
+    monkeypatch.setattr('polyumi_catalog.pp_status.run_full_pipeline', lambda *a, **k: None)
+
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    client.post('/scenes/scene-1/run-pp')
+
+    assert zarr.open_group(str(scene_dir / 'scene.zarr'), mode='r').attrs['preprocessing_steps'] == [1, 2]

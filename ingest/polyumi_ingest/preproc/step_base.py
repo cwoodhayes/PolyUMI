@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import pathlib
 import shutil
@@ -12,6 +13,7 @@ import zarr
 
 _PS = TypeVar('_PS', bound='PreprocessingStep')
 
+from polyumi_ingest.gitinfo import git_sha
 from polyumi_ingest.pzarr.scene_files import SceneFiles
 
 log = logging.getLogger(__name__)
@@ -57,12 +59,36 @@ def preprocessing_steps_done(root: zarr.Group) -> list[int]:
         return []
 
 
+def preprocessing_step_versions(root: zarr.Group) -> dict[str, dict]:
+    """
+    Return ``{step_number_as_str: {'git_sha': ..., 'completed_at': ...}}`` recorded on ``root``.
+
+    Empty for any store last processed before this provenance was recorded, so callers must
+    treat a missing entry as "unknown", not as "not run" — ``preprocessing_steps`` remains
+    the authority on which steps are complete.
+    """
+    raw = root.attrs.get('preprocessing_step_versions', {})
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): v for k, v in raw.items() if isinstance(v, dict)}
+
+
 def _mark_preprocessing_step(root: zarr.Group, step_number: int) -> None:
     steps = preprocessing_steps_done(root)
     if step_number not in steps:
         steps.append(step_number)
         steps.sort()
     root.attrs['preprocessing_steps'] = steps
+    # Per-step provenance, alongside the root's build-time `git_sha`: steps are re-run
+    # individually and often under a later commit than the one that built the store, so a
+    # single store-level sha can't say which code produced any particular step's output.
+    # Keys are strings because zarr attrs round-trip through JSON, which has no int keys.
+    versions = preprocessing_step_versions(root)
+    versions[str(step_number)] = {
+        'git_sha': git_sha(),
+        'completed_at': dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+    root.attrs['preprocessing_step_versions'] = versions
 
 
 def _write_scalar(group: zarr.Group, name: str, value: float | int) -> None:

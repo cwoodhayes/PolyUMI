@@ -199,6 +199,15 @@ body {
   opacity: 0.6;
 }
 
+/* Commit each completed step was run under. Muted and non-breaking so it reads as an
+   annotation on the step rather than part of its name. */
+.pp-step-sha {
+  font-size: 0.75rem;
+  opacity: 0.65;
+  white-space: nowrap;
+  word-break: normal;
+}
+
 .stream-table {
   border-collapse: collapse;
   width: 100%;

@@ -42,7 +42,9 @@ step is done, since it would then be a no-op) and "Re-run pipeline" (``force=tru
 re-runs every step from scratch regardless of completion — only shown once at least
 one step is complete, i.e. there's actually something it would discard). Both post to
 the same ``run-pp`` route with an ``hx-vals``-supplied ``force`` field; the route
-itself is agnostic to which button fired it.
+itself is agnostic to which button fired it. A forced run clears the scene's recorded
+step completion before starting (``pp_status.reset_pp_status``), so the pane drops to
+0/N and re-ticks as the run proceeds instead of sitting at "complete" throughout.
 Phase 5 adds marking an episode unusable (excluded from dataset exports): a plain HTMX POST
 from the session detail pane, same in-place-swap style as MCAP export, except it also
 out-of-band-updates the Episodes column (``_detail_with_episodes_oob``) so that column's
@@ -71,7 +73,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import Engine
 from sqlmodel import Session as DBSession
 
-from polyumi_catalog import mcap_tools, pp_status, queries, thumbnails
+from polyumi_catalog import mcap_tools, pp_status, provenance, queries, thumbnails
 from polyumi_catalog.db import default_datasets_dir
 from polyumi_catalog.dataset_builder import DatasetBuildError, build_dataset
 from polyumi_catalog.models import Scene
@@ -108,6 +110,9 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
     app.state.pp_runs_lock = threading.Lock()
     app.mount('/static', StaticFiles(directory=_STATIC_DIR), name='static')
     templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+    # Commit shas are shown abbreviated in several places; the full value stays in the
+    # element's title attribute, so the templates need both forms of the same string.
+    templates.env.filters['short_sha'] = provenance.short_sha
 
     def render(request: Request, template: str, **ctx) -> HTMLResponse:
         return templates.TemplateResponse(request, template, ctx)
@@ -390,6 +395,20 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
                 app.state.pp_runs[scene_id] = {'status': 'running', 'error': None}
 
         if not already_running:
+            if force:
+                # Done here rather than only inside run_full_pipeline so the response
+                # rendered below already shows 0/N: the thread hasn't necessarily reached
+                # the reset by the time this request returns, and the pane would otherwise
+                # keep claiming "complete" until the first poll three seconds later.
+                # Idempotent — run_full_pipeline repeats it for non-HTTP callers.
+                try:
+                    pp_status.reset_pp_status(scene_dir)
+                except Exception as exc:
+                    with app.state.pp_runs_lock:
+                        app.state.pp_runs[scene_id] = {'status': 'error', 'error': str(exc)}
+                    with DBSession(engine) as db:
+                        detail = _scene_detail_with_run_state(db, scene_id)
+                    return render(request, '_detail.html', detail=detail, oob=False)
 
             def _run() -> None:
                 # Broad except is intentional: this runs unattended on a background
