@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import logging
-import pathlib
 
 import numpy as np
 import zarr
 from scipy.spatial.transform import Rotation
 
 from polyumi_ingest.config import load_gripper_calib
-from polyumi_ingest.preproc.step_base import PreprocessingStep, register_preprocessing_step
-from polyumi_ingest.pzarr.store import arr, grp
+from polyumi_ingest.episode_status import Episode, SceneContext
+from polyumi_ingest.preproc.step_base import PreprocessingStep, StepComplete, register_preprocessing_step
+from polyumi_ingest.pzarr.store import arr
 from polyumi_ingest.transforms import gripper_calib_transforms, transform_optitrack_pose
 
 log = logging.getLogger(__name__)
@@ -113,63 +113,70 @@ class SlamToWorldAlignStep(PreprocessingStep):
             'rotation': [0.0, 0.0, 0.0, 1.0],
         }
 
-    def run_step(self, scene_zarr: pathlib.Path, force: bool = False) -> None:
-        """Compute T_ws and write it to the root zarr attrs."""
-        root = zarr.open_group(str(scene_zarr), mode='a')
+    def prepare_scene(self, scene: SceneContext) -> None:
+        """Load the OptiTrack side of the fit, or settle the whole step if there's nothing to fit."""
+        root = scene.root
 
-        if 'optitrack_to_slam_transform' in root.attrs and not force:
-            log.info('optitrack_to_slam_transform already present; use --force to recompute.')
-            return
+        if 'optitrack_to_slam_transform' in root.attrs and not scene.force:
+            raise StepComplete('optitrack_to_slam_transform already present; use --force to recompute.')
 
         if 'optitrack/pose' not in root:
             log.warning('No optitrack data in scene; storing identity T_ws.')
             self._write_identity(root)
-            return
+            raise StepComplete('no optitrack data to align against.')
 
         gripper_calib = load_gripper_calib()
         root.attrs['gripper_calib'] = gripper_calib
 
         T_gb_rb, T_gb_gp, _ = gripper_calib_transforms(gripper_calib)
-        ot_ts = np.asarray(root['optitrack/timestamps'][:], dtype=np.float64)
+        self.ot_ts = np.asarray(root['optitrack/timestamps'][:], dtype=np.float64)
         ot_poses = np.asarray(root['optitrack/pose'][:], dtype=np.float64)
 
         # Convert OptiTrack poses to optitrack-frame GoPro poses (position + orientation).
-        ot_gopro_poses = np.array([transform_optitrack_pose(p, T_gb_rb, T_gb_gp) for p in ot_poses])
+        self.ot_gopro_poses = np.array([transform_optitrack_pose(p, T_gb_rb, T_gb_gp) for p in ot_poses])
+
+        # Filled by process_episode; the fit in finish_scene runs over their concatenation.
+        self.slam_ts_parts: list[np.ndarray] = []
+        self.slam_pos_parts: list[np.ndarray] = []
+        self.slam_quat_parts: list[np.ndarray] = []
+
+    def process_episode(self, scene: SceneContext, episode: Episode) -> None:
+        """Collect one episode's valid SLAM poses, corrected to the finger/optitrack clock."""
+        ep_grp = episode.group
+        if 'gopro/slam_poses' not in ep_grp:
+            return
+        poses = np.asarray(arr(ep_grp, 'gopro/slam_poses')[:], dtype=np.float64)
+        gopro_ts = np.asarray(arr(ep_grp, 'timestamps/gopro')[:], dtype=np.float64)
+
+        # Shift GoPro timestamps into the finger (= OptiTrack) clock domain.
+        offset = 0.0
+        if 'annotations/time_sync' in ep_grp:
+            offset = float(
+                ep_grp['annotations/time_sync'].attrs.get('gopro_to_finger_offset_s', 0.0)  # type: ignore[index]
+            )
+            gopro_ts = gopro_ts - offset
+
+        valid = ~np.isnan(poses[:, 0])
+        if valid.any():
+            self.slam_ts_parts.append(gopro_ts[valid])
+            self.slam_pos_parts.append(poses[valid, :3])
+            self.slam_quat_parts.append(poses[valid, 3:])
+
+    def finish_scene(self, scene: SceneContext) -> None:
+        """Fit T_ws over every episode's SLAM poses at once and write it to the root attrs."""
+        root = scene.root
+        ot_ts = self.ot_ts
+        ot_gopro_poses = self.ot_gopro_poses
         ot_gopro_pos = ot_gopro_poses[:, :3]
 
-        # Collect SLAM poses across all episodes, correcting to the finger/optitrack clock.
-        slam_ts_parts: list[np.ndarray] = []
-        slam_pos_parts: list[np.ndarray] = []
-        slam_quat_parts: list[np.ndarray] = []
-        for ep_key in sorted(k for k in root.keys() if k.startswith('episode_')):
-            ep_grp = grp(root, ep_key)
-            if 'gopro/slam_poses' not in ep_grp:
-                continue
-            poses = np.asarray(arr(ep_grp, 'gopro/slam_poses')[:], dtype=np.float64)
-            gopro_ts = np.asarray(arr(ep_grp, 'timestamps/gopro')[:], dtype=np.float64)
-
-            # Shift GoPro timestamps into the finger (= OptiTrack) clock domain.
-            offset = 0.0
-            if 'annotations/time_sync' in ep_grp:
-                offset = float(
-                    ep_grp['annotations/time_sync'].attrs.get('gopro_to_finger_offset_s', 0.0)  # type: ignore[index]
-                )
-                gopro_ts = gopro_ts - offset
-
-            valid = ~np.isnan(poses[:, 0])
-            if valid.any():
-                slam_ts_parts.append(gopro_ts[valid])
-                slam_pos_parts.append(poses[valid, :3])
-                slam_quat_parts.append(poses[valid, 3:])
-
-        if not slam_ts_parts:
+        if not self.slam_ts_parts:
             log.warning('No valid SLAM poses found across any episode; storing identity T_ws.')
             self._write_identity(root)
             return
 
-        slam_ts = np.concatenate(slam_ts_parts)
-        slam_pos = np.concatenate(slam_pos_parts, axis=0)
-        slam_quat = np.concatenate(slam_quat_parts, axis=0)
+        slam_ts = np.concatenate(self.slam_ts_parts)
+        slam_pos = np.concatenate(self.slam_pos_parts, axis=0)
+        slam_quat = np.concatenate(self.slam_quat_parts, axis=0)
 
         # Sort by timestamp (episodes may not be contiguous).
         order = np.argsort(slam_ts)

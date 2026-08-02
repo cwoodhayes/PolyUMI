@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-import pathlib
 
 import numpy as np
 import zarr
 from numcodecs import Blosc
 
 from polyumi_ingest.config import load_gripper_calib
+from polyumi_ingest.episode_status import Episode, SceneContext
 from polyumi_ingest.interpolation import interpolate_se3_gaps
 from polyumi_ingest.preproc.step_base import PreprocessingStep, register_preprocessing_step
 from polyumi_ingest.pzarr.store import arr, grp
@@ -95,28 +95,19 @@ class EefPoseStep(PreprocessingStep):
     ``gopro/slam_poses`` in the episode.
     """
 
-    def run_step(self, scene_zarr: pathlib.Path, force: bool = False) -> None:
-        """Write ``eef/pose_<source>`` for every source each episode can supply."""
-        root = zarr.open_group(str(scene_zarr), mode='a')
-        episodes = sorted(k for k in root.keys() if k.startswith('episode_'))
-        if not episodes:
-            raise RuntimeError(f'No episodes found in {scene_zarr}')
-
+    def prepare_scene(self, scene: SceneContext) -> None:
+        """Load the gripper calibration and derive each source's hop to the hand frame."""
         gripper_calib = load_gripper_calib()
         T_gb_rb, T_gb_gp, _ = gripper_calib_transforms(gripper_calib)
         T_gp_hand = gopro_to_hand_transform(gripper_calib)
-        root.attrs['gripper_calib'] = gripper_calib
+        scene.root.attrs['gripper_calib'] = gripper_calib
 
         # Per-source hop from what the sensor reports to the hand frame. Both route through the
         # GoPro frame, which is the only body both embodiments share; see the class docstring.
-        source_to_hand = {
+        self.source_to_hand = {
             'slam': T_gp_hand,
             'optitrack': T_gb_rb.inv() * T_gb_gp * T_gp_hand,
         }
-
-        for episode_key in episodes:
-            ep = root.require_group(episode_key)
-            self._process_episode(root, ep, episode_key, source_to_hand, force=force)
 
     def _available_sources(self, root: zarr.Group, ep: zarr.Group) -> list[str]:
         """Pose sources this episode can actually supply, in preference order."""
@@ -127,22 +118,18 @@ class EefPoseStep(PreprocessingStep):
             available.append('slam')
         return [s for s in _SOURCE_PREFERENCE if s in available]
 
-    def _process_episode(
-        self,
-        root: zarr.Group,
-        ep: zarr.Group,
-        episode_key: str,
-        source_to_hand: dict,
-        force: bool,
-    ) -> None:
+    def process_episode(self, scene: SceneContext, episode: Episode) -> None:
         """Resolve this episode's available pose sources and write one eef/pose_<source> each."""
+        root, ep, episode_key = scene.root, episode.group, episode.key
+        source_to_hand = self.source_to_hand
+
         sources = self._available_sources(root, ep)
         if not sources:
             log.warning(f'  {episode_key}: no optitrack or slam pose source; skipping.')
             return
 
         existing = set(ep['eef'].attrs.get('available_sources', [])) if 'eef' in ep else set()
-        if not force and existing.issuperset(sources):
+        if not scene.force and existing.issuperset(sources):
             log.info(f'  {episode_key}: eef/pose_* already present for {sources}; use --force to recompute.')
             return
 

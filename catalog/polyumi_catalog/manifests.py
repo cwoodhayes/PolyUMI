@@ -3,7 +3,9 @@ Read/write helpers for the catalog's authoritative on-disk manifests.
 
 ``SceneManifest`` (``scene.json`` at a scene root) is the canonical home of a scene's
 task assignment, notes, and unusable-episode markers; it lives in ``polyumi_ingest.manifests``
-(re-exported here) because DP export needs to read it too — see that module's docstring.
+(re-exported here, along with the ``update_scene_manifest`` / ``set_episode_unusable`` writers
+every mutation goes through) because DP export needs to read it too, and ingest writes it —
+see that module's docstring.
 ``DatasetManifest`` (``<name>.dataset.json`` beside an exported buffer) records what
 scenes/episodes and which code version produced a training dataset. See docs/catalog-ui-plan.md §3.2.
 """
@@ -15,13 +17,20 @@ import pathlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from polyumi_ingest.manifests import SCENE_MANIFEST_NAME, SceneManifest
+from polyumi_ingest.manifests import (
+    SCENE_MANIFEST_NAME,
+    SceneManifest,
+    set_episode_unusable,
+    update_scene_manifest,
+)
 
 __all__ = [
     'SCENE_MANIFEST_NAME',
     'SceneManifest',
     'DatasetMemberSpec',
     'DatasetManifest',
+    'set_episode_unusable',
+    'update_scene_manifest',
 ]
 
 

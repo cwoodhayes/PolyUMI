@@ -75,6 +75,11 @@ class SceneFiles:
 
     path: pathlib.Path
     sessions: list[SessionFiles] = field(default_factory=list)
+    #: ``{session_dir_name: reason}`` for session directories that failed to load at all — an
+    #: empty ``audio.wav``, missing ``metadata.json``. They never become episodes, so
+    #: ``build_pzarr`` flags them unusable from here; otherwise they'd be a warning nobody sees
+    #: and a scene that quietly has fewer episodes than it has session directories.
+    unloadable: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_path(cls, path: pathlib.Path) -> SceneFiles:
@@ -84,14 +89,19 @@ class SceneFiles:
             raise ValueError(f'Expected scene directory: {path}')
 
         sessions: list[SessionFiles] = []
+        unloadable: dict[str, str] = {}
         for child in sorted(path.iterdir()):
             if child.is_dir() and child.name.startswith('session_'):
                 try:
                     sessions.append(SessionFiles.from_file(child))
                 except Exception as e:
-                    log.warning(f'Skipping {child.name}: {e}')
+                    # !r, not str: a bare EOFError() from wave.open on a zero-byte audio.wav
+                    # stringifies to nothing, which used to print `Skipping session_x: `.
+                    reason = f'{type(e).__name__}: {e}' if str(e) else repr(e)
+                    log.warning(f'Skipping {child.name}: {reason}')
+                    unloadable[child.name] = reason
 
-        return cls(path=path, sessions=sessions)
+        return cls(path=path, sessions=sessions, unloadable=unloadable)
 
     @staticmethod
     def resolve_zarr_path(path: pathlib.Path) -> pathlib.Path:

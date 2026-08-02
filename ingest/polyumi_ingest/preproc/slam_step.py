@@ -18,6 +18,7 @@ import zarr
 from numcodecs import Blosc
 
 from polyumi_ingest.config import load_slam_config
+from polyumi_ingest.episode_status import Episode, SceneContext
 from polyumi_ingest.preproc.step_base import (
     PreprocessingStep,
     register_preprocessing_step,
@@ -821,76 +822,66 @@ class OrbSlam3Step(PreprocessingStep):
             log.error(f'Localization failed; temp dir preserved: {tmp_dir}')
             raise
 
-    def run_step(self, scene_zarr: pathlib.Path, force: bool = False) -> None:
+    def prepare_scene(self, scene: SceneContext) -> None:
         """
-        Run map building then per-episode localization on scene_zarr.
+        Phase 1: build the ORB-SLAM3 atlas from the scene's MAPPING session.
 
-        Expects at least one episode group with ``session_type`` attribute set
-        to ``'MAPPING'`` (written by ``build_pzarr``).  Falls back to treating
-        the first episode as the mapping session for zarr stores built before
-        this change was introduced (see OQ-4).
+        Expects one episode group with ``session_type`` set to ``'MAPPING'`` (written by
+        ``build_pzarr``). Falls back to treating the first episode as the mapping session for
+        zarr stores built before that attribute existed (see OQ-4).
+
+        A failure here is fatal to the step by design: without an atlas there is nothing for
+        any episode to localize against, so this is not an episode-shaped failure.
         """
         self._validate_settings_yaml()
 
-        scene_dir = scene_zarr.parent
-        atlas_path = scene_dir / f'{scene_dir.name}.atlas.osa'
-        log_dir = scene_dir / 'slam_logs'
-        log_dir.mkdir(exist_ok=True)
+        scene_dir = scene.scene_dir
+        self.atlas_path = scene_dir / f'{scene_dir.name}.atlas.osa'
+        self.log_dir = scene_dir / 'slam_logs'
+        self.log_dir.mkdir(exist_ok=True)
 
-        root = zarr.open_group(str(scene_zarr), mode='a')
-        episodes = sorted(k for k in root.keys() if k.startswith('episode_'))
-        if not episodes:
-            raise RuntimeError(f'No episodes found in {scene_zarr}')
-
-        mapping_key: str | None = None
-        episode_keys: list[str] = []
-        for ep_key in episodes:
-            ep = grp(root, ep_key)
-            session_type = ep.attrs.get('session_type', None)
-            if session_type == 'MAPPING':
-                mapping_key = ep_key
-            else:
-                episode_keys.append(ep_key)
+        episodes = scene.episodes
+        mapping = next((ep for ep in episodes if ep.is_mapping), None)
 
         # OQ-4 fallback: if no episode has session_type='MAPPING', treat first as mapping
-        if mapping_key is None:
+        if mapping is None:
             log.warning(
                 'No episode with session_type=MAPPING found; treating first episode as mapping. '
                 'Rebuild the zarr store to get proper session_type attributes.'
             )
-            mapping_key = episodes[0]
-            episode_keys = [k for k in episodes if k != mapping_key]
+            mapping = episodes[0]
+        self._mapping_key = mapping.key
 
-        if not episode_keys:
+        if len(episodes) == 1:
             log.warning(
-                f'No EPISODE groups found in {scene_zarr} — only {mapping_key} '
+                f'No EPISODE groups found in {scene.zarr_path} — only {mapping.key} '
                 f'(session_type=MAPPING) is present. Map will be built but no '
                 f'localization will run. Add episode sessions to localize.'
             )
 
-        # Phase 1: map building
-        if atlas_path.exists() and force:
-            log.info(f'--force: removing existing atlas at {atlas_path}')
-            atlas_path.unlink()
-        if atlas_path.exists():
-            log.info(f'Atlas already exists at {atlas_path}, skipping map building.')
-        else:
-            log.info(f'Phase 1: building map from {mapping_key}...')
-            mapping_grp = grp(root, mapping_key)
-            t0 = time.monotonic()
-            self._build_map(mapping_grp, atlas_path, log_dir, scene_zarr)
-            elapsed = time.monotonic() - t0
-            log.info(f'Map built in {elapsed:.1f}s: {atlas_path}')
+        if self.atlas_path.exists() and scene.force:
+            log.info(f'--force: removing existing atlas at {self.atlas_path}')
+            self.atlas_path.unlink()
+        if self.atlas_path.exists():
+            log.info(f'Atlas already exists at {self.atlas_path}, skipping map building.')
+            return
 
-        # Phase 2: per-episode localization
-        for i, ep_key in enumerate(episode_keys):
-            log.info(f'Phase 2: localizing {ep_key} ({i + 1}/{len(episode_keys)})...')
-            ep_grp = grp(root, ep_key)
-            # Use the zarr episode index (parsed from ep_key) so log filenames
-            # and tmp dirs line up with the episode_N group in scene.zarr,
-            # rather than the position within episode_keys (which skips MAPPING).
-            ep_index = int(ep_key.split('_')[1])
-            t0 = time.monotonic()
-            self._localize_episode(ep_grp, ep_index, atlas_path, log_dir, scene_zarr)
-            elapsed = time.monotonic() - t0
-            log.info(f'Localized {ep_key} in {elapsed:.1f}s')
+        log.info(f'Phase 1: building map from {mapping.key}...')
+        t0 = time.monotonic()
+        self._build_map(mapping.group, self.atlas_path, self.log_dir, scene.zarr_path)
+        elapsed = time.monotonic() - t0
+        log.info(f'Map built in {elapsed:.1f}s: {self.atlas_path}')
+
+    def process_episode(self, scene: SceneContext, episode: Episode) -> None:
+        """Phase 2: localize one episode against the atlas built in phase 1."""
+        # The mapping session *is* the map, so there is nothing to localize it against — its
+        # own trajectory was already reconciled onto it during the phase-1 build.
+        if episode.key == self._mapping_key:
+            return
+
+        log.info(f'Phase 2: localizing {episode.key}...')
+        t0 = time.monotonic()
+        # episode.index (parsed from the key) rather than a loop counter, so log filenames and
+        # tmp dirs line up with the episode_N group in scene.zarr even though MAPPING is skipped.
+        self._localize_episode(episode.group, episode.index, self.atlas_path, self.log_dir, scene.zarr_path)
+        log.info(f'Localized {episode.key} in {time.monotonic() - t0:.1f}s')

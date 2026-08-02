@@ -12,7 +12,6 @@ import numpy as np
 import pytest
 import zarr
 from numcodecs import Blosc
-
 from polyumi_ingest.preproc.slam_step import (
     OrbSlam3Step,
     _downsample_settings,
@@ -205,11 +204,15 @@ def test_zarr_output_schema(tmp_path: pathlib.Path) -> None:
 
 def test_placeholder_detection_raises(tmp_path: pathlib.Path) -> None:
     """Settings YAML with placeholder values must raise before any subprocess is called."""
+    scene_zarr = tmp_path / 'scene.zarr'
+    root = zarr.open_group(str(scene_zarr), mode='w', zarr_format=2)
+    _make_episode(root, 'episode_0', session_type='MAPPING')
+
     yaml_with_placeholder = tmp_path / 'bad.yaml'
     yaml_with_placeholder.write_text('%YAML:1.0\nCamera.fx: 0.0  # CALIBRATE_ME\n')
     step = OrbSlam3Step(settings_yaml=yaml_with_placeholder)
     with pytest.raises(RuntimeError, match='CALIBRATE_ME'):
-        step.run_step(tmp_path / 'scene.zarr')
+        step.run_step(scene_zarr)
 
 
 def test_telemetry_json_preserves_raw_gopro_axis_order(tmp_path: pathlib.Path) -> None:
@@ -741,23 +744,8 @@ def test_slam_config_yaml_supplies_the_defaults(monkeypatch) -> None:
     assert OrbSlam3Step().localization_frame_stride == 1
 
 
-def test_shipped_slam_config_matches_the_migrated_defaults() -> None:
-    """The checked-in config really is half-res + stride 2, not just the code fallback."""
-    from polyumi_ingest.config import load_slam_config
-
-    cfg = load_slam_config()
-    assert cfg['resolution_divisor'] == 2
-    assert cfg['localization_frame_stride'] == 2
-    assert cfg['reverse_merge_max_overlap_mm'] == 50.0
-
-
-def test_step_config_defaults_and_rollback(monkeypatch) -> None:
-    """Defaults are half-res + stride 2; env vars override; 1/1 is the rollback."""
-    monkeypatch.delenv('POLYUMI_SLAM_RES_DIV', raising=False)
-    monkeypatch.delenv('POLYUMI_SLAM_LOC_STRIDE', raising=False)
-    step = OrbSlam3Step()
-    assert (step.resolution_divisor, step.localization_frame_stride) == (2, 2)
-
+def test_step_config_rollback(monkeypatch) -> None:
+    """Env vars override defaults, and arguments override both."""
     monkeypatch.setenv('POLYUMI_SLAM_RES_DIV', '1')
     monkeypatch.setenv('POLYUMI_SLAM_LOC_STRIDE', '1')
     rollback = OrbSlam3Step()

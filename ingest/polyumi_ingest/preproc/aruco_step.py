@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
-import pathlib
 
 import cv2
 import numpy as np
-import zarr
 from numcodecs import Blosc
 from tqdm import tqdm
 
 from polyumi_ingest.config import GOPRO_INTRINSICS_JSON, load_aruco_finger_config
+from polyumi_ingest.episode_status import Episode, SceneContext
 from polyumi_ingest.preproc._umi_cv_util import (
     convert_fisheye_intrinsics_resolution,
     detect_localize_aruco_tags,
@@ -46,71 +45,39 @@ class ArucoGripperWidthStep(PreprocessingStep):
     Reuses the UMI implementation verbatim (see ``_umi_cv_util.py``).
     """
 
-    def run_step(self, scene_zarr: pathlib.Path, force: bool = False) -> None:
-        """Detect ArUco finger markers in each episode and write the gripper width series."""
-        root = zarr.open_group(str(scene_zarr), mode='a')
-        episodes = sorted(k for k in root.keys() if k.startswith('episode_'))
-        if not episodes:
-            raise RuntimeError(f'No episodes found in {scene_zarr}')
-
+    def prepare_scene(self, scene: SceneContext) -> None:
+        """Load the marker config and camera intrinsics shared by every episode."""
         cfg = load_aruco_finger_config()
-        left_id = int(cfg['left_id'])
-        right_id = int(cfg['right_id'])
-        marker_size_m = float(cfg['marker_size_m'])
-        nominal_z_m = float(cfg['nominal_z_m'])
-        z_tolerance_m = float(cfg['z_tolerance_m'])
+        self.left_id = int(cfg['left_id'])
+        self.right_id = int(cfg['right_id'])
+        self.marker_size_m = float(cfg['marker_size_m'])
+        self.nominal_z_m = float(cfg['nominal_z_m'])
+        self.z_tolerance_m = float(cfg['z_tolerance_m'])
 
-        aruco_dict = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, cfg['dictionary']))
-        marker_size_map = {left_id: marker_size_m, right_id: marker_size_m}
+        self.aruco_dict = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, cfg['dictionary']))
+        self.marker_size_map = {self.left_id: self.marker_size_m, self.right_id: self.marker_size_m}
 
         with GOPRO_INTRINSICS_JSON.open() as f:
-            base_intr = parse_fisheye_intrinsics(json.load(f))
+            self.base_intr = parse_fisheye_intrinsics(json.load(f))
 
-        for episode_key in episodes:
-            ep = root.require_group(episode_key)
-            self._process_episode(
-                ep=ep,
-                episode_key=episode_key,
-                scene_zarr=scene_zarr,
-                base_intr=base_intr,
-                aruco_dict=aruco_dict,
-                marker_size_map=marker_size_map,
-                left_id=left_id,
-                right_id=right_id,
-                marker_size_m=marker_size_m,
-                nominal_z_m=nominal_z_m,
-                z_tolerance_m=z_tolerance_m,
-                force=force,
-            )
+    def process_episode(self, scene: SceneContext, episode: Episode) -> None:
+        """Detect the finger markers across one episode and write its gripper width series."""
+        ep, episode_key = episode.group, episode.key
+        left_id, right_id = self.left_id, self.right_id
 
-    def _process_episode(
-        self,
-        ep: zarr.Group,
-        episode_key: str,
-        scene_zarr: pathlib.Path,
-        base_intr: dict,
-        aruco_dict: cv2.aruco.Dictionary,
-        marker_size_map: dict[int, float],
-        left_id: int,
-        right_id: int,
-        marker_size_m: float,
-        nominal_z_m: float,
-        z_tolerance_m: float,
-        force: bool,
-    ) -> None:
         if 'timestamps/gopro' not in ep:
             log.warning(f'{episode_key}: no timestamps/gopro; skipping aruco width.')
             return
 
         # GoPro frames are decoded on demand from the gopro.mp4 sidecar.
-        frames_arr = open_gopro_frames(ep, scene_zarr)
+        frames_arr = open_gopro_frames(ep, scene.zarr_path)
         timestamps = np.asarray(arr(ep, 'timestamps/gopro')[:], dtype=np.float64)
         n_frames, H, W, _ = frames_arr.shape
         if n_frames != len(timestamps):
             raise RuntimeError(f'{episode_key}: frame count {n_frames} != timestamp count {len(timestamps)}')
 
         # Scale calibration to the actual frame resolution.
-        intr = convert_fisheye_intrinsics_resolution(base_intr, (W, H))
+        intr = convert_fisheye_intrinsics_resolution(self.base_intr, (W, H))
 
         raw_ts: list[float] = []
         raw_widths: list[float] = []
@@ -120,8 +87,8 @@ class ArucoGripperWidthStep(PreprocessingStep):
             frame = np.asarray(frames_arr[i])
             tag_dict = detect_localize_aruco_tags(
                 frame,
-                aruco_dict=aruco_dict,
-                marker_size_map=marker_size_map,
+                aruco_dict=self.aruco_dict,
+                marker_size_map=self.marker_size_map,
                 fisheye_intr_dict=intr,
             )
             if left_id in tag_dict:
@@ -132,8 +99,8 @@ class ArucoGripperWidthStep(PreprocessingStep):
                 tag_dict,
                 left_id=left_id,
                 right_id=right_id,
-                nominal_z=nominal_z_m,
-                z_tolerance=z_tolerance_m,
+                nominal_z=self.nominal_z_m,
+                z_tolerance=self.z_tolerance_m,
             )
             if width is not None:
                 raw_ts.append(float(timestamps[i]))
@@ -181,9 +148,9 @@ class ArucoGripperWidthStep(PreprocessingStep):
         out_grp.attrs['n_frames'] = int(n_frames)
         out_grp.attrs['left_id'] = left_id
         out_grp.attrs['right_id'] = right_id
-        out_grp.attrs['marker_size_m'] = marker_size_m
-        out_grp.attrs['nominal_z_m'] = nominal_z_m
-        out_grp.attrs['z_tolerance_m'] = z_tolerance_m
+        out_grp.attrs['marker_size_m'] = self.marker_size_m
+        out_grp.attrs['nominal_z_m'] = self.nominal_z_m
+        out_grp.attrs['z_tolerance_m'] = self.z_tolerance_m
 
         log.info(
             f'{episode_key}: aruco width — '

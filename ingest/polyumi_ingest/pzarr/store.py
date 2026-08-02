@@ -17,7 +17,9 @@ from imagecodecs.numcodecs import Jpegxl
 from numcodecs import Blosc
 from polyumi_pi.files.session import SessionFiles
 
+from polyumi_ingest.episode_status import Episode, episode_guard
 from polyumi_ingest.gitinfo import git_sha
+from polyumi_ingest.manifests import set_episode_unusable
 from polyumi_ingest.gopro_fetch import _recording_start_time
 from polyumi_ingest.gpmf_parse import extract_gpmf_binary, parse_imu
 from polyumi_ingest.pzarr.optitrack import find_optitrack_csv, write_optitrack
@@ -259,9 +261,11 @@ def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) 
         raise RuntimeError(f'No finger frames found in {video_dir}')
     N = len(frames)
 
-    sample = cv2.imdecode(np.frombuffer(frames[0].read_bytes(), dtype=np.uint8), cv2.IMREAD_COLOR)
+    # Guard the buffer size: cv2.imdecode raises on empty input rather than returning None.
+    raw_sample = np.frombuffer(frames[0].read_bytes(), dtype=np.uint8)
+    sample = cv2.imdecode(raw_sample, cv2.IMREAD_COLOR) if raw_sample.size else None
     if sample is None:
-        raise RuntimeError(f'Failed to decode sample frame: {frames[0]}')
+        raise RuntimeError(f'Failed to decode sample frame ({raw_sample.size} bytes): {frames[0]}')
     H, W = sample.shape[:2]
 
     finger_grp = ep_grp.require_group('finger')
@@ -274,7 +278,10 @@ def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) 
         zarr_format=2,
     )
     n_written = write_frames_to_zarr(frames, frames_arr)
+    if n_written == 0:
+        raise RuntimeError(f'No finger frames could be decoded in {video_dir}')
     if n_written < N:
+        log.warning(f'  Only {n_written}/{N} finger frames decoded; truncating the episode there.')
         frames_arr.resize((n_written, H, W, 3))
 
     if meta.first_frame_metadata is None:
@@ -332,6 +339,11 @@ def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.P
         raise RuntimeError(f'No valid sessions found in {scene_path}')
 
     root = zarr.open_group(str(scene.zarr_path), mode='w', zarr_format=2)
+    # Flipped to True once every episode has been attempted. A store left False was interrupted
+    # mid-build and is missing episodes; `pingest pp` rebuilds it rather than preprocessing a
+    # partial scene. Stores built before this attr existed have neither value, and a missing
+    # attr means "unknown, assume complete" — see _pzarr_needs_build in main.py.
+    root.attrs['build_complete'] = False
 
     first_meta = sessions[0].metadata
     optitrack_start_time = first_meta.optitrack_start_time
@@ -362,13 +374,24 @@ def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.P
                 f' OptiTrack poses will not be included in the zarr store.'
             )
 
+    # A session directory too damaged to load at all never becomes an episode, so there is no
+    # episode group to flag; mark it straight in scene.json instead of only warning about it.
+    for session_dir_name, reason in scene.unloadable.items():
+        set_episode_unusable(scene.path, session_dir_name, True)
+        log.warning(f'{session_dir_name}: marked unusable in scene.json ({reason})')
+
     for i, session in enumerate(sessions):
         log.info(f'[{i + 1}/{len(sessions)}] Episode {i}: {session.path.name}')
         ep_grp = root.require_group(f'episode_{i}')
         ep_grp.attrs['session_type'] = session.metadata.session_type.value
         ep_grp.attrs['session_dir'] = session.path.name
-        _write_episode(ep_grp, session, skip_gopro)
+        episode = Episode(key=f'episode_{i}', index=i, group=ep_grp)
+        # A session damaged on disk (truncated JPEG, unreadable WAV) flags itself unusable
+        # and the build moves on; the whole scene no longer dies with it. See episode_status.
+        with episode_guard(episode, scene.path, step='build-pzarr'):
+            _write_episode(ep_grp, session, skip_gopro)
 
+    root.attrs['build_complete'] = True
     return scene.zarr_path
 
 

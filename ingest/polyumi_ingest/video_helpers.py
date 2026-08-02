@@ -142,11 +142,17 @@ def _video_frames(cap: cv2.VideoCapture) -> Iterator[np.ndarray]:
 
 
 def _image_frames(paths: list[pathlib.Path]) -> Iterator[np.ndarray]:
-    for fp in paths:
+    for i, fp in enumerate(paths):
         raw = np.frombuffer(fp.read_bytes(), dtype=np.uint8)
-        bgr = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+        # A recorder killed mid-write leaves a zero-byte or half-flushed JPEG behind, in
+        # practice as the final frame. cv2.imdecode *raises* on an empty buffer and returns
+        # None on a corrupt one, so guard both. Stop rather than skip: frame i lines up with
+        # row i of video_timestamps.csv, so dropping one from the middle would silently
+        # shift every timestamp after it. The caller truncates to what decoded.
+        bgr = cv2.imdecode(raw, cv2.IMREAD_COLOR) if raw.size else None
         if bgr is None:
-            raise RuntimeError(f'Failed to decode frame: {fp}')
+            log.warning(f'  Undecodable frame {fp.name} ({raw.size} bytes); truncating after {i} of {len(paths)}.')
+            return
         yield cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 

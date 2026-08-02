@@ -6,13 +6,14 @@ import datetime as dt
 import logging
 import pathlib
 import shutil
-from abc import ABC, abstractmethod
+from abc import ABC
 from typing import TypeVar
 
 import zarr
 
 _PS = TypeVar('_PS', bound='PreprocessingStep')
 
+from polyumi_ingest.episode_status import Episode, SceneContext, episode_guard
 from polyumi_ingest.gitinfo import git_sha
 from polyumi_ingest.pzarr.scene_files import SceneFiles
 
@@ -96,15 +97,87 @@ def _write_scalar(group: zarr.Group, name: str, value: float | int) -> None:
     group.attrs[name] = value
 
 
+class StepComplete(Exception):  # noqa: N818 — control flow, not an error
+    """
+    Raised by ``prepare_scene`` to end a step early with nothing left to do.
+
+    Not a failure: the harness logs the message and returns, and the step is still marked
+    complete. Used for "output already present, use --force" and for the degenerate inputs a
+    step answers at scene level (so-align storing an identity transform when there's no
+    OptiTrack data to align to).
+    """
+
+
 class PreprocessingStep(ABC):
-    """Base class for a single preprocessing step."""
+    """
+    Base class for a single preprocessing step, and the harness that runs one.
+
+    Steps are map-reduce over a scene's episodes: :meth:`prepare_scene` once, then
+    :meth:`process_episode` for each episode, then :meth:`finish_scene` once. All three
+    default to no-ops, so a step implements only the phases it needs. ``run_step`` is the
+    harness itself and is not meant to be overridden.
+
+    The point of the shape is fault isolation. An exception from ``process_episode`` flags
+    *that* episode unusable (in the store and in ``scene.json``) and the scene carries on —
+    a single corrupt session can't discard the work already done on its siblings. Scene-level
+    hooks have no such net: if ``prepare_scene`` or ``finish_scene`` raises, the step fails,
+    which is right, because their failure isn't episode-shaped.
+
+    A step instance handles exactly one scene (``run_preprocessing`` constructs one per scene),
+    so ``prepare_scene`` may stash whatever the later hooks need on ``self``.
+    """
 
     step_number: int
     step_name: str
 
-    @abstractmethod
+    def prepare_scene(self, scene: SceneContext) -> None:
+        """
+        Scene-level work before any episode: load config, build shared artifacts.
+
+        Raise :class:`StepComplete` to finish the step here, skipping both later phases.
+        """
+
+    def process_episode(self, scene: SceneContext, episode: Episode) -> None:
+        """
+        Work on one episode. Raising flags it unusable; the rest of the scene continues.
+
+        Returning early is *not* a failure and flags nothing — that's how a step declines an
+        episode it has nothing to do for (a missing prerequisite, the mapping session).
+        """
+
+    def finish_scene(self, scene: SceneContext) -> None:
+        """Scene-level work after every episode: the reduce half of a map-reduce step."""
+
     def run_step(self, scene_zarr: pathlib.Path, force: bool = False) -> None:
-        """Mutate a scene.zarr store in place."""
+        """Run this step's three phases over a scene.zarr, isolating per-episode failures."""
+        # Checked here as well as in run(): opening for mutation would otherwise *create* an
+        # empty store at this path and then complain that it has no episodes.
+        if not scene_zarr.exists():
+            raise FileNotFoundError(f'No scene.zarr found at {scene_zarr}')
+        scene = SceneContext.open(scene_zarr, force=force)
+        episodes = scene.episodes
+        if not episodes:
+            raise RuntimeError(f'No episodes found in {scene_zarr}')
+
+        try:
+            self.prepare_scene(scene)
+        except StepComplete as done:
+            log.info(f'{self.step_name}: {done}')
+            return
+
+        for episode in episodes:
+            failure = episode.failure
+            if failure is not None and not force:
+                log.warning(
+                    f'{episode.key}: skipping — flagged unusable in {failure.step} ({failure.error}); --force to retry'
+                )
+                continue
+            if failure is not None:
+                log.info(f'{episode.key}: retrying (was flagged in {failure.step})')
+            with episode_guard(episode, scene.scene_dir, step=self.step_name):
+                self.process_episode(scene, episode)
+
+        self.finish_scene(scene)
 
     def run(self, scene_path: pathlib.Path, copy: bool = False, force: bool = False) -> pathlib.Path:
         """Run the step on a scene directory or scene.zarr path."""
@@ -170,12 +243,29 @@ def run_preprocessing_on_recordings(
     copy: bool = False,
     force: bool = False,
 ) -> list[pathlib.Path]:
-    """Run preprocessing on every scene under recordings_dir."""
+    """
+    Run preprocessing on every scene under recordings_dir.
+
+    A scene that fails outright (as opposed to one episode failing, which the step harness
+    already absorbs) is logged and skipped so the rest of the batch still runs; the failures
+    are summarised at the end. Same reasoning as the per-episode guard, one level up.
+    """
     outputs: list[pathlib.Path] = []
+    failures: list[tuple[str, str]] = []
     for scene_dir in _scene_dirs(recordings_dir):
         zarr_path = SceneFiles.resolve_zarr_path(scene_dir)
         if not zarr_path.exists():
             log.info(f'Skipping {scene_dir.name}: no scene.zarr found')
             continue
-        outputs.append(run_preprocessing(scene_dir, step_number=step_number, copy=copy, force=force))
+        try:
+            outputs.append(run_preprocessing(scene_dir, step_number=step_number, copy=copy, force=force))
+        except Exception as exc:
+            log.debug(f'{scene_dir.name}: traceback', exc_info=True)
+            log.error(f'{scene_dir.name} failed, continuing with the remaining scenes: {exc}')
+            failures.append((scene_dir.name, f'{type(exc).__name__}: {exc}'))
+
+    if failures:
+        log.error(f'{len(failures)} scene(s) failed:')
+        for name, reason in failures:
+            log.error(f'  {name}: {reason}')
     return outputs
