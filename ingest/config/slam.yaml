@@ -1,9 +1,8 @@
 # Tunables for the ORB-SLAM3 preprocessing step (step 2).
 #
-# This file holds the knobs that decide *how much data* SLAM is fed. The camera
-# model itself (intrinsics, distortion, IMU noise, ORB extractor settings) lives
+# Controls the data that python feeds to ORB-SLAM3, and the post-processing of the ORB-SLAM3 output.
+# Config for SLAM itself (intrinsics, distortion, IMU noise, ORB extractor settings) lives
 # separately in the ORB-SLAM3 settings YAML -- see `camera_settings_note` below --
-# because ORB-SLAM3 reads that file directly and it is the calibration artifact.
 #
 # Values here are defaults. Each can be overridden by an environment variable for
 # one-off experiments without editing the file; the env var always wins.
@@ -14,13 +13,9 @@
 #
 # 2 => 2704x2028 source decoded to 676x507 for tracking.
 #
-# Applies to BOTH map building and localization, and they must stay equal: ORB
-# descriptors and the scale pyramid are resolution-dependent, so localizing against
-# an atlas built at a different resolution makes relocalization unreliable
-# (bistable: some episodes track 100%, others 0%, with no middle ground).
-#
+# Applies to BOTH map building and localization (required to be the same)
 # Env override: POLYUMI_SLAM_RES_DIV
-resolution_divisor: 2
+resolution_divisor: 1
 
 # Feed every Nth frame to the LOCALIZER. 2 => ~30 fps from the 59.94 fps source.
 #
