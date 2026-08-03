@@ -32,4 +32,6 @@ dev = [
     "httpx",
     "ipykernel",
     "jupyterlab",
+    "ipympl>=0.10.0",
+    "plotly>=6.9.0",
 ]

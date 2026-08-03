@@ -97,8 +97,8 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
-# Exploratory notebooks are kept local (not tracked); promote reusable code to polyumi_ingest.
-notebooks/*.ipynb
+# Exploratory notebooks are kept local by default (not tracked); promote reusable code to polyumi_ingest.
+notebooks/*
 
 # IPython
 profile_default/

@@ -19,14 +19,9 @@ resolution_divisor: 1
 
 # Feed every Nth frame to the LOCALIZER. 2 => ~30 fps from the 59.94 fps source.
 #
-# Map building is deliberately NOT decimated (it always runs at full frame rate):
-# decimating it measured no reliable benefit, and at stride 3 one scene failed to
-# initialise a map at all. Mapping is only ~10% of per-scene cost, so there is
-# nothing to gain against that risk.
-#
-# Set this and resolution_divisor both to 1 to restore the pre-migration behaviour
-# exactly -- that is the rollback path.
-#
+# Map building is not decimated. In my experiments this consistently degraded 
+# performance for the whole scene, with only marginal speed benefit (since most of the time
+# is spent localizing the many episodes).
 # Env override: POLYUMI_SLAM_LOC_STRIDE
 localization_frame_stride: 2
 
