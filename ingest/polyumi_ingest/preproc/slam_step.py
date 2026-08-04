@@ -18,7 +18,7 @@ import numpy as np
 import zarr
 from numcodecs import Blosc
 
-from polyumi_ingest.config import load_slam_config
+from polyumi_ingest.config import SLAM_CONFIG_YAML, load_slam_config
 from polyumi_ingest.episode_status import Episode, SceneContext
 from polyumi_ingest.preproc.step_base import (
     PreprocessingStep,
@@ -42,16 +42,30 @@ _DEFAULT_ORB_SLAM3_DIR = _REPO_ROOT / 'external' / 'ORB_SLAM3_PolyUMI'
 
 _DEFAULT_SETTINGS_YAML = _DEFAULT_ORB_SLAM3_DIR / 'Examples' / 'Monocular-Inertial' / 'gopro_hero12_slam.yaml'
 
-# Tunables live in config/slam.yaml so resolution/frame-rate settings are visible
-# next to the other ingest config rather than buried in code; the values below are
-# fallbacks used only if that file is missing or omits a key.
-_SLAM_CONFIG = load_slam_config()
-
 # How far (as a fraction of a frame period) a trajectory row's timestamp may sit from the
 # frame its index maps to. Rows are indexed directly, so this is a consistency assertion on
 # the decimation stride rather than a matching tolerance — not a tuning knob, hence not in
 # slam.yaml.
 _TRAJ_TOLERANCE_FRAC = 0.5
+
+
+def _require_slam_setting(key: str) -> int:
+    """
+    Read one required tunable from ``config/slam.yaml``, raising if it isn't there.
+
+    Deliberately has no default to fall back on. These values decide what ORB-SLAM3 is fed,
+    they are stamped into every episode, and DP export refuses to mix two of them in one
+    buffer — so a default that silently disagreed with the checked-in config would split a
+    corpus across incompatible time bases rather than fail.
+    """
+    config = load_slam_config()
+    try:
+        return int(config[key])
+    except KeyError:
+        raise KeyError(
+            f'{SLAM_CONFIG_YAML} has no {key!r} entry. It controls how much data the SLAM '
+            f'step is fed and has no safe default; add it to the config file.'
+        ) from None
 
 
 def _export_telemetry_json(
@@ -472,20 +486,31 @@ class OrbSlam3Step(PreprocessingStep):
         timeout_s:
             Per-episode subprocess timeout; None = no timeout.
         resolution_divisor:
-            Downsample factor applied to the camera settings for *both* passes
-            (default 2 = half resolution, 676x507).  Map building and localization
-            must use the same value: ORB descriptors and the scale pyramid are
-            resolution-dependent, so localizing against a resolution-mismatched
-            atlas makes relocalization unreliable.  Defaults from
-            ``POLYUMI_SLAM_RES_DIV``.
+            Downsample factor applied to the camera settings for *both* passes.  Map
+            building and localization must use the same value: ORB descriptors and the
+            scale pyramid are resolution-dependent, so localizing against a
+            resolution-mismatched atlas makes relocalization unreliable.  Read from
+            ``config/slam.yaml`` unless overridden by ``POLYUMI_SLAM_RES_DIV``.
         localization_frame_stride:
-            Feed every Nth frame to the *localizer* (default 2 ~= 30 fps from
-            59.94 fps source).  Map building is deliberately left at full rate --
-            decimating it measured no benefit and 20 fps mapping failed outright.
-            Defaults from ``POLYUMI_SLAM_LOC_STRIDE``.
+            Feed every Nth frame to the *localizer* (2 ~= 30 fps from a 59.94 fps
+            source).  Map building is deliberately left at full rate -- decimating it
+            measured no benefit and 20 fps mapping failed outright.  Read from
+            ``config/slam.yaml`` unless overridden by ``POLYUMI_SLAM_LOC_STRIDE``.
 
-            Setting both this and ``resolution_divisor`` to 1 restores the
-            pre-migration behaviour exactly; that is the rollback path.
+        Neither has an in-code default.  These two numbers decide what ORB-SLAM3 ever sees,
+        and they are recorded per episode (``annotations/slam/frame_stride``) and enforced to
+        be uniform across a DP export -- so a fallback quietly disagreeing with the
+        checked-in config is exactly the failure that would split a corpus across two
+        incompatible time bases.  ``config/slam.yaml`` is the single source of truth.
+
+        Raises
+        ------
+        FileNotFoundError
+            If ``config/slam.yaml`` is missing.
+        KeyError
+            If it omits either key.
+        ValueError
+            If either value is below 1.
 
         """
         if orb_slam3_dir is None:
@@ -497,14 +522,17 @@ class OrbSlam3Step(PreprocessingStep):
         self.map_builder_bin = self.orb_slam3_dir / bin_subdir / map_builder_bin
         self.localizer_bin = self.orb_slam3_dir / bin_subdir / localizer_bin
         self.timeout_s = timeout_s
-        # Precedence: explicit argument > environment override > config/slam.yaml >
-        # in-code fallback.  The config file is the documented home for these; the
-        # env vars exist so an experiment can vary them without editing it.
+        # Precedence: explicit argument > environment override > config/slam.yaml.  There is
+        # no fourth tier: see the docstring for why a fallback is worse than a hard failure.
+        # Loaded here rather than at import so a broken config fails when a step is actually
+        # constructed, not when anything in the package is imported.
         if resolution_divisor is None:
-            resolution_divisor = int(os.environ.get('POLYUMI_SLAM_RES_DIV', _SLAM_CONFIG.get('resolution_divisor', 2)))
+            resolution_divisor = int(
+                os.environ.get('POLYUMI_SLAM_RES_DIV', _require_slam_setting('resolution_divisor'))
+            )
         if localization_frame_stride is None:
             localization_frame_stride = int(
-                os.environ.get('POLYUMI_SLAM_LOC_STRIDE', _SLAM_CONFIG.get('localization_frame_stride', 2))
+                os.environ.get('POLYUMI_SLAM_LOC_STRIDE', _require_slam_setting('localization_frame_stride'))
             )
         if resolution_divisor < 1 or localization_frame_stride < 1:
             raise ValueError(

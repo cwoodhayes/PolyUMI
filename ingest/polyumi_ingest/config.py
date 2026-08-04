@@ -12,9 +12,8 @@ GOPRO_INTRINSICS_JSON = INGEST_ROOT / 'config' / 'gopro_intrinsics.json'
 #: Thresholds for auto-flagging episodes unusable. Policy, not data — verdicts are
 #: derived at read time (see polyumi_ingest.quality), never written into the pzarr.
 QUALITY_THRESHOLDS_YAML = INGEST_ROOT / 'config' / 'quality_thresholds.yaml'
-#: How much data the SLAM step is fed (resolution divisor, localization frame stride)
-#: and the reverse-merge gate. The camera model itself lives in the ORB-SLAM3 settings
-#: YAML, which that file points at.
+#: How much data the SLAM step is fed: resolution divisor and localization frame stride.
+#: The camera model itself lives in the ORB-SLAM3 settings YAML, which that file points at.
 SLAM_CONFIG_YAML = INGEST_ROOT / 'config' / 'slam.yaml'
 
 
@@ -33,11 +32,20 @@ def load_slam_config() -> dict:
     """
     Load SLAM step tunables from config/slam.yaml.
 
-    Returns an empty dict if the file is missing so the step falls back to its
-    in-code defaults rather than failing to import.
+    Required, not optional: these values decide how much of each video ORB-SLAM3 ever
+    sees, and an in-code default silently disagreeing with the checked-in file is how a
+    corpus ends up half-processed at one stride and half at another. The file ships with
+    the repo, so a missing one means a broken checkout, not a configuration choice.
+
+    Raises:
+        FileNotFoundError: if config/slam.yaml is absent or unreadable.
+
     """
     try:
         with SLAM_CONFIG_YAML.open() as f:
             return yaml.safe_load(f) or {}
-    except OSError:
-        return {}
+    except OSError as err:
+        raise FileNotFoundError(
+            f'Cannot read {SLAM_CONFIG_YAML}, which is required to run the SLAM step '
+            f'(it sets the resolution divisor and localization frame stride): {err}'
+        ) from err

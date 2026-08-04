@@ -580,13 +580,13 @@ def test_post_chirp_counts_fall_back_without_the_marker(tmp_path: pathlib.Path) 
     assert attrs['n_frames_fed_lost_post_chirp'] == 3
 
 
-def test_slam_config_yaml_supplies_the_defaults(monkeypatch) -> None:
-    """config/slam.yaml is the documented home for these; env vars only override it."""
+def test_slam_config_yaml_supplies_the_values(monkeypatch) -> None:
+    """config/slam.yaml is the only home for these; env vars override it, nothing else does."""
     monkeypatch.delenv('POLYUMI_SLAM_RES_DIV', raising=False)
     monkeypatch.delenv('POLYUMI_SLAM_LOC_STRIDE', raising=False)
     monkeypatch.setattr(
-        'polyumi_ingest.preproc.slam_step._SLAM_CONFIG',
-        {'resolution_divisor': 4, 'localization_frame_stride': 3},
+        'polyumi_ingest.preproc.slam_step.load_slam_config',
+        lambda: {'resolution_divisor': 4, 'localization_frame_stride': 3},
     )
     step = OrbSlam3Step()
     assert (step.resolution_divisor, step.localization_frame_stride) == (4, 3)
@@ -594,6 +594,24 @@ def test_slam_config_yaml_supplies_the_defaults(monkeypatch) -> None:
     # env wins over the file, for one-off experiments
     monkeypatch.setenv('POLYUMI_SLAM_LOC_STRIDE', '1')
     assert OrbSlam3Step().localization_frame_stride == 1
+
+
+def test_missing_slam_config_key_raises(monkeypatch) -> None:
+    """
+    A key absent from slam.yaml is a hard error, not a silent in-code default.
+
+    These two numbers decide what ORB-SLAM3 is fed and are enforced uniform across a DP
+    export, so a fallback disagreeing with the config would split a corpus across two
+    incompatible time bases instead of failing.
+    """
+    monkeypatch.delenv('POLYUMI_SLAM_RES_DIV', raising=False)
+    monkeypatch.delenv('POLYUMI_SLAM_LOC_STRIDE', raising=False)
+    monkeypatch.setattr(
+        'polyumi_ingest.preproc.slam_step.load_slam_config',
+        lambda: {'localization_frame_stride': 2},  # resolution_divisor missing
+    )
+    with pytest.raises(KeyError, match='resolution_divisor'):
+        OrbSlam3Step()
 
 
 def test_step_config_rollback(monkeypatch) -> None:

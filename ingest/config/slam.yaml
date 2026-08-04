@@ -4,14 +4,19 @@
 # Config for SLAM itself (intrinsics, distortion, IMU noise, ORB extractor settings) lives
 # separately in the ORB-SLAM3 settings YAML -- see `camera_settings_note` below --
 #
-# Values here are defaults. Each can be overridden by an environment variable for
-# one-off experiments without editing the file; the env var always wins.
+# This file is REQUIRED, and every key below is required. There are deliberately no in-code
+# defaults: these values decide what ORB-SLAM3 ever sees, they are stamped into each episode
+# (`annotations/slam/frame_stride`), and DP export refuses to build a buffer that mixes two of
+# them -- so a code-side default silently disagreeing with this file would split a corpus
+# across incompatible time bases rather than fail loudly. Each key can still be overridden by
+# an environment variable for one-off experiments without editing the file; the env var wins.
 
 # Downsample factor applied to the camera settings (width/height and the fx/fy/cx/cy
 # intrinsics; the KannalaBrandt k1..k4 distortion coefficients act on a dimensionless
 # angle and are deliberately not scaled).
 #
-# 2 => 2704x2028 source decoded to 676x507 for tracking.
+# 1 => tracking at the calibrated 1352x1014, which is what we run. (2 would halve that to
+# 676x507; we are committed to full resolution, so this stays 1.)
 #
 # Applies to BOTH map building and localization (required to be the same)
 # Env override: POLYUMI_SLAM_RES_DIV
