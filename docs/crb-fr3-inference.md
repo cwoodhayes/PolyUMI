@@ -282,7 +282,7 @@ publishes it to `/polyumi/target_poses_preview` for Foxglove (always) and — on
 
 Start the pieces in separate terminals, in this order.
 
-**1. NUC — bring up the FR3** (enable FCI on the Desk UI first):
+### **1. NUC — bring up the FR3** (enable FCI on the Desk UI first):
 
 ```bash
 fr3-bringup          # franka_bringup, arm_id:=fr3, robot @ 192.168.51.20
@@ -304,7 +304,7 @@ export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export CYCLONEDDS_URI=file://$HOME/franka_ws/config/cyclonedds.xml
 ```
 
-**1b. NUC — start MoveIt `move_group`** (third NUC terminal):
+#### **1b. NUC — start MoveIt `move_group`** (third NUC terminal):
 
 ```bash
 ros2 launch nuc/launch/fr3_move_group.launch.py robot_ip:=192.168.51.20
@@ -334,7 +334,7 @@ Trajectory execution is managing controllers
 (Do **not** use upstream `moveit.launch.py` — it starts a *second* controller_manager +
 robot_state_publisher and collides with `fr3-bringup`.)
 
-**1c. NUC — start the MoveIt bridge** (fourth NUC terminal):
+#### **1c. NUC — start the MoveIt bridge** (fourth NUC terminal):
 
 ```bash
 # from the PolyUMI repo
@@ -350,7 +350,7 @@ with a hand on the e-stop, then raise it once you trust the motion. It logs
 `move_group found (compute_cartesian_path ready).` at
 startup — if it instead says `NOT found after 10s`, step 1b isn't running.
 
-**1d. NUC — start the gripper bridge** (fifth NUC terminal, only if you want the hand to move):
+#### **1d. NUC — start the gripper bridge** (fifth NUC terminal, only if you want the hand to move):
 
 ```bash
 python3 nuc/fr3_gripper_bridge.py --ros-args -p execute:=true
@@ -370,7 +370,7 @@ A quiet log with occasional goals is correct; a stream of `Command aborted!` is 
 with `execute:=true`**, so a bad width command moves fingers and nothing else. Keep the hand clear
 of objects and of the table.
 
-**2. Inference server — real (GPU box) or dummy (laptop).**
+### **2. Inference server — real (GPU box) or dummy (laptop).**
 
 *Real policy* — on the GPU workstation (`sheep`), serve a trained checkpoint. `serve_policy.sh`
 builds the image and wires the rootless-Docker flags + checkpoint/HF-cache mounts (see
@@ -401,7 +401,7 @@ with only fastapi/uvicorn/numpy — no need to source anything. The command is
 `dummy-server` (hyphen), the `[project.scripts]` entry point. Leave
 `inference_server_url` at its default (`http://localhost:8000/predict_cartesian/`) in step 4.
 
-**3. Pi — start the camera/audio stream** (ssh into the Pi):
+### **3. Pi — start the camera/audio stream** (ssh into the Pi):
 
 ```bash
 polyumi-pi stream   # ZMQ PUSH: video on :5555, audio on :5556
@@ -412,7 +412,7 @@ republishes them as `/pi/*`. Without this running, Foxglove shows no Pi feed, an
 logs a warning. (The FR3 inference loop itself doesn't depend on the Pi, but the full
 demo does.)
 
-**4. Laptop — PolyUMI ROS2 nodes + policy client** (another terminal):
+### **4. Laptop — PolyUMI ROS2 nodes + policy client** (another terminal):
 
 ```bash
 source setup_franka_env.sh          # CycloneDDS + domain 0 + bring up the fr3-link NM profile
