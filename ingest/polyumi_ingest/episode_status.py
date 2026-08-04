@@ -19,6 +19,13 @@ Nothing here deletes data: the partial episode group stays on disk for inspectio
 ``--force`` re-run retries it, clearing both marks if it succeeds. Only a mark this module
 made is ever cleared — an episode a human marked unusable in the catalog UI has no
 ``failure`` record, so it stays marked.
+
+The one exception is ``build_pzarr``, which resets every successfully-built session to usable
+outright rather than going through :func:`clear_episode_failure`. It has to: it opens the
+store ``mode='w'``, so the previous run's ``failure`` attr is gone before the retry-clearing
+path could ever see it, and a session that failed once would otherwise stay excluded forever.
+Rebuilding is the "start over from the raw sessions" operation, so it discards catalog-UI
+curation along with everything else.
 """
 
 from __future__ import annotations

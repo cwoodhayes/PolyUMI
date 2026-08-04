@@ -19,9 +19,9 @@ from polyumi_pi.files.session import SessionFiles
 
 from polyumi_ingest.episode_status import Episode, episode_guard
 from polyumi_ingest.gitinfo import git_sha
-from polyumi_ingest.manifests import set_episode_unusable
 from polyumi_ingest.gopro_fetch import _recording_start_time
 from polyumi_ingest.gpmf_parse import extract_gpmf_binary, parse_imu
+from polyumi_ingest.manifests import SceneManifest, set_episode_unusable
 from polyumi_ingest.pzarr.optitrack import find_optitrack_csv, write_optitrack
 from polyumi_ingest.pzarr.scene_files import GOPRO_MP4, SceneFiles
 from polyumi_ingest.pzarr.version import PZARR_VERSION
@@ -338,6 +338,13 @@ def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.P
     if not sessions:
         raise RuntimeError(f'No valid sessions found in {scene_path}')
 
+    # Snapshot before anything below mutates it: a rebuild resets usability, so any session
+    # that builds clean has to come *off* this set. Read up front rather than clearing
+    # unconditionally per episode, so a scene with nothing flagged never gets a scene.json
+    # written just to record that nothing is wrong.
+    manifest = SceneManifest.from_scene_dir(scene.path)
+    previously_unusable = set(manifest.unusable_episodes) if manifest else set()
+
     root = zarr.open_group(str(scene.zarr_path), mode='w', zarr_format=2)
     # Flipped to True once every episode has been attempted. A store left False was interrupted
     # mid-build and is missing episodes; `pingest pp` rebuilds it rather than preprocessing a
@@ -390,6 +397,18 @@ def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.P
         # and the build moves on; the whole scene no longer dies with it. See episode_status.
         with episode_guard(episode, scene.path, step='build-pzarr'):
             _write_episode(ep_grp, session, skip_gopro)
+        # A rebuild resets usability: the store is opened mode='w', so the previous run's
+        # `failure` attr is already gone and episode_guard's own retry-clearing path can never
+        # fire here. Without this, a session that failed once stays in scene.json's
+        # unusable_episodes forever, silently absent from every export even after the data
+        # behind it was re-fetched and now builds clean.
+        #
+        # Note this also clears a mark a human set in the catalog UI. That is intended --
+        # rebuilding is the "start over from the raw sessions" operation -- but it means
+        # per-episode curation must be redone after a rebuild.
+        if episode.failure is None and session.path.name in previously_unusable:
+            set_episode_unusable(scene.path, session.path.name, False)
+            log.info(f'{session.path.name}: rebuilt cleanly; no longer flagged unusable in scene.json.')
 
     root.attrs['build_complete'] = True
     return scene.zarr_path

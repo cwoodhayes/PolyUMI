@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import shutil
 import wave
 
 import cv2
@@ -193,6 +194,31 @@ def test_unloadable_session_is_marked_in_scene_json(tmp_path: pathlib.Path) -> N
     assert manifest.unusable_episodes == ['session_b']
     # The manifest we created adopts the scene's real identity from session metadata.
     assert manifest.scene_id == _SCENE_ID
+
+
+def test_rebuild_clears_a_stale_unusable_mark(tmp_path: pathlib.Path) -> None:
+    """
+    A session that failed once and now builds clean comes back off ``unusable_episodes``.
+
+    The store is opened mode='w', so the previous run's ``failure`` attr is gone before
+    ``episode_guard``'s retry-clearing path could see it — without an explicit reset the
+    mark would survive every future rebuild and silently drop the episode from exports.
+    """
+    scene_dir = tmp_path / 'scene_2026-07-29_16-01-53_2bd6'
+    scene_dir.mkdir()
+    _write_session(scene_dir, 'session_a')
+    _write_session(scene_dir, 'session_b', audio_channels=1)  # mono: rejected by _write_episode
+
+    build_pzarr(scene_dir, skip_gopro=True)
+    assert SceneManifest.from_scene_dir(scene_dir).unusable_episodes == ['session_b']
+
+    # Re-record session_b correctly (as a re-fetch would) and rebuild.
+    shutil.rmtree(scene_dir / 'session_b')
+    _write_session(scene_dir, 'session_b')
+    build_pzarr(scene_dir, skip_gopro=True)
+
+    assert _episode_by_dir(scene_dir, 'session_b').failure is None
+    assert SceneManifest.from_scene_dir(scene_dir).unusable_episodes == []
 
 
 def test_interrupted_build_is_detectable(tmp_path: pathlib.Path) -> None:
