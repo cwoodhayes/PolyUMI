@@ -33,7 +33,8 @@
         <dt>Task</dt><dd>{{ detail.task_name or '(unassigned)' }}</dd>
         <dt>Directory</dt><dd class="mono">{{ detail.dir }}</dd>
         <dt>Archived</dt><dd>{{ 'yes' if detail.archived else 'no' }}</dd>
-        <dt>Sessions</dt><dd>{{ detail.n_episodes }} episode / {{ detail.n_sessions }} total</dd>
+        <dt title="Episodes still usable (neither marked unusable nor auto-excluded), episodes, and all sessions including mapping passes">Sessions</dt>
+        <dd>{{ detail.n_usable_episodes }} usable / {{ detail.n_episodes }} episode / {{ detail.n_sessions }} total</dd>
         <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
         <dt>Last synced</dt><dd>{{ detail.synced_at or '—' }}</dd>
       </dl>

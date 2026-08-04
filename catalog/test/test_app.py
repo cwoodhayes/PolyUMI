@@ -565,9 +565,12 @@ def test_post_build_dataset_success_redirects_and_clears_draft(tmp_path: pathlib
     assert (rec / 'datasets' / 'fold_towel_v1.zarr.zip').is_file()
     assert (rec / 'datasets' / 'fold_towel_v1.dataset.json').is_file()
 
-    # the draft is cleared after a successful build
+    # the draft is cleared after a successful build, and the new dataset is on the page the
+    # POST redirects to — the Datasets column is otherwise only filled by /select/task
     index_resp = client.get('/')
     assert 'name="scene_ids"' not in index_resp.text
+    assert 'fold_towel_v1' in index_resp.text
+    assert 'No datasets.' not in index_resp.text
 
 
 def test_post_build_dataset_with_task_id_persists_it(tmp_path: pathlib.Path, monkeypatch):
