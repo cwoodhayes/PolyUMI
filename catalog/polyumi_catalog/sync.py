@@ -4,7 +4,7 @@ Scan the recordings tree and upsert its scenes/sessions/tasks/datasets into the 
 The scene/session scan is idempotent and mtime-gated: a scene is re-parsed only when its
 directory, one of its session directories, or a ``metadata.json`` has changed since the last
 sync (or when ``force`` is set). SQLite is a pure cache here — every fact is re-derivable from
-disk. See docs/catalog-ui-plan.md §6.
+disk.
 
 Known limitation: mtime gating uses the newest mtime among the scene dir, its session
 dirs, and their ``metadata.json`` files. In-place edits to other files a scene depends on

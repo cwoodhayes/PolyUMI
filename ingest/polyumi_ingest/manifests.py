@@ -3,7 +3,7 @@ Read/write helpers for ``scene.json``, the catalog's authoritative scene-level m
 
 Lives in ``ingest`` rather than ``catalog`` because DP export (``export.dp.buffer``) needs to
 read it too — to know which episodes are marked unusable — and ``ingest`` owns
-preprocessing/export while ``catalog`` only imports it (docs/catalog-ui-plan.md §10.2), never
+preprocessing/export while ``catalog`` only imports it, never
 the other way around. ``polyumi_catalog.manifests`` re-exports ``SceneManifest`` from here so
 existing catalog call sites are unaffected.
 

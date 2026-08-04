@@ -53,7 +53,7 @@ or the policy trains on a different Δt than it runs at.
 
 One session can produce **several episodes**. Where the pose source has no pose — SLAM lost
 tracking — the session is split into the contiguous runs either side, each exported as its own
-episode, and runs shorter than ``_MIN_SEGMENT_STEPS`` are dropped. Bridging a gap would put a
+episode, and runs shorter than ``MIN_SEGMENT_STEPS`` are dropped. Bridging a gap would put a
 step of the wrong duration inside an episode, which the fixed-rate sampler cannot see; splitting
 keeps every episode honest. This follows upstream UMI's ``06_generate_dataset_plan.py``.
 
@@ -114,7 +114,7 @@ _GAP_WARN_FACTOR = 5.0
 #: Shortest run of valid steps worth emitting as its own episode. Matches upstream UMI's
 #: ``--min_episode_length`` default. Anything shorter can't supply a full observation +
 #: action horizon, so it would only ever be padding.
-_MIN_SEGMENT_STEPS = 24
+MIN_SEGMENT_STEPS = 24
 
 
 def _episode_frame_stride(ep: zarr.Group) -> int:
@@ -257,7 +257,7 @@ def _export_episode(
     episode_key: str,
     scene_zarr: pathlib.Path,
     pose_source: str,
-    min_segment_steps: int = _MIN_SEGMENT_STEPS,
+    min_segment_steps: int = MIN_SEGMENT_STEPS,
 ) -> list[tuple[int, dict]]:
     """
     Export one session as one DP episode per contiguous valid segment.
@@ -415,7 +415,7 @@ def _append_scene_episodes(
     total: int,
     provenance: list[dict],
     enforce_preprocessing: bool = True,
-    min_segment_steps: int = _MIN_SEGMENT_STEPS,
+    min_segment_steps: int = MIN_SEGMENT_STEPS,
 ) -> int:
     """Append every EPISODE session of one scene onto ``data_grp``, returning the new running total."""
     zarr_path = SceneFiles.resolve_zarr_path(scene_path)
@@ -476,7 +476,7 @@ def export_scene_to_dp(
     scene_path: pathlib.Path,
     output_path: pathlib.Path,
     enforce_preprocessing: bool = True,
-    min_segment_steps: int = _MIN_SEGMENT_STEPS,
+    min_segment_steps: int = MIN_SEGMENT_STEPS,
 ) -> tuple[int, list[dict]]:
     """
     Export EPISODE sessions of a pzarr scene to a UMI-format ``.zarr.zip`` ReplayBuffer.
@@ -507,7 +507,7 @@ def export_scenes_to_dp(
     scene_paths: list[pathlib.Path],
     output_path: pathlib.Path,
     enforce_preprocessing: bool = True,
-    min_segment_steps: int = _MIN_SEGMENT_STEPS,
+    min_segment_steps: int = MIN_SEGMENT_STEPS,
 ) -> tuple[int, list[dict]]:
     """
     Export EPISODE sessions from one or more pzarr scenes into a single UMI ``.zarr.zip``.

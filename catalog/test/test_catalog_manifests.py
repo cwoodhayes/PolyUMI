@@ -1,4 +1,10 @@
-"""Round-trip tests for the on-disk manifests."""
+"""
+Round-trip tests for the on-disk manifests, from the catalog side.
+
+Named ``test_catalog_manifests`` rather than ``test_manifests`` so it doesn't collide with
+``ingest/test/test_manifests.py``: neither test dir is a package, so pytest imports both by
+bare module name and a shared basename makes collecting the two suites together fail.
+"""
 
 from __future__ import annotations
 

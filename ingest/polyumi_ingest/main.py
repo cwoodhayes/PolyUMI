@@ -16,7 +16,7 @@ from polyumi_pi.files.session import SessionFiles
 from rich.logging import RichHandler
 from rich.prompt import Confirm
 
-from polyumi_ingest.export.dp.buffer import _MIN_SEGMENT_STEPS
+from polyumi_ingest.export.dp import MIN_SEGMENT_STEPS
 from polyumi_ingest.gopro_fetch import DEFAULT_THRESHOLD_MS, find_gopro_video
 from polyumi_ingest.pi_fetch import PiFetch
 from polyumi_ingest.preproc import (
@@ -699,7 +699,7 @@ def export_dp(
         'whenever the chirp-end marker is present, regardless of this flag.',
     ),
     min_segment_steps: int = typer.Option(
-        _MIN_SEGMENT_STEPS,
+        MIN_SEGMENT_STEPS,
         '--min-segment-steps',
         help='Shortest run of valid steps exported as its own episode. A session whose pose '
         'source drops out is split into the runs either side; runs shorter than this are '
@@ -756,7 +756,7 @@ def export_dataset(
         'whenever the chirp-end marker is present, regardless of this flag.',
     ),
     min_segment_steps: int = typer.Option(
-        _MIN_SEGMENT_STEPS,
+        MIN_SEGMENT_STEPS,
         '--min-segment-steps',
         help='Shortest run of valid steps exported as its own episode. A session whose pose '
         'source drops out is split into the runs either side; runs shorter than this are '

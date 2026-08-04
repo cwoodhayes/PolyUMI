@@ -1,7 +1,7 @@
 """
 Tests for Phase 2 mutations: create/rename tasks and scene->task assignment.
 
-The Phase 2 deliverable per docs/catalog-ui-plan.md §9 is: "retag a scene, drop the
+The Phase 2 deliverable is: "retag a scene, drop the
 DB, re-sync, tag survives" — i.e. every mutation here must write scene.json
 (authoritative), not just the DB row. Each test below verifies that by dropping and
 rebuilding the DB from a fresh engine and re-running sync.

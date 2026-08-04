@@ -3,7 +3,7 @@ Mutating operations for the catalog UI: tasks, scene/session assignment, notes, 
 
 Every mutation writes the authoritative on-disk file first (``scene.json`` for
 scene-level fields, a session's own ``metadata.json`` for session-level ones), then
-updates the corresponding DB row in the same operation, per docs/catalog-ui-plan.md §3.1/§4
+updates the corresponding DB row in the same operation
 ("task_id on scene is a cache of what scene.json says; the writer updates both
 scene.json and the row in one operation") — session notes extend that same pattern to
 metadata.json, which used to be a Pi-record-time-only, catalog-read-only file (see the

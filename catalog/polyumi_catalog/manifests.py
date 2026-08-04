@@ -7,7 +7,7 @@ task assignment, notes, and unusable-episode markers; it lives in ``polyumi_inge
 every mutation goes through) because DP export needs to read it too, and ingest writes it —
 see that module's docstring.
 ``DatasetManifest`` (``<name>.dataset.json`` beside an exported buffer) records what
-scenes/episodes and which code version produced a training dataset. See docs/catalog-ui-plan.md §3.2.
+scenes/episodes and which code version produced a training dataset.
 """
 
 from __future__ import annotations

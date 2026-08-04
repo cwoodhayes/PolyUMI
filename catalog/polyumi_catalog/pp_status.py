@@ -9,7 +9,7 @@ exist yet (requiring every session's gopro.mp4 sidecar, same as the CLI without
 --skip-gopro), then run every step in order, skipping ones already complete. No new
 pipeline logic lives here; this only reuses ingest's own ``build_pzarr`` /
 ``run_preprocessing`` / ``available_preprocessing_steps``, per the "ingest owns
-preprocessing/export, catalog only imports it" split (docs/catalog-ui-plan.md §10.2).
+preprocessing/export, catalog only imports it" split.
 """
 
 from __future__ import annotations

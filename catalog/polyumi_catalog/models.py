@@ -3,7 +3,7 @@ SQLModel tables for the catalog cache.
 
 This database is a *rebuildable index* — the authoritative homes of each fact are the
 on-disk ``metadata.json`` (sessions), ``scene.json`` (scene→task, notes), and the
-per-dataset manifest. See docs/catalog-ui-plan.md §3.1. Any row here can be
+per-dataset manifest. Any row here can be
 reconstructed by re-running ``sync`` against the recordings tree.
 """
 

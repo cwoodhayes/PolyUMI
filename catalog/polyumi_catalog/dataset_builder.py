@@ -2,7 +2,7 @@
 Multi-scene dataset builder & export (Phase 3).
 
 Combines whole scenes into one UMI-format ReplayBuffer, per the "ingest owns
-preprocessing/export, catalog only imports it" decision (docs/catalog-ui-plan.md §10.2) — the
+preprocessing/export, catalog only imports it" decision — the
 same pattern already used for Phase 2.5's MCAP export. Exports the buffer first and only then
 writes the dataset manifest (§3.2) beside it, so a failed/interrupted export never leaves a
 manifest pointing at nonexistent data. The manifest is the authoritative record; the DB rows

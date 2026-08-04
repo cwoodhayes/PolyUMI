@@ -1,8 +1,6 @@
 # PolyUMI Catalog
 
-A localhost web app for browsing the tasks, scenes, sessions, and training datasets produced by PolyUMI. It scans the recordings directory into a local SQLite cache (`polyumi-catalog sync`), and provides r/w access to the metadata for each item. See
-[docs/catalog-ui-plan.md](../docs/catalog-ui-plan.md) for the full design and phase
-plan.
+A localhost web app for browsing the tasks, scenes, sessions, and training datasets produced by PolyUMI. It scans the recordings directory into a local SQLite cache (`polyumi-catalog sync`), and provides r/w access to the metadata for each item.
 
 ## Running it
 
