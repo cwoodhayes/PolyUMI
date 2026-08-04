@@ -346,3 +346,29 @@ def test_already_current_store_is_silent(tmp_path: pathlib.Path, caplog, one_ste
         run_preprocessing(scene_zarr, step_number=_DemoStep.step_number)
 
     assert 'pzarr' not in caplog.text
+
+
+def test_unparseable_version_attr_warns_but_still_runs(tmp_path: pathlib.Path, caplog, one_step_registry) -> None:
+    """
+    A corrupt pzarr_version is reported, not raised on.
+
+    The version check is advisory: it exists to tell the operator what they're looking at.
+    An unconditional int() cast turned a bad attr into an aborted preprocessing run.
+    """
+    scene_zarr = _make_scene(tmp_path)
+    zarr.open_group(str(scene_zarr), mode='a').attrs['pzarr_version'] = 'not-a-version'
+
+    with caplog.at_level(logging.WARNING):
+        run_preprocessing(scene_zarr, step_number=_DemoStep.step_number)
+
+    assert 'not a version number' in caplog.text
+
+
+def test_full_run_restamps_over_an_unparseable_version(tmp_path: pathlib.Path, one_step_registry) -> None:
+    """Every step just re-ran, so the store is current whatever the corrupt attr claimed."""
+    scene_zarr = _make_scene(tmp_path)
+    zarr.open_group(str(scene_zarr), mode='a').attrs['pzarr_version'] = 'not-a-version'
+
+    run_preprocessing(scene_zarr)  # no step_number => the whole pipeline
+
+    assert int(zarr.open_group(str(scene_zarr), mode='r').attrs['pzarr_version']) == PZARR_VERSION

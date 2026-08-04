@@ -32,6 +32,20 @@ SCENE_MANIFEST_NAME = 'scene.json'
 _SCENE_JSON_LOCK = threading.Lock()
 
 
+def _as_str_list(value: object) -> list[str]:
+    """Coerce a decoded-JSON value to ``list[str]``, dropping anything that isn't a string."""
+    if not isinstance(value, list):
+        return []
+    return [v for v in value if isinstance(v, str)]
+
+
+def _as_str_dict(value: object) -> dict[str, str]:
+    """Coerce a decoded-JSON value to ``dict[str, str]``, dropping non-string keys/values."""
+    if not isinstance(value, dict):
+        return {}
+    return {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, str)}
+
+
 @dataclass
 class SceneManifest:
     """Authoritative scene-level metadata stored at ``<scene>/scene.json``."""
@@ -57,7 +71,16 @@ class SceneManifest:
 
     @classmethod
     def from_file(cls, path: pathlib.Path) -> SceneManifest:
-        """Load a manifest from an explicit ``scene.json`` path."""
+        """
+        Load a manifest from an explicit ``scene.json`` path.
+
+        The two collection fields are coerced to their declared shapes rather than trusted
+        as-read. This file is hand-editable and the catalog UI documents editing it, so a
+        ``null`` or a list where a dict belongs is a realistic typo — and it would otherwise
+        surface far away, as an ``AttributeError`` inside DP export or the sync pass, on a
+        field nothing had validated. Malformed entries are dropped, not raised on: a scene
+        whose markers are unreadable should still be listable and exportable.
+        """
         data = json.loads(path.read_text())
         version = data.get('file_version', 1)
         if version != 1:
@@ -66,8 +89,8 @@ class SceneManifest:
             scene_id=data['scene_id'],
             task=data.get('task'),
             notes=data.get('notes'),
-            unusable_episodes=data.get('unusable_episodes', []),
-            pose_source_overrides=data.get('pose_source_overrides', {}),
+            unusable_episodes=_as_str_list(data.get('unusable_episodes')),
+            pose_source_overrides=_as_str_dict(data.get('pose_source_overrides')),
             file_version=version,
         )
 

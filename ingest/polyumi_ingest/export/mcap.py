@@ -577,6 +577,21 @@ def _write_log(writer: Writer, channel_id: int, t_s: float, message: str, name: 
     writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
 
 
+def _eef_world_frame(ep_grp, source: str) -> str:
+    """
+    Frame id for an ``eef/pose_<source>`` channel, read from what step 5 recorded.
+
+    ``EefPoseStep`` stamps ``world_frame`` on each array; using it keeps the MCAP frame
+    graph agreeing with the store instead of restating the naming here, where the two could
+    drift apart silently. Falls back to the source name, which is what step 5 writes today.
+    """
+    try:
+        recorded = ep_grp[f'eef/pose_{source}'].attrs.get('world_frame')
+    except KeyError:
+        recorded = None
+    return str(recorded) if isinstance(recorded, str) and recorded else source
+
+
 def _write_poses_skip_nan(
     writer: Writer,
     channel_id: int,
@@ -988,7 +1003,7 @@ def export_episode_to_mcap(
                     ch['/eef/pose_optitrack'],
                     np.asarray(ep_grp['eef/pose_optitrack'][:]),  # type: ignore[index]
                     _gopro_ts('gopro'),
-                    frame_id='optitrack',
+                    frame_id=_eef_world_frame(ep_grp, 'optitrack'),
                     label='eef pose (optitrack)',
                 )
 
@@ -999,7 +1014,7 @@ def export_episode_to_mcap(
                     ch['/eef/pose_slam'],
                     np.asarray(ep_grp['eef/pose_slam'][:]),  # type: ignore[index]
                     _gopro_ts('gopro'),
-                    frame_id='slam',
+                    frame_id=_eef_world_frame(ep_grp, 'slam'),
                     label='eef pose (slam)',
                 )
 

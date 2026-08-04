@@ -42,3 +42,33 @@ def test_scene_manifest_pose_source_overrides_defaults_to_empty(tmp_path: pathli
     path.write_text('{"scene_id": "abc-789", "file_version": 1}')
     loaded = SceneManifest.from_file(path)
     assert loaded.pose_source_overrides == {}
+
+
+def test_scene_manifest_coerces_malformed_collections(tmp_path: pathlib.Path):
+    """
+    A hand-edited scene.json with the wrong types loads empty rather than crashing later.
+
+    Both fields are read with .get()/set() by DP export and the catalog sync. A null or a
+    list where a dict belongs would otherwise surface as an AttributeError deep in those
+    callers, on a value nothing had validated.
+    """
+    path = tmp_path / 'scene.json'
+    path.write_text('{"scene_id": "abc", "unusable_episodes": null, "pose_source_overrides": ["s1"]}')
+
+    loaded = SceneManifest.from_file(path)
+
+    assert loaded.unusable_episodes == []
+    assert loaded.pose_source_overrides == {}
+
+
+def test_scene_manifest_drops_non_string_entries(tmp_path: pathlib.Path):
+    """Well-shaped containers holding junk keep the usable entries and drop the rest."""
+    path = tmp_path / 'scene.json'
+    path.write_text(
+        '{"scene_id": "abc", "unusable_episodes": ["s1", 7, null], "pose_source_overrides": {"s2": "slam", "s3": 3}}'
+    )
+
+    loaded = SceneManifest.from_file(path)
+
+    assert loaded.unusable_episodes == ['s1']
+    assert loaded.pose_source_overrides == {'s2': 'slam'}

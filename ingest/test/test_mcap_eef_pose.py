@@ -104,3 +104,20 @@ def test_both_eef_pose_channels_present_when_both_sources_available(tmp_path: pa
 
     assert len(_messages(mcap_path, '/eef/pose_optitrack')) == 2
     assert len(_messages(mcap_path, '/eef/pose_slam')) == 1
+
+
+def test_eef_pose_frame_id_follows_the_recorded_world_frame(tmp_path: pathlib.Path) -> None:
+    """
+    The frame id comes from what step 5 stamped, not from a constant restated in the exporter.
+
+    The two would agree today, which is exactly why a divergence would go unnoticed: pinning
+    the attr as the source keeps the MCAP frame graph honest if the naming ever moves.
+    """
+    root, ep = _build_episode(tmp_path, with_eef_optitrack=True, with_eef_slam=False)
+    ep['eef/pose_optitrack'].attrs['world_frame'] = 'optitrack_renamed'
+
+    out = tmp_path / 'ep.mcap'
+    export_episode_to_mcap(ep, out, root_grp=root, scene_zarr=tmp_path / 'scene.zarr')
+
+    msgs = _messages(out, '/eef/pose_optitrack')
+    assert msgs and all(m['frame_id'] == 'optitrack_renamed' for m in msgs)

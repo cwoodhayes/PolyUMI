@@ -98,6 +98,21 @@ def _write_scalar(group: zarr.Group, name: str, value: float | int) -> None:
     group.attrs[name] = value
 
 
+def _stored_pzarr_version(root: zarr.Group) -> int | None:
+    """
+    Read a store's ``pzarr_version``, or None if it isn't a number.
+
+    Missing means a pre-v1 store, which is v1 by definition. Present-but-unparseable means a
+    corrupt or hand-edited attr; the callers below only warn and restamp, so neither should
+    abort a preprocessing run over it — hence None rather than a raise.
+    """
+    raw = root.attrs.get('pzarr_version', 1)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _warn_if_outdated_pzarr(root: zarr.Group, scene_label: str) -> None:
     """
     Log if a store's schema version doesn't match the running code. Never blocks.
@@ -107,7 +122,13 @@ def _warn_if_outdated_pzarr(root: zarr.Group, scene_label: str) -> None:
     are combined into one dataset. A *newer* store is the more dangerous direction: the code
     reading it can't know what it doesn't know, so that warns harder.
     """
-    stored = int(root.attrs.get('pzarr_version', 1))  # pre-v1 stores have no attr
+    stored = _stored_pzarr_version(root)
+    if stored is None:
+        log.warning(
+            f'{scene_label}: pzarr_version attr is {root.attrs.get("pzarr_version")!r}, not a version '
+            f'number — cannot tell whether this store matches pzarr v{PZARR_VERSION}.'
+        )
+        return
     if stored == PZARR_VERSION:
         return
     if stored < PZARR_VERSION:
@@ -266,7 +287,9 @@ def run_preprocessing(
     # `preprocessing_steps_done` instead would stamp the current version onto a store whose
     # skipped steps still hold output from an older schema — worse than not stamping at all,
     # since the stamp is what tells the next run whether it can believe what it reads.
-    if ran == set(PREPROCESSING_STEPS) and int(root.attrs.get('pzarr_version', 1)) != PZARR_VERSION:
+    # An unparseable stored version (None) restamps too: every step just re-ran, so v4 is
+    # what the store now holds regardless of what the corrupt attr claimed.
+    if ran == set(PREPROCESSING_STEPS) and _stored_pzarr_version(root) != PZARR_VERSION:
         log.info(f'{scene_zarr.parent.name}: whole pipeline re-run; restamping as pzarr v{PZARR_VERSION}')
         root.attrs['pzarr_version'] = PZARR_VERSION
 
