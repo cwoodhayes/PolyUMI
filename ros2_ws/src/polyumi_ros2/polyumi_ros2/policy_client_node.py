@@ -13,9 +13,13 @@ At each control tick the node:
      previously published chunk, matching UMI (infer once per ~steps_per_inference*dt).
   4. Drops the leading actions of the returned chunk that are already stale by the time the
      arm could act on them (observation + inference + arm-execution latency).
-  5. Logs the chunk. If execute_motion is set, publishes the remaining chunk as a PoseArray
-     on /polyumi/target_poses for the NUC-side fr3_moveit_bridge to plan+execute as one
-     Cartesian path (receding-horizon control) — see docs/crb-fr3-inference.md.
+  5. Logs the chunk. If execute_motion is set, publishes the remaining chunk on two topics for
+     the NUC-side bridges: the pose half as a PoseArray on /polyumi/target_poses (planned and
+     executed as one Cartesian path by fr3_moveit_bridge, receding-horizon control), and the
+     gripper half as a JointTrajectory on /polyumi/target_gripper (fr3_gripper_bridge). The two
+     ride separate channels because a PoseArray cannot carry a width and because the Franka Hand
+     is action-only, so it needs a different execution cadence entirely — see
+     docs/crb-fr3-inference.md and docs/franka-inference-bringup.md ("Phase 2.5").
 
 Usage:
     ros2 run polyumi_ros2 policy_client_node
@@ -42,10 +46,17 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, JointState
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException  # type: ignore[attr-defined]
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from polyumi_ros2.camera_preproc import CAMERA0_RGB_INTERPOLATION
+from polyumi_ros2.gripper_map import policy_to_robot_width, robot_to_policy_width
+
+# Name used for the single "joint" in the gripper trajectory chunk. Deliberately NOT a real joint
+# name (the FR3's fingers are fr3_finger_joint1/2, each reporting half the aperture): the value we
+# publish is the full aperture, so naming it after a finger joint would invite a 2x error.
+GRIPPER_JOINT_NAME = 'fr3_gripper_width'
 
 
 class PolicyClientNode(Node):
@@ -126,6 +137,26 @@ class PolicyClientNode(Node):
         self.declare_parameter('latency.piezo_mic', 0.0)
         self.declare_parameter('latency.proprio', 0.0)
         self.declare_parameter('latency.arm_exec', 0.0)
+        # Delay from the hand's true aperture to its measurement appearing on the joint-state
+        # topic. Kept separate from latency.proprio because the gripper is a different device on a
+        # different link — UMI does the same (gripper_action_latency vs robot_action_latency).
+        # Unmeasured, like the rest; the topic jitters 24-100 ms, so the true value is not 0.
+        self.declare_parameter('latency.gripper', 0.0)
+        # --- Gripper ---
+        # Source for agent_pos[7]. The FR3 publishes each finger at HALF the aperture, so the two
+        # positions are summed; see docs/crb-fr3-inference.md ("Gripper interface").
+        self.declare_parameter('gripper_state_topic', '/fr3_gripper/joint_states')
+        # If true, a tick with no gripper state is skipped (as a failed TF lookup is). Off by
+        # default so setups without a hand — motion_only bringup, a bare arm — still run, feeding
+        # the closed width with a throttled warning rather than stalling the whole loop.
+        self.declare_parameter('require_gripper_state', False)
+        # Finger-tag separation with the gripper fully closed, subtracted to get jaw aperture.
+        # !!! NEVER MEASURED — it is gripper_calib.yaml's closed_mm, a value no code reads. !!!
+        # UMI measures its equivalent from a calibration video; see polyumi_ros2.gripper_map.
+        self.declare_parameter('gripper_offset_m', 0.005)
+        # Commanded widths clamp here. The FR3 hand reads ~0.0817 m fully open, but max_width is
+        # not published on any topic, so this is a constant rather than something we can read back.
+        self.declare_parameter('gripper_max_width_m', 0.08)
         # How far back (seconds) the EE-pose TF buffer retains history — must be >= the
         # largest latency being compensated for (see _lookup_agent_pos).
         self.declare_parameter('buffers.ee_pose_s', 1.0)
@@ -145,12 +176,17 @@ class PolicyClientNode(Node):
         self._steps_per_inference = self.get_parameter('steps_per_inference').get_parameter_value().integer_value
         control_hz = self.get_parameter('control_hz').get_parameter_value().double_value
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
+        gripper_topic = self.get_parameter('gripper_state_topic').get_parameter_value().string_value
+        self._require_gripper_state = self.get_parameter('require_gripper_state').get_parameter_value().bool_value
+        self._gripper_offset_m = self.get_parameter('gripper_offset_m').get_parameter_value().double_value
+        self._gripper_max_width_m = self.get_parameter('gripper_max_width_m').get_parameter_value().double_value
         self._latency = {
             'gopro': self.get_parameter('latency.gopro').get_parameter_value().double_value,
             'finger_cam': self.get_parameter('latency.finger_cam').get_parameter_value().double_value,
             'piezo_mic': self.get_parameter('latency.piezo_mic').get_parameter_value().double_value,
             'proprio': self.get_parameter('latency.proprio').get_parameter_value().double_value,
             'arm_exec': self.get_parameter('latency.arm_exec').get_parameter_value().double_value,
+            'gripper': self.get_parameter('latency.gripper').get_parameter_value().double_value,
         }
         self._ee_pose_buffer_s = self.get_parameter('buffers.ee_pose_s').get_parameter_value().double_value
         self._validate_params(control_hz)
@@ -176,6 +212,14 @@ class PolicyClientNode(Node):
         self._latest_image: np.ndarray | None = None
         self._latest_image_stamp: rclpy.time.Time | None = None
         self._latest_image_lock = threading.Lock()
+        # Gripper aperture history, (stamp, width_m) oldest-first, for the same reason TF keeps a
+        # buffer: the width must be sampled at the *frame's* capture instant, not at tick time.
+        # tf2 does that interpolation for the pose; there's no equivalent for a plain topic, so we
+        # keep a short ring and interpolate by hand (see _gripper_width_at). Sized to cover
+        # ee_pose_s at the observed ~17 Hz with headroom, floored so a tiny buffer config can't
+        # leave us with a single sample and no interval to interpolate over.
+        self._gripper_buffer: deque = deque(maxlen=max(8, int(self._ee_pose_buffer_s * 40)))
+        self._gripper_lock = threading.Lock()
         # Reject a cached frame older than this at tick time; a frame older than this means the
         # capture pipeline stalled. The auto default (max_image_age_s <= 0) is two camera periods
         # at the 60 Hz v4l2 rate, floored at half a control period so a slow tick doesn't trip it;
@@ -198,16 +242,26 @@ class PolicyClientNode(Node):
         # goals across the rmw-major boundary. So when execution is enabled we just publish
         # the target EEF pose chunk (PoseArray); the NUC bridge subscribes and plans+executes
         # the whole chunk as one Cartesian path via its local move_group.
+        # The gripper rides a SEPARATE topic, not a field on the pose chunk: a PoseArray cannot
+        # carry a width, and the Franka Hand is action-only (no ros2_control interface, libfranka
+        # offers only blocking move/grasp), so it cannot be driven at the arm's cadence anyway.
+        # fr3_gripper_bridge on the NUC deadbands and rate-limits it into Move/Grasp goals.
         self._target_pub = None
+        self._gripper_pub = None
         if self._execute_motion:
             self._target_pub = self.create_publisher(PoseArray, '/polyumi/target_poses', 10)
+            self._gripper_pub = self.create_publisher(JointTrajectory, '/polyumi/target_gripper', 10)
 
         # Viz-only preview publisher (always on when publish_preview). Shows every commanded chunk
         # in Foxglove/RViz without moving the arm: the NUC bridge subscribes only to the execution
         # topic /polyumi/target_poses, never this one.
         self._preview_pub = None
+        self._gripper_preview_pub = None
         if self._publish_preview:
             self._preview_pub = self.create_publisher(PoseArray, '/polyumi/target_poses_preview', 10)
+            self._gripper_preview_pub = self.create_publisher(
+                JointTrajectory, '/polyumi/target_gripper_preview', 10
+            )
 
         # Episode-start /reset. The server needs the episode-start EEF pose for
         # robot0_eef_rot_axis_angle_wrt_start; sent once on the first full-buffer tick. The reset
@@ -217,6 +271,7 @@ class PolicyClientNode(Node):
 
         # Subscribers
         self.create_subscription(Image, image_topic, self._image_cb, 10)
+        self.create_subscription(JointState, gripper_topic, self._gripper_cb, 10)
 
         # Control timer — exclusive callback group ensures only one tick (and its
         # blocking POST) runs at a time; an in-flight tick causes the next one to
@@ -247,6 +302,11 @@ class PolicyClientNode(Node):
         self.get_logger().info(
             f'latency budget — measured observation age (capture→response) + '
             f'act={self._latency_act}s vs action_dt={self._action_dt}s'
+        )
+        gripper_missing = 'skip tick' if self._require_gripper_state else 'warn + use closed width'
+        self.get_logger().info(
+            f'gripper — state: {gripper_topic} (missing: {gripper_missing}), '
+            f'offset={self._gripper_offset_m}m (UNMEASURED), max_width={self._gripper_max_width_m}m'
         )
 
     def _validate_params(self, control_hz: float) -> None:
@@ -285,6 +345,10 @@ class PolicyClientNode(Node):
         for name, seconds in self._latency.items():
             if seconds < 0:
                 errors.append(f'latency.{name} must be >= 0, got {seconds}')
+        if self._gripper_offset_m < 0:
+            errors.append(f'gripper_offset_m must be >= 0, got {self._gripper_offset_m}')
+        if self._gripper_max_width_m <= 0:
+            errors.append(f'gripper_max_width_m must be > 0, got {self._gripper_max_width_m}')
         # The TF buffer must reach back at least as far as the instant we look poses up at,
         # or _lookup_agent_pos asks for a transform the buffer has already dropped.
         compensated = self._latency['gopro'] - self._latency['proprio']
@@ -323,6 +387,54 @@ class PolicyClientNode(Node):
             # camera period old before the tick even fires — and if the v4l2 pipeline stalls,
             # unboundedly older, with no way to notice. See _lookup_agent_pos.
             self._latest_image_stamp = rclpy.time.Time.from_msg(msg.header.stamp)
+
+    def _gripper_cb(self, msg: JointState) -> None:
+        """Cache the gripper aperture with its stamp, summing the two finger joints."""
+        if len(msg.position) < 2:
+            self._warn_throttled(
+                f'Ignoring gripper state with {len(msg.position)} position(s); expected 2 '
+                f'(names: {list(msg.name)})'
+            )
+            return
+        # Each FR3 finger reports HALF the aperture, so the full opening is their sum. Summing
+        # rather than doubling position[0] keeps this honest if the fingers are ever asymmetric.
+        width = float(msg.position[0] + msg.position[1])
+        with self._gripper_lock:
+            self._gripper_buffer.append((rclpy.time.Time.from_msg(msg.header.stamp), width))
+
+    def _gripper_width_at(self, target: rclpy.time.Time) -> float | None:
+        """
+        Linearly interpolate the cached gripper aperture to ``target``, or None if unavailable.
+
+        The same time-alignment discipline the TF lookup gets, done by hand because a plain topic
+        has no tf2-style interpolating buffer. Outside the cached span we hold the nearest endpoint
+        rather than extrapolating: the hand moves slowly relative to the ~60 ms sample interval, so
+        a held value is a far smaller error than a linear extrapolation off the end would be.
+
+        :param target: instant to sample the aperture at.
+        :returns: aperture in metres, or None if no gripper state has been received at all.
+        """
+        with self._gripper_lock:
+            samples = list(self._gripper_buffer)
+        if not samples:
+            return None
+
+        t_ns = target.nanoseconds
+        if t_ns <= samples[0][0].nanoseconds:
+            return samples[0][1]
+        if t_ns >= samples[-1][0].nanoseconds:
+            return samples[-1][1]
+
+        for (t0, w0), (t1, w1) in zip(samples, samples[1:]):
+            t0_ns, t1_ns = t0.nanoseconds, t1.nanoseconds
+            if t0_ns <= t_ns <= t1_ns:
+                if t1_ns == t0_ns:  # duplicate stamps — nothing to interpolate over
+                    return w1
+                alpha = (t_ns - t0_ns) / (t1_ns - t0_ns)
+                return w0 + alpha * (w1 - w0)
+        # Unreachable given the endpoint guards above, but a bad stamp ordering shouldn't crash
+        # the control loop — fall back to the freshest sample.
+        return samples[-1][1]
 
     # ------------------------------------------------------------------
     # Control loop
@@ -422,9 +534,11 @@ class PolicyClientNode(Node):
 
         tf2's Buffer interpolates (linear + slerp) between the two nearest cached transforms
         automatically; buffers.ee_pose_s sizes the buffer's cache_time so the lookup stays in
-        range.
+        range. The gripper width gets the same treatment via _gripper_width_at, hand-rolled
+        because a plain topic has no equivalent interpolating buffer.
 
         :param image_stamp: header stamp of the camera frame this pose will be paired with.
+        :returns: the 8-vector agent_pos, or None if the tick should be skipped.
         """
         # tf2 time=0 means "latest available" — used for the dry-run clock-skew workaround.
         target_time = rclpy.time.Time() if self._tf_use_latest else (
@@ -437,11 +551,47 @@ class PolicyClientNode(Node):
             self._warn_throttled(f'TF lookup failed: {e}')
             return None
 
+        gripper_width = self._gripper_width_policy_units(image_stamp)
+        if gripper_width is None:
+            return None  # warning already logged inside
+
         t = tf.transform.translation
         r = tf.transform.rotation
-        # gripper_width placeholder — replaced in Phase 2 with real joint state subscriber
-        gripper_width = 0.0
         return np.array([t.x, t.y, t.z, r.x, r.y, r.z, r.w, gripper_width], dtype=np.float64)
+
+    def _gripper_width_policy_units(self, image_stamp: rclpy.time.Time) -> float | None:
+        """
+        Sample the gripper aperture aligned to the frame, converted into the policy's units.
+
+        Time-aligned exactly as the pose is, with latency.gripper standing in for
+        latency.proprio — the hand is a separate device reporting on its own topic at its own
+        rate, which is why UMI also keeps the two constants apart.
+
+        :param image_stamp: header stamp of the camera frame this observation belongs to.
+        :returns: width in policy units (finger-tag separation), or None if the tick should be
+            skipped because require_gripper_state is set and no state has arrived.
+        """
+        target_time = rclpy.time.Time() if self._tf_use_latest else (
+            image_stamp - Duration(seconds=self._latency['gopro'])
+            + Duration(seconds=self._latency['gripper'])
+        )
+        width = self._gripper_width_at(target_time)
+        if width is None:
+            if self._require_gripper_state:
+                self._warn_throttled(
+                    'Dropped control tick: no gripper state received yet '
+                    '(require_gripper_state is set)'
+                )
+                return None
+            # Substituting the closed width is a lie to the policy, but a survivable one — it keeps
+            # arm-only bringup (motion_only, no hand) working. The startup banner says which mode
+            # is active so this isn't silent.
+            self._warn_throttled(
+                'No gripper state received yet; substituting closed width for agent_pos[7]. '
+                'Set require_gripper_state:=true to skip these ticks instead.'
+            )
+            return robot_to_policy_width(0.0, self._gripper_offset_m)
+        return robot_to_policy_width(width, self._gripper_offset_m)
 
     def _n_stale_actions(self, t_obs: rclpy.time.Time) -> int:
         """
@@ -517,6 +667,8 @@ class PolicyClientNode(Node):
         # stale. The NUC bridge never subscribes to this topic, so nothing moves.
         if self._preview_pub is not None:
             self._preview_pub.publish(self._actions_to_pose_array(actions))
+        if self._gripper_preview_pub is not None:
+            self._gripper_preview_pub.publish(self._actions_to_gripper_trajectory(actions))
 
         # Drop the leading actions that refer to instants already elapsed by the time the arm
         # can act on them, so execution starts from the first still-future waypoint.
@@ -534,18 +686,26 @@ class PolicyClientNode(Node):
             return
 
         first = actions[0]
+        # Log the width in both spaces: policy units are what the model emitted, robot units are
+        # what the hand will be commanded. A surprising gap between them is the offset being wrong.
+        grip_robot = policy_to_robot_width(
+            float(first[7]), self._gripper_offset_m, self._gripper_max_width_m
+        )
         self.get_logger().info(
             f'action chunk n={len(actions)} (dropped {n_stale}/{n_received} stale, '
             f'inference={latency_inference * 1000:.0f}ms) first: x={first[0]:.4f} y={first[1]:.4f} '
-            f'z={first[2]:.4f} grip={first[7]:.3f}'
+            f'z={first[2]:.4f} grip={first[7]:.3f}→{grip_robot:.3f}m'
         )
 
         # Phase 2: publish the whole action chunk for the NUC bridge to plan+execute as one
         # Cartesian path (receding-horizon control). Non-blocking (unlike a direct MoveIt
         # call): the NUC bridge does its own skip-while-busy, so at worst it drops chunks
-        # that arrive mid-motion. Gripper (action[7]) is deferred; only xyz+quat is published.
+        # that arrive mid-motion. The gripper half goes out on its own topic, from the same
+        # (already stale-dropped) action list so the two chunks stay index-aligned.
         if self._target_pub is not None:
             self._target_pub.publish(self._actions_to_pose_array(actions))
+        if self._gripper_pub is not None:
+            self._gripper_pub.publish(self._actions_to_gripper_trajectory(actions))
 
     def _actions_to_pose_array(self, actions) -> PoseArray:
         """Build a PoseArray in base_frame from a list of 8-vector actions [x,y,z,qx,qy,qz,qw,grip]."""
@@ -565,6 +725,30 @@ class PolicyClientNode(Node):
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = self._base_frame
         msg.poses = poses
+        return msg
+
+    def _actions_to_gripper_trajectory(self, actions) -> JointTrajectory:
+        """
+        Build the gripper half of an action chunk as a timed single-DOF trajectory.
+
+        Carries per-point ``time_from_start`` (unlike the pose PoseArray, which has no timing yet)
+        so the NUC bridge can pick a lead waypoint and derive a move speed from it, rather than
+        commanding every width at one fixed speed. The widths are converted to robot jaw aperture
+        here so the bridge stays free of calibration — see polyumi_ros2.gripper_map.
+
+        :param actions: 8-vector actions [x,y,z,qx,qy,qz,qw,grip], grip in policy units.
+        """
+        msg = JointTrajectory()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self._base_frame
+        msg.joint_names = [GRIPPER_JOINT_NAME]
+        for i, action in enumerate(actions):
+            point = JointTrajectoryPoint()
+            point.positions = [
+                policy_to_robot_width(float(action[7]), self._gripper_offset_m, self._gripper_max_width_m)
+            ]
+            point.time_from_start = Duration(seconds=i * self._action_dt).to_msg()
+            msg.points.append(point)
         return msg
 
     def _warn_throttled(self, msg: str) -> None:

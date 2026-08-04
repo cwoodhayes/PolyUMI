@@ -32,6 +32,28 @@
       proprio: 0.01
       # Delay from publishing a target pose to the arm actually starting to move.
       arm_exec: 0.01
+      # Delay from the hand's true aperture to it appearing on /fr3_gripper/joint_states.
+      # Kept separate from proprio because the gripper is a different device on its own link and
+      # its own (slower, jitterier) topic — UMI splits these too (gripper_action_latency vs
+      # robot_action_latency). Unmeasured; the topic jitters 24-100 ms, so 0 is certainly wrong,
+      # but a wrong non-zero guess is worse than a known-zero placeholder.
+      gripper: 0.0
+
+    # --- Gripper width conversion. ---
+    # The policy speaks ArUco finger-tag separation (what ingest step 4 measures); the robot
+    # speaks jaw aperture. The conversion is a constant subtraction, following UMI — see
+    # polyumi_ros2/gripper_map.py and docs/franka-inference-bringup.md ("Phase 2.5").
+    #
+    # !!! NEVER MEASURED. !!! This is gripper_calib.yaml's closed_mm (5 mm), a value no code
+    # reads and nobody has checked against a closing video. UMI derives its equivalent
+    # empirically (scripts/calibrate_gripper_range.py takes the minimum tag separation over a
+    # video in which the gripper fully closes); we have no such script yet. If commanded widths
+    # look systematically too open or too closed, this is the first number to suspect.
+    gripper_offset_m: 0.005
+    # Commanded aperture clamps here. The FR3 hand reads ~0.0817 m fully open, but franka_gripper
+    # does not publish max_width on any topic, so it cannot be read back at runtime.
+    gripper_max_width_m: 0.08
+
     buffers:
       # How far back (seconds) the EE-pose TF buffer retains history, so a past pose can
       # still be looked up/interpolated to align with a delayed observation (e.g. the gopro

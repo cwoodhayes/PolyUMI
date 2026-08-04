@@ -24,9 +24,12 @@ enp0s31f6 = 10.0.0.1/24            10.0.0.x      enx00249b860356 = 10.0.0.2/24
   - v4l2_camera (GoPro)                           - fr3-arm-controller
   - pi_receiver_node                              - move_group  (nuc/launch/fr3_move_group.launch.py)
   - policy_client_node ──HTTP──┐                  - fr3_moveit_bridge  (nuc/fr3_moveit_bridge.py)
-  - dummy_server (localhost:8000) ◄┘              - publishes fr3_* TF + joint states
+  - dummy_server (localhost:8000) ◄┘              - fr3_gripper_bridge (nuc/fr3_gripper_bridge.py)
+        │                                         - publishes fr3_* TF + joint states
         │                                         - enp89s0 = 192.168.51.10 → robot @ .20
-        └── /polyumi/target_poses (PoseArray) ──────────► fr3_moveit_bridge ──► move_group
+        ├── /polyumi/target_poses (PoseArray) ─────────► fr3_moveit_bridge ──► move_group
+        └── /polyumi/target_gripper ───────────────────► fr3_gripper_bridge ─► /fr3_gripper/{move,grasp}
+              (JointTrajectory)
 ```
 
 The PolyUMI ROS2 nodes use only distro-agnostic APIs (`rclpy`, `sensor_msgs`,
@@ -135,9 +138,8 @@ Both machines must agree on all of:
   - Base frame: **`fr3_link0`**
   - EEF / tool frame: **`fr3_hand_tcp`** (tool center point, 0.1034 m past `fr3_hand`)
   - `policy_client_node` reads `base_frame` / `eef_frame` params (defaults above).
-- **Gripper:** width on `/fr3_gripper/joint_states`; action servers
-  `/fr3_gripper/{grasp,move,gripper_action,homing}`. (Wired into observations /
-  execution in Phase 2; currently a `0.0` placeholder.)
+- **Gripper (Franka Hand):** see [Gripper interface](#gripper-interface-franka-hand) below — it
+  behaves quite differently from the arm and has several traps.
 - **Robot state:** `/franka_robot_state_broadcaster/current_pose` exposes the EEF
   pose as an alternative to the TF lookup, plus joint states / wrenches.
 - **⚠ MoveIt planning group: use `fr3_arm`, NOT `fr3_manipulator`.** The SRDF defines
@@ -152,6 +154,68 @@ Both machines must agree on all of:
   `max_acceleration_scaling_factor` don't exist on the request in Humble (added later);
   setting them raises `AttributeError`. `fr3_moveit_bridge` instead scales the planned
   trajectory in time (`_slow_trajectory`) before execution.
+
+### Gripper interface (Franka Hand)
+
+Launched by `fr3-bringup` automatically — `franka.launch.py`'s `load_gripper` defaults to `true`.
+
+**It is action-only. There is no way to servo it.** `ros2 control list_hardware_interfaces` shows
+**zero** finger/gripper interfaces: the hand is not in ros2_control at all, so the native
+`cartesian_pose` command interface the arm exposes has no gripper counterpart. Nor is this a ROS
+wrapper limitation — libfranka's `franka::Gripper` (`~/franka_ws/src/libfranka/include/franka/gripper.h`)
+offers only `homing()`, `grasp()`, `move()`, `stop()`, `readOnce()`, all blocking and discrete.
+This is why PolyUMI's gripper commander is deadbanded and rate-limited rather than a streaming
+servo like UMI's — see [Phase 2.5](franka-inference-bringup.md#phase-25--gripper-control).
+
+| Interface | Type | Notes |
+|---|---|---|
+| `/fr3_gripper/move` | `franka_msgs/action/Move` | `width` (m, **full aperture**), `speed` (m/s). Position only — applies no force, stalls on contact. |
+| `/fr3_gripper/grasp` | `franka_msgs/action/Grasp` | `width`, `speed`, `force` (N), `epsilon.inner/outer`. The only action that actually **holds**: succeeds and keeps applying force if the final width lands in `[width-inner, width+outer]`. |
+| `/fr3_gripper/gripper_action` | `control_msgs/action/GripperCommand` | Convenience wrapper: auto-dispatches `move()` when opening, `grasp()` when closing. **⚠ `position` is PER-FINGER** (the node does `width = 2 * position`), unlike Move/Grasp. Speed is fixed at `default_speed_` (0.1 m/s) and epsilon at 0.005 — both unsettable through this action. Out-of-range targets `abort()` rather than clamping. |
+| `/fr3_gripper/homing` | `franka_msgs/action/Homing` | Empty goal; re-estimates max width. Needed after changing fingers. |
+| `/fr3_gripper/stop` | `std_srvs/srv/Trigger` | The sanctioned way to interrupt; action `cancel` also calls `gripper_->stop()`. |
+
+**No goal is ever rejected.** `gripper_action_server.cpp` returns `ACCEPT_AND_EXECUTE`
+unconditionally and spawns a detached `std::thread` per goal — no queue, no preemption. libfranka
+aborts the superseded command, surfacing as `goal_handle->abort()` with
+`libfranka gripper: Command aborted!`. So "latest wins" holds, but every superseded goal reports a
+failure. **Do not stream goals at the control rate.**
+
+**State:** `/fr3_gripper/joint_states`, `name: [fr3_finger_joint1, fr3_finger_joint2]`. Each finger
+reports **half** the aperture, so `width = position[0] + position[1]`. `velocity` and `effort` are
+hardcoded `0.0` — there is no real force feedback. Measured rate **~17 Hz**, not the configured 30:
+`publishGripperState()` calls the blocking `readOnce()` inside its timer callback, so the hand's UDP
+stream is the real bound. Reachable from the laptop over DDS (verified). `max_width` (~0.0817 m
+after homing) is **not published anywhere** — it exists only inside the node.
+
+### Known upstream `franka_ros2` bugs (not fixed)
+
+Both are real defects in `franka_ros2` v0.1.15, confirmed on this NUC. Neither is fixed here:
+they live in the NUC's `~/franka_ws/src/franka_ros2` checkout — **not** in our
+`external/franka_ros2` submodule, which is built for `franka_msgs` only, so patching this repo
+would change nothing at runtime. A fix means editing NUC machine state plus
+`colcon build --packages-select franka_gripper franka_bringup` and an `fr3-bringup` restart.
+Recorded so nobody re-diagnoses them.
+
+**1. The gripper's params file is silently ignored.**
+`franka_gripper/config/franka_gripper_node.yaml` is keyed `franka_gripper:`, but
+`gripper.launch.py` names the node `[arm_id, '_gripper']` = `fr3_gripper`, so the key never
+matches. Verify with `ros2 param dump /fr3_gripper`: `state_publish_rate` reads **30** (the C++
+default) rather than the YAML's 50, and `feedback_publish_rate` reads 10 rather than 30. Only
+`robot_ip` / `joint_names` take effect, because those are passed as an inline dict.
+Impact on us is small — `Move`/`Grasp` take speed and epsilon per goal, so our bridge sets what it
+needs. And fixing it would **not** raise the observed ~17 Hz state rate, which is bounded by the
+blocking `readOnce()`, not by the timer.
+
+**2. There is no finger TF.** `franka.launch.py:147` points `joint_state_publisher` at
+`franka_gripper/joint_states`, while the node actually publishes `/fr3_gripper/joint_states`
+(`ros2 topic info -v /franka_gripper/joint_states` → `Publisher count: 0`). Finger joints therefore
+never reach `robot_state_publisher`, so `fr3_leftfinger` / `fr3_rightfinger` do not resolve in TF.
+Root cause is one level up: `franka.launch.py` forwards only `robot_ip` and `use_fake_hardware` to
+`gripper.launch.py`, never `arm_id` — the gripper's own default happens to be `fr3`, so our topic
+names line up by coincidence and would break for any other `arm_id`.
+Harmless for PolyUMI because `policy_client_node` subscribes to `/fr3_gripper/joint_states`
+directly, but it will bite anyone expecting finger frames in TF.
 
 ### Quick checks
 
@@ -176,9 +240,12 @@ can't parse it. This surfaces as two loud messages:
 
 **Harmless for small/simple messages.** Verified: `ros2 topic hz /joint_states` gives a
 real rate on the laptop, TF crosses fine, and a `geometry_msgs/PoseStamped` published
-laptop→NUC arrives byte-for-byte intact. The inference loop's observation path is
-unaffected. rmw_cyclonedds 4.0.2 has no switch to suppress the type-hash emission (it
-only reads `CYCLONEDDS_URI`), so we accept this noise.
+laptop→NUC arrives byte-for-byte intact. `trajectory_msgs/JointTrajectory` (the gripper chunk on
+`/polyumi/target_gripper`) was checked the same way and also **crosses intact** — the NUC received
+`frame_id`, `joint_names`, and every point's `positions` + `time_from_start` exactly as published,
+with the `serdata.cpp:384` noise appearing alongside but not corrupting the payload. The inference
+loop's observation path is unaffected. rmw_cyclonedds 4.0.2 has no switch to suppress the type-hash
+emission (it only reads `CYCLONEDDS_URI`), so we accept this noise.
 
 **⚠ NOT harmless for large nested messages.** A `MoveGroup.Goal` sent from the **laptop**
 to the NUC's move_group fails: move_group logs `Catastrophic failure` right next to those
@@ -240,7 +307,7 @@ export CYCLONEDDS_URI=file://$HOME/franka_ws/config/cyclonedds.xml
 **1b. NUC — start MoveIt `move_group`** (third NUC terminal):
 
 ```bash
-ros2 launch <repo>/nuc/launch/fr3_move_group.launch.py robot_ip:=192.168.51.20
+ros2 launch nuc/launch/fr3_move_group.launch.py robot_ip:=192.168.51.20
 ```
 
 This adds **only** the `move_group` planner (exposing `/move_action`,
@@ -270,7 +337,8 @@ robot_state_publisher and collides with `fr3-bringup`.)
 **1c. NUC — start the MoveIt bridge** (fourth NUC terminal):
 
 ```bash
-python3 <repo>/nuc/fr3_moveit_bridge.py --ros-args -p execute:=true -p max_velocity_scaling:=0.8
+# from the PolyUMI repo
+python3 nuc/fr3_moveit_bridge.py --ros-args -p execute:=true -p max_velocity_scaling:=0.8
 ```
 
 Subscribes `/polyumi/target_poses` (a `PoseArray` — one action chunk) and drives the local
@@ -281,6 +349,26 @@ move_group already planned at) time-scales the trajectory; **start low** (e.g. `
 with a hand on the e-stop, then raise it once you trust the motion. It logs
 `move_group found (compute_cartesian_path ready).` at
 startup — if it instead says `NOT found after 10s`, step 1b isn't running.
+
+**1d. NUC — start the gripper bridge** (fifth NUC terminal, only if you want the hand to move):
+
+```bash
+python3 nuc/fr3_gripper_bridge.py --ros-args -p execute:=true
+```
+
+Subscribes `/polyumi/target_gripper` (a `trajectory_msgs/JointTrajectory` — the width half of the
+action chunk) and drives `/fr3_gripper/{move,grasp}`. Like the MoveIt bridge, **`execute` defaults
+to `false`** (logs the goal it would send, commands nothing) — pass `execute:=true` to move the
+fingers. Independent of `move_group`, so it runs without steps 1b/1c.
+
+Because the hand cannot be servoed (see [Gripper interface](#gripper-interface-franka-hand)), this
+node deliberately does **not** track every chunk: it deadbands (`width_deadband_m`, default 5 mm)
+and rate-limits (`min_command_period_s`, default 0.25 s), sending only the latest desired width.
+A quiet log with occasional goals is correct; a stream of `Command aborted!` is not.
+
+**First time on hardware, run the arm bridge in plan-only (`execute:=false`) and only this node
+with `execute:=true`**, so a bad width command moves fingers and nothing else. Keep the hand clear
+of objects and of the table.
 
 **2. Inference server — real (GPU box) or dummy (laptop).**
 
@@ -415,6 +503,23 @@ YUYV→RGB conversion (it logs "possibly slow conversion") into a ~6 MB `rgb8` m
 frame's capture stamp, so it's safe for the dry run. For **execution**, prefer a genuinely faster
 camera path (lower published resolution, or the compressed transport) so the policy isn't acting on
 200 ms-old vision.
+
+### Gripper: a stream of `Command aborted!` / "Gripper move failed"
+`franka_gripper` accepts every goal and never preempts; libfranka aborts whichever command a new
+one supersedes, so each superseded goal ends ABORTED. A steady stream of these means
+`fr3_gripper_bridge` is sending goals far too fast — check that `min_command_period_s` and
+`width_deadband_m` are actually applied (a deadband of 0 with a noisy commanded width will fire
+every period). Occasional aborts when the width changes quickly are expected and logged at info.
+
+### Gripper never moves
+In order: is `fr3_gripper_bridge` running with `execute:=true` (it defaults to false)? Does
+`ros2 action list | grep fr3_gripper` show the four servers — if not, `fr3-bringup` was started with
+`load_gripper:=false`. Is anything arriving on `/polyumi/target_gripper` (`ros2 topic hz`)? If the
+laptop publishes but the NUC sees nothing, suspect the `JointTrajectory` message crossing the
+rmw-version gap — compare against `/polyumi/target_poses`, which is known to cross fine. Finally,
+a commanded width inside `width_deadband_m` of the current one is *intentionally* not sent.
+(The `JointTrajectory` message itself is known to cross the laptop↔NUC rmw gap intact — that has
+been verified, so it is not the likely culprit.)
 
 ### First inference times out, then recovers; many actions dropped as stale
 The first `/predict_cartesian/` after the server starts includes GPU/model warmup and can exceed

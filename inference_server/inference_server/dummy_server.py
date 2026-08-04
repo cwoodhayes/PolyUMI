@@ -5,6 +5,11 @@ Implements the /predict_cartesian/ endpoint with a sine-wave oscillator instead 
 policy, so the ROS2 policy_client_node can be developed and tested end-to-end without a
 trained checkpoint.
 
+Two channels oscillate, at the same frequency but 90 degrees apart: X on a sine, gripper width
+on a cosine. The phase offset is deliberate — the gripper's extremes land on X's zero crossings,
+so a routing bug that feeds X into the gripper (or vice versa) is visible at a glance in the logs
+and in Foxglove, instead of looking perfectly plausible.
+
 Usage:
     HOME_POSE="0.4 0.0 0.4 0 0 0 1 0.04" uv run uvicorn inference_server.dummy_server:app --host 0.0.0.0 --port 8000
 """
@@ -27,7 +32,15 @@ REQUIRED_OBS_KEYS = {'image', 'agent_pos'}
 AGENT_POS_DIM = 8  # [x, y, z, qx, qy, qz, qw, gripper_width]
 OSCILLATION_AMPLITUDE_M = 0.05
 OSCILLATION_PERIOD_STEPS = 20  # full cycle over this many /predict calls
-DEFAULT_HOME_POSE = '0.56 0.13 0.25 -1 0 0 0 0.4'  # xyz qxqyqzqw gripper
+# Gripper swing, in the same units as the training data (ArUco finger-tag separation, NOT the
+# robot's jaw aperture — policy_client_node applies the offset, see docs/franka-inference-bringup.md
+# "Phase 2.5"). Centred on the home width, so keep amplitude <= that to stay non-negative.
+GRIPPER_OSCILLATION_AMPLITUDE_M = 0.04
+DEFAULT_HOME_POSE = '0.56 0.13 0.25 -1 0 0 0 0.05'  # xyz qxqyqzqw gripper
+# Sanity bound on the home gripper width. The Franka Hand tops out near 0.0817 m and the handheld
+# gripper's tags separate to ~0.1 m, so anything past this is a units error (this default used to
+# read 0.4 — 400 mm — which went unnoticed only because the width was being dropped downstream).
+MAX_PLAUSIBLE_GRIPPER_M = 0.2
 
 
 class PredictRequest(BaseModel):
@@ -60,6 +73,13 @@ async def _lifespan(app: FastAPI):
     vals = [float(v) for v in raw.split()]
     if len(vals) != AGENT_POS_DIM:
         raise ValueError(f'HOME_POSE must have {AGENT_POS_DIM} values (xyz qxqyqzqw gripper), got {len(vals)}')
+    gripper = vals[-1]
+    if not 0.0 < gripper <= MAX_PLAUSIBLE_GRIPPER_M:
+        raise ValueError(
+            f'HOME_POSE gripper width {gripper} m is out of range (0, {MAX_PLAUSIBLE_GRIPPER_M}]. '
+            'The last HOME_POSE value is a width in METRES — a value like 0.4 is 400 mm, ~5x the '
+            'Franka Hand\'s stroke. Did you mean 0.04?'
+        )
     _home_pose = np.array(vals)
     yield
 
@@ -121,8 +141,8 @@ def predict_cartesian(req: PredictRequest) -> PredictResponse:
             detail=f'agent_pos must have shape [{req.n_obs_steps}, {AGENT_POS_DIM}]',
         )
 
-    # Oscillate X around the fixed home pose (set via HOME_POSE env var at startup).
-    # Return a genuine forward-looking chunk — one pose per step, phase advancing by one
+    # Oscillate X and the gripper width around the fixed home pose (set via HOME_POSE env var at
+    # startup). Return a genuine forward-looking chunk — one pose per step, phase advancing by one
     # OSCILLATION_PERIOD_STEPS-th per step — rather than n_return copies of a single pose,
     # so the client has an actual multi-waypoint path to plan+execute (not n identical
     # points). _call_count advances by the full chunk length so consecutive calls continue
@@ -134,8 +154,13 @@ def predict_cartesian(req: PredictRequest) -> PredictResponse:
     for i in range(n_return):
         phase = 2 * math.pi * (_call_count + i) / OSCILLATION_PERIOD_STEPS
         delta_x = OSCILLATION_AMPLITUDE_M * math.sin(phase)
+        # cos against X's sin — same frequency, quarter period apart. See the module docstring:
+        # this is what makes a gripper/pose routing mix-up visible rather than plausible.
+        delta_grip = GRIPPER_OSCILLATION_AMPLITUDE_M * math.cos(phase)
         target = _home_pose.copy()
         target[0] += delta_x
+        # Clamp at 0: a negative width is meaningless, and the client would clamp it anyway.
+        target[7] = max(0.0, target[7] + delta_grip)
         actions.append(target.tolist())
     _call_count += n_return
 
