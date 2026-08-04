@@ -161,7 +161,7 @@ call it makes to the dummy server today, so nothing changes on the ROS side but 
 
 ## What is out of scope here
 
-Calibration (`T_gopro_to_hand`, `latency.gopro`, the `eef_frame` static TF) is a separate ticket
+Calibration (`T_gopro_to_fingertip`, `latency.gopro`, the `eef_frame` static TF) is a separate ticket
 and does **not** gate training: the task config sets `dataset_frequeny: 0`, which zeroes every
 `latency_steps`, so the latency numbers are inert during training. A policy trained now will not
 *deploy* correctly until calibration lands, but its loss curve is meaningful.

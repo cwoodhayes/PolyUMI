@@ -72,15 +72,15 @@ def test_retarget_body_frame_all_nan() -> None:
 
 
 def test_gopro_to_hand_transform_requires_calibration() -> None:
-    """A calibration missing T_gopro_to_hand raises rather than silently defaulting."""
-    with pytest.raises(KeyError, match='T_gopro_to_hand'):
+    """A calibration missing T_gopro_to_fingertip raises rather than silently defaulting."""
+    with pytest.raises(KeyError, match='T_gopro_to_fingertip'):
         gopro_to_hand_transform({'some_other_key': {}})
 
 
 def test_gopro_to_hand_transform_reads_calibration() -> None:
-    """T_gopro_to_hand is parsed as a pose of the hand expressed in the GoPro frame."""
+    """T_gopro_to_fingertip is parsed as a pose of the hand expressed in the GoPro frame."""
     tf = gopro_to_hand_transform(
-        {'T_gopro_to_hand': {'translation': [0.0, 0.0, 0.072], 'rotation': [0.0, 0.0, 0.0, 1.0]}}
+        {'T_gopro_to_fingertip': {'translation': [0.0, 0.0, 0.072], 'rotation': [0.0, 0.0, 0.0, 1.0]}}
     )
     np.testing.assert_allclose(tf.translation, [0.0, 0.0, 0.072], atol=1e-12)
 

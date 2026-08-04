@@ -42,9 +42,11 @@ scene.zarr/
 │   │   ├── gps                     (N_gps, 3) float64 — [lat, lon, alt]
 │   │   └── slam_poses              (N_gopro, 7) float64 — [x, y, z, qx, qy, qz, qw] of the GoPro
 │   │                                    optical frame (x right, y down, z forward); NaN when lost or never fed
-│   ├── eef/                        populated by step 5
-│   │   └── pose                    (N_gopro, 7) float64 — [x, y, z, qx, qy, qz, qw] on the
-│   │                               hand body frame, gopro grid; NaN where unsolved
+│   ├── eef/                        populated by step 5 — one array per available source
+│   │   ├── pose_optitrack          (N_gopro, 7) float64 — [x, y, z, qx, qy, qz, qw] on the
+│   │   │                           hand body frame, gopro grid; NaN where unsolved
+│   │   └── pose_slam               same shape/frame; NaN where SLAM had no pose, which
+│   │                               includes every frame the localizer was never fed
 │   ├── timestamps/
 │   │   ├── finger                  (N_finger,) float64 — UTC seconds
 │   │   ├── finger_piezo            (N_audio,) float64
@@ -157,7 +159,7 @@ You can have multiple sources for the same scene and decide downstream which to 
 
 Step 5 (`eef-pose`) resolves this per source: for every source an episode actually has, it converts that source onto the canonical **hand** body frame, resamples onto the GoPro frame grid, and writes `episode_N/eef/pose_optitrack` and/or `episode_N/eef/pose_slam` — one array per source, not a single winner. (SLAM's array is taken exactly as reported: since pzarr v4 nothing is interpolated, so rows SLAM could not place — including every frame the localizer was never fed under `localization_frame_stride` — stay NaN, and the exporter turns runs of NaN into episode boundaries.) Picking *which* source to train on is deferred to **export time**, not baked in here — see `export.dp.buffer.resolve_pose_source`: it defaults to OptiTrack when present (else SLAM), overridable per session via `scene.json`'s `pose_source_overrides`. This means changing the source is a re-export, not a re-preprocess.
 
-Both sources route through the **GoPro frame**, then take one shared `T_gopro_to_hand` hop:
+Both sources route through the **GoPro frame**, then take one shared `T_gopro_to_fingertip` hop:
 
 ```
 slam:      T_s_gp  ─────────────────────────────────►  · T_gp_hand
@@ -173,7 +175,7 @@ The **world** frame is deliberately left as each source's own (OptiTrack frame o
 
 Each `eef/pose_<source>` array records its own `world_frame`, `body_frame` (`hand`), `grid` (`gopro`), and `n_nan` attrs. The `eef` group itself records `available_sources` (which arrays this episode has) and `default_source` (what export uses absent a `scene.json` override).
 
-> **`T_gopro_to_hand` in `config/gripper_calib.yaml` is currently an unmeasured placeholder.** It is on the critical path for every exported pose. Calibrate it before any training run.
+> **`T_gopro_to_fingertip` in `config/gripper_calib.yaml` is measured from the PolyUMI CAD assembly**, not from a calibration rig: its origin is the centre of the GoPro lens faceplate plus a 5 mm allowance for the sensor plane, and its target is the midpoint of the closed fingertips on the plane of the finger's upper surface. It is on the critical path for every exported pose, so re-derive it from CAD whenever the mount geometry changes.
 
 > **At inference**, the robot must report this same physical point — the policy compares like with like or not at all. That means `eef_frame` on the ROS side must resolve to the hand frame defined here, not the stock `fr3_hand_tcp`. See [franka-inference-bringup.md](franka-inference-bringup.md).
 
@@ -220,7 +222,7 @@ It is implemented once per side because the two live in separate Python environm
 
 `pzarr` is the source of truth; downstream formats are exports produced on demand.
 
-- **UMI ReplayBuffer** (`pingest export-dp`): a `.zarr.zip` matching `universal_manipulation_interface`'s `ReplayBuffer` so `UmiDataset` reads it directly. `meta/episode_ends` plus `data/` keys `camera0_rgb` (T,224,224,3 uint8, Blosc-zstd; see the camera0_rgb preprocessing contract above), `robot0_eef_pos` (T,3), `robot0_eef_rot_axis_angle` (T,3, rotvec), `robot0_gripper_width` (T,1), and `robot0_demo_start_pose`/`robot0_demo_end_pose` (T,6, the episode's first/last `[pos, rotvec]` broadcast). The key *names* are load-bearing — `UmiDataset` name-matches them. Poses are read from `eef/pose_<source>` (so step 5 must have run) and are on the hand frame; the exporter resolves the source per episode (see the `eef/pose_<source>` section above) and records the choice as provenance — in `meta.attrs['pose_provenance']`/`episode_pose_source` inside the `.zarr.zip`, and in a `<output>.provenance.json` sidecar (or the catalog's `DatasetManifest`). The `action` key is deliberately omitted (the sampler synthesises it from `[eef_pos, eef_rot_axis_angle, gripper_width]`). Frames are exported at the native GoPro rate (~59.94 Hz); the training config sets the observation rate via `obs_down_sample_steps`. Only `EPISODE`-typed sessions are exported; `MAPPING` sessions are skipped.
+- **UMI ReplayBuffer** (`pingest export-dp`): a `.zarr.zip` matching `universal_manipulation_interface`'s `ReplayBuffer` so `UmiDataset` reads it directly. `meta/episode_ends` plus `data/` keys `camera0_rgb` (T,224,224,3 uint8, Blosc-zstd; see the camera0_rgb preprocessing contract above), `robot0_eef_pos` (T,3), `robot0_eef_rot_axis_angle` (T,3, rotvec), `robot0_gripper_width` (T,1), and `robot0_demo_start_pose`/`robot0_demo_end_pose` (T,6, the episode's first/last `[pos, rotvec]` broadcast). The key *names* are load-bearing — `UmiDataset` name-matches them. Poses are read from `eef/pose_<source>` (so step 5 must have run) and are on the hand frame; the exporter resolves the source per episode (see the `eef/pose_<source>` section above) and records the choice as provenance — in `meta.attrs['pose_provenance']`/`episode_pose_source` inside the `.zarr.zip`, and in a `<output>.provenance.json` sidecar (or the catalog's `DatasetManifest`). The `action` key is deliberately omitted (the sampler synthesises it from `[eef_pos, eef_rot_axis_angle, gripper_width]`). Steps are the frames SLAM was *fed* — every `localization_frame_stride`-th GoPro frame, so ~29.97 Hz at the current stride of 2, not the 59.94 Hz the camera records at — and the training config sets the observation rate from there via `obs_down_sample_steps`. **Those two knobs are coupled:** halving the stored rate must halve `obs_down_sample_steps`, or the policy trains on a different Δt than it runs at. A single buffer may not mix strides; export refuses to write one that does. A session whose pose source drops out mid-demo is split into one episode per contiguous run, discarding runs shorter than `--min-segment-steps`. Only `EPISODE`-typed sessions are exported; `MAPPING` sessions are skipped.
 
 - **MCAP** (`pingest export-mcap`): one `.mcap` file per episode, with channels for finger image, GoPro image, both audio streams, IMU, GPS, SLAM pose, OptiTrack pose, ArUco annotations, and gripper width. Uses Foxglove JSON schemas; audio is chunked at 4096 samples per message.
 

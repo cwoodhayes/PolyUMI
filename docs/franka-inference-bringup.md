@@ -38,8 +38,9 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
      scripts" — **no such script exists**. UMI measured 0.125–0.17 s for a plain UVC webcam;
      the GoPro→HDMI→capture-card→v4l2 path is longer, so 50 ms is likely well short. This now
      sets both the TF lookup instant *and* `t_obs` for chunk truncation.
-   - `T_gopro_to_hand` in `ingest/config/gripper_calib.yaml` — translation inferred from
-     `nominal_z_m`, rotation an unverified identity. Feeds every exported pose.
+   - `T_gopro_to_fingertip` in `ingest/config/gripper_calib.yaml` — now measured from the
+     PolyUMI CAD assembly (GoPro lens faceplate → closed-fingertip midpoint), rotation an
+     identity because both frames are the GoPro optical convention. Feeds every exported pose.
 
 3. **Gripper is unwired in both directions.** `_lookup_agent_pos` hardcodes
    `gripper_width = 0.0`, so `agent_pos[7]` is a constant the policy learns nothing from; and
@@ -646,7 +647,7 @@ Franka package set present: `franka_bringup`, `franka_description`, `franka_fr3_
 | 3 | `moveit_py` availability — and on which machine (Phase 2)? | **Resolved:** not used at all. Raw `moveit_msgs` calls from a small node (`nuc/fr3_moveit_bridge.py`) running on the NUC, same-rmw as move_group — see Phase 2 / crb-fr3-inference.md. |
 | 4 | Gripper width topic on Franka? | **Resolved:** `/fr3_gripper/joint_states`; actions `/fr3_gripper/{grasp,move,gripper_action,homing}`. |
 | 5 | Subprocess vs direct import for Phase 3 | **Resolved — direct import (subprocess retired).** The original answer was subprocess, but the training work produced a single Docker image whose `umi` env has both `diffusion_policy`/torch and fastapi/uvicorn, so `serve_policy.py` direct-imports the policy and the container is the isolation boundary. See Phase 3. |
-| 6 | Which physical point is the canonical `hand` frame, and what publishes it on the FR3? | **Open — blocking.** Ingest step 5 emits poses on a `hand` frame defined by `T_gopro_to_hand` (itself an unmeasured placeholder). The FR3 must report that same point as `eef_frame`; today it reports `fr3_hand_tcp`. Needs a mounting calibration + a static TF. |
+| 6 | Which physical point is the canonical `hand` frame, and what publishes it on the FR3? | **Open — blocking.** Ingest step 5 emits poses on a `hand` frame defined by `T_gopro_to_fingertip` — the closed-fingertip midpoint, measured from CAD. The FR3 must report that same point as `eef_frame`; today it reports `fr3_hand_tcp`. Needs a mounting calibration + a static TF. |
 | 7 | How do gripper width (obs) and gripper command (action) get wired? | **Open.** Obs: subscribe `/fr3_gripper/joint_states` and fill `agent_pos[7]` (currently `0.0`). Action: `PoseArray` can't carry width — either change the chunk message type or publish a parallel one, then drive `/fr3_gripper/{grasp,move}` from the NUC bridge. |
 | 8 | Do finger cam / piezo feed the policy, and at what latency? | **Open.** Params exist and are unconsumed. If they become obs, the capture instant becomes the *oldest* across streams (an observation is only as fresh as its slowest signal), and they must also be added to the DP export, which carries none of them today. |
 | 9 | What is `latency.gopro` actually? | **Open — needs measurement, not a guess.** See Status blocker 2. |

@@ -57,7 +57,7 @@ class EefPoseStep(PreprocessingStep):
     ``eef.attrs['default_source']`` records which one export uses absent an override.
 
     The chain routes both sources through the **GoPro frame** and then applies one shared
-    ``T_gopro_to_hand`` hop::
+    ``T_gopro_to_fingertip`` hop::
 
         slam:      T_s_gp  ──────────────────────────────────► · T_gp_hand
         optitrack: T_o_rb · inv(T_gb_rb) · T_gb_gp  ─────────► · T_gp_hand
@@ -84,7 +84,7 @@ class EefPoseStep(PreprocessingStep):
     Runs after step 3 (slam-optitrack-align), which needs the untouched source-frame poses to
     solve for T_ws, and step 4 (aruco-gripper-width), which defines the GoPro-grid convention.
 
-    Prerequisites: ``T_gopro_to_hand`` in ``config/gripper_calib.yaml``; ``timestamps/gopro``
+    Prerequisites: ``T_gopro_to_fingertip`` in ``config/gripper_calib.yaml``; ``timestamps/gopro``
     per episode; and either ``optitrack/pose`` + ``optitrack/timestamps`` in the root group or
     ``gopro/slam_poses`` in the episode.
     """
