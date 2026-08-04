@@ -40,7 +40,8 @@ scene.zarr/
 │   │   ├── accl                    (N_accl, 3) float64 — [z, x, y] m/s²
 │   │   ├── gyro                    (N_gyro, 3) float64 — [z, x, y] rad/s
 │   │   ├── gps                     (N_gps, 3) float64 — [lat, lon, alt]
-│   │   └── slam_poses              (N_gopro, 7) float64 — [x, y, z, qx, qy, qz, qw], NaN when tracking lost
+│   │   └── slam_poses              (N_gopro, 7) float64 — [x, y, z, qx, qy, qz, qw] of the GoPro
+│   │                                    optical frame (x right, y down, z forward); NaN when lost or never fed
 │   ├── eef/                        populated by step 5
 │   │   └── pose                    (N_gopro, 7) float64 — [x, y, z, qx, qy, qz, qw] on the
 │   │                               hand body frame, gopro grid; NaN where unsolved

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import os
@@ -46,10 +47,10 @@ _DEFAULT_SETTINGS_YAML = _DEFAULT_ORB_SLAM3_DIR / 'Examples' / 'Monocular-Inerti
 # fallbacks used only if that file is missing or omits a key.
 _SLAM_CONFIG = load_slam_config()
 
-# Maximum acceptable distance (as a fraction of a frame period) between a
-# trajectory entry's timestamp and the nearest frame timestamp when
-# reconciling the C++ output back onto our frame index.  Internal to the matching
-# algorithm rather than a tuning knob, so deliberately not in slam.yaml.
+# How far (as a fraction of a frame period) a trajectory row's timestamp may sit from the
+# frame its index maps to. Rows are indexed directly, so this is a consistency assertion on
+# the decimation stride rather than a matching tolerance — not a tuning knob, hence not in
+# slam.yaml.
 _TRAJ_TOLERANCE_FRAC = 0.5
 
 
@@ -219,70 +220,67 @@ def _make_temp_settings_yaml(
     return dst
 
 
-def _parse_and_reconcile_trajectory(traj_path: pathlib.Path, frame_ts: np.ndarray) -> np.ndarray:
+def _parse_trajectory_csv(traj_path: pathlib.Path, frame_ts: np.ndarray, frame_stride: int = 1) -> np.ndarray:
     """
-    Parse an ORB-SLAM3 EuRoC-format trajectory and align it to ``frame_ts``.
+    Parse the localizer's CSV trajectory onto the full GoPro frame grid.
 
-    ``SaveTrajectoryEuRoC`` writes whitespace-separated rows::
+    ``System::SaveTrajectoryCSV`` writes one row per frame the binary was *fed*, in order,
+    with a header and an explicit lost flag::
 
-        timestamp_ns tx ty tz qx qy qz qw
+        frame_idx,timestamp,state,is_lost,is_keyframe,x,y,z,q_x,q_y,q_z,q_w
 
-    Lost frames are silently omitted, so we map each entry to its nearest
-    frame timestamp (within half a frame period) and mark every frame that
-    received no match as is_lost=True.
+    Row ``k`` is therefore the k-th fed frame, i.e. original frame ``k * frame_stride`` --
+    a direct index, which is why nothing here matches timestamps. (The EuRoC writer omitted
+    lost frames entirely, so every row had to be matched back by time within half a frame
+    period, and a mis-estimated anchor shifted poses silently.)
 
-    The trajectory timestamps are nanoseconds of *video time* (because the
-    C++ binary computes tframe from ``cap.get(CAP_PROP_POS_MSEC)``), so we
-    add ``frame_ts[0]`` to bring them back to UTC before matching.
+    Poses are in the **camera optical frame**: unlike ``SaveTrajectoryEuRoC``, whose inertial
+    branch composes ``mTbc`` and reports the IMU body pose, this writer reports ``Twc``
+    directly. See the note in ``mono_inertial_gopro_vi_localize.cc``.
 
-    Returns ``poses`` shaped (N,7) float64 ``[x,y,z, qx,qy,qz,qw]``. Lost
-    rows are all-NaN.
+    The ``timestamp`` column is video seconds, so it cross-checks the stride assumption: if
+    the binary decimated differently than we think, the times won't line up and this raises
+    rather than silently returning poses attached to the wrong frames.
+
+    Returns ``poses`` shaped (N,7) float64 ``[x,y,z, qx,qy,qz,qw]``, all-NaN where lost or
+    never fed.
     """
     n = len(frame_ts)
     poses = np.full((n, 7), np.nan, dtype=np.float64)
-
     if n < 2:
         return poses
 
     t_ref = float(frame_ts[0])
-    period = float(np.median(np.diff(frame_ts)))
-    tolerance = _TRAJ_TOLERANCE_FRAC * period
+    tolerance = _TRAJ_TOLERANCE_FRAC * float(np.median(np.diff(frame_ts)))
 
-    n_matched = 0
-    n_skipped = 0
-    with open(traj_path) as fh:
-        for line_no, line in enumerate(fh, start=1):
-            line = line.strip()
-            if not line:
+    n_tracked = n_lost = n_dropped = 0
+    with open(traj_path, newline='') as fh:
+        for row in csv.DictReader(fh):
+            idx = int(row['frame_idx']) * frame_stride
+            if idx >= n:
+                # The decoder can overrun the end of the mp4 and feed empty frames; those
+                # rows describe frames that don't exist on our grid.
+                n_dropped += 1
                 continue
-            parts = line.split()
-            if len(parts) != 8:
-                log.warning(f'  Skipping malformed trajectory line {line_no}: {line!r}')
+            if row['is_lost'].strip().lower() == 'true':
+                n_lost += 1
                 continue
-            t_ns = float(parts[0])
-            tx, ty, tz, qx, qy, qz, qw = (float(p) for p in parts[1:])
-            t_utc = t_ref + t_ns / 1e9
 
-            idx_right = int(np.searchsorted(frame_ts, t_utc))
-            candidates = []
-            if idx_right > 0:
-                candidates.append(idx_right - 1)
-            if idx_right < n:
-                candidates.append(idx_right)
-            idx = min(candidates, key=lambda i: abs(frame_ts[i] - t_utc))
-
-            if abs(frame_ts[idx] - t_utc) > tolerance:
-                log.warning(
-                    f'  Trajectory entry at video t={t_ns / 1e9:.6f}s has no '
-                    f'matching frame within {tolerance * 1000:.1f}ms — skipping'
+            drift = abs((t_ref + float(row['timestamp'])) - float(frame_ts[idx]))
+            if drift > tolerance:
+                raise RuntimeError(
+                    f'Trajectory row {row["frame_idx"]} claims video t={row["timestamp"]}s, which is '
+                    f'{drift * 1000:.1f}ms from frame {idx} (tolerance {tolerance * 1000:.1f}ms). '
+                    f'The localizer did not decimate at the stride {frame_stride} assumed here, so '
+                    f'every pose would land on the wrong frame.'
                 )
-                n_skipped += 1
-                continue
 
-            poses[idx] = [tx, ty, tz, qx, qy, qz, qw]
-            n_matched += 1
+            poses[idx] = [float(row[k]) for k in ('x', 'y', 'z', 'q_x', 'q_y', 'q_z', 'q_w')]
+            n_tracked += 1
 
-    log.info(f'  Trajectory reconciliation: {n_matched} matched, {n_skipped} skipped')
+    if n_dropped:
+        log.warning(f'  {n_dropped} trajectory row(s) past the {n}-frame grid; ignored.')
+    log.info(f'  Trajectory: {n_tracked} tracked, {n_lost} lost of {n_tracked + n_lost} fed frames')
     return poses
 
 
@@ -563,7 +561,7 @@ class OrbSlam3Step(PreprocessingStep):
                 save_atlas=atlas_path,
                 res_div=self.resolution_divisor,
             )
-            traj_out = log_dir / 'mapping_trajectory.txt'
+            traj_out = log_dir / 'mapping_trajectory.csv'
             cmd = [
                 str(self.map_builder_bin),
                 str(self._vocab_path),
@@ -582,13 +580,13 @@ class OrbSlam3Step(PreprocessingStep):
             if not atlas_path.exists():
                 raise RuntimeError(f'ORB-SLAM3 map builder completed but atlas not found at {atlas_path}')
 
-            # Reconcile the mapping trajectory back onto the mapping episode
-            # and persist poses next to the localized episodes' data.  Same
-            # EuRoC format and reconciliation as Phase 2 — keeps the schema
-            # consistent across MAPPING and EPISODE sessions.
+            # Put the mapping trajectory back onto the mapping episode and persist it
+            # alongside the localized episodes' poses. Same CSV format and same parser as
+            # phase 2 — keeps the schema consistent across MAPPING and EPISODE sessions.
+            # Map building is never decimated, so its stride is 1.
             if traj_out.exists():
                 log.info(f'  Mapping trajectory saved to {traj_out}')
-                poses = _parse_and_reconcile_trajectory(traj_out, frame_ts)
+                poses = _parse_trajectory_csv(traj_out, frame_ts)
                 _write_slam_results(ep_grp, poses, self.settings_yaml, atlas_path)
 
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -618,7 +616,7 @@ class OrbSlam3Step(PreprocessingStep):
                 res_div=self.resolution_divisor,
                 fps_div=self.localization_frame_stride,
             )
-            traj_out = tmp_dir / 'trajectory.txt'
+            traj_out = tmp_dir / 'trajectory.csv'
             # Forward pass only. The binary still accepts an optional 6th argument that makes
             # it run a second, temporally-reversed pass against the same atlas; we no longer
             # pass it. Recovering the lead-in frames that way meant merging two trajectories
@@ -647,7 +645,7 @@ class OrbSlam3Step(PreprocessingStep):
             if not traj_out.exists():
                 raise RuntimeError(f'ORB-SLAM3 localizer completed but trajectory file not found: {traj_out}')
 
-            poses = _parse_and_reconcile_trajectory(traj_out, frame_ts)
+            poses = _parse_trajectory_csv(traj_out, frame_ts, frame_stride=self.localization_frame_stride)
             _write_slam_results(
                 ep_grp,
                 poses,

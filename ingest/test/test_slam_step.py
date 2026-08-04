@@ -17,7 +17,7 @@ from polyumi_ingest.preproc.slam_step import (
     _downsample_settings,
     _export_telemetry_json,
     _make_temp_settings_yaml,
-    _parse_and_reconcile_trajectory,
+    _parse_trajectory_csv,
     _write_slam_results,
 )
 
@@ -58,29 +58,30 @@ def _make_episode(
     return ep
 
 
-def _make_euroc_trajectory(
+def _make_trajectory_csv(
     path: pathlib.Path,
     frame_ts: np.ndarray,
     tracked_mask: np.ndarray,
+    frame_stride: int = 1,
 ) -> None:
     """
-    Write a fake EuRoC-format trajectory output for frames where ``tracked_mask`` is True.
+    Write a fake trajectory CSV as ``System::SaveTrajectoryCSV`` does.
 
-    Each row is whitespace-separated::
-
-        timestamp_ns tx ty tz qx qy qz qw
-
-    Timestamps are nanoseconds of *video time* (relative to frame_ts[0]),
-    matching what ORB-SLAM3's SaveTrajectoryEuRoC writes for the gopro
-    binary's tframe values.
+    One row per frame the binary was *fed* — so with ``frame_stride`` > 1 the rows cover
+    ``frame_ts[::frame_stride]`` and ``frame_idx`` counts fed frames, not source frames.
+    Lost frames get a row too, flagged and zero-filled, which is what lets the parser index
+    rows directly instead of matching timestamps.
     """
     t_ref = float(frame_ts[0])
+    fed = np.arange(0, len(frame_ts), frame_stride)
     with open(path, 'w') as fh:
-        for i, ts in enumerate(frame_ts):
+        fh.write('frame_idx,timestamp,state,is_lost,is_keyframe,x,y,z,q_x,q_y,q_z,q_w\n')
+        for k, i in enumerate(fed):
+            t = float(frame_ts[i]) - t_ref
             if not tracked_mask[i]:
-                continue
-            t_ns = (float(ts) - t_ref) * 1e9
-            fh.write(f'{t_ns:.6f} 0.1 0.2 0.3 0.0 0.0 0.0 1.0\n')
+                fh.write(f'{k},{t:.6f},3,true,false,0,0,0,0,0,0,0\n')
+            else:
+                fh.write(f'{k},{t:.6f},2,false,false,0.1,0.2,0.3,0.0,0.0,0.0,1.0\n')
 
 
 def _calibrated_settings(tmp_path: pathlib.Path) -> pathlib.Path:
@@ -154,12 +155,12 @@ def test_zarr_output_schema(tmp_path: pathlib.Path) -> None:
         atlas_path.touch()
 
     def _fake_localize(ep_grp, episode_index, atlas_path, log_dir, scene_zarr):
-        traj_path = tmp_path / f'traj_{episode_index}.txt'
+        traj_path = tmp_path / f'traj_{episode_index}.csv'
         frame_ts = np.asarray(ep_grp['timestamps/gopro'][:], dtype=np.float64)
         tracked = np.ones(n_frames, dtype=bool)
         tracked[:2] = False  # first two frames lost
-        _make_euroc_trajectory(traj_path, frame_ts, tracked)
-        poses = _parse_and_reconcile_trajectory(traj_path, frame_ts)
+        _make_trajectory_csv(traj_path, frame_ts, tracked)
+        poses = _parse_trajectory_csv(traj_path, frame_ts)
         from polyumi_ingest.preproc.slam_step import _write_slam_results
 
         _write_slam_results(ep_grp, poses, settings, atlas_path)
@@ -211,6 +212,56 @@ def test_placeholder_detection_raises(tmp_path: pathlib.Path) -> None:
     step = OrbSlam3Step(settings_yaml=yaml_with_placeholder)
     with pytest.raises(RuntimeError, match='CALIBRATE_ME'):
         step.run_step(scene_zarr)
+
+
+def test_parse_trajectory_csv_maps_rows_through_the_stride(tmp_path: pathlib.Path) -> None:
+    """
+    Under decimation, CSV row k is source frame k*stride — not frame k.
+
+    The binary only ever sees the kept frames and numbers them 0..M-1, so getting this
+    wrong would place every pose on the wrong frame while still looking plausible.
+    """
+    n, stride = 12, 2
+    frame_ts = 1000.0 + np.arange(n, dtype=np.float64) / 60.0
+    traj_path = tmp_path / 'traj.csv'
+    _make_trajectory_csv(traj_path, frame_ts, np.ones(n, dtype=bool), frame_stride=stride)
+
+    poses = _parse_trajectory_csv(traj_path, frame_ts, frame_stride=stride)
+
+    tracked = ~np.isnan(poses[:, 0])
+    assert list(np.flatnonzero(tracked)) == list(range(0, n, stride))
+
+
+def test_parse_trajectory_csv_rejects_a_wrong_stride(tmp_path: pathlib.Path) -> None:
+    """
+    A stride mismatch raises instead of silently shifting every pose.
+
+    This is the failure the old timestamp matching could not catch: a whole-frame offset
+    still landed inside the matching tolerance of the *wrong* frame.
+    """
+    n = 12
+    frame_ts = 1000.0 + np.arange(n, dtype=np.float64) / 60.0
+    traj_path = tmp_path / 'traj.csv'
+    _make_trajectory_csv(traj_path, frame_ts, np.ones(n, dtype=bool), frame_stride=2)
+
+    with pytest.raises(RuntimeError, match='did not decimate at the stride'):
+        _parse_trajectory_csv(traj_path, frame_ts, frame_stride=1)
+
+
+def test_parse_trajectory_csv_ignores_rows_past_the_grid(tmp_path: pathlib.Path) -> None:
+    """The decoder can overrun the end of the mp4; those rows describe frames we don't have."""
+    n = 6
+    frame_ts = 1000.0 + np.arange(n, dtype=np.float64) / 60.0
+    traj_path = tmp_path / 'traj.csv'
+    _make_trajectory_csv(traj_path, frame_ts, np.ones(n, dtype=bool))
+    with open(traj_path, 'a') as fh:  # two frames past the end, as an EOF overrun would write
+        fh.write(f'{n},{n / 60.0:.6f},2,false,false,9,9,9,0,0,0,1\n')
+        fh.write(f'{n + 1},{(n + 1) / 60.0:.6f},2,false,false,9,9,9,0,0,0,1\n')
+
+    poses = _parse_trajectory_csv(traj_path, frame_ts)
+
+    assert poses.shape == (n, 7)
+    assert not np.isnan(poses[:, 0]).any()
 
 
 def test_telemetry_json_preserves_raw_gopro_axis_order(tmp_path: pathlib.Path) -> None:
@@ -270,19 +321,19 @@ def test_make_temp_settings_yaml_injects_atlas_paths(tmp_path: pathlib.Path) -> 
     assert 'System.SaveAtlasToFile' not in content
 
 
-def test_parse_and_reconcile_trajectory_aligns_and_marks_lost(tmp_path: pathlib.Path) -> None:
+def test_parse_trajectory_csv_aligns_and_marks_lost(tmp_path: pathlib.Path) -> None:
     """
-    Trajectory entries should land in their corresponding frame slot.
+    Trajectory rows should land in their corresponding frame slot.
 
-    Missing frames must end up as all-NaN rows in the (N,7) pose array.
+    Frames the binary flagged lost must end up as all-NaN rows in the (N,7) pose array.
     """
     n = 6
     frame_ts = 1000.0 + np.arange(n, dtype=np.float64) / 60.0
     tracked = np.array([False, False, True, True, True, True])
-    traj_path = tmp_path / 'traj.txt'
-    _make_euroc_trajectory(traj_path, frame_ts, tracked)
+    traj_path = tmp_path / 'traj.csv'
+    _make_trajectory_csv(traj_path, frame_ts, tracked)
 
-    poses = _parse_and_reconcile_trajectory(traj_path, frame_ts)
+    poses = _parse_trajectory_csv(traj_path, frame_ts)
 
     assert poses.shape == (n, 7)
     # Lost rows: all NaN
