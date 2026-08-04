@@ -56,6 +56,12 @@ class Session(SQLModel, table=True):
     instead, same cache-of-the-manifest pattern as ``Scene.task_id``/``Scene.notes``.
     ``task_meta`` preserves the session's own collection-time task string so the UI can flag it
     when it disagrees with the canonical scene-level task.
+
+    ``slam_attrs_json`` / ``slam_has_optitrack`` mirror the episode's ``annotations/slam`` attrs
+    out of the scene's pzarr — measurements only. The usable/unusable *verdict* over them is
+    still computed on every read (``episode_quality.quality_view``), so editing
+    ``quality_thresholds.yaml`` reclassifies everything with no re-sync; caching the numbers
+    just keeps rendering a column of scenes from opening every pzarr store on disk.
     """
 
     session_id: str = Field(primary_key=True)
@@ -74,6 +80,13 @@ class Session(SQLModel, table=True):
     pose_source_override: str | None = None
     notes: str | None = None
     created_at: datetime | None = None
+    #: Verbatim JSON of the episode's `annotations/slam` attrs; None means SLAM hasn't run for
+    #: it (or the scene has no pzarr yet). Stored whole rather than as one column per metric so
+    #: a new metric needs no schema change — nothing here is queried by SQL, only re-parsed.
+    slam_attrs_json: str | None = None
+    #: Whether the episode has an OptiTrack pose source, which exempts it from the SLAM-derived
+    #: checks. Nullable so it can be added to an existing DB in place; None reads as False.
+    slam_has_optitrack: bool | None = None
 
 
 class Dataset(SQLModel, table=True):

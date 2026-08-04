@@ -70,22 +70,33 @@ def test_scene_quality_by_session_dir_skips_episodes_without_slam(tmp_path: path
     assert quality['session_done']['tracking_ratio'] == 1.0
 
 
-def test_session_quality_resolves_single_session(tmp_path: pathlib.Path):
-    """session_quality returns one session's stats by dirname."""
+def test_slam_records_round_trip_through_the_cached_columns(tmp_path: pathlib.Path):
+    """
+    What sync stores on a Session row rebuilds into the same view as reading pzarr directly.
+
+    This is the property the cache rests on: the DB holds the measurements, the thresholds
+    are still applied on read, so both routes reach the same verdict.
+    """
     scene_dir = tmp_path / 'scene_d'
     scene_dir.mkdir()
     _make_pzarr_with_slam(scene_dir, [('session_1', _slam_attrs(50, 5, n_reloc=2))])
-    quality = episode_quality.session_quality(scene_dir, 'session_1')
-    assert quality is not None
-    assert quality['n_frames_lost'] == 5
-    assert quality['n_relocalization_events'] == 2
+
+    record = episode_quality.scene_slam_records(scene_dir)['session_1']
+    assert record.has_optitrack is False
+    round_tripped = episode_quality.record_from_json(episode_quality.record_to_json(record), record.has_optitrack)
+    assert (
+        episode_quality.quality_view(round_tripped)
+        == episode_quality.scene_quality_by_session_dir(scene_dir)['session_1']
+    )
+    assert episode_quality.quality_view(round_tripped)['n_relocalization_events'] == 2
 
 
-def test_session_quality_unknown_session_returns_none(tmp_path: pathlib.Path):
-    """A session with no matching episode (or no pzarr) resolves to None."""
-    scene_dir = tmp_path / 'scene_e'
-    scene_dir.mkdir()
-    assert episode_quality.session_quality(scene_dir, 'session_1') is None
+def test_record_from_json_without_measurements_is_none(tmp_path: pathlib.Path):
+    """A session row with no cached attrs — or unparseable ones — reads as 'nothing measured'."""
+    assert episode_quality.record_from_json(None, None) is None
+    assert episode_quality.record_from_json('', False) is None
+    assert episode_quality.record_from_json('{not json', False) is None
+    assert episode_quality.quality_view(None) is None
 
 
 def test_scene_quality_summary_aggregates_across_episodes(tmp_path: pathlib.Path):
@@ -99,18 +110,16 @@ def test_scene_quality_summary_aggregates_across_episodes(tmp_path: pathlib.Path
             ('session_2', _slam_attrs(100, 80)),  # 20% -> low quality
         ],
     )
-    summary = episode_quality.scene_quality_summary(scene_dir, ['session_1', 'session_2'])
+    views = episode_quality.scene_quality_by_session_dir(scene_dir)
+    summary = episode_quality.scene_quality_summary([views['session_1'], views['session_2']])
     assert summary['n_episodes_with_slam'] == 2
     assert summary['avg_tracking_ratio'] == 0.6
     assert summary['n_low_quality'] == 1
 
 
-def test_scene_quality_summary_with_no_slam_data_returns_zeros(tmp_path: pathlib.Path):
+def test_scene_quality_summary_with_no_slam_data_returns_zeros():
     """No episodes with SLAM results yet yields a summary with None/0, not a crash."""
-    scene_dir = tmp_path / 'scene_g'
-    scene_dir.mkdir()
-    summary = episode_quality.scene_quality_summary(scene_dir, ['session_1'])
-    assert summary == {
+    assert episode_quality.scene_quality_summary([None]) == {
         'n_episodes_with_slam': 0,
         'avg_tracking_ratio': None,
         'n_low_quality': 0,

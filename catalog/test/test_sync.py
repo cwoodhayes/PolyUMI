@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
+import shutil
 from datetime import datetime, timezone
 
+import zarr
 from polyumi_catalog.db import get_engine
 from polyumi_catalog.manifests import DatasetManifest, DatasetMemberSpec, SceneManifest
 from polyumi_catalog.models import Dataset, DatasetMember, Scene, Session, Task
-from polyumi_catalog.sync import sync_datasets, sync_recordings
+from polyumi_catalog.sync import sync_datasets, sync_recordings, sync_scene_quality
 from polyumi_pi.files.metadata import SessionMetadata, SessionType
 from sqlmodel import Session as DBSession
 from sqlmodel import select
@@ -161,6 +164,106 @@ def test_sync_is_idempotent_and_mtime_gated(tmp_path: pathlib.Path):
     stats2 = sync_recordings(rec, engine)
     assert stats2.scenes_skipped == 1
     assert stats2.scenes_updated == 0
+
+
+def _stamp_slam(scene_dir: pathlib.Path, session_dirname: str, *, n_lost: int) -> None:
+    """Write one episode's annotations/slam attrs into the scene's pzarr, as step 2 does."""
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 1
+    ep = root.require_group('episode_0')
+    ep.attrs['session_dir'] = session_dirname
+    slam = ep.require_group('annotations').require_group('slam')
+    slam.attrs['n_frames_total'] = 100
+    slam.attrs['n_frames_lost'] = n_lost
+    slam.attrs['tracking_ratio'] = (100 - n_lost) / 100
+
+
+def test_sync_caches_slam_measurements_on_the_session_row(tmp_path: pathlib.Path):
+    """Sync mirrors each episode's SLAM attrs onto its row; a session with none stays NULL."""
+    rec = tmp_path / 'recordings'
+    scene_dir = rec / 'scene_2026-07-23_12-00-00_slam'
+    scene_dir.mkdir(parents=True)
+    _make_session(scene_dir, 'session_1', scene_id='scene-s', session_type=SessionType.MAPPING, task=None)
+    _make_session(scene_dir, 'session_2', scene_id='scene-s', session_type=SessionType.EPISODE, task=None)
+    _stamp_slam(scene_dir, 'session_2', n_lost=7)
+
+    engine = _engine(tmp_path)
+    stats = sync_recordings(rec, engine)
+    assert stats.sessions_requalified == 1
+
+    with DBSession(engine) as db:
+        rows = {pathlib.Path(r.dir).name: r for r in db.exec(select(Session)).all()}
+    assert json.loads(rows['session_2'].slam_attrs_json)['n_frames_lost'] == 7
+    assert rows['session_2'].slam_has_optitrack is False
+    assert rows['session_1'].slam_attrs_json is None  # the mapping pass has no episode group
+
+
+def test_sync_refreshes_slam_measurements_past_the_mtime_gate(tmp_path: pathlib.Path):
+    """
+    Preprocessing results are picked up even when the gate would skip the scene.
+
+    SLAM writes deep inside scene.zarr, which no mtime the gate looks at reflects — so a
+    gated sync must still re-read them or a freshly-SLAMmed scene shows its old numbers.
+    """
+    rec = tmp_path / 'recordings'
+    scene_dir = rec / 'scene_2026-07-23_13-00-00_gate'
+    scene_dir.mkdir(parents=True)
+    _make_session(scene_dir, 'session_1', scene_id='scene-g', session_type=SessionType.EPISODE, task=None)
+    past = datetime(2020, 1, 1, tzinfo=timezone.utc).timestamp()
+    for p in (scene_dir, scene_dir / 'session_1', scene_dir / 'session_1' / 'metadata.json'):
+        os.utime(p, (past, past))
+
+    engine = _engine(tmp_path)
+    sync_recordings(rec, engine)
+    _stamp_slam(scene_dir, 'session_1', n_lost=3)
+    os.utime(scene_dir, (past, past))  # as if the run left the scene dir itself untouched
+
+    stats = sync_recordings(rec, engine)
+    assert stats.scenes_skipped == 1  # the gate did skip it
+    assert stats.sessions_requalified == 1  # and the measurements landed anyway
+    with DBSession(engine) as db:
+        row = db.exec(select(Session)).first()
+    assert json.loads(row.slam_attrs_json)['n_frames_lost'] == 3
+
+    # a third sync with nothing changed writes nothing
+    assert sync_recordings(rec, engine).sessions_requalified == 0
+
+
+def test_sync_scene_quality_refreshes_one_scene(tmp_path: pathlib.Path):
+    """The post-pipeline-run hook re-reads a single scene, and is a no-op for an unknown id."""
+    rec = tmp_path / 'recordings'
+    scene_dir = rec / 'scene_2026-07-23_14-00-00_hook'
+    scene_dir.mkdir(parents=True)
+    _make_session(scene_dir, 'session_1', scene_id='scene-h', session_type=SessionType.EPISODE, task=None)
+    engine = _engine(tmp_path)
+    sync_recordings(rec, engine)
+
+    _stamp_slam(scene_dir, 'session_1', n_lost=11)
+    assert sync_scene_quality('scene-h', engine) == 1
+    assert sync_scene_quality('scene-h', engine) == 0  # already current
+    assert sync_scene_quality('no-such-scene', engine) == 0
+
+    with DBSession(engine) as db:
+        row = db.exec(select(Session)).first()
+    assert json.loads(row.slam_attrs_json)['n_frames_lost'] == 11
+
+
+def test_sync_clears_cached_slam_when_the_pzarr_goes_away(tmp_path: pathlib.Path):
+    """Archiving a scene (scene.zarr zipped away) resets its rows to 'no measurements'."""
+    rec = tmp_path / 'recordings'
+    scene_dir = rec / 'scene_2026-07-23_15-00-00_arch'
+    scene_dir.mkdir(parents=True)
+    _make_session(scene_dir, 'session_1', scene_id='scene-a2', session_type=SessionType.EPISODE, task=None)
+    _stamp_slam(scene_dir, 'session_1', n_lost=4)
+    engine = _engine(tmp_path)
+    sync_recordings(rec, engine)
+
+    shutil.rmtree(scene_dir / 'scene.zarr')
+    assert sync_recordings(rec, engine).sessions_requalified == 1
+    with DBSession(engine) as db:
+        row = db.exec(select(Session)).first()
+    assert row.slam_attrs_json is None
+    assert row.slam_has_optitrack is None
 
 
 def test_sync_reconciles_removed_sessions(tmp_path: pathlib.Path):

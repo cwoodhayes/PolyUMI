@@ -1,42 +1,63 @@
 """
 Per-episode SLAM tracking-quality stats surfaced in the catalog UI (Phase 4).
 
-Reads the ``annotations/slam`` group attrs the SLAM preprocessing step
-(``OrbSlam3Step``, ingest step 2) already writes into each episode's pzarr
-group — no new computation, just plumbing an existing per-episode summary
-through to the catalog so tracking coverage is visible without opening
-Foxglove.
+The numbers come from the ``annotations/slam`` group attrs the SLAM preprocessing step
+(``OrbSlam3Step``, ingest step 2) already writes into each episode's pzarr group — no new
+computation, just plumbing an existing per-episode summary through to the catalog so
+tracking coverage is visible without opening Foxglove.
 
-Also derives each episode's **automatic unusable verdict** from those metrics via
-``polyumi_ingest.quality``, whose thresholds live in
-``ingest/config/quality_thresholds.yaml``. The verdict is computed on read, never
-stored, so changing a threshold reclassifies everything with no reprocessing. DP
-export calls the same function, so this view and what actually exports agree.
+This module is split in two, and the split matters:
+
+* :func:`scene_slam_records` is the only thing here that touches disk. It runs at **sync**
+  time, and ``sync.py`` mirrors what it returns onto the ``Session`` row. Rendering a
+  column of scenes therefore opens no pzarr stores at all — doing that per render cost
+  ~1 s for a 22-scene recordings tree, on every click in the Scenes column, and grew
+  linearly with the corpus.
+* :func:`quality_view` turns one session's cached metrics into the verdict and badges the
+  UI shows, via ``polyumi_ingest.quality`` (thresholds in
+  ``ingest/config/quality_thresholds.yaml``). This runs on **every read**, so editing a
+  threshold still reclassifies every episode at once with no re-sync: only the raw
+  measurements are cached, never the verdict. DP export calls the same policy functions,
+  so this view and what actually exports agree.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import pathlib
+from dataclasses import dataclass
 
 import zarr
 from polyumi_ingest import quality as iquality
 
+log = logging.getLogger('catalog.episode_quality')
 
-def scene_quality_by_session_dir(scene_dir: pathlib.Path) -> dict[str, dict]:
+
+@dataclass(frozen=True)
+class SlamRecord:
+    """One episode's raw SLAM measurements, as cached on its ``Session`` row."""
+
+    #: The episode's ``annotations/slam`` attrs, verbatim.
+    attrs: dict
+    #: Whether the episode has an OptiTrack pose source (exempt from the SLAM checks).
+    has_optitrack: bool
+
+
+def scene_slam_records(scene_dir: pathlib.Path) -> dict[str, SlamRecord]:
     """
-    Read every episode's SLAM quality in one pass, keyed by source session dirname.
+    Read every episode's raw SLAM measurements in one pass, keyed by source session dirname.
 
-    Returns ``{}`` if pzarr doesn't exist yet. An episode is omitted from the result
-    (rather than given a ``None``-filled entry) if it has no ``session_dir`` attr or
-    SLAM (step 2) hasn't run for it yet.
+    Returns ``{}`` if pzarr doesn't exist yet. An episode is omitted from the result (rather
+    than given an empty record) if it has no ``session_dir`` attr or SLAM (step 2) hasn't run
+    for it yet — "nothing measured", which the verdict treats as "nothing to condemn it with".
     """
     zarr_path = scene_dir / 'scene.zarr'
     if not zarr_path.is_dir():
         return {}
     root = zarr.open_group(str(zarr_path), mode='r')
     n_episodes = int(root.attrs.get('n_episodes', 0))
-    thresholds = iquality.load_quality_thresholds()
-    out: dict[str, dict] = {}
+    out: dict[str, SlamRecord] = {}
     for i in range(n_episodes):
         ep_key = f'episode_{i}'
         if ep_key not in root:
@@ -47,43 +68,81 @@ def scene_quality_by_session_dir(scene_dir: pathlib.Path) -> dict[str, dict]:
             continue
         if 'annotations' not in ep or 'slam' not in ep['annotations']:
             continue
-        attrs = dict(ep['annotations']['slam'].attrs)
-        tracking_ratio = attrs.get('tracking_ratio')
         # OptiTrack episodes don't depend on SLAM for their pose source, so they're
         # exempt from the SLAM-derived checks. 'available_sources' is written by
         # step 5 (EefPoseStep); absent means step 5 hasn't run, i.e. not exempt.
         has_optitrack = 'optitrack' in list(ep['eef'].attrs.get('available_sources', [])) if 'eef' in ep else False
-        reasons = iquality.auto_unusable_reasons(attrs, has_optitrack=has_optitrack, thresholds=thresholds)
-        out[session_dir] = {
-            'n_frames_total': attrs.get('n_frames_total'),
-            'n_frames_lost': attrs.get('n_frames_lost'),
-            'tracking_ratio': tracking_ratio,
-            'n_relocalization_events': attrs.get('n_relocalization_events'),
-            'has_optitrack': has_optitrack,
-            'low_quality': iquality.is_low_quality(attrs, thresholds=thresholds),
-            #: Derived from the thresholds, not stored. An episode can also be unusable
-            #: because a human listed it in scene.json; that's merged in by queries.py.
-            'auto_unusable': bool(reasons),
-            'auto_unusable_reasons': reasons,
-        }
+        out[session_dir] = SlamRecord(attrs=dict(ep['annotations']['slam'].attrs), has_optitrack=has_optitrack)
     return out
 
 
-def session_quality(scene_dir: pathlib.Path, session_dirname: str) -> dict | None:
-    """Return one session's SLAM tracking-quality stats, or ``None`` if unavailable."""
-    return scene_quality_by_session_dir(scene_dir).get(session_dirname)
+def record_to_json(record: SlamRecord) -> str:
+    """Serialize a record's attrs for the ``Session.slam_attrs_json`` column."""
+    return json.dumps(record.attrs)
 
 
-def scene_quality_summary(scene_dir: pathlib.Path, session_dirnames: list[str]) -> dict:
+def record_from_json(attrs_json: str | None, has_optitrack: bool | None) -> SlamRecord | None:
     """
-    Aggregate SLAM tracking quality across a scene's given session dirnames.
+    Rebuild a record from a ``Session`` row's cached columns, or ``None`` if it has none.
 
-    Only sessions that actually have SLAM results contribute; if none do (SLAM
-    hasn't run, or pzarr doesn't exist yet), returns an all-empty summary rather
-    than raising.
+    Unparseable JSON is treated as "no measurements" rather than raising: the column is a
+    cache, and one corrupt row shouldn't take down the page that lists its scene.
     """
-    by_dir = scene_quality_by_session_dir(scene_dir)
-    rows = [by_dir[d] for d in session_dirnames if d in by_dir]
+    if not attrs_json:
+        return None
+    try:
+        attrs = json.loads(attrs_json)
+    except ValueError as err:
+        log.warning(f'Ignoring unparseable cached SLAM attrs: {err}')
+        return None
+    return SlamRecord(attrs=attrs, has_optitrack=bool(has_optitrack))
+
+
+def quality_view(record: SlamRecord | None) -> dict | None:
+    """
+    Apply the current thresholds to one episode's measurements, for display.
+
+    Returns ``None`` when there are no measurements (SLAM hasn't run, no pzarr yet) — the
+    callers render that as "unknown", not as a failing episode.
+    """
+    if record is None:
+        return None
+    thresholds = iquality.load_quality_thresholds()
+    reasons = iquality.auto_unusable_reasons(record.attrs, has_optitrack=record.has_optitrack, thresholds=thresholds)
+    return {
+        'n_frames_total': record.attrs.get('n_frames_total'),
+        'n_frames_lost': record.attrs.get('n_frames_lost'),
+        'tracking_ratio': record.attrs.get('tracking_ratio'),
+        'n_relocalization_events': record.attrs.get('n_relocalization_events'),
+        'has_optitrack': record.has_optitrack,
+        'low_quality': iquality.is_low_quality(record.attrs, thresholds=thresholds),
+        #: Derived from the thresholds, not stored. An episode can also be unusable
+        #: because a human listed it in scene.json; that's merged in by queries.py.
+        'auto_unusable': bool(reasons),
+        'auto_unusable_reasons': reasons,
+    }
+
+
+def scene_quality_by_session_dir(scene_dir: pathlib.Path) -> dict[str, dict]:
+    """
+    Read a scene's episode quality straight off disk, keyed by source session dirname.
+
+    The catalog itself goes through the cached columns instead (see the module docstring);
+    this is for callers with only a directory in hand, and for the export-side test that
+    checks the catalog's verdict matches what DP export skips.
+    """
+    return {d: quality_view(r) for d, r in scene_slam_records(scene_dir).items()}
+
+
+def scene_quality_summary(views: list[dict | None]) -> dict:
+    """
+    Aggregate SLAM tracking quality across a scene's episodes.
+
+    Takes the per-episode :func:`quality_view` results; only episodes that actually have
+    SLAM results (a non-``None`` view) contribute. If none do, returns an all-empty summary
+    rather than raising.
+    """
+    rows = [v for v in views if v is not None]
     if not rows:
         return {
             'n_episodes_with_slam': 0,

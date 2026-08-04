@@ -89,7 +89,7 @@ from polyumi_catalog.mutations import (
     set_session_unusable,
     set_task_description,
 )
-from polyumi_catalog.sync import sync_datasets, sync_recordings
+from polyumi_catalog.sync import sync_datasets, sync_recordings, sync_scene_quality
 
 _PKG_DIR = pathlib.Path(__file__).resolve().parent
 _TEMPLATES_DIR = _PKG_DIR / 'templates'
@@ -176,9 +176,7 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
         with DBSession(engine) as db:
             scenes = queries.list_scenes(db, task_key)
             datasets = queries.list_datasets(db, task_key)
-            # reuse the counts list_scenes already paid for rather than re-reading every pzarr
-            usable = sum(s['usable_episode_count'] for s in scenes)
-            detail = queries.task_detail(db, task_key, usable_episode_count=usable)
+            detail = queries.task_detail(db, task_key)
         return render(
             request,
             'select_task.html',
@@ -424,6 +422,9 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
                 # "running" forever with no way to observe what happened.
                 try:
                     pp_status.run_full_pipeline(scene_dir, force=force)
+                    # the run just wrote this scene's SLAM metrics; pull them into the DB the
+                    # UI reads so its usable-episode counts don't sit stale until a rescan
+                    sync_scene_quality(scene_id, engine)
                     with app.state.pp_runs_lock:
                         app.state.pp_runs[scene_id] = {'status': 'done', 'error': None}
                 except Exception as exc:

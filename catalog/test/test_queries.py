@@ -3,27 +3,36 @@
 from __future__ import annotations
 
 import pathlib
+from unittest import mock
 
 import zarr
+from polyumi_ingest import quality as iquality
+
 from polyumi_catalog import queries
 from polyumi_catalog.db import get_engine
 from polyumi_catalog.manifests import SceneManifest
 from polyumi_catalog.models import Session
-from polyumi_catalog.sync import sync_recordings
+from polyumi_catalog.sync import sync_recordings, sync_scene_quality
 from polyumi_pi.files.metadata import SessionMetadata, SessionType
 from sqlmodel import Session as DBSession
 
 
 def _add_slam_quality(
+    engine,
     scene_dir: pathlib.Path,
     session_dirname: str,
     *,
+    scene_id: str = 'scene-1',
     n_total: int,
     n_lost: int,
     fed: bool = False,
 ) -> None:
     """
     Stamp a one-episode scene.zarr with SLAM quality attrs for ``session_dirname``.
+
+    Also syncs them into the catalog DB, which is where the queries read them from — the
+    real writer (preprocessing) is followed by a sync for the same reason. Writing only to
+    pzarr leaves the catalog showing the pre-run numbers.
 
     ``fed`` additionally writes the post-chirp fed-grid counts. Those are what the
     auto-unusable thresholds judge — without them ``quality._fed_frame_counts`` has
@@ -42,6 +51,7 @@ def _add_slam_quality(
     if fed:
         slam_grp.attrs['n_frames_fed_post_chirp'] = n_total
         slam_grp.attrs['n_frames_fed_lost_post_chirp'] = n_lost
+    sync_scene_quality(scene_id, engine)
 
 
 def _make_session(scene_dir: pathlib.Path, name: str, *, scene_id: str, session_type: SessionType, task: str | None):
@@ -131,12 +141,12 @@ def test_list_scenes_usable_episode_count(tmp_path: pathlib.Path):
         assert scene['usable_episode_count'] == 1  # no pzarr yet
         scene_dir = pathlib.Path(scene['dir'])
 
-    _add_slam_quality(scene_dir, 'session_2', n_total=100, n_lost=5, fed=True)  # 95 tracked, 5 lost
+    _add_slam_quality(engine, scene_dir, 'session_2', n_total=100, n_lost=5, fed=True)  # 95 tracked, 5 lost
     with DBSession(engine) as db:
         scene = next(s for s in queries.list_scenes(db, queries.FILTER_ALL) if s['scene_id'] == 'scene-1')
         assert scene['usable_episode_count'] == 1
 
-    _add_slam_quality(scene_dir, 'session_2', n_total=100, n_lost=60, fed=True)  # 60 lost > max_lost_frames
+    _add_slam_quality(engine, scene_dir, 'session_2', n_total=100, n_lost=60, fed=True)  # 60 lost > max_lost_frames
     with DBSession(engine) as db:
         scene = next(s for s in queries.list_scenes(db, queries.FILTER_ALL) if s['scene_id'] == 'scene-1')
         assert scene['episode_count'] == 1  # total is unchanged
@@ -148,7 +158,7 @@ def test_list_scenes_usable_episode_count_honours_manual_marking(tmp_path: pathl
     engine = _populated_engine(tmp_path)
     with DBSession(engine) as db:
         scene_dir = pathlib.Path(queries.scene_detail(db, 'scene-1')['dir'])
-    _add_slam_quality(scene_dir, 'session_2', n_total=100, n_lost=5, fed=True)
+    _add_slam_quality(engine, scene_dir, 'session_2', n_total=100, n_lost=5, fed=True)
     _mark_unusable(engine, 'scene-1')
 
     with DBSession(engine) as db:
@@ -158,21 +168,49 @@ def test_list_scenes_usable_episode_count_honours_manual_marking(tmp_path: pathl
 
 
 def test_task_detail_usable_episode_count(tmp_path: pathlib.Path):
-    """task_detail reports usable episodes alongside the total, and accepts a precomputed one."""
+    """task_detail reports usable episodes alongside the total, per filter."""
     engine = _populated_engine(tmp_path)
     with DBSession(engine) as db:
+        tasks = {t['name']: t for t in queries.list_tasks(db) if not t['pseudo']}
+        task_key = str(tasks['fold_towel']['id'])
         detail = queries.task_detail(db, queries.FILTER_ALL)
         assert detail['episode_count'] == 2  # scene-1 + scene-2
         assert detail['usable_episode_count'] == 2
 
-    _mark_unusable(engine, 'scene-1')
+    _mark_unusable(engine, 'scene-1')  # scene-1 is the fold_towel one; scene-2 is unassigned
     with DBSession(engine) as db:
         detail = queries.task_detail(db, queries.FILTER_ALL)
         assert detail['episode_count'] == 2
         assert detail['usable_episode_count'] == 1
 
-        # callers that already built the Scenes column pass their sum in rather than re-reading
-        assert queries.task_detail(db, queries.FILTER_ALL, usable_episode_count=7)['usable_episode_count'] == 7
+        assert queries.task_detail(db, task_key)['usable_episode_count'] == 0
+        assert queries.task_detail(db, queries.FILTER_UNASSIGNED)['usable_episode_count'] == 1
+
+
+def test_task_detail_usable_count_follows_the_thresholds_not_a_stored_verdict(tmp_path: pathlib.Path):
+    """
+    Editing the thresholds reclassifies cached episodes with no re-sync.
+
+    The point of caching only the measurements: the verdict is still policy applied on read.
+    """
+    engine = _populated_engine(tmp_path)
+    with DBSession(engine) as db:
+        scene_dir = pathlib.Path(queries.scene_detail(db, 'scene-1')['dir'])
+    _add_slam_quality(engine, scene_dir, 'session_2', n_total=100, n_lost=5, fed=True)
+
+    with DBSession(engine) as db:
+        assert queries.task_detail(db, queries.FILTER_ALL)['usable_episode_count'] == 2
+
+    iquality.load_quality_thresholds.cache_clear()
+    try:
+        with mock.patch.object(
+            iquality, 'load_quality_thresholds', return_value=iquality.QualityThresholds(max_lost_frames=1)
+        ):
+            with DBSession(engine) as db:
+                # same cached numbers, stricter threshold -> scene-1's episode is now excluded
+                assert queries.task_detail(db, queries.FILTER_ALL)['usable_episode_count'] == 1
+    finally:
+        iquality.load_quality_thresholds.cache_clear()
 
 
 def test_list_sessions_for_scene(tmp_path: pathlib.Path):
@@ -230,7 +268,7 @@ def test_list_sessions_includes_slam_quality(tmp_path: pathlib.Path):
     with DBSession(engine) as db:
         scene = queries.scene_detail(db, 'scene-1')
     scene_dir = pathlib.Path(scene['dir'])
-    _add_slam_quality(scene_dir, 'session_2', n_total=100, n_lost=60)  # 40% tracked -> low quality
+    _add_slam_quality(engine, scene_dir, 'session_2', n_total=100, n_lost=60)  # 40% tracked -> low quality
 
     with DBSession(engine) as db:
         sessions = queries.list_sessions(db, 'scene-1')
@@ -254,7 +292,7 @@ def test_session_detail_includes_slam_quality_when_available(tmp_path: pathlib.P
     with DBSession(engine) as db:
         assert queries.session_detail(db, session_id)['slam'] is None  # no pzarr yet
 
-    _add_slam_quality(scene_dir, 'session_2', n_total=50, n_lost=5)
+    _add_slam_quality(engine, scene_dir, 'session_2', n_total=50, n_lost=5)
     with DBSession(engine) as db:
         detail = queries.session_detail(db, session_id)
     assert detail['slam']['n_frames_lost'] == 5
@@ -362,7 +400,7 @@ def test_scene_detail_includes_quality_summary(tmp_path: pathlib.Path):
     }
     assert scene['total_dropped_video_frames'] == 3  # from the EPISODE session's metadata
 
-    _add_slam_quality(scene_dir, 'session_2', n_total=100, n_lost=10)
+    _add_slam_quality(engine, scene_dir, 'session_2', n_total=100, n_lost=10)
     with DBSession(engine) as db:
         scene = queries.scene_detail(db, 'scene-1')
     assert scene['quality']['n_episodes_with_slam'] == 1

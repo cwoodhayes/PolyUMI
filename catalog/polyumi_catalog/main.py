@@ -17,7 +17,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
-from polyumi_catalog.db import default_datasets_dir, default_db_path, get_engine
+from polyumi_catalog.db import default_datasets_dir, default_db_path, get_engine, rebuild_schema, schema_mismatches
 from polyumi_catalog.sync import sync_datasets, sync_recordings
 
 logging.basicConfig(
@@ -34,6 +34,34 @@ app = typer.Typer(help='PolyUMI metadata catalog & dataset builder.')
 def _main():
     """PolyUMI metadata catalog & dataset builder."""
     # Present so Typer keeps sub-command dispatch (``serve`` arrives in Phase 1).
+
+
+def _open_db(db_path: pathlib.Path, *, rebuild_if_stale: bool | None):
+    """
+    Open the catalog DB, offering to rebuild it if its schema no longer matches the models.
+
+    There are no migrations: every row is derived from the recordings tree, so a DB written
+    against an older ``models.py`` is thrown away and re-synced rather than patched. Returns
+    ``(engine, was_rebuilt)`` — a rebuilt DB is empty, so the caller must sync afterwards
+    even if it otherwise wouldn't have.
+    """
+    engine = get_engine(db_path)
+    mismatches = schema_mismatches(engine)
+    if not mismatches:
+        return engine, False
+
+    console = Console()
+    console.print(f"[yellow]The catalog DB at {db_path} doesn't match this version of PolyUMI:[/yellow]")
+    for m in mismatches:
+        console.print(f'  • {m}')
+    console.print('It only caches what the recordings tree already holds, so rebuilding it loses nothing.')
+    if rebuild_if_stale is None:
+        rebuild_if_stale = typer.confirm('Rebuild it from disk now?', default=True)
+    if not rebuild_if_stale:
+        console.print('[red]Cannot continue against a mismatched DB.[/red] Re-run without --no-rebuild-db.')
+        raise typer.Exit(1)
+    rebuild_schema(engine)
+    return engine, True
 
 
 @app.command()
@@ -54,6 +82,11 @@ def sync(
         '--force',
         help='Re-parse every scene, ignoring mtime gating.',
     ),
+    rebuild_db: bool | None = typer.Option(
+        None,
+        '--rebuild-db/--no-rebuild-db',
+        help='Rebuild the DB without asking if its schema is out of date (default: ask).',
+    ),
 ):
     """Scan the recordings tree and update the catalog cache."""
     recordings = recordings.expanduser()
@@ -62,7 +95,7 @@ def sync(
         raise typer.Exit(1)
 
     db_path = db.expanduser() if db else default_db_path(recordings)
-    engine = get_engine(db_path)
+    engine, _ = _open_db(db_path, rebuild_if_stale=rebuild_db)
     stats = sync_recordings(recordings, engine, force=force)
     dataset_stats = sync_datasets(default_datasets_dir(recordings), engine)
 
@@ -75,6 +108,7 @@ def sync(
     table.add_row('scenes skipped', str(stats.scenes_skipped))
     table.add_row('sessions upserted', str(stats.sessions_upserted))
     table.add_row('sessions removed', str(stats.sessions_removed))
+    table.add_row('sessions re-qualified', str(stats.sessions_requalified))
     table.add_row('tasks created', str(stats.tasks_created + dataset_stats.tasks_created))
     table.add_row('task conflicts', str(len(stats.conflicts)))
     table.add_row('datasets scanned', str(dataset_stats.datasets_scanned))
@@ -109,6 +143,11 @@ def serve(
         '--sync-on-start/--no-sync-on-start',
         help='Run a (mtime-gated) sync before serving.',
     ),
+    rebuild_db: bool | None = typer.Option(
+        None,
+        '--rebuild-db/--no-rebuild-db',
+        help='Rebuild the DB without asking if its schema is out of date (default: ask).',
+    ),
 ):
     """Serve the read-only catalog browser (Phase 1: no mutations)."""
     import uvicorn
@@ -117,7 +156,10 @@ def serve(
 
     recordings = recordings.expanduser()
     db_path = db.expanduser() if db else default_db_path(recordings)
-    engine = get_engine(db_path)
+    engine, was_rebuilt = _open_db(db_path, rebuild_if_stale=rebuild_db)
+    if was_rebuilt:
+        # the rebuild emptied it, so serving without a sync would serve an empty catalog
+        sync_on_start = True
 
     if sync_on_start and recordings.is_dir():
         stats = sync_recordings(recordings, engine)

@@ -111,43 +111,45 @@ def scenes_by_ids(db: DBSession, scene_ids: list[str]) -> list[dict]:
     return [by_id[sid] for sid in scene_ids if sid in by_id]
 
 
-def _scenes_for_task(db: DBSession, task_key: str) -> list[Scene]:
-    """Return the scene rows a task filter selects, ordered by directory."""
-    stmt = select(Scene)
-    if task_key == FILTER_UNASSIGNED:
-        stmt = stmt.where(Scene.task_id.is_(None))
-    elif task_key != FILTER_ALL:
-        stmt = stmt.where(Scene.task_id == int(task_key))
-    return list(db.exec(stmt.order_by(Scene.dir)).all())
+def _session_quality(row: Session) -> dict | None:
+    """Apply the current quality thresholds to a session row's cached SLAM measurements."""
+    return episode_quality.quality_view(episode_quality.record_from_json(row.slam_attrs_json, row.slam_has_optitrack))
 
 
-def _usable_episode_counts_by_scene(db: DBSession, scenes: list[Scene]) -> dict[str, int]:
+def _is_usable(row: Session) -> bool:
     """
-    Map each given scene's id to its count of *usable* EPISODE sessions.
+    Report whether an episode counts towards a scene's usable total.
 
-    Usable is the same effective verdict :func:`list_sessions` shows per episode —
-    neither manually marked unusable in scene.json nor auto-unusable under the current
-    quality thresholds — so a scene's badge always agrees with its expanded episode
-    list. An episode with no SLAM results yet counts as usable: nothing has ruled it
-    out. Costs one pzarr read per scene, so pass only the scenes being rendered.
+    This is the same effective verdict :func:`list_sessions` shows per episode — neither
+    manually marked unusable in scene.json nor auto-unusable under the current quality
+    thresholds — so a scene's badge always agrees with its expanded episode list. An
+    episode with no SLAM results yet counts as usable: nothing has ruled it out.
     """
-    if not scenes:
-        return {}
-    scene_ids = [s.scene_id for s in scenes]
-    episodes = db.exec(select(Session).where(Session.session_type == 'EPISODE', Session.scene_id.in_(scene_ids))).all()
-    by_scene: dict[str, list[Session]] = {}
-    for s in episodes:
-        by_scene.setdefault(s.scene_id, []).append(s)
+    if row.unusable:
+        return False
+    quality = _session_quality(row)
+    return not (quality and quality['auto_unusable'])
 
+
+def _usable_episode_counts_by_scene(db: DBSession) -> dict[str, int]:
+    """Map each scene_id to its count of usable EPISODE sessions."""
     counts: dict[str, int] = {}
-    for scene in scenes:
-        quality_by_dir = episode_quality.scene_quality_by_session_dir(pathlib.Path(scene.dir))
-        usable = 0
-        for s in by_scene.get(scene.scene_id, []):
-            quality = quality_by_dir.get(_basename(s.dir))
-            if not (s.unusable or (quality['auto_unusable'] if quality else False)):
-                usable += 1
-        counts[scene.scene_id] = usable
+    for row in db.exec(select(Session).where(Session.session_type == 'EPISODE')).all():
+        counts[row.scene_id] = counts.get(row.scene_id, 0) + (1 if _is_usable(row) else 0)
+    return counts
+
+
+def _usable_episode_counts_by_task(db: DBSession) -> dict[int | None, int]:
+    """Map each task_id (None = unassigned) to its usable EPISODE count across all its scenes."""
+    rows = db.exec(
+        select(Scene.task_id, Session)
+        .select_from(Session)
+        .join(Scene, Session.scene_id == Scene.scene_id)
+        .where(Session.session_type == 'EPISODE')
+    ).all()
+    counts: dict[int | None, int] = {}
+    for task_id, row in rows:
+        counts[task_id] = counts.get(task_id, 0) + (1 if _is_usable(row) else 0)
     return counts
 
 
@@ -173,10 +175,15 @@ def list_scenes(db: DBSession, task_key: str) -> list[dict]:
 
     ``task_key`` is ``all``, ``unassigned``, or a stringified task id.
     """
-    scenes = _scenes_for_task(db, task_key)
+    stmt = select(Scene)
+    if task_key == FILTER_UNASSIGNED:
+        stmt = stmt.where(Scene.task_id.is_(None))
+    elif task_key != FILTER_ALL:
+        stmt = stmt.where(Scene.task_id == int(task_key))
+    scenes = db.exec(stmt.order_by(Scene.dir)).all()
 
     ep_counts = _episode_counts_by_scene(db)
-    usable_counts = _usable_episode_counts_by_scene(db, scenes)
+    usable_counts = _usable_episode_counts_by_scene(db)
     sess_counts = _session_counts_by_scene(db)
     task_names = {t.id: t.name for t in db.exec(select(Task)).all()}
     return [
@@ -194,11 +201,9 @@ def list_scenes(db: DBSession, task_key: str) -> list[dict]:
 def list_sessions(db: DBSession, scene_id: str) -> list[dict]:
     """Return the Episodes column view models (all sessions) for one scene."""
     sessions = db.exec(select(Session).where(Session.scene_id == scene_id).order_by(Session.dir)).all()
-    scene = db.get(Scene, scene_id)
-    quality_by_dir = episode_quality.scene_quality_by_session_dir(pathlib.Path(scene.dir)) if scene else {}
     result = []
     for s in sessions:
-        quality = quality_by_dir.get(_basename(s.dir))
+        quality = _session_quality(s)
         result.append(
             {
                 'session_id': s.session_id,
@@ -248,27 +253,16 @@ def list_datasets(db: DBSession, task_key: str) -> list[dict]:
     ]
 
 
-def task_detail(db: DBSession, task_key: str, usable_episode_count: int | None = None) -> dict:
-    """
-    Return the detail-panel view model for a Tasks-column selection.
-
-    ``usable_episode_count`` is the task's usable-episode total, which callers that have
-    already built this filter's Scenes column can pass in — it is exactly the sum over
-    those scene views, and recomputing it costs a pzarr read per scene. Omit it and it is
-    computed here.
-    """
-    if usable_episode_count is None:
-        usable_episode_count = sum(_usable_episode_counts_by_scene(db, _scenes_for_task(db, task_key)).values())
+def task_detail(db: DBSession, task_key: str) -> dict:
+    """Return the detail-panel view model for a Tasks-column selection."""
     if task_key == FILTER_ALL:
-        total = sum(_scene_counts_by_task(db).values())
-        total_episodes = sum(_episode_counts_by_task(db).values())
         return {
             'kind': 'task',
             'name': 'All scenes',
             'pseudo': True,
-            'scene_count': total,
-            'episode_count': total_episodes,
-            'usable_episode_count': usable_episode_count,
+            'scene_count': sum(_scene_counts_by_task(db).values()),
+            'episode_count': sum(_episode_counts_by_task(db).values()),
+            'usable_episode_count': sum(_usable_episode_counts_by_task(db).values()),
         }
     if task_key == FILTER_UNASSIGNED:
         return {
@@ -277,7 +271,7 @@ def task_detail(db: DBSession, task_key: str, usable_episode_count: int | None =
             'pseudo': True,
             'scene_count': _scene_counts_by_task(db).get(None, 0),
             'episode_count': _episode_counts_by_task(db).get(None, 0),
-            'usable_episode_count': usable_episode_count,
+            'usable_episode_count': _usable_episode_counts_by_task(db).get(None, 0),
         }
     task = db.get(Task, int(task_key))
     if task is None:
@@ -290,7 +284,7 @@ def task_detail(db: DBSession, task_key: str, usable_episode_count: int | None =
         'pseudo': False,
         'scene_count': _scene_counts_by_task(db).get(task.id, 0),
         'episode_count': _episode_counts_by_task(db).get(task.id, 0),
-        'usable_episode_count': usable_episode_count,
+        'usable_episode_count': _usable_episode_counts_by_task(db).get(task.id, 0),
         'created_at': task.created_at,
     }
 
@@ -308,8 +302,8 @@ def scene_detail(db: DBSession, scene_id: str) -> dict:
         for s in sessions
         if task is not None and s.task_meta and s.task_meta != task.name
     ]
-    episode_dirs = [_basename(s.dir) for s in sessions if s.session_type == 'EPISODE']
-    quality = episode_quality.scene_quality_summary(pathlib.Path(scene.dir), episode_dirs)
+    episodes = [s for s in sessions if s.session_type == 'EPISODE']
+    quality = episode_quality.scene_quality_summary([_session_quality(s) for s in episodes])
     return {
         'kind': 'scene',
         'scene_id': scene.scene_id,
@@ -322,7 +316,9 @@ def scene_detail(db: DBSession, scene_id: str) -> dict:
         'created_at': scene.created_at,
         'synced_at': scene.synced_at,
         'n_sessions': len(sessions),
-        'n_episodes': sum(1 for s in sessions if s.session_type == 'EPISODE'),
+        'n_episodes': len(episodes),
+        # so the pane agrees with the scene's Scenes-column badge, which is usable/total
+        'n_usable_episodes': sum(1 for s in episodes if _is_usable(s)),
         'conflicts': conflicts,
         'quality': quality,
         'total_dropped_video_frames': sum(s.video_dropped_frames or 0 for s in sessions),
@@ -340,7 +336,7 @@ def session_detail(db: DBSession, session_id: str) -> dict:
     session_dirname = _basename(s.dir)
     pzarr_ok = mcap_tools.pzarr_exists(pathlib.Path(scene.dir)) if scene else False
     mcap_path = mcap_tools.mcap_path_for_session(pathlib.Path(scene.dir), session_dirname) if pzarr_ok else None
-    slam = episode_quality.session_quality(pathlib.Path(scene.dir), session_dirname) if pzarr_ok else None
+    slam = _session_quality(s)
     pzarr_streams = pzarr_inspect.session_pzarr_streams(pathlib.Path(scene.dir), session_dirname) if pzarr_ok else None
     available_pose_sources = (
         pzarr_inspect.available_pose_sources(pathlib.Path(scene.dir), session_dirname) if pzarr_ok else None
