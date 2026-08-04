@@ -89,7 +89,7 @@ from polyumi_catalog.mutations import (
     set_session_unusable,
     set_task_description,
 )
-from polyumi_catalog.sync import sync_datasets, sync_recordings
+from polyumi_catalog.sync import sync_datasets, sync_recordings, sync_scene_quality
 
 _PKG_DIR = pathlib.Path(__file__).resolve().parent
 _TEMPLATES_DIR = _PKG_DIR / 'templates'
@@ -153,6 +153,9 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
     def index(request: Request) -> HTMLResponse:
         with DBSession(engine) as db:
             tasks = queries.list_tasks(db)
+            # unfiltered, so a dataset is visible right after POST /datasets redirects here —
+            # the Datasets column is otherwise only filled by /select/task's OOB swap
+            datasets = queries.list_datasets(db, queries.FILTER_ALL)
             with app.state.pending_dataset_lock:
                 pending_ids = list(app.state.pending_dataset_scene_ids)
             pending_scenes = queries.scenes_by_ids(db, pending_ids)
@@ -161,6 +164,7 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
             request,
             'index.html',
             tasks=tasks,
+            datasets=datasets,
             pending_scenes=pending_scenes,
             all_tasks=all_tasks,
             can_rescan=recordings_dir is not None,
@@ -418,6 +422,9 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
                 # "running" forever with no way to observe what happened.
                 try:
                     pp_status.run_full_pipeline(scene_dir, force=force)
+                    # the run just wrote this scene's SLAM metrics; pull them into the DB the
+                    # UI reads so its usable-episode counts don't sit stale until a rescan
+                    sync_scene_quality(scene_id, engine)
                     with app.state.pp_runs_lock:
                         app.state.pp_runs[scene_id] = {'status': 'done', 'error': None}
                 except Exception as exc:

@@ -69,9 +69,27 @@ def test_select_task_returns_scenes_and_oob_detail(tmp_path: pathlib.Path):
 
 
 def test_select_task_detail_includes_episode_count(tmp_path: pathlib.Path):
-    """The task detail panel shows an episode count alongside the scene count."""
+    """The task detail panel shows usable and total episode counts alongside the scene count."""
     resp = _client(tmp_path).get('/select/task/all')
-    assert '<dt>Episodes</dt><dd>1</dd>' in resp.text
+    assert '<dt>Episodes</dt><dd>1 usable / 1 total</dd>' in resp.text
+
+
+def test_scene_badge_counts_episodes_not_sessions(tmp_path: pathlib.Path):
+    """The Scenes badge is usable-over-total *episodes*; mapping passes only show in the tooltip."""
+    rec = tmp_path / 'recordings'
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+    scene_dir.mkdir(parents=True)
+    SceneManifest(scene_id='scene-1', task='fold_towel', unusable_episodes=['session_2']).write_to_scene_dir(scene_dir)
+    _make_session(scene_dir, 'session_0', scene_id='scene-1', session_type=SessionType.MAPPING)
+    _make_session(scene_dir, 'session_1', scene_id='scene-1', session_type=SessionType.EPISODE)
+    _make_session(scene_dir, 'session_2', scene_id='scene-1', session_type=SessionType.EPISODE)
+    engine = get_engine(tmp_path / 'catalog.db')
+    sync_recordings(rec, engine)
+
+    resp = TestClient(create_app(engine, recordings_dir=rec)).get('/select/task/all')
+    # 1 usable of 2 episodes -- not 1/3, which would count the mapping pass against usability
+    assert '>1/2</span>' in resp.text
+    assert '1 usable of 2 episodes, 3 sessions in total' in resp.text
 
 
 def test_select_scene_returns_sessions(tmp_path: pathlib.Path):
@@ -565,9 +583,12 @@ def test_post_build_dataset_success_redirects_and_clears_draft(tmp_path: pathlib
     assert (rec / 'datasets' / 'fold_towel_v1.zarr.zip').is_file()
     assert (rec / 'datasets' / 'fold_towel_v1.dataset.json').is_file()
 
-    # the draft is cleared after a successful build
+    # the draft is cleared after a successful build, and the new dataset is on the page the
+    # POST redirects to — the Datasets column is otherwise only filled by /select/task
     index_resp = client.get('/')
     assert 'name="scene_ids"' not in index_resp.text
+    assert 'fold_towel_v1' in index_resp.text
+    assert 'No datasets.' not in index_resp.text
 
 
 def test_post_build_dataset_with_task_id_persists_it(tmp_path: pathlib.Path, monkeypatch):

@@ -2,6 +2,10 @@
 
 A localhost web app for browsing the tasks, scenes, sessions, and training datasets produced by PolyUMI. It scans the recordings directory into a local SQLite cache (`polyumi-catalog sync`), and provides r/w access to the metadata for each item.
 
+Note: Unlike the other code in this repo, this app is pretty much fully vibecoded with no manual review, as it is purely a convenient UI layer (which calls the actual postprocessing scripts, which I maintain more carefully). 
+The point is, my standards for code quality etc are lower for this part of the repo, and anyone picking up this work
+should likely consider continuing in the same vein (treating this code as cheap).
+
 ## Running it
 
 From the repo root:

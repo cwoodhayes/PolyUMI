@@ -10,6 +10,13 @@ Known limitation: mtime gating uses the newest mtime among the scene dir, its se
 dirs, and their ``metadata.json`` files. In-place edits to other files a scene depends on
 are not detected; use ``--force`` to rebuild unconditionally.
 
+The one exception is each episode's cached SLAM quality (``Session.slam_attrs_json``),
+which is refreshed on **every** sync, gate or no gate. Preprocessing writes those attrs
+deep inside ``scene.zarr``, where nothing the gate looks at changes, so a gated sync would
+otherwise leave a freshly-SLAMmed scene showing its pre-run numbers forever. Re-reading
+them costs one pzarr open per scene (~50 ms), which is affordable for an explicit sync and
+is exactly what it buys: page renders then never touch pzarr at all.
+
 Dataset sync (``sync_datasets``) is a separate, simpler pass: dataset manifests are written
 once at export time and never edited in place, so it just re-parses every ``*.dataset.json``
 under the datasets directory on every call — no mtime gating needed.
@@ -27,6 +34,7 @@ from polyumi_pi.files.metadata import SessionMetadata
 from sqlmodel import Session as DBSession
 from sqlmodel import select
 
+from polyumi_catalog import episode_quality
 from polyumi_catalog.manifests import DatasetManifest, SceneManifest
 from polyumi_catalog.models import Dataset, DatasetMember, Scene, Session, Task
 
@@ -52,6 +60,7 @@ class SyncStats:
     scenes_skipped: int = 0
     sessions_upserted: int = 0
     sessions_removed: int = 0
+    sessions_requalified: int = 0
     tasks_created: int = 0
     conflicts: list[Conflict] = field(default_factory=list)
 
@@ -102,6 +111,29 @@ def _get_or_create_task(db: DBSession, name: str) -> tuple[Task, bool]:
     return task, False
 
 
+def _refresh_scene_quality(db: DBSession, scene_id: str, scene_dir: pathlib.Path, stats: SyncStats) -> None:
+    """
+    Mirror the scene's per-episode SLAM measurements from pzarr onto its session rows.
+
+    Runs outside the mtime gate (see the module docstring). Rows whose cached values are
+    already correct are left untouched, so a sync over an unchanged tree still writes
+    nothing. A session with no measurements — no pzarr, SLAM not run yet, or an archived
+    scene whose ``scene.zarr`` has been zipped away — is cleared back to ``None``, which
+    reads as "unknown", not as a failure.
+    """
+    records = episode_quality.scene_slam_records(scene_dir)
+    for row in db.exec(select(Session).where(Session.scene_id == scene_id)).all():
+        record = records.get(pathlib.Path(row.dir).name)
+        attrs_json = episode_quality.record_to_json(record) if record else None
+        has_optitrack = record.has_optitrack if record else None
+        if row.slam_attrs_json == attrs_json and row.slam_has_optitrack == has_optitrack:
+            continue
+        row.slam_attrs_json = attrs_json
+        row.slam_has_optitrack = has_optitrack
+        db.add(row)
+        stats.sessions_requalified += 1
+
+
 def _sync_scene(db: DBSession, scene_dir: pathlib.Path, now: datetime, force: bool, stats: SyncStats) -> None:
     """Upsert a single scene directory and its sessions into the DB."""
     session_dirs = sorted(d for d in scene_dir.iterdir() if d.is_dir() and d.name.startswith('session_'))
@@ -115,6 +147,7 @@ def _sync_scene(db: DBSession, scene_dir: pathlib.Path, now: datetime, force: bo
         and _newest_mtime(scene_dir, session_dirs) <= _utc_ts(existing_scene.synced_at)
     ):
         stats.scenes_skipped += 1
+        _refresh_scene_quality(db, existing_scene.scene_id, scene_dir, stats)
         return
 
     # parse session metadata
@@ -194,6 +227,7 @@ def _sync_scene(db: DBSession, scene_dir: pathlib.Path, now: datetime, force: bo
         db.delete(row)
         stats.sessions_removed += 1
 
+    _refresh_scene_quality(db, scene_id, scene_dir, stats)
     stats.scenes_updated += 1
 
 
@@ -213,6 +247,24 @@ def sync_recordings(recordings_dir: pathlib.Path, engine, *, force: bool = False
             _sync_scene(db, scene_dir, now, force, stats)
         db.commit()
     return stats
+
+
+def sync_scene_quality(scene_id: str, engine) -> int:
+    """
+    Re-read one scene's SLAM measurements into its session rows; returns how many changed.
+
+    For callers that just wrote new ones — the "run pipeline" button — so the usable-episode
+    counts reflect the run without waiting for the next full sync. A scene whose row has gone
+    missing is a no-op.
+    """
+    stats = SyncStats()
+    with DBSession(engine) as db:
+        scene = db.get(Scene, scene_id)
+        if scene is None:
+            return 0
+        _refresh_scene_quality(db, scene_id, pathlib.Path(scene.dir), stats)
+        db.commit()
+    return stats.sessions_requalified
 
 
 def _episodes_to_db(episodes: str | list[int]) -> str:

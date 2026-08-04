@@ -136,6 +136,21 @@ training must use the same image because checkpoints are dill-pickled against th
 - **`ros2_ws/src/polyumi_pi_msgs/`** — Protobuf definitions (`CameraFrame`, `AudioChunk`) with nanosecond timestamps; generated `*_pb2.py` files live alongside `.proto` sources
 - **`ros2_ws/src/polyumi_ros2/`** — ROS2 package; `pi_receiver_node.py` bridges ZMQ → ROS2 topics
 - **`ingest/polyumi_ingest/main.py`** — `pingest` CLI; fetches sessions from Pi via tar-over-SSH, builds pzarr working-format stores, and archives scenes to zip
+- **`catalog/polyumi_catalog/`** — `polyumi-catalog` CLI (`sync`, `serve`); FastAPI + HTMX browser over a SQLite cache of the recordings tree
+
+## The Catalog DB Has No Migrations — Ever
+
+`catalog.db` is a **pure cache**. The recordings tree (`metadata.json`, `scene.json`, the
+pzarr stores) and the dataset manifests are the source of truth; every row is re-derivable by
+`polyumi-catalog sync`, and rebuilding costs seconds. So:
+
+- **Never write a migration, an `ALTER TABLE`, or a schema-version column.** To add or change a
+  field, just edit `catalog/polyumi_catalog/models.py` and make sure `sync.py` populates it.
+- Startup compares the DB's schema against the models (`db.schema_mismatches`). On any
+  difference the CLI prints what drifted and offers to rebuild (`db.rebuild_schema` →
+  drop + create + re-sync). `--rebuild-db` / `--no-rebuild-db` answers it non-interactively.
+- Anything the catalog caches that is *not* re-derivable from disk is a bug in that field's
+  design, not a reason to preserve the DB file.
 
 ## Session Data Layout
 ```
