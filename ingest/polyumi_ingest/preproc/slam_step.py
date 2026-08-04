@@ -347,6 +347,18 @@ def _write_slam_results(
     n_fed_post_lost = int(is_lost[fed_post].sum()) if n_fed_post else 0
 
     slam_grp = ep_grp.require_group('annotations').require_group('slam')
+    # Same reasoning as deleting the stale arrays above: a v3 store re-run under v4 would
+    # otherwise keep attrs describing a two-pass merge that no longer happened — including
+    # reverse_pass: True, which reads as a claim about *these* poses.
+    for stale in (
+        'reverse_pass',
+        'reverse_merged',
+        'reverse_n_filled',
+        'reverse_n_forward_only',
+        'reverse_overlap_frames',
+        'reverse_overlap_median_mm',
+    ):
+        slam_grp.attrs.pop(stale, None)
     slam_grp.attrs['n_frames_total'] = n_total
     slam_grp.attrs['n_frames_lost'] = n_lost
     slam_grp.attrs['frame_stride'] = int(frame_stride)

@@ -515,6 +515,28 @@ def test_legacy_pass_arrays_are_cleared_on_rerun(tmp_path: pathlib.Path) -> None
     assert 'slam_poses_reverse' not in ep['gopro']
 
 
+def test_legacy_reverse_attrs_are_cleared_on_rerun(tmp_path: pathlib.Path) -> None:
+    """
+    Re-processing a pzarr v3 store drops its reverse_* annotations along with its arrays.
+
+    `reverse_pass: True` left behind next to freshly written forward-only poses reads as a
+    claim about *those* poses, which would be false.
+    """
+    n = 8
+    poses = np.zeros((n, 7))
+    root = zarr.open_group(str(tmp_path / 'legacy_attrs.zarr'), mode='w', zarr_format=2)
+    ep = root.create_group('episode_0')
+    ep.require_group('annotations').require_group('slam').attrs.update(
+        {'reverse_pass': True, 'reverse_merged': False, 'reverse_overlap_median_mm': 399.7}
+    )
+
+    _write_slam_results(ep, poses, tmp_path / 's.yaml', tmp_path / 'a.osa')
+
+    attrs = dict(ep['annotations/slam'].attrs)
+    assert not [k for k in attrs if k.startswith('reverse_')]
+    assert attrs['n_frames_total'] == n
+
+
 def test_post_chirp_counts_restrict_to_the_exported_window(tmp_path: pathlib.Path) -> None:
     """
     The gate's counts cover only frames at/after the chirp, where the export starts.
