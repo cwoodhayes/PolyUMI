@@ -69,9 +69,9 @@ def test_select_task_returns_scenes_and_oob_detail(tmp_path: pathlib.Path):
 
 
 def test_select_task_detail_includes_episode_count(tmp_path: pathlib.Path):
-    """The task detail panel shows an episode count alongside the scene count."""
+    """The task detail panel shows usable and total episode counts alongside the scene count."""
     resp = _client(tmp_path).get('/select/task/all')
-    assert '<dt>Episodes</dt><dd>1</dd>' in resp.text
+    assert '<dt>Episodes</dt><dd>1 usable / 1 total</dd>' in resp.text
 
 
 def test_select_scene_returns_sessions(tmp_path: pathlib.Path):

@@ -14,8 +14,22 @@ from polyumi_pi.files.metadata import SessionMetadata, SessionType
 from sqlmodel import Session as DBSession
 
 
-def _add_slam_quality(scene_dir: pathlib.Path, session_dirname: str, *, n_total: int, n_lost: int) -> None:
-    """Stamp a one-episode scene.zarr with SLAM quality attrs for ``session_dirname``."""
+def _add_slam_quality(
+    scene_dir: pathlib.Path,
+    session_dirname: str,
+    *,
+    n_total: int,
+    n_lost: int,
+    fed: bool = False,
+) -> None:
+    """
+    Stamp a one-episode scene.zarr with SLAM quality attrs for ``session_dirname``.
+
+    ``fed`` additionally writes the post-chirp fed-grid counts. Those are what the
+    auto-unusable thresholds judge — without them ``quality._fed_frame_counts`` has
+    nothing to go on and every episode reads as usable — while ``tracking_ratio``
+    alone is enough for the advisory ``low_quality`` badge.
+    """
     root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
     root.attrs['n_episodes'] = 1
     ep = root.require_group('episode_0')
@@ -25,6 +39,9 @@ def _add_slam_quality(scene_dir: pathlib.Path, session_dirname: str, *, n_total:
     slam_grp.attrs['n_frames_lost'] = n_lost
     slam_grp.attrs['tracking_ratio'] = (n_total - n_lost) / n_total
     slam_grp.attrs['n_relocalization_events'] = 0
+    if fed:
+        slam_grp.attrs['n_frames_fed_post_chirp'] = n_total
+        slam_grp.attrs['n_frames_fed_lost_post_chirp'] = n_lost
 
 
 def _make_session(scene_dir: pathlib.Path, name: str, *, scene_id: str, session_type: SessionType, task: str | None):
@@ -89,6 +106,73 @@ def test_list_scenes_filters_by_task(tmp_path: pathlib.Path):
     assert assigned[0]['session_count'] == 2
     assert [s['scene_id'] for s in unassigned] == ['scene-2']
     assert len(everything) == 2
+
+
+def _mark_unusable(engine, scene_id: str) -> None:
+    """Manually mark ``scene_id``'s EPISODE session unusable, as the UI's toggle does."""
+    with DBSession(engine) as db:
+        episode = next(s for s in queries.list_sessions(db, scene_id) if s['session_type'] == 'EPISODE')
+        row = db.get(Session, episode['session_id'])
+        row.unusable = True
+        db.add(row)
+        db.commit()
+
+
+def test_list_scenes_usable_episode_count(tmp_path: pathlib.Path):
+    """
+    The Scenes column counts usable episodes, excluding both flavours of unusable.
+
+    With no SLAM results at all nothing has ruled the episode out, so it still counts.
+    """
+    engine = _populated_engine(tmp_path)
+    with DBSession(engine) as db:
+        scene = next(s for s in queries.list_scenes(db, queries.FILTER_ALL) if s['scene_id'] == 'scene-1')
+        assert scene['episode_count'] == 1
+        assert scene['usable_episode_count'] == 1  # no pzarr yet
+        scene_dir = pathlib.Path(scene['dir'])
+
+    _add_slam_quality(scene_dir, 'session_2', n_total=100, n_lost=5, fed=True)  # 95 tracked, 5 lost
+    with DBSession(engine) as db:
+        scene = next(s for s in queries.list_scenes(db, queries.FILTER_ALL) if s['scene_id'] == 'scene-1')
+        assert scene['usable_episode_count'] == 1
+
+    _add_slam_quality(scene_dir, 'session_2', n_total=100, n_lost=60, fed=True)  # 60 lost > max_lost_frames
+    with DBSession(engine) as db:
+        scene = next(s for s in queries.list_scenes(db, queries.FILTER_ALL) if s['scene_id'] == 'scene-1')
+        assert scene['episode_count'] == 1  # total is unchanged
+        assert scene['usable_episode_count'] == 0
+
+
+def test_list_scenes_usable_episode_count_honours_manual_marking(tmp_path: pathlib.Path):
+    """A manually-marked episode drops out of the usable count even with clean SLAM."""
+    engine = _populated_engine(tmp_path)
+    with DBSession(engine) as db:
+        scene_dir = pathlib.Path(queries.scene_detail(db, 'scene-1')['dir'])
+    _add_slam_quality(scene_dir, 'session_2', n_total=100, n_lost=5, fed=True)
+    _mark_unusable(engine, 'scene-1')
+
+    with DBSession(engine) as db:
+        scene = next(s for s in queries.list_scenes(db, queries.FILTER_ALL) if s['scene_id'] == 'scene-1')
+    assert scene['episode_count'] == 1
+    assert scene['usable_episode_count'] == 0
+
+
+def test_task_detail_usable_episode_count(tmp_path: pathlib.Path):
+    """task_detail reports usable episodes alongside the total, and accepts a precomputed one."""
+    engine = _populated_engine(tmp_path)
+    with DBSession(engine) as db:
+        detail = queries.task_detail(db, queries.FILTER_ALL)
+        assert detail['episode_count'] == 2  # scene-1 + scene-2
+        assert detail['usable_episode_count'] == 2
+
+    _mark_unusable(engine, 'scene-1')
+    with DBSession(engine) as db:
+        detail = queries.task_detail(db, queries.FILTER_ALL)
+        assert detail['episode_count'] == 2
+        assert detail['usable_episode_count'] == 1
+
+        # callers that already built the Scenes column pass their sum in rather than re-reading
+        assert queries.task_detail(db, queries.FILTER_ALL, usable_episode_count=7)['usable_episode_count'] == 7
 
 
 def test_list_sessions_for_scene(tmp_path: pathlib.Path):

@@ -176,7 +176,9 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
         with DBSession(engine) as db:
             scenes = queries.list_scenes(db, task_key)
             datasets = queries.list_datasets(db, task_key)
-            detail = queries.task_detail(db, task_key)
+            # reuse the counts list_scenes already paid for rather than re-reading every pzarr
+            usable = sum(s['usable_episode_count'] for s in scenes)
+            detail = queries.task_detail(db, task_key, usable_episode_count=usable)
         return render(
             request,
             'select_task.html',

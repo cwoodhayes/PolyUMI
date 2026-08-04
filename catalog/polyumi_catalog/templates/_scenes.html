@@ -14,7 +14,7 @@
     <span class="item-name" title="{{ s.name }}">{{ s.name }}</span>
     <span class="badges">
       {% if s.archived %}<span class="badge archived">archived</span>{% endif %}
-      <span class="badge" title="episode / total sessions">{{ s.episode_count }}/{{ s.session_count }}</span>
+      <span class="badge" title="usable episodes / total sessions">{{ s.usable_episode_count }}/{{ s.session_count }}</span>
     </span>
   </div>
   {% endfor %}
