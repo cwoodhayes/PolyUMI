@@ -254,13 +254,6 @@
         </dd>
         <dt>Frames lost</dt><dd>{{ detail.slam.n_frames_lost }} / {{ detail.slam.n_frames_total }}</dd>
         <dt>Relocalizations</dt><dd>{{ detail.slam.n_relocalization_events }}</dd>
-        {% if detail.slam.reverse_overlap_median_mm is not none %}
-        <dt title="Median disagreement between the forward and reverse SLAM passes on frames both tracked. Both localize against the same atlas, so this is a self-consistency check needing no ground truth.">Fwd/rev agreement</dt>
-        <dd>
-          {{ '%.2f mm' % detail.slam.reverse_overlap_median_mm }}
-          {% if detail.slam.reverse_merged is false %}<span class="badge warn" title="reverse pass discarded by the merge consistency gate">reverse discarded</span>{% endif %}
-        </dd>
-        {% endif %}
         {% if detail.slam.has_optitrack %}
         <dt>OptiTrack</dt><dd>available — exempt from SLAM-based exclusion</dd>
         {% endif %}

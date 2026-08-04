@@ -5,7 +5,7 @@ Reads the ``annotations/slam`` group attrs the SLAM preprocessing step
 (``OrbSlam3Step``, ingest step 2) already writes into each episode's pzarr
 group — no new computation, just plumbing an existing per-episode summary
 through to the catalog so tracking coverage is visible without opening
-Foxglove. See docs/catalog-ui-plan.md Phase 4.
+Foxglove.
 
 Also derives each episode's **automatic unusable verdict** from those metrics via
 ``polyumi_ingest.quality``, whose thresholds live in
@@ -59,11 +59,6 @@ def scene_quality_by_session_dir(scene_dir: pathlib.Path) -> dict[str, dict]:
             'n_frames_lost': attrs.get('n_frames_lost'),
             'tracking_ratio': tracking_ratio,
             'n_relocalization_events': attrs.get('n_relocalization_events'),
-            # Reference-free forward/reverse self-consistency (mm); None for episodes
-            # processed before the reverse pass existed, NaN when the two passes shared
-            # too few frames to compare.
-            'reverse_overlap_median_mm': attrs.get('reverse_overlap_median_mm'),
-            'reverse_merged': attrs.get('reverse_merged'),
             'has_optitrack': has_optitrack,
             'low_quality': iquality.is_low_quality(attrs, thresholds=thresholds),
             #: Derived from the thresholds, not stored. An episode can also be unusable
