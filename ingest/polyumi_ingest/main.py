@@ -16,6 +16,7 @@ from polyumi_pi.files.session import SessionFiles
 from rich.logging import RichHandler
 from rich.prompt import Confirm
 
+from polyumi_ingest.export.dp.buffer import _MIN_SEGMENT_STEPS
 from polyumi_ingest.gopro_fetch import DEFAULT_THRESHOLD_MS, find_gopro_video
 from polyumi_ingest.pi_fetch import PiFetch
 from polyumi_ingest.preproc import (
@@ -697,6 +698,13 @@ def export_dp(
         '(e.g. eef/pose_<source>) are missing, and the post-chirp start trim is applied independently '
         'whenever the chirp-end marker is present, regardless of this flag.',
     ),
+    min_segment_steps: int = typer.Option(
+        _MIN_SEGMENT_STEPS,
+        '--min-segment-steps',
+        help='Shortest run of valid steps exported as its own episode. A session whose pose '
+        'source drops out is split into the runs either side; runs shorter than this are '
+        'discarded rather than emitted as episodes too short to sample a horizon from.',
+    ),
 ):
     """
     Export a pzarr scene to a UMI-format ReplayBuffer (.zarr.zip).
@@ -712,7 +720,12 @@ def export_dp(
     from polyumi_ingest.export.dp import export_scene_to_dp
 
     try:
-        n, provenance = export_scene_to_dp(scene_path, output_path, enforce_preprocessing=enforce_preprocessing)
+        n, provenance = export_scene_to_dp(
+            scene_path,
+            output_path,
+            enforce_preprocessing=enforce_preprocessing,
+            min_segment_steps=min_segment_steps,
+        )
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         log.error(str(e))
         raise typer.Exit(1)
@@ -742,6 +755,13 @@ def export_dataset(
         '(e.g. eef/pose_<source>) are missing, and the post-chirp start trim is applied independently '
         'whenever the chirp-end marker is present, regardless of this flag.',
     ),
+    min_segment_steps: int = typer.Option(
+        _MIN_SEGMENT_STEPS,
+        '--min-segment-steps',
+        help='Shortest run of valid steps exported as its own episode. A session whose pose '
+        'source drops out is split into the runs either side; runs shorter than this are '
+        'discarded rather than emitted as episodes too short to sample a horizon from.',
+    ),
 ):
     """
     Export EPISODE sessions from multiple pzarr scenes into a single UMI ReplayBuffer.
@@ -754,7 +774,12 @@ def export_dataset(
     from polyumi_ingest.export.dp import export_scenes_to_dp
 
     try:
-        n, provenance = export_scenes_to_dp(scene_paths, output_path, enforce_preprocessing=enforce_preprocessing)
+        n, provenance = export_scenes_to_dp(
+            scene_paths,
+            output_path,
+            enforce_preprocessing=enforce_preprocessing,
+            min_segment_steps=min_segment_steps,
+        )
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         log.error(str(e))
         raise typer.Exit(1)

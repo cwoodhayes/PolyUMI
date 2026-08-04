@@ -21,7 +21,7 @@ Compared to downstream data formats like LeRobot Dataset or Diffusion Policy's z
 
 Use `zarr-python 3.x` with `zarr_format=2` explicitly. zarr-python 3 reads and writes v2 stores cleanly, but the v2 format gives us reliable JpegXl codec support (the v3 codec story for non-spec codecs has interop caveats) and matches the format that downstream tools like forge and CRB's `ReplayBuffer` already expect. If sharding becomes a real pain point as datasets grow, migrate to v3 later via `zarr.copy()`.
 
-The format version is tracked as `pzarr_version` (currently `3`) in the scene root `.zattrs`. Read this from the store in your code rather than hardcoding it, so schema migrations are operational rather than code changes. See `ingest/polyumi_ingest/pzarr/version.py` for the version history.
+The format version is tracked as `pzarr_version` (currently `4`) in the scene root `.zattrs`. Read this from the store in your code rather than hardcoding it, so schema migrations are operational rather than code changes. See `ingest/polyumi_ingest/pzarr/version.py` for the version history.
 
 ## Schema
 
@@ -67,8 +67,14 @@ scene.zarr/
 │       │   └── gopro_chirp_peak           scalar float32
 │       ├── slam/                   populated by step 2
 │       │   ├── n_frames_total             scalar int
-│       │   ├── n_frames_lost              scalar int
-│       │   ├── tracking_ratio             scalar float
+│       │   ├── n_frames_lost              scalar int — whole grid; do NOT gate on this
+│       │   ├── frame_stride               scalar int — every Nth frame is fed to the localizer
+│       │   ├── n_frames_fed               scalar int
+│       │   ├── n_frames_fed_tracked       scalar int
+│       │   ├── n_frames_fed_post_chirp    scalar int — the window the exporter ships
+│       │   ├── n_frames_fed_lost_post_chirp  scalar int — what the usability gate counts
+│       │   ├── chirp_gated                scalar bool — False = the two above cover the whole episode
+│       │   ├── tracking_ratio             scalar float — over fed frames
 │       │   ├── n_relocalization_events    scalar int
 │       │   ├── orb_slam3_settings_path    scalar str
 │       │   └── atlas_path                 scalar str
@@ -148,7 +154,7 @@ You can have multiple sources for the same scene and decide downstream which to 
 | `optitrack/pose` | the marker **rigid body** | Motive puts the origin at the marker centroid — an arbitrary point that moves whenever markers are re-stuck |
 | `gopro/slam_poses` | the GoPro **optical frame** | not the point the robot reports at inference |
 
-Step 5 (`eef-pose`) resolves this per source: for every source an episode actually has, it converts that source onto the canonical **hand** body frame, resamples onto the GoPro frame grid, and writes `episode_N/eef/pose_optitrack` and/or `episode_N/eef/pose_slam` — one array per source, not a single winner. (SLAM's array also has short interior tracking-loss gaps filled by Slerp+linear interpolation; see `interpolation.interpolate_se3_gaps`.) Picking *which* source to train on is deferred to **export time**, not baked in here — see `export.dp.buffer.resolve_pose_source`: it defaults to OptiTrack when present (else SLAM), overridable per session via `scene.json`'s `pose_source_overrides`. This means changing the source is a re-export, not a re-preprocess.
+Step 5 (`eef-pose`) resolves this per source: for every source an episode actually has, it converts that source onto the canonical **hand** body frame, resamples onto the GoPro frame grid, and writes `episode_N/eef/pose_optitrack` and/or `episode_N/eef/pose_slam` — one array per source, not a single winner. (SLAM's array is taken exactly as reported: since pzarr v4 nothing is interpolated, so rows SLAM could not place — including every frame the localizer was never fed under `localization_frame_stride` — stay NaN, and the exporter turns runs of NaN into episode boundaries.) Picking *which* source to train on is deferred to **export time**, not baked in here — see `export.dp.buffer.resolve_pose_source`: it defaults to OptiTrack when present (else SLAM), overridable per session via `scene.json`'s `pose_source_overrides`. This means changing the source is a re-export, not a re-preprocess.
 
 Both sources route through the **GoPro frame**, then take one shared `T_gopro_to_hand` hop:
 
@@ -164,7 +170,7 @@ The **world** frame is deliberately left as each source's own (OptiTrack frame o
 - A shared **world** frame *cancels* out of the relative pose representation policies train on — `inv(T_0)·T_k` is invariant to a global re-frame. So normalizing it buys nothing.
 - A **body** offset does *not* cancel. It conjugates the relative transform: `inv(T_0·X)·(T_k·X) = inv(X)·(inv(T_0)·T_k)·X`, leaking a `(R − I)·x` error into the relative translation. At a 20 cm offset a 30° wrist rotation injects ~11 cm of phantom translation; even at the ~7 cm GoPro-to-fingertip scale it is ~4 cm. That is why this step is not optional.
 
-Each `eef/pose_<source>` array records its own `world_frame`, `body_frame` (`hand`), `grid` (`gopro`), `n_nan`, and `n_interp_filled` attrs. The `eef` group itself records `available_sources` (which arrays this episode has) and `default_source` (what export uses absent a `scene.json` override).
+Each `eef/pose_<source>` array records its own `world_frame`, `body_frame` (`hand`), `grid` (`gopro`), and `n_nan` attrs. The `eef` group itself records `available_sources` (which arrays this episode has) and `default_source` (what export uses absent a `scene.json` override).
 
 > **`T_gopro_to_hand` in `config/gripper_calib.yaml` is currently an unmeasured placeholder.** It is on the critical path for every exported pose. Calibrate it before any training run.
 

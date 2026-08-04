@@ -25,17 +25,6 @@ resolution_divisor: 1
 # Env override: POLYUMI_SLAM_LOC_STRIDE
 localization_frame_stride: 2
 
-# Maximum median position disagreement (mm) between the forward and reverse passes,
-# measured on frames both tracked, before the reverse pass is discarded from the
-# merge and the forward-only trajectory is kept.
-#
-# NOTE: `max_reverse_overlap_mm` in quality_thresholds.yaml is the *same decision
-# boundary applied a second time* -- there it decides whether to flag the episode
-# unusable, here it decides whether to trust the reverse poses. Keep the two in
-# sync unless you specifically want an episode whose reverse pass was discarded to
-# still count as usable.
-reverse_merge_max_overlap_mm: 50.0
-
 # Where the camera/IMU calibration actually lives. Not loaded from here -- recorded
 # so this file is a complete map of SLAM configuration.
 #

@@ -10,7 +10,6 @@ from numcodecs import Blosc
 
 from polyumi_ingest.config import load_gripper_calib
 from polyumi_ingest.episode_status import Episode, SceneContext
-from polyumi_ingest.interpolation import interpolate_se3_gaps
 from polyumi_ingest.preproc.step_base import PreprocessingStep, register_preprocessing_step
 from polyumi_ingest.pzarr.store import arr, grp
 from polyumi_ingest.timebase import nearest_idx
@@ -27,11 +26,6 @@ _BLOSC = Blosc(cname='zstd', clevel=5, shuffle=Blosc.SHUFFLE)
 #: Preference order when a scene carries more than one pose source. OptiTrack is mocap ground
 #: truth and beats SLAM wherever the volume covers the demo.
 _SOURCE_PREFERENCE = ('optitrack', 'slam')
-
-#: Longest interior SLAM tracking-loss gap (in GoPro frames) that gets Slerp+linear filled.
-#: A synthetic hold-out study on real trajectories put median error at a 20-frame gap around
-#: ~8 mm / ~1.2°, degrading fast beyond that; larger gaps are left NaN and trimmed downstream.
-_SLAM_MAX_GAP_FRAMES = 20
 
 
 def _gopro_ts_in_finger_clock(ep: zarr.Group) -> np.ndarray:
@@ -81,11 +75,11 @@ class EefPoseStep(PreprocessingStep):
     the body frame does not cancel, which is why it has to be fixed here. See
     ``transforms.retarget_body_frame``.
 
-    SLAM leaves NaN rows wherever tracking was lost. Short *interior* gaps (a valid pose on
-    both sides, up to ``_SLAM_MAX_GAP_FRAMES``) are filled with Slerp+linear interpolation via
-    ``interpolation.interpolate_se3_gaps`` before retargeting, so a brief dropout does not
-    truncate the usable span; leading/trailing NaN and longer gaps stay NaN by design and are
-    trimmed downstream. OptiTrack is dense and needs no such filling.
+    SLAM's NaN rows are carried through untouched -- both genuine tracking losses and, under
+    ``localization_frame_stride``, every frame the localizer was never fed. Nothing here invents
+    a pose: gaps become episode boundaries at export (see ``export.dp.buffer``), which is the
+    upstream UMI policy and means every exported pose is a real measurement. OptiTrack is dense
+    and has no gaps to begin with.
 
     Runs after step 3 (slam-optitrack-align), which needs the untouched source-frame poses to
     solve for T_ws, and step 4 (aruco-gripper-width), which defines the GoPro-grid convention.
@@ -146,7 +140,6 @@ class EefPoseStep(PreprocessingStep):
             out_grp.attrs.pop(stale_attr, None)
 
         for source in sources:
-            n_interp = 0
             if source == 'optitrack':
                 # OptiTrack runs on its own clock and rate; resample it onto the GoPro frame
                 # grid so eef/pose_optitrack shares one index with the frames and gripper width.
@@ -155,12 +148,11 @@ class EefPoseStep(PreprocessingStep):
                 raw = opti_poses[nearest_idx(opti_ts, gopro_ts)]
                 world_frame = 'optitrack'
             else:
-                # SLAM leaves NaN rows wherever tracking was lost. Fill short interior gaps
-                # (Slerp rotation + linear translation) so a brief dropout doesn't truncate the
-                # usable span; long gaps and the leading/trailing NaN stay NaN by design.
+                # Taken exactly as SLAM reported it. NaN rows -- wherever tracking was lost, and
+                # every frame the localizer was never fed under `localization_frame_stride` --
+                # stay NaN: the exporter selects the fed grid and turns runs of NaN into episode
+                # boundaries, so nothing downstream needs an invented pose to bridge a gap.
                 raw = np.asarray(arr(ep, 'gopro/slam_poses')[:], dtype=np.float64)
-                raw, filled = interpolate_se3_gaps(raw, max_gap_frames=_SLAM_MAX_GAP_FRAMES)
-                n_interp = int(filled.sum())
                 world_frame = 'slam'
 
             if len(raw) != len(gopro_ts):
@@ -180,12 +172,10 @@ class EefPoseStep(PreprocessingStep):
             pose_arr.attrs['body_frame'] = 'hand'
             pose_arr.attrs['grid'] = 'gopro'
             pose_arr.attrs['n_nan'] = n_nan
-            pose_arr.attrs['n_interp_filled'] = n_interp
 
-            interp_note = f', {n_interp} interp-filled' if n_interp else ''
             log.info(
                 f'  {episode_key}: eef/pose_{source} {pose.shape} '
-                f'(world={world_frame}, body=hand, {n_nan}/{len(pose)} NaN{interp_note})'
+                f'(world={world_frame}, body=hand, {n_nan}/{len(pose)} NaN)'
             )
 
         out_grp.attrs['available_sources'] = sources

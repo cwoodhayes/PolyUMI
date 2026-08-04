@@ -16,6 +16,7 @@ _PS = TypeVar('_PS', bound='PreprocessingStep')
 from polyumi_ingest.episode_status import Episode, SceneContext, episode_guard
 from polyumi_ingest.gitinfo import git_sha
 from polyumi_ingest.pzarr.scene_files import SceneFiles
+from polyumi_ingest.pzarr.version import PZARR_VERSION
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +96,30 @@ def _mark_preprocessing_step(root: zarr.Group, step_number: int) -> None:
 def _write_scalar(group: zarr.Group, name: str, value: float | int) -> None:
     """Write a scalar annotation as a group attribute."""
     group.attrs[name] = value
+
+
+def _warn_if_outdated_pzarr(root: zarr.Group, scene_label: str) -> None:
+    """
+    Log if a store's schema version doesn't match the running code. Never blocks.
+
+    An older store still processes fine — the steps overwrite what they own — but its
+    untouched outputs may predate the current schema, which matters most when several scenes
+    are combined into one dataset. A *newer* store is the more dangerous direction: the code
+    reading it can't know what it doesn't know, so that warns harder.
+    """
+    stored = int(root.attrs.get('pzarr_version', 1))  # pre-v1 stores have no attr
+    if stored == PZARR_VERSION:
+        return
+    if stored < PZARR_VERSION:
+        log.warning(
+            f'{scene_label}: built under pzarr v{stored}, current is v{PZARR_VERSION} — outputs may '
+            f'predate the current schema; a full `pingest pp --force` reprocesses and restamps it.'
+        )
+    else:
+        log.error(
+            f'{scene_label}: written by pzarr v{stored}, but this code only knows v{PZARR_VERSION} — '
+            f'it may read fields that have since changed meaning. Update your checkout.'
+        )
 
 
 class StepComplete(Exception):  # noqa: N818 — control flow, not an error
@@ -212,10 +237,12 @@ def run_preprocessing(
         raise FileNotFoundError(f'No scene.zarr found at {scene_path}')
 
     root = zarr.open_group(str(scene_zarr), mode='a')
+    _warn_if_outdated_pzarr(root, scene_zarr.parent.name)
     completed_steps = set(preprocessing_steps_done(root))
     step_numbers = [step_number] if step_number is not None else sorted(PREPROCESSING_STEPS)
 
     current_path = scene_path
+    ran: set[int] = set()
     for number in step_numbers:
         try:
             step_cls = PREPROCESSING_STEPS[number]
@@ -230,9 +257,18 @@ def run_preprocessing(
         scene_zarr = SceneFiles.resolve_zarr_path(current_path)
         root = zarr.open_group(str(scene_zarr), mode='a')
         _mark_preprocessing_step(root, number)
+        ran.add(number)
         completed_steps = set(preprocessing_steps_done(root))
         if step_number is None:
             copy = False
+
+    # Restamp only when every registered step actually ran *here*. Trusting
+    # `preprocessing_steps_done` instead would stamp the current version onto a store whose
+    # skipped steps still hold output from an older schema — worse than not stamping at all,
+    # since the stamp is what tells the next run whether it can believe what it reads.
+    if ran == set(PREPROCESSING_STEPS) and int(root.attrs.get('pzarr_version', 1)) != PZARR_VERSION:
+        log.info(f'{scene_zarr.parent.name}: whole pipeline re-run; restamping as pzarr v{PZARR_VERSION}')
+        root.attrs['pzarr_version'] = PZARR_VERSION
 
     return SceneFiles.resolve_zarr_path(current_path)
 

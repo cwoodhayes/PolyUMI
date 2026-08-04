@@ -17,9 +17,7 @@ from polyumi_ingest.preproc.slam_step import (
     _downsample_settings,
     _export_telemetry_json,
     _make_temp_settings_yaml,
-    _merge_forward_reverse,
     _parse_and_reconcile_trajectory,
-    _parse_decoded_frame_count,
     _write_slam_results,
 )
 
@@ -296,220 +294,6 @@ def test_parse_and_reconcile_trajectory_aligns_and_marks_lost(tmp_path: pathlib.
         np.testing.assert_array_almost_equal(poses[i, 3:], [0.0, 0.0, 0.0, 1.0], decimal=5)
 
 
-def _make_euroc_trajectory_reversed(
-    path: pathlib.Path,
-    frame_ts: np.ndarray,
-    tracked_mask: np.ndarray,
-    anchor_idx: int | None = None,
-) -> None:
-    """
-    Write a fake EuRoC trajectory as the localizer's *reverse* sweep would.
-
-    The reverse sweep runs frames back-to-front on a flipped video clock
-    ``tframe' = t_anchor - (frame_ts - frame_ts[0])``, so timestamps still
-    increase as ORB-SLAM3 requires; see
-    ``mono_inertial_gopro_vi_localize.cc``'s ``RunLocalizationPass``. This
-    mirrors that transform so ``reversed_clock=True`` can be tested without
-    the real binary.
-
-    ``anchor_idx`` is the index of the last frame the binary decoded (the frame
-    its clock is flipped about); it defaults to the last frame of the grid.
-    Pass a smaller index to simulate a decode that stopped early.
-    """
-    t0 = float(frame_ts[0])
-    idx = len(frame_ts) - 1 if anchor_idx is None else anchor_idx
-    anchor_video = float(frame_ts[idx] - t0)
-    with open(path, 'w') as fh:
-        for i, ts in enumerate(frame_ts):
-            if not tracked_mask[i]:
-                continue
-            t_ns = (anchor_video - (float(ts) - t0)) * 1e9
-            fh.write(f'{t_ns:.6f} 0.1 0.2 0.3 0.0 0.0 0.0 1.0\n')
-
-
-def test_parse_and_reconcile_trajectory_reversed_clock_lands_on_original_frames(
-    tmp_path: pathlib.Path,
-) -> None:
-    """A reverse-pass trajectory (flipped clock) reconciles back onto the original frame grid."""
-    n = 6
-    frame_ts = 1000.0 + np.arange(n, dtype=np.float64) / 60.0
-    tracked = np.array([True, True, True, True, False, False])  # reverse loses the tail
-    traj_path = tmp_path / 'traj_rev.txt'
-    _make_euroc_trajectory_reversed(traj_path, frame_ts, tracked)
-
-    poses = _parse_and_reconcile_trajectory(traj_path, frame_ts, reversed_clock=True)
-
-    assert poses.shape == (n, 7)
-    for i in range(4):
-        np.testing.assert_array_almost_equal(poses[i, :3], [0.1, 0.2, 0.3], decimal=5)
-    for i in range(4, n):
-        assert np.all(np.isnan(poses[i]))
-
-
-def test_parse_and_reconcile_trajectory_reversed_clock_honours_explicit_anchor(
-    tmp_path: pathlib.Path,
-) -> None:
-    """
-    A reverse pass anchored short of the grid's end still lands on the right frames.
-
-    The binary flips its reverse clock about the last frame it *decoded*, which
-    isn't always the last frame of the grid (an early decoder stop, or a
-    frame-decimating run, leaves it short).  Given that anchor, every reverse
-    entry must still reconcile onto its original frame index.
-    """
-    n = 10
-    frame_ts = 1000.0 + np.arange(n, dtype=np.float64) / 60.0
-    anchor_idx = 7  # decode stopped 2 frames early
-    tracked = np.zeros(n, dtype=bool)
-    tracked[:8] = True  # reverse tracked everything it was given
-    traj_path = tmp_path / 'traj_rev.txt'
-    _make_euroc_trajectory_reversed(traj_path, frame_ts, tracked, anchor_idx=anchor_idx)
-
-    poses = _parse_and_reconcile_trajectory(
-        traj_path, frame_ts, reversed_clock=True, reverse_anchor_ts=float(frame_ts[anchor_idx])
-    )
-
-    for i in range(8):
-        np.testing.assert_array_almost_equal(poses[i, :3], [0.1, 0.2, 0.3], decimal=5)
-    for i in range(8, n):
-        assert np.all(np.isnan(poses[i]))
-
-
-def test_parse_and_reconcile_trajectory_reversed_clock_wrong_anchor_shifts_silently(
-    tmp_path: pathlib.Path,
-) -> None:
-    """
-    Regression guard: assuming frame_ts[-1] as the anchor mis-maps a short decode.
-
-    This is why ``reverse_anchor_ts`` exists.  A whole-frame offset still falls
-    inside the matching tolerance of the *wrong* frame, so the old behaviour
-    produced silently shifted poses rather than skipped entries — no warning to
-    notice.  Pinning that here keeps the failure mode from quietly returning.
-    """
-    n = 10
-    frame_ts = 1000.0 + np.arange(n, dtype=np.float64) / 60.0
-    anchor_idx = 7
-    tracked = np.zeros(n, dtype=bool)
-    tracked[:8] = True
-    traj_path = tmp_path / 'traj_rev.txt'
-    _make_euroc_trajectory_reversed(traj_path, frame_ts, tracked, anchor_idx=anchor_idx)
-
-    # Default anchor (frame_ts[-1]) is wrong by 2 frames for this trajectory.
-    poses = _parse_and_reconcile_trajectory(traj_path, frame_ts, reversed_clock=True)
-
-    # Every pose is shifted 2 frames later, and nothing warns about it: frames
-    # 0..1 come out empty while 8..9 get poses they should never have had.
-    assert np.all(np.isnan(poses[0]))
-    assert np.all(np.isnan(poses[1]))
-    np.testing.assert_array_almost_equal(poses[9, :3], [0.1, 0.2, 0.3], decimal=5)
-    # ...whereas the explicit anchor puts them back where they belong.
-    fixed = _parse_and_reconcile_trajectory(
-        traj_path, frame_ts, reversed_clock=True, reverse_anchor_ts=float(frame_ts[anchor_idx])
-    )
-    np.testing.assert_array_almost_equal(fixed[0, :3], [0.1, 0.2, 0.3], decimal=5)
-    assert np.all(np.isnan(fixed[9]))
-
-
-def test_reverse_anchor_index_accounts_for_the_frame_stride() -> None:
-    """
-    The reverse anchor is (n_decoded-1)*stride, not n_decoded-1.
-
-    The binary flips its reverse clock about the last frame it decoded. Under
-    decimation, decoded frame k is original frame k*stride, so a stride-blind
-    formula picks a frame near the *start* of the clip -- and because a whole-frame
-    offset still falls inside the matching tolerance of the wrong frame, every
-    reverse pose would shift silently rather than fail loudly.
-
-    This pins the arithmetic that ``_localize_episode`` performs; the two
-    reconciliation tests below cover what a wrong anchor does to the output.
-    """
-    n_frames, stride = 405, 2
-    n_decoded = len(range(0, n_frames, stride))  # 203 frames fed
-    assert (n_decoded - 1) * stride == 404  # correct: the last kept frame
-    assert n_decoded - 1 == 202  # what the stride-blind formula would have picked
-
-
-def test_parse_decoded_frame_count_reads_the_binarys_report(tmp_path: pathlib.Path) -> None:
-    """The decoded-frame count is picked out of the localizer's stdout log."""
-    log_path = tmp_path / 'slam.stdout'
-    log_path.write_text(
-        'Loading ORB Vocabulary...\nDecoded 405 frames into memory\n[localizer:forward] tracked 100/405 frames\n'
-    )
-    assert _parse_decoded_frame_count(log_path) == 405
-
-
-def test_parse_decoded_frame_count_returns_none_when_absent(tmp_path: pathlib.Path) -> None:
-    """A log without the line (or no log at all) yields None so callers can fall back."""
-    log_path = tmp_path / 'slam.stdout'
-    log_path.write_text('Loading ORB Vocabulary...\nnothing useful here\n')
-    assert _parse_decoded_frame_count(log_path) is None
-    assert _parse_decoded_frame_count(tmp_path / 'does_not_exist.stdout') is None
-
-
-# ---------------------------------------------------------------------------
-# _merge_forward_reverse
-# ---------------------------------------------------------------------------
-
-
-def _poses_from_valid(valid: np.ndarray, xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> np.ndarray:
-    """(N,7) pose array: valid rows get a fixed pose at ``xyz``, others NaN."""
-    n = len(valid)
-    poses = np.full((n, 7), np.nan, dtype=np.float64)
-    poses[valid, :3] = xyz
-    poses[valid, 3:] = [0.0, 0.0, 0.0, 1.0]
-    return poses
-
-
-def test_merge_forward_reverse_fills_forward_gaps_with_reverse() -> None:
-    """Reverse should fill exactly the frames forward lost, when both passes agree."""
-    # forward lost {0,1,7}; reverse lost {5,6,7} -> overlap (both tracked) = {2,3,4};
-    # forward-only-lost, reverse-recoverable = {0,1}; lost by both = {7}.
-    fwd_valid = np.array([False, False, True, True, True, True, True, False])
-    rev_valid = np.array([True, True, True, True, True, False, False, False])
-    fwd = _poses_from_valid(fwd_valid)
-    rev = _poses_from_valid(rev_valid)  # same pose everywhere -> zero disagreement in overlap
-
-    merged, stats = _merge_forward_reverse(fwd, rev)
-
-    assert not np.any(np.isnan(merged[0]))  # forward lost, reverse filled it
-    assert not np.any(np.isnan(merged[1]))
-    for i in range(2, 7):
-        assert not np.any(np.isnan(merged[i]))  # tracked by at least one pass
-    assert np.all(np.isnan(merged[7]))  # lost by both — stays NaN
-    assert stats['merged'] is True
-    assert stats['n_reverse_filled'] == 2
-    assert stats['n_overlap'] == 3
-    assert stats['overlap_median_mm'] == pytest.approx(0.0, abs=1e-6)
-
-
-def test_merge_forward_reverse_never_overwrites_a_tracked_forward_frame() -> None:
-    """Even where reverse disagrees, a forward-tracked frame keeps its forward pose."""
-    fwd_valid = np.array([True, True, True])
-    rev_valid = np.array([True, True, True])
-    fwd = _poses_from_valid(fwd_valid, xyz=(0.0, 0.0, 0.0))
-    rev = _poses_from_valid(rev_valid, xyz=(1.0, 0.0, 0.0))  # 1m off — well past the guard
-
-    merged, stats = _merge_forward_reverse(fwd, rev)
-
-    # Guard trips (1m >> 50mm threshold) -> reverse discarded, forward unchanged.
-    np.testing.assert_array_almost_equal(merged[:, :3], fwd[:, :3])
-    assert stats['merged'] is False
-    assert stats['overlap_median_mm'] == pytest.approx(1000.0, abs=1.0)
-
-
-def test_merge_forward_reverse_no_reverse_tracking_is_a_noop() -> None:
-    """If the reverse pass tracked nothing, the merge returns forward unchanged."""
-    fwd_valid = np.array([True, False, True])
-    fwd = _poses_from_valid(fwd_valid)
-    rev = np.full((3, 7), np.nan)
-
-    merged, stats = _merge_forward_reverse(fwd, rev)
-
-    np.testing.assert_array_equal(merged, fwd)
-    assert stats['n_reverse'] == 0
-    assert stats['n_reverse_filled'] == 0
-
-
 # ---------------------------------------------------------------------------
 # Smoke test (skipped unless POLYUMI_TEST_SCENE_DIR is set)
 # ---------------------------------------------------------------------------
@@ -657,43 +441,22 @@ def test_tracking_ratio_unchanged_at_stride_one(tmp_path: pathlib.Path) -> None:
     assert attrs['n_frames_fed'] == 50
 
 
-def test_forward_and_reverse_passes_are_stored_alongside_the_merge(tmp_path: pathlib.Path) -> None:
+def test_legacy_pass_arrays_are_cleared_on_rerun(tmp_path: pathlib.Path) -> None:
     """
-    Both un-merged passes persist, so the merge can be re-derived without re-running SLAM.
+    Re-processing a pzarr v3 store drops its slam_poses_{forward,reverse} arrays.
 
-    The merge is lossy — a union records neither which pass supplied each frame nor
-    what the discarded pass said — so keeping the inputs is what makes the decision
-    auditable and replaceable in Python later.
+    Those were the un-merged passes of the old two-pass localizer. Nothing reads them now, and
+    leaving them beside freshly written poses would have them silently describing a different
+    run against a different atlas.
     """
-    n = 20
-    fwd = np.full((n, 7), np.nan)
-    fwd[:10] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
-    rev = np.full((n, 7), np.nan)
-    rev[5:] = [2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
-    merged = fwd.copy()
-    merged[10:] = rev[10:]
-
-    root = zarr.open_group(str(tmp_path / 'fr.zarr'), mode='w', zarr_format=2)
+    n = 8
+    poses = np.zeros((n, 7))
+    root = zarr.open_group(str(tmp_path / 'stale.zarr'), mode='w', zarr_format=2)
     ep = root.create_group('episode_0')
-    _write_slam_results(
-        ep,
-        merged,
-        tmp_path / 's.yaml',
-        tmp_path / 'a.osa',
-        forward_poses=fwd,
-        reverse_poses=rev,
-    )
+    gopro = ep.require_group('gopro')
+    gopro.create_array('slam_poses_forward', data=poses, compressor=_BLOSC)
+    gopro.create_array('slam_poses_reverse', data=poses, compressor=_BLOSC)
 
-    np.testing.assert_allclose(ep['gopro']['slam_poses'][:], merged, equal_nan=True)
-    np.testing.assert_allclose(ep['gopro']['slam_poses_forward'][:], fwd, equal_nan=True)
-    np.testing.assert_allclose(ep['gopro']['slam_poses_reverse'][:], rev, equal_nan=True)
-
-
-def test_reverse_pass_arrays_absent_when_not_run(tmp_path: pathlib.Path) -> None:
-    """With reverse_pass off, only the merged array is written — no empty placeholders."""
-    poses = np.zeros((5, 7))
-    root = zarr.open_group(str(tmp_path / 'nofr.zarr'), mode='w', zarr_format=2)
-    ep = root.create_group('episode_0')
     _write_slam_results(ep, poses, tmp_path / 's.yaml', tmp_path / 'a.osa')
 
     assert 'slam_poses' in ep['gopro']
@@ -701,31 +464,47 @@ def test_reverse_pass_arrays_absent_when_not_run(tmp_path: pathlib.Path) -> None
     assert 'slam_poses_reverse' not in ep['gopro']
 
 
-def test_stale_pass_arrays_are_cleared_on_rerun(tmp_path: pathlib.Path) -> None:
+def test_post_chirp_counts_restrict_to_the_exported_window(tmp_path: pathlib.Path) -> None:
     """
-    Re-running without the reverse pass removes previously-stored pass arrays.
+    The gate's counts cover only frames at/after the chirp, where the export starts.
 
-    Otherwise a stale forward/reverse pair would sit next to freshly written merged
-    poses, silently describing a different run.
+    Losses in the idle pre-chirp prefix are exactly the ones relocalization is still working
+    through, and they never reach the dataset, so they must not count against the episode.
     """
-    n = 8
+    n = 20
     poses = np.zeros((n, 7))
-    root = zarr.open_group(str(tmp_path / 'stale.zarr'), mode='w', zarr_format=2)
+    poses[:6] = np.nan  # lost through the idle prefix and one frame past it
+    root = zarr.open_group(str(tmp_path / 'chirp.zarr'), mode='w', zarr_format=2)
     ep = root.create_group('episode_0')
-    _write_slam_results(
-        ep,
-        poses,
-        tmp_path / 's.yaml',
-        tmp_path / 'a.osa',
-        forward_poses=poses,
-        reverse_poses=poses,
-    )
-    assert 'slam_poses_forward' in ep['gopro']
+    ts = 1_000.0 + np.arange(n, dtype=np.float64) / 60.0
+    ep.require_group('timestamps').create_array('gopro', data=ts)
+    ep.require_group('annotations').require_group('time_sync').attrs['gopro_chirp_end_s'] = float(ts[5])
 
     _write_slam_results(ep, poses, tmp_path / 's.yaml', tmp_path / 'a.osa')
 
-    assert 'slam_poses_forward' not in ep['gopro']
-    assert 'slam_poses_reverse' not in ep['gopro']
+    attrs = ep['annotations/slam'].attrs
+    assert attrs['chirp_gated'] is True
+    assert attrs['n_frames_fed'] == n  # stride 1: every frame fed
+    assert attrs['n_frames_fed_post_chirp'] == 15  # frames 5..19
+    assert attrs['n_frames_fed_lost_post_chirp'] == 1  # only frame 5 of those was lost
+    assert attrs['n_frames_lost'] == 6  # whole-episode count still records all six
+
+
+def test_post_chirp_counts_fall_back_without_the_marker(tmp_path: pathlib.Path) -> None:
+    """No chirp annotation means the counts cover the whole episode, and say so."""
+    n = 10
+    poses = np.zeros((n, 7))
+    poses[:3] = np.nan
+    root = zarr.open_group(str(tmp_path / 'nochirp.zarr'), mode='w', zarr_format=2)
+    ep = root.create_group('episode_0')
+    ep.require_group('timestamps').create_array('gopro', data=1_000.0 + np.arange(n) / 60.0)
+
+    _write_slam_results(ep, poses, tmp_path / 's.yaml', tmp_path / 'a.osa')
+
+    attrs = ep['annotations/slam'].attrs
+    assert attrs['chirp_gated'] is False
+    assert attrs['n_frames_fed_post_chirp'] == n
+    assert attrs['n_frames_fed_lost_post_chirp'] == 3
 
 
 def test_slam_config_yaml_supplies_the_defaults(monkeypatch) -> None:

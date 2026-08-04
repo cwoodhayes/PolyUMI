@@ -251,24 +251,35 @@ def _make_slam_only(scene: pathlib.Path, **slam_attrs: object) -> None:
     ep['annotations'].require_group('slam').attrs.update(slam_attrs)
 
 
+def _slam_counts(n_fed: int, n_lost: int) -> dict:
+    """Post-chirp fed-grid counts as step 2 records them (see _write_slam_results)."""
+    return {
+        'frame_stride': 1,
+        'n_frames_fed': n_fed,
+        'n_frames_fed_post_chirp': n_fed,
+        'n_frames_fed_lost_post_chirp': n_lost,
+        'chirp_gated': True,
+        'tracking_ratio': (n_fed - n_lost) / n_fed,
+    }
+
+
 def test_skips_episode_failing_the_quality_thresholds(tmp_path: pathlib.Path) -> None:
     """
     An episode whose stored SLAM metrics fail config/quality_thresholds.yaml is skipped.
 
-    Full coverage but a large forward/reverse disagreement — the 74ee episode_3 shape,
-    where 100% of frames had a pose yet those poses were ~220 mm wrong. Coverage alone
-    would have let this through.
+    Enough lost frames to trip UMI's absolute count. Nothing interpolates over them any more,
+    so the alternative to dropping the demo is exporting around holes in its trajectory.
     """
     scene = _build_scene(tmp_path, with_slam=True)
-    _make_slam_only(scene, tracking_ratio=1.0, reverse_overlap_median_mm=453.85)
+    _make_slam_only(scene, **_slam_counts(n_fed=120, n_lost=25))
     with pytest.raises(RuntimeError, match='no EPISODE sessions'):
         export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
 
 
-def test_skips_episode_below_the_tracking_ratio_threshold(tmp_path: pathlib.Path) -> None:
-    """Coverage under the configured minimum excludes the episode from export."""
+def test_skips_episode_with_too_few_tracked_frames(tmp_path: pathlib.Path) -> None:
+    """An episode too short to be worth training on is excluded even with no losses."""
     scene = _build_scene(tmp_path, with_slam=True)
-    _make_slam_only(scene, tracking_ratio=0.42, reverse_overlap_median_mm=1.0)
+    _make_slam_only(scene, **_slam_counts(n_fed=40, n_lost=0))
     with pytest.raises(RuntimeError, match='no EPISODE sessions'):
         export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
 
@@ -276,7 +287,7 @@ def test_skips_episode_below_the_tracking_ratio_threshold(tmp_path: pathlib.Path
 def test_exports_episode_that_passes_the_quality_thresholds(tmp_path: pathlib.Path) -> None:
     """The converse: healthy SLAM metrics must not be excluded by the new checks."""
     scene = _build_scene(tmp_path, with_slam=True)
-    _make_slam_only(scene, tracking_ratio=1.0, reverse_overlap_median_mm=0.55)
+    _make_slam_only(scene, **_slam_counts(n_fed=120, n_lost=2))
     n_eps, _ = export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
     assert n_eps == 1
 
@@ -289,9 +300,7 @@ def test_optitrack_episode_is_exempt_from_slam_quality_thresholds(tmp_path: path
     """
     scene = _build_scene(tmp_path, with_slam=True)  # keeps pose_optitrack + available_sources
     root = zarr.open_group(str(scene), mode='a')
-    root['episode_0']['annotations'].require_group('slam').attrs.update(
-        {'tracking_ratio': 0.0, 'reverse_overlap_median_mm': 999.0}
-    )
+    root['episode_0']['annotations'].require_group('slam').attrs.update(_slam_counts(n_fed=120, n_lost=119))
     n_eps, _ = export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
     assert n_eps == 1
 
@@ -307,7 +316,7 @@ def test_export_and_catalog_agree_on_which_episodes_are_unusable(tmp_path: pathl
     from polyumi_ingest.export.dp.buffer import _auto_unusable_reasons_for_episode
 
     scene = _build_scene(tmp_path, with_slam=True)
-    _make_slam_only(scene, tracking_ratio=1.0, reverse_overlap_median_mm=453.85)
+    _make_slam_only(scene, **_slam_counts(n_fed=120, n_lost=25))
     ep = zarr.open_group(str(scene / 'episode_0'), mode='r')
 
     export_reasons = _auto_unusable_reasons_for_episode(ep)
@@ -544,7 +553,6 @@ def test_pose_source_override_routes_to_slam(tmp_path: pathlib.Path) -> None:
     assert n_eps == 1
     assert provenance[0]['source'] == 'slam'
     assert provenance[0]['world_frame'] == 'slam'
-    assert provenance[0]['n_interp_filled'] == 3
     pos = _open_zip(out)['data/robot0_eef_pos'][:]
     assert pos[0, 0] == pytest.approx(10.0, abs=1e-5)  # slam trajectory is offset +10 in x
 
@@ -562,7 +570,7 @@ def test_pose_source_override_to_unavailable_source_raises(tmp_path: pathlib.Pat
 def test_pose_provenance_embedded_in_meta_attrs(tmp_path: pathlib.Path) -> None:
     """The .zarr.zip carries the same provenance the function returns, as meta attrs."""
     scene_a = _build_scene(tmp_path / 'a', n=30, with_slam=True)
-    scene_b = _build_scene(tmp_path / 'b', n=20)
+    scene_b = _build_scene(tmp_path / 'b', n=30)
     SceneManifest(scene_id='a', pose_source_overrides={'session_0': 'slam'}).write_to_scene_dir(tmp_path / 'a')
     out = tmp_path / 'combined.zarr.zip'
 
@@ -572,3 +580,123 @@ def test_pose_provenance_embedded_in_meta_attrs(tmp_path: pathlib.Path) -> None:
     meta = _open_zip(out)['meta']
     assert meta.attrs['pose_provenance'] == provenance
     assert meta.attrs['episode_pose_source'] == ['slam', 'optitrack']
+
+
+# ---------------------------------------------------------------------------
+# Fed-grid steps and segment-per-episode (the UMI discard/trim/split migration)
+# ---------------------------------------------------------------------------
+
+
+def _set_stride(scene: pathlib.Path, stride: int) -> None:
+    """Record the localizer's frame stride, which is the grid poses actually exist on."""
+    root = zarr.open_group(str(scene), mode='a')
+    root['episode_0']['annotations'].require_group('slam').attrs['frame_stride'] = stride
+
+
+def test_steps_are_the_fed_grid_not_every_frame(tmp_path: pathlib.Path) -> None:
+    """
+    At stride 2 the export holds half the GoPro frames, one per frame SLAM was fed.
+
+    Poses only exist on that grid — nothing is interpolated since pzarr v4 — so exporting the
+    full grid would make every other row NaN and leave no contiguous run to sample from.
+    """
+    n = 120
+    scene = _build_scene(tmp_path, n=n)
+    _set_stride(scene, 2)
+    out = tmp_path / 'buf.zarr.zip'
+
+    export_scene_to_dp(scene, out)
+
+    assert int(_open_zip(out)['meta/episode_ends'][-1]) == n // 2
+
+
+def test_exported_step_period_matches_the_stride(tmp_path: pathlib.Path) -> None:
+    """
+    Consecutive steps are stride/rate apart, uniformly.
+
+    This is the number the training config's obs_down_sample_steps divides: if the stored
+    period changes and that factor doesn't, the policy trains at a different rate than it runs.
+    """
+    n = 120
+    scene = _build_scene(tmp_path, n=n)
+    _set_stride(scene, 2)
+    out = tmp_path / 'buf.zarr.zip'
+
+    export_scene_to_dp(scene, out)
+
+    pos = _open_zip(out)['data/robot0_eef_pos'][:]
+    # The fixture translates linearly along x, so equal steps in x mean equal steps in time.
+    dx = np.diff(pos[:, 0])
+    assert np.allclose(dx, dx[0], atol=1e-6)
+    # Half as many steps over the same span => each covers twice the ground of a stride-1 step.
+    assert dx[0] == pytest.approx(0.5 / (n - 1) * 2, rel=1e-3)
+
+
+def test_pose_gap_splits_one_session_into_two_episodes(tmp_path: pathlib.Path) -> None:
+    """
+    A hole in the pose source ends one episode and starts another, rather than truncating.
+
+    Bridging the gap would put a step of the wrong duration inside an episode, which UMI's
+    fixed-rate sampler cannot see; keeping only the longer side would throw away real data.
+    """
+    n = 120
+    scene = _build_scene(tmp_path, n=n, nan_rows=slice(50, 56))
+    out = tmp_path / 'buf.zarr.zip'
+
+    n_eps, provenance = export_scene_to_dp(scene, out)
+
+    assert n_eps == 2
+    ends = list(_open_zip(out)['meta/episode_ends'][:])
+    assert ends == [50, 50 + (n - 56)]
+    assert [p['segment'] for p in provenance] == [0, 1]
+    assert provenance[0]['frame_range'] == [0, 49]
+    assert provenance[1]['frame_range'] == [56, n - 1]
+
+
+def test_segment_shorter_than_the_floor_is_dropped(tmp_path: pathlib.Path) -> None:
+    """A run too short to sample a horizon from is discarded, not emitted as an episode."""
+    n = 120
+    # 10 valid steps, then a hole, then the rest: the first run is under the 24-step floor.
+    scene = _build_scene(tmp_path, n=n, nan_rows=slice(10, 20))
+    out = tmp_path / 'buf.zarr.zip'
+
+    n_eps, provenance = export_scene_to_dp(scene, out)
+
+    assert n_eps == 1
+    assert provenance[0]['frame_range'] == [20, n - 1]
+
+
+def test_min_segment_steps_is_configurable(tmp_path: pathlib.Path) -> None:
+    """Lowering the floor keeps the short run that the default would have dropped."""
+    scene = _build_scene(tmp_path, n=120, nan_rows=slice(10, 20))
+    n_eps, _ = export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip', min_segment_steps=5)
+    assert n_eps == 2
+
+
+def test_episode_with_no_long_enough_run_is_skipped(tmp_path: pathlib.Path) -> None:
+    """An episode chopped into fragments by tracking losses exports nothing at all."""
+    scene = _build_scene(tmp_path, n=120)
+    root = zarr.open_group(str(scene), mode='a')
+    pose = root['episode_0']['eef']['pose_optitrack'][:]
+    pose[::3] = np.nan  # no run longer than 2 steps survives
+    root['episode_0']['eef']['pose_optitrack'][:] = pose
+
+    with pytest.raises(RuntimeError, match='no EPISODE sessions'):
+        export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
+
+
+def test_mixing_frame_strides_in_one_buffer_raises(tmp_path: pathlib.Path) -> None:
+    """
+    Two scenes localized at different strides can't share a buffer.
+
+    UmiDataset reads one episode_ends array and assumes a single uniform Δt across all of it,
+    so a mixed-rate buffer would train on two different notions of "one step" with nothing
+    recording which episode used which.
+    """
+    scene_a = _build_scene(tmp_path / 'a', n=120)
+    scene_b = _build_scene(tmp_path / 'b', n=120)
+    _set_stride(scene_a, 1)
+    _set_stride(scene_b, 2)
+
+    with pytest.raises(RuntimeError, match='mixed-rate'):
+        export_scenes_to_dp([scene_a, scene_b], tmp_path / 'combined.zarr.zip')

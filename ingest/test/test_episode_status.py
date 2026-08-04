@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import pathlib
 
 import pytest
 import zarr
 from polyumi_ingest.episode_status import Episode, SceneContext, episode_guard
 from polyumi_ingest.manifests import SceneManifest, set_episode_unusable
-from polyumi_ingest.preproc.step_base import PreprocessingStep, StepComplete
+from polyumi_ingest.preproc import step_base
+from polyumi_ingest.preproc.step_base import PreprocessingStep, StepComplete, run_preprocessing
+from polyumi_ingest.pzarr.version import PZARR_VERSION
 
 
 def _make_scene(tmp_path: pathlib.Path, n_episodes: int = 3) -> pathlib.Path:
@@ -261,3 +264,85 @@ def test_harness_rejects_a_missing_store(tmp_path: pathlib.Path) -> None:
     with pytest.raises(FileNotFoundError):
         _DemoStep().run_step(tmp_path / 'nope.zarr')
     assert not (tmp_path / 'nope.zarr').exists()
+
+
+# ---------------------------------------------------------------------------
+# pzarr version stamping
+# ---------------------------------------------------------------------------
+
+
+class _SecondStep(_DemoStep):
+    """A second registered step, so 'ran everything' can be told apart from 'ran one'."""
+
+    step_number = -2
+    step_name = 'second-demo-step'
+
+
+@pytest.fixture
+def one_step_registry(monkeypatch):
+    """Make _DemoStep the only registered step, so a plain run is a whole-pipeline run."""
+    monkeypatch.setattr(step_base, 'PREPROCESSING_STEPS', {_DemoStep.step_number: _DemoStep})
+
+
+def test_outdated_store_warns_but_still_runs(tmp_path: pathlib.Path, caplog, one_step_registry) -> None:
+    """An older store is reported, never blocked — the steps overwrite what they own."""
+    scene_zarr = _make_scene(tmp_path)
+    zarr.open_group(str(scene_zarr), mode='a').attrs['pzarr_version'] = PZARR_VERSION - 1
+
+    with caplog.at_level(logging.WARNING):
+        run_preprocessing(scene_zarr, step_number=_DemoStep.step_number)
+
+    assert f'built under pzarr v{PZARR_VERSION - 1}' in caplog.text
+
+
+def test_store_newer_than_the_code_warns_harder(tmp_path: pathlib.Path, caplog, one_step_registry) -> None:
+    """Reading a store from the future is the dangerous direction, so it's an error-level log."""
+    scene_zarr = _make_scene(tmp_path)
+    zarr.open_group(str(scene_zarr), mode='a').attrs['pzarr_version'] = PZARR_VERSION + 1
+
+    with caplog.at_level(logging.WARNING):
+        run_preprocessing(scene_zarr, step_number=_DemoStep.step_number)
+
+    assert any(r.levelno == logging.ERROR and 'Update your checkout' in r.message for r in caplog.records)
+
+
+def test_full_pipeline_run_restamps_the_version(tmp_path: pathlib.Path, one_step_registry) -> None:
+    """Running every registered step is what earns the current stamp."""
+    scene_zarr = _make_scene(tmp_path)
+    zarr.open_group(str(scene_zarr), mode='a').attrs['pzarr_version'] = PZARR_VERSION - 1
+
+    run_preprocessing(scene_zarr)  # no step_number => the whole pipeline
+
+    assert int(zarr.open_group(str(scene_zarr), mode='r').attrs['pzarr_version']) == PZARR_VERSION
+
+
+def test_partial_run_does_not_restamp(tmp_path: pathlib.Path, monkeypatch) -> None:
+    """
+    A run that skips any registered step leaves the stamp alone.
+
+    Stamping here would claim the whole store conforms to the current schema while the steps
+    that didn't run still hold output from the old one — worse than not stamping, since the
+    stamp is what the next run trusts.
+    """
+    monkeypatch.setattr(
+        step_base,
+        'PREPROCESSING_STEPS',
+        {_DemoStep.step_number: _DemoStep, _SecondStep.step_number: _SecondStep},
+    )
+    scene_zarr = _make_scene(tmp_path)
+    zarr.open_group(str(scene_zarr), mode='a').attrs['pzarr_version'] = PZARR_VERSION - 1
+
+    run_preprocessing(scene_zarr, step_number=_DemoStep.step_number)
+
+    assert int(zarr.open_group(str(scene_zarr), mode='r').attrs['pzarr_version']) == PZARR_VERSION - 1
+
+
+def test_already_current_store_is_silent(tmp_path: pathlib.Path, caplog, one_step_registry) -> None:
+    """No version noise for a store that's already up to date."""
+    scene_zarr = _make_scene(tmp_path)
+    zarr.open_group(str(scene_zarr), mode='a').attrs['pzarr_version'] = PZARR_VERSION
+
+    with caplog.at_level(logging.WARNING):
+        run_preprocessing(scene_zarr, step_number=_DemoStep.step_number)
+
+    assert 'pzarr' not in caplog.text

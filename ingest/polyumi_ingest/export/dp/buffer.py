@@ -37,17 +37,25 @@ policy trains on, whereas the body frame does not — which is why step 5 exists
 
 Each exported episode's resolved source is recorded as **provenance**: alongside the returned
 episode count, ``export_scenes_to_dp``/``export_scene_to_dp`` return a list of per-episode
-provenance dicts (scene, session, episode, source, world_frame, n_steps, n_interp_filled), which
-callers can persist externally (see ``main.py``'s ``<output>.provenance.json`` sidecar and the
+provenance dicts (scene, session, episode, source, world_frame, n_steps, segment, frame_range,
+frame_stride), which callers can persist externally (see ``main.py``'s ``<output>.provenance.json`` sidecar and the
 catalog's ``DatasetManifest``). The same information is also written into the ``.zarr.zip``
 itself, as ``meta.attrs['pose_provenance']`` (the full list) and ``meta.attrs['episode_pose_source']``
 (just the per-episode source strings, aligned with ``episode_ends``) — ``UmiDataset`` only ever
 reads ``meta/episode_ends``, so these extra attrs are inert cargo it ignores.
 
-Frames are exported at the **native GoPro rate** (~59.94 Hz), not down-sampled here. UMI's
-dataset assumes uniform Δt and sets the effective observation rate itself via
-``obs_down_sample_steps`` in the task config, so storing raw keeps that knob meaningful and
-lets the obs rate change without re-exporting.
+Steps are the frames SLAM was **fed** — every ``localization_frame_stride``-th GoPro frame, so
+~30 Hz at the current stride of 2, not the 59.94 Hz the camera records at. Poses exist only on
+that grid (nothing is interpolated), and Δt stays uniform, which is all UMI's dataset requires;
+it sets the observation rate from there via ``obs_down_sample_steps`` in the task config. That
+knob and this stride are coupled: halving the stored rate must halve ``obs_down_sample_steps``
+or the policy trains on a different Δt than it runs at.
+
+One session can produce **several episodes**. Where the pose source has no pose — SLAM lost
+tracking — the session is split into the contiguous runs either side, each exported as its own
+episode, and runs shorter than ``_MIN_SEGMENT_STEPS`` are dropped. Bridging a gap would put a
+step of the wrong duration inside an episode, which the fixed-rate sampler cannot see; splitting
+keeps every episode honest. This follows upstream UMI's ``06_generate_dataset_plan.py``.
 
 Images use **Blosc**, not JpegXl, on purpose. The training container pins Python 3.9 with
 ``imagecodecs==2023.9.18``, whose JpegXl codec cannot parse the config that our Python-3.13
@@ -103,6 +111,24 @@ _TIME_CHUNK = 1024
 #: suggests a recording problem.
 _GAP_WARN_FACTOR = 5.0
 
+#: Shortest run of valid steps worth emitting as its own episode. Matches upstream UMI's
+#: ``--min_episode_length`` default. Anything shorter can't supply a full observation +
+#: action horizon, so it would only ever be padding.
+_MIN_SEGMENT_STEPS = 24
+
+
+def _episode_frame_stride(ep: zarr.Group) -> int:
+    """
+    Return the frame decimation SLAM ran at, which is the grid poses exist on.
+
+    ``localization_frame_stride`` (step 2) feeds the localizer every Nth GoPro frame, so the
+    other frames have no pose at all. Defaults to 1 for stores predating the attr, where the
+    localizer saw every frame and the fed grid is the full grid.
+    """
+    if 'annotations/slam' not in ep:
+        return 1
+    return max(1, int(grp(ep, 'annotations/slam').attrs.get('frame_stride', 1)))
+
 
 def _measure_rate(gopro_ts: np.ndarray) -> float:
     """Native frame rate (Hz) from the median inter-frame period of GoPro timestamps."""
@@ -111,28 +137,32 @@ def _measure_rate(gopro_ts: np.ndarray) -> float:
     return 1.0 / float(np.median(np.diff(gopro_ts)))
 
 
-def _longest_valid_span(valid: np.ndarray) -> tuple[int, int]:
+def _valid_segments(valid: np.ndarray, min_steps: int) -> list[tuple[int, int]]:
     """
-    Return the inclusive [start, end] index range of the longest run of True in ``valid``.
+    Split a validity mask into contiguous True runs, dropping those shorter than ``min_steps``.
 
-    An episode can lose its pose source mid-way (SLAM tracking loss shows up as NaN rows in
-    ``eef/pose``). Dropping scattered rows would break the temporal continuity UMI's fixed-rate
-    sampler assumes, so we export the single longest gap-free stretch instead.
+    Returns inclusive ``[start, end]`` index pairs into ``valid``.
+
+    One episode per run, rather than the single longest run we used to keep: a demo whose pose
+    source drops out in the middle is two usable demonstrations either side of the hole, not one
+    truncated one. This mirrors upstream UMI's ``get_bool_segments`` in
+    ``06_generate_dataset_plan.py``. Runs shorter than ``min_steps`` are too short to sample a
+    horizon from and are discarded rather than emitted as degenerate episodes.
+
+    Splitting rather than bridging is the whole point: UMI's fixed-rate sampler assumes uniform
+    Δt *within* an episode, which a gap would silently violate.
     """
-    best_start, best_len = 0, 0
-    run_start = None
+    segments: list[tuple[int, int]] = []
+    run_start: int | None = None
     for i, ok in enumerate(valid):
         if ok and run_start is None:
             run_start = i
         elif not ok and run_start is not None:
-            if i - run_start > best_len:
-                best_start, best_len = run_start, i - run_start
+            segments.append((run_start, i - 1))
             run_start = None
-    if run_start is not None and len(valid) - run_start > best_len:
-        best_start, best_len = run_start, len(valid) - run_start
-    if best_len == 0:
-        raise RuntimeError('no valid (non-NaN) pose/gripper rows in episode')
-    return best_start, best_start + best_len - 1
+    if run_start is not None:
+        segments.append((run_start, len(valid) - 1))
+    return [(s, e) for s, e in segments if e - s + 1 >= min_steps]
 
 
 def _decode_resized_frames(frames_arr: GoproMp4Frames, gidx: np.ndarray) -> np.ndarray:
@@ -222,9 +252,19 @@ def resolve_pose_source(ep: zarr.Group, episode_key: str, override: str | None) 
 
 
 def _export_episode(
-    ep: zarr.Group, data_grp: zarr.Group, episode_key: str, scene_zarr: pathlib.Path, pose_source: str
-) -> tuple[int, dict]:
-    """Export one episode's longest valid span at native rate and append it. Returns (T, provenance)."""
+    ep: zarr.Group,
+    data_grp: zarr.Group,
+    episode_key: str,
+    scene_zarr: pathlib.Path,
+    pose_source: str,
+    min_segment_steps: int = _MIN_SEGMENT_STEPS,
+) -> list[tuple[int, dict]]:
+    """
+    Export one session as one DP episode per contiguous valid segment.
+
+    Returns ``[(T, provenance), ...]`` — possibly empty if nothing survived, one entry per
+    segment appended to ``data_grp``.
+    """
     array_name = f'pose_{pose_source}'
     if 'eef' not in ep or array_name not in grp(ep, 'eef'):
         raise RuntimeError(
@@ -244,22 +284,15 @@ def _export_episode(
             f'eef/{array_name} and gripper_width must be on the GoPro grid (steps 4 and 5).'
         )
 
-    # Valid window: the longest gap-free run where both pose and gripper are non-NaN. This is
-    # what replaces the old cross-stream overlap window — no finger/optitrack clock needed,
-    # since frames, pose, and gripper already share the GoPro grid.
-    valid = ~np.isnan(pose).any(axis=1) & ~np.isnan(gripper)
-    i0, i1 = _longest_valid_span(valid)
-    n_dropped = n - (i1 - i0 + 1)
-    if n_dropped:
-        log.warning(
-            f'  {episode_key}: kept longest valid span [{i0}, {i1}] of {n} frames '
-            f'({n_dropped} dropped as NaN/outside span).'
-        )
+    # The step grid is the frames SLAM was actually fed, not every GoPro frame. Poses only
+    # exist on that grid (nothing is interpolated any more), so exporting the full grid would
+    # make every other row NaN. Δt is uniform at stride/rate, which is what UMI's sampler needs.
+    stride = _episode_frame_stride(ep)
+    steps = np.arange(0, n, stride)
 
-    # Advance the start past the sync chirp: the operator waits for the chirp before starting,
-    # so the frames up to gopro_chirp_end_s are an idle prefix that shouldn't train the policy.
-    # gopro_chirp_end_s (step 1, chirp-time-sync) is on the same clock as gopro_ts. Moving i0
-    # forward within the contiguous valid run keeps every remaining row valid.
+    # Mask out the idle prefix before the sync chirp: the operator waits for the chirp, so those
+    # frames shouldn't train the policy. Masking (rather than nudging a start index) means the
+    # exported span is exactly the span quality.py gates on, and it composes with segmentation.
     chirp_end_s = None
     if 'annotations/time_sync' in ep:
         chirp_end_s = grp(ep, 'annotations/time_sync').attrs.get('gopro_chirp_end_s')
@@ -271,64 +304,81 @@ def _export_episode(
             f'predating this marker); exporting without start trim.'
         )
     else:
-        first_after = int(np.searchsorted(gopro_ts, float(chirp_end_s), side='left'))
-        # _measure_rate needs >=2 frames, so require at least 2 remaining after the trim
-        # (first_after <= i1 - 1); this also covers chirp end landing past the whole span.
-        if first_after >= i1:
+        trimmed = steps[gopro_ts[steps] >= float(chirp_end_s)]
+        if len(trimmed) < min_segment_steps:
+            # A chirp end past (or nearly past) the episode means the detection was wrong, not
+            # that the demo is one long idle prefix. Dropping the episode on that evidence would
+            # let one bad correlation peak silently delete real data, so distrust the marker.
             log.warning(
-                f'  {episode_key}: chirp end leaves fewer than 2 valid frames — '
+                f'  {episode_key}: chirp end leaves only {len(trimmed)} of {len(steps)} steps — '
                 f'likely a bad chirp detection; not trimming.'
             )
-        elif first_after > i0:
-            log.info(
-                f'  {episode_key}: trimmed {first_after - i0} leading frame(s) '
-                f'(~{(first_after - i0) / _measure_rate(gopro_ts):.2f}s) before chirp end.'
-            )
-            i0 = first_after
+        else:
+            log.info(f'  {episode_key}: trimmed {len(steps) - len(trimmed)} step(s) before chirp end.')
+            steps = trimmed
 
-    # Export the frames as recorded — no resampling. UMI's dataset assumes uniform Δt and sets
-    # the observation rate itself via obs_down_sample_steps, so the exporter's job is just to
-    # hand over the raw native-rate stream. GoPro records at a steady ~59.94 Hz locally; a large
-    # inter-frame gap means a dropped frame, which would be treated as a single step, so warn.
-    span_ts = gopro_ts[i0 : i1 + 1]
-    rate = _measure_rate(span_ts)
-    max_gap = float(np.max(np.diff(span_ts)))
-    if max_gap > _GAP_WARN_FACTOR / rate:
+    valid = ~np.isnan(pose[steps]).any(axis=1) & ~np.isnan(gripper[steps])
+    segments = _valid_segments(valid, min_segment_steps)
+    if not segments:
         log.warning(
-            f'  {episode_key}: largest inter-frame gap {max_gap * 1e3:.0f} ms is '
-            f'>{_GAP_WARN_FACTOR:g}x the {1e3 / rate:.1f} ms median — a dropped frame is stored '
-            f'as one step, breaking the uniform-rate assumption there.'
+            f'  {episode_key}: no valid run of >={min_segment_steps} steps in {len(steps)} fed frames; skipping.'
         )
+        return []
+    if len(segments) > 1:
+        log.info(f'  {episode_key}: pose gaps split this session into {len(segments)} episodes.')
 
-    gidx = np.arange(i0, i1 + 1)
-    t = len(gidx)
+    results: list[tuple[int, dict]] = []
+    for seg_i, (s0, s1) in enumerate(segments):
+        gidx = steps[s0 : s1 + 1]
+        t = len(gidx)
 
-    pos = pose[gidx, :3].astype(np.float32)
-    rotvec = Rotation.from_quat(pose[gidx, 3:]).as_rotvec().astype(np.float32)
-    tcp6 = np.concatenate([pos, rotvec], axis=1)  # (T,6) [pos, rotvec] — UMI's tcp_pose
+        # No resampling: the stored Δt *is* the dataset's, and UMI sets the observation rate
+        # from it via obs_down_sample_steps. A gap much larger than the median means a dropped
+        # frame, which would be stored as one ordinary step and silently bend the time base.
+        span_ts = gopro_ts[gidx]
+        rate = _measure_rate(span_ts)
+        max_gap = float(np.max(np.diff(span_ts)))
+        if max_gap > _GAP_WARN_FACTOR / rate:
+            log.warning(
+                f'  {episode_key}: largest inter-frame gap {max_gap * 1e3:.0f} ms is '
+                f'>{_GAP_WARN_FACTOR:g}x the {1e3 / rate:.1f} ms median — a dropped frame is stored '
+                f'as one step, breaking the uniform-rate assumption there.'
+            )
 
-    _append(
-        data_grp,
-        {
-            _CAMERA: _decode_resized_frames(frames, gidx),
-            f'{_ROBOT}_eef_pos': pos,
-            f'{_ROBOT}_eef_rot_axis_angle': rotvec,
-            f'{_ROBOT}_gripper_width': gripper[gidx, None].astype(np.float32),
-            f'{_ROBOT}_demo_start_pose': np.broadcast_to(tcp6[0], (t, 6)).copy(),
-            f'{_ROBOT}_demo_end_pose': np.broadcast_to(tcp6[-1], (t, 6)).copy(),
-        },
-    )
-    log.info(f'  {episode_key}: {t} steps @ {rate:.2f} Hz (pose={pose_source})')
-    # 'episode'/'scene'/'session' are filled in by the caller (_append_scene_episodes), which
-    # knows the plain episode key ('episode_0') and scene/session names — episode_key here is
-    # the combined 'scene_label/episode_0' string used only for log/error messages.
-    provenance = {
-        'source': pose_source,
-        'world_frame': pose_attrs.get('world_frame'),
-        'n_steps': t,
-        'n_interp_filled': pose_attrs.get('n_interp_filled', 0),
-    }
-    return t, provenance
+        pos = pose[gidx, :3].astype(np.float32)
+        rotvec = Rotation.from_quat(pose[gidx, 3:]).as_rotvec().astype(np.float32)
+        tcp6 = np.concatenate([pos, rotvec], axis=1)  # (T,6) [pos, rotvec] — UMI's tcp_pose
+
+        _append(
+            data_grp,
+            {
+                _CAMERA: _decode_resized_frames(frames, gidx),
+                f'{_ROBOT}_eef_pos': pos,
+                f'{_ROBOT}_eef_rot_axis_angle': rotvec,
+                f'{_ROBOT}_gripper_width': gripper[gidx, None].astype(np.float32),
+                f'{_ROBOT}_demo_start_pose': np.broadcast_to(tcp6[0], (t, 6)).copy(),
+                f'{_ROBOT}_demo_end_pose': np.broadcast_to(tcp6[-1], (t, 6)).copy(),
+            },
+        )
+        seg_label = f' segment {seg_i}' if len(segments) > 1 else ''
+        log.info(f'  {episode_key}{seg_label}: {t} steps @ {rate:.2f} Hz (pose={pose_source})')
+        # 'episode'/'scene'/'session' are filled in by the caller (_append_scene_episodes), which
+        # knows the plain episode key ('episode_0') and scene/session names — episode_key here is
+        # the combined 'scene_label/episode_0' string used only for log/error messages.
+        results.append(
+            (
+                t,
+                {
+                    'source': pose_source,
+                    'world_frame': pose_attrs.get('world_frame'),
+                    'n_steps': t,
+                    'segment': seg_i,
+                    'frame_range': [int(gidx[0]), int(gidx[-1])],
+                    'frame_stride': stride,
+                },
+            )
+        )
+    return results
 
 
 def _zip_zarr_dir(zarr_dir: pathlib.Path, out_path: pathlib.Path) -> None:
@@ -365,6 +415,7 @@ def _append_scene_episodes(
     total: int,
     provenance: list[dict],
     enforce_preprocessing: bool = True,
+    min_segment_steps: int = _MIN_SEGMENT_STEPS,
 ) -> int:
     """Append every EPISODE session of one scene onto ``data_grp``, returning the new running total."""
     zarr_path = SceneFiles.resolve_zarr_path(scene_path)
@@ -410,15 +461,22 @@ def _append_scene_episodes(
             log.info(f'  {scene_label}/{ep_key}: unusable ({"; ".join(auto_reasons)}), skipping.')
             continue
         pose_source = resolve_pose_source(ep, f'{scene_label}/{ep_key}', pose_source_overrides.get(session_dir))
-        t, ep_provenance = _export_episode(ep, data_grp, f'{scene_label}/{ep_key}', zarr_path, pose_source)
-        total += t
-        episode_ends.append(total)
-        provenance.append({'scene': scene_label, 'session': session_dir, 'episode': ep_key, **ep_provenance})
+        # One session can yield several episodes — a pose gap splits it into the usable runs
+        # either side — or none, if nothing survived the chirp trim and the length floor.
+        for t, ep_provenance in _export_episode(
+            ep, data_grp, f'{scene_label}/{ep_key}', zarr_path, pose_source, min_segment_steps=min_segment_steps
+        ):
+            total += t
+            episode_ends.append(total)
+            provenance.append({'scene': scene_label, 'session': session_dir, 'episode': ep_key, **ep_provenance})
     return total
 
 
 def export_scene_to_dp(
-    scene_path: pathlib.Path, output_path: pathlib.Path, enforce_preprocessing: bool = True
+    scene_path: pathlib.Path,
+    output_path: pathlib.Path,
+    enforce_preprocessing: bool = True,
+    min_segment_steps: int = _MIN_SEGMENT_STEPS,
 ) -> tuple[int, list[dict]]:
     """
     Export EPISODE sessions of a pzarr scene to a UMI-format ``.zarr.zip`` ReplayBuffer.
@@ -437,11 +495,19 @@ def export_scene_to_dp(
     provenance list (also embedded in the ``.zarr.zip``'s ``meta`` attrs; see module docstring).
     MAPPING sessions and episodes marked unusable in ``scene.json`` are skipped.
     """
-    return export_scenes_to_dp([scene_path], output_path, enforce_preprocessing=enforce_preprocessing)
+    return export_scenes_to_dp(
+        [scene_path],
+        output_path,
+        enforce_preprocessing=enforce_preprocessing,
+        min_segment_steps=min_segment_steps,
+    )
 
 
 def export_scenes_to_dp(
-    scene_paths: list[pathlib.Path], output_path: pathlib.Path, enforce_preprocessing: bool = True
+    scene_paths: list[pathlib.Path],
+    output_path: pathlib.Path,
+    enforce_preprocessing: bool = True,
+    min_segment_steps: int = _MIN_SEGMENT_STEPS,
 ) -> tuple[int, list[dict]]:
     """
     Export EPISODE sessions from one or more pzarr scenes into a single UMI ``.zarr.zip``.
@@ -472,7 +538,24 @@ def export_scenes_to_dp(
         total = 0
         for scene_path in scene_paths:
             total = _append_scene_episodes(
-                scene_path, data, episode_ends, total, provenance, enforce_preprocessing=enforce_preprocessing
+                scene_path,
+                data,
+                episode_ends,
+                total,
+                provenance,
+                enforce_preprocessing=enforce_preprocessing,
+                min_segment_steps=min_segment_steps,
+            )
+
+        # Every episode in one buffer must share a time base: UmiDataset reads a single
+        # episode_ends array and assumes one uniform Δt across all of it, so a mix of strides
+        # would train on two different notions of "one step" with nothing recording which.
+        strides = {p['frame_stride'] for p in provenance if 'frame_stride' in p}
+        if len(strides) > 1:
+            raise RuntimeError(
+                f'Refusing to write a mixed-rate buffer: episodes were localized at frame strides '
+                f'{sorted(strides)}, so their steps span different durations. Re-run `pingest pp 2 '
+                f'--force` on the odd scenes so every episode shares one stride.'
             )
 
         if not episode_ends:

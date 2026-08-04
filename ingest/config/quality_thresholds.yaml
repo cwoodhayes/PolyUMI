@@ -9,22 +9,37 @@
 #
 # An episode explicitly listed in a scene's scene.json `unusable_episodes` is
 # unusable regardless of what's here; these thresholds only add to that set.
-
-# Minimum fraction of frames with a pose. Below this the episode is unusable.
-min_tracking_ratio: 0.80
-
-# Maximum median forward/reverse disagreement (mm) on frames both passes tracked.
-# The two passes localize against the same atlas independently, so this is a
-# reference-free self-consistency check — no ground truth needed. Matches
-# slam_step's _REVERSE_MERGE_MAX_OVERLAP_MM, the point at which the merge already
-# refuses to trust the reverse pass.
 #
-# Known limits, measured over 5 scenes (see notebooks/slam_tuning_explore.ipynb §7):
-#  - False positives happen: one episode disagreed by 213 mm yet its poses were
-#    fine. Flagging it for review is cheap, so that's an acceptable trade.
-#  - False negatives happen too: an episode whose passes agreed to 0.8 mm was
-#    still ~10 mm off. Passing this check is NOT proof of correctness.
-max_reverse_overlap_mm: 50.0
+# The two counts below deliberately mirror upstream UMI's
+# scripts_slam_pipeline/06_generate_dataset_plan.py, which drops a demo outright
+# rather than exporting around a patchy trajectory. Since pzarr v4 we no longer
+# interpolate over tracking gaps, so an episode that keeps losing the map has
+# nothing standing in for the frames it lost — dropping it is the honest outcome.
+
+# Maximum number of lost frames before the whole episode is unusable. An absolute
+# count, not a fraction: UMI's judgement is that a demo which loses tracking at all
+# is suspect, however long it happens to be.
+#
+# Counted on the frames SLAM was actually *fed*, never on the full GoPro grid. Under
+# `localization_frame_stride: 2` the localizer never sees odd frames, so the
+# whole-grid `n_frames_lost` is ~half the episode even for a flawless run and this
+# threshold would reject the entire corpus.
+max_lost_frames: 10
+
+# Minimum number of tracked frames for the episode to be worth keeping at all.
+# Guards the degenerate case the count above cannot see: an episode that tracked
+# almost nothing has few lost frames simply because it is short.
+min_tracked_frames: 60
+
+# Both counts are measured over the post-chirp window — the end of the sync chirp to
+# the end of the episode — because that is the span the exporter actually ships. The
+# idle prefix before the chirp is where the localizer is still relocalizing, and
+# condemning an episode for gaps in footage that never reaches the dataset costs real
+# demos: measured across 246 episodes, 61% survive when judged over the whole
+# recording against 65% over the exported window.
+#
+# Stores written before pzarr v4 have no post-chirp counts; quality.py falls back to
+# the whole-episode fed-frame count for those and says so in the reason string.
 
 # Episodes with OptiTrack poses available (eef.attrs['available_sources']) skip
 # the checks above entirely — their pose source doesn't depend on SLAM.
