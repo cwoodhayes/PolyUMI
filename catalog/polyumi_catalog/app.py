@@ -153,6 +153,9 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
     def index(request: Request) -> HTMLResponse:
         with DBSession(engine) as db:
             tasks = queries.list_tasks(db)
+            # unfiltered, so a dataset is visible right after POST /datasets redirects here —
+            # the Datasets column is otherwise only filled by /select/task's OOB swap
+            datasets = queries.list_datasets(db, queries.FILTER_ALL)
             with app.state.pending_dataset_lock:
                 pending_ids = list(app.state.pending_dataset_scene_ids)
             pending_scenes = queries.scenes_by_ids(db, pending_ids)
@@ -161,6 +164,7 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
             request,
             'index.html',
             tasks=tasks,
+            datasets=datasets,
             pending_scenes=pending_scenes,
             all_tasks=all_tasks,
             can_rescan=recordings_dir is not None,
