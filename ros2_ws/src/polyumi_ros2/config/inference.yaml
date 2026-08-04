@@ -22,22 +22,22 @@
       # instant and t_obs for chunk truncation, so it is the most load-bearing value here.
       # 0.05 is a guess and probably low — UMI measured 0.125-0.17s for a plain UVC webcam,
       # and this path is longer than that.
-      gopro: 0.05
+      gopro: 0.13
       # Finger camera latency. Declared but never consumed — the policy has no tactile input
       # yet (blocking issue 4). Left at 0 so it cannot skew anything until it is wired.
       finger_cam: 0.0
       # Piezo mic latency. Declared but never consumed, as above.
       piezo_mic: 0.0
       # Delay from the arm's true EE pose to its measurement appearing on TF.
-      proprio: 0.01
+      proprio: 0.03
       # Delay from publishing a target pose to the arm actually starting to move.
-      arm_exec: 0.01
+      arm_exec: 0.03
       # Delay from the hand's true aperture to it appearing on /fr3_gripper/joint_states.
       # Kept separate from proprio because the gripper is a different device on its own link and
       # its own (slower, jitterier) topic — UMI splits these too (gripper_action_latency vs
       # robot_action_latency). Unmeasured; the topic jitters 24-100 ms, so 0 is certainly wrong,
       # but a wrong non-zero guess is worse than a known-zero placeholder.
-      gripper: 0.0
+      gripper: 0.05
 
     # --- Gripper width conversion. ---
     # The policy speaks ArUco finger-tag separation (what ingest step 4 measures); the robot
