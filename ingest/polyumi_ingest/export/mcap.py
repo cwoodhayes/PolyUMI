@@ -296,6 +296,8 @@ def _register_channels(
     has_gopro_audio: bool,
     has_optitrack: bool,
     has_slam: bool,
+    has_eef_pose_optitrack: bool,
+    has_eef_pose_slam: bool,
     has_aruco: bool,
     has_chirp_marker: bool,
 ) -> dict[str, int]:
@@ -334,6 +336,10 @@ def _register_channels(
         channels['/optitrack/pose_raw'] = ch('/optitrack/pose_raw', pose_sid)
     if has_slam:
         channels['/slam/pose'] = ch('/slam/pose', pose_sid)
+    if has_eef_pose_optitrack:
+        channels['/eef/pose_optitrack'] = ch('/eef/pose_optitrack', pose_sid)
+    if has_eef_pose_slam:
+        channels['/eef/pose_slam'] = ch('/eef/pose_slam', pose_sid)
     if has_aruco:
         channels['/gopro/aruco_annotations'] = ch('/gopro/aruco_annotations', ann_sid)
         channels['/gripper/width'] = ch('/gripper/width', width_sid)
@@ -571,21 +577,43 @@ def _write_log(writer: Writer, channel_id: int, t_s: float, message: str, name: 
     writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
 
 
-def _write_slam_poses(
+def _eef_world_frame(ep_grp, source: str) -> str:
+    """
+    Frame id for an ``eef/pose_<source>`` channel, read from what step 5 recorded.
+
+    ``EefPoseStep`` stamps ``world_frame`` on each array; using it keeps the MCAP frame
+    graph agreeing with the store instead of restating the naming here, where the two could
+    drift apart silently. Falls back to the source name, which is what step 5 writes today.
+    """
+    try:
+        recorded = ep_grp[f'eef/pose_{source}'].attrs.get('world_frame')
+    except KeyError:
+        recorded = None
+    return str(recorded) if isinstance(recorded, str) and recorded else source
+
+
+def _write_poses_skip_nan(
     writer: Writer,
     channel_id: int,
     poses: np.ndarray,
     ts: np.ndarray,
     frame_id: str,
+    label: str = 'poses',
 ) -> None:
-    """Write SLAM poses as PoseInFrame messages, skipping lost (NaN) frames."""
+    """
+    Write PoseInFrame messages, skipping NaN (untracked/lost) rows.
+
+    Generic over any (N,7) [x y z qx qy qz qw] pose stream on a shared timestamp grid — used
+    for raw SLAM poses (``gopro/slam_poses``) and the hand-frame ``eef/pose_<source>`` arrays
+    alike, since both can carry NaN rows (SLAM tracking loss).
+    """
     n = len(ts)
     if len(poses) != n:
-        raise ValueError(f'SLAM pose/timestamp length mismatch: poses={len(poses)} ts={n}')
+        raise ValueError(f'{label} pose/timestamp length mismatch: poses={len(poses)} ts={n}')
 
     valid_idx = np.nonzero(~np.isnan(poses[:, 0]))[0]
     if valid_idx.size == 0:
-        log.info('  slam poses: all frames lost, nothing to write')
+        log.info(f'  {label}: all frames lost, nothing to write')
         return
 
     for i in valid_idx:
@@ -597,7 +625,7 @@ def _write_slam_poses(
             publish_time=_ts_ns(t_s),
         )
 
-    log.info(f'  slam poses: wrote {valid_idx.size}/{n} (lost {n - valid_idx.size})')
+    log.info(f'  {label}: wrote {valid_idx.size}/{n} (lost {n - valid_idx.size})')
 
 
 # Foxglove PointsAnnotationType: 2 = LINE_LOOP (closed polygon through all points).
@@ -735,6 +763,12 @@ def export_episode_to_mcap(
     has_gps = 'gopro/gps' in ep_grp
     has_optitrack = root_grp is not None and 'optitrack/pose' in root_grp
     has_slam = 'gopro/slam_poses' in ep_grp
+    # Hand-frame trajectories from preprocessing step 5 (EefPoseStep writes one array per
+    # available source) — distinct from has_optitrack/has_slam above, which gate the *raw*
+    # sensor-frame channels. Absent whenever step 5 hasn't run yet; non-fatal, same as any
+    # other has_* gate.
+    has_eef_pose_optitrack = 'eef/pose_optitrack' in ep_grp
+    has_eef_pose_slam = 'eef/pose_slam' in ep_grp
     has_aruco = (
         'annotations/gripper_width/finger_corners' in ep_grp
         and 'annotations/gripper_width/width_m' in ep_grp
@@ -773,6 +807,8 @@ def export_episode_to_mcap(
                 has_gps=has_gps,
                 has_optitrack=has_optitrack,
                 has_slam=has_slam,
+                has_eef_pose_optitrack=has_eef_pose_optitrack,
+                has_eef_pose_slam=has_eef_pose_slam,
                 has_aruco=has_aruco,
                 has_chirp_marker=has_chirp_marker,
             )
@@ -951,12 +987,35 @@ def export_episode_to_mcap(
 
             if has_slam:
                 log.info('  slam poses...')
-                _write_slam_poses(
+                _write_poses_skip_nan(
                     writer,
                     ch['/slam/pose'],
                     np.asarray(ep_grp['gopro/slam_poses'][:]),  # type: ignore[index]
                     _gopro_ts('gopro'),
                     frame_id='slam',
+                    label='slam poses',
+                )
+
+            if has_eef_pose_optitrack:
+                log.info('  eef pose (optitrack)...')
+                _write_poses_skip_nan(
+                    writer,
+                    ch['/eef/pose_optitrack'],
+                    np.asarray(ep_grp['eef/pose_optitrack'][:]),  # type: ignore[index]
+                    _gopro_ts('gopro'),
+                    frame_id=_eef_world_frame(ep_grp, 'optitrack'),
+                    label='eef pose (optitrack)',
+                )
+
+            if has_eef_pose_slam:
+                log.info('  eef pose (slam)...')
+                _write_poses_skip_nan(
+                    writer,
+                    ch['/eef/pose_slam'],
+                    np.asarray(ep_grp['eef/pose_slam'][:]),  # type: ignore[index]
+                    _gopro_ts('gopro'),
+                    frame_id=_eef_world_frame(ep_grp, 'slam'),
+                    label='eef pose (slam)',
                 )
 
             if has_aruco:

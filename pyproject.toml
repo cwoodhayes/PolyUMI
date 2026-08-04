@@ -30,4 +30,8 @@ dev = [
     "picamera2",
     "pytest>=9.0.2",
     "httpx",
+    "ipykernel",
+    "jupyterlab",
+    "ipympl>=0.10.0",
+    "plotly>=6.9.0",
 ]

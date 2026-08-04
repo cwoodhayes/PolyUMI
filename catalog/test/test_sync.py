@@ -97,6 +97,22 @@ def test_sync_populates_unusable_from_scene_json(tmp_path: pathlib.Path):
     assert sessions == {'session_1': False, 'session_2': True}
 
 
+def test_sync_populates_pose_source_override_from_scene_json(tmp_path: pathlib.Path):
+    """A session dir keyed in scene.json's pose_source_overrides syncs onto the Session row."""
+    rec = tmp_path / 'recordings'
+    scene_dir = rec / 'scene_2026-07-28_09-00-00_wwww'
+    scene_dir.mkdir(parents=True)
+    SceneManifest(scene_id='scene-p', pose_source_overrides={'session_2': 'slam'}).write_to_scene_dir(scene_dir)
+    _make_session(scene_dir, 'session_1', scene_id='scene-p', session_type=SessionType.EPISODE, task=None)
+    _make_session(scene_dir, 'session_2', scene_id='scene-p', session_type=SessionType.EPISODE, task=None)
+
+    engine = _engine(tmp_path)
+    sync_recordings(rec, engine)
+    with DBSession(engine) as db:
+        sessions = {pathlib.Path(s.dir).name: s.pose_source_override for s in db.exec(select(Session)).all()}
+    assert sessions == {'session_1': None, 'session_2': 'slam'}
+
+
 def test_sync_populates_session_notes_from_metadata(tmp_path: pathlib.Path):
     """A session's metadata.json notes field syncs onto Session.notes."""
     rec = tmp_path / 'recordings'

@@ -164,3 +164,130 @@ def test_run_full_pipeline_skips_build_when_pzarr_exists(tmp_path: pathlib.Path,
     pp_status.run_full_pipeline(scene_dir)
 
     assert calls == ['run_preprocessing']
+
+
+def test_run_full_pipeline_passes_force_through_to_run_preprocessing(tmp_path: pathlib.Path, monkeypatch):
+    """force=True must reach run_preprocessing, not get silently dropped along the way."""
+    scene_dir = tmp_path / 'scene_g'
+    scene_dir.mkdir()
+    zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+
+    forces_seen = []
+    monkeypatch.setattr(
+        'polyumi_ingest.preproc.run_preprocessing',
+        lambda *a, force=False, **k: forces_seen.append(force),
+    )
+
+    pp_status.run_full_pipeline(scene_dir, force=True)
+    pp_status.run_full_pipeline(scene_dir)  # default
+
+    assert forces_seen == [True, False]
+
+
+def test_scene_pp_status_exposes_per_step_commit(tmp_path: pathlib.Path):
+    """Each completed step carries the git sha + timestamp recorded when it ran."""
+    scene_dir = tmp_path / 'scene_prov'
+    scene_dir.mkdir()
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 0
+    root.attrs['preprocessing_steps'] = [1, 2]
+    root.attrs['preprocessing_step_versions'] = {
+        '1': {'git_sha': 'a' * 40, 'completed_at': '2026-08-01T00:00:00+00:00'},
+        '2': {'git_sha': 'b' * 40, 'completed_at': '2026-08-01T01:00:00+00:00'},
+    }
+
+    steps = {s['number']: s for s in pp_status.scene_pp_status(scene_dir)['steps']}
+
+    assert steps[1]['git_sha'] == 'a' * 40
+    assert steps[2]['completed_at'] == '2026-08-01T01:00:00+00:00'
+
+
+def test_scene_pp_status_reports_none_sha_for_stores_predating_provenance(tmp_path: pathlib.Path):
+    """
+    A store processed before per-step provenance existed reports complete steps with no sha.
+
+    The completion mark stays authoritative — a missing version entry must not be read as
+    "step didn't run", which would silently un-tick every already-processed scene.
+    """
+    scene_dir = tmp_path / 'scene_legacy'
+    scene_dir.mkdir()
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 0
+    root.attrs['preprocessing_steps'] = [1]
+
+    steps = {s['number']: s for s in pp_status.scene_pp_status(scene_dir)['steps']}
+
+    assert steps[1]['complete'] is True
+    assert steps[1]['git_sha'] is None
+    assert steps[1]['completed_at'] is None
+
+
+def test_reset_pp_status_clears_completion_marks(tmp_path: pathlib.Path):
+    """Resetting drops every step back to incomplete and clears the recorded commits."""
+    scene_dir = tmp_path / 'scene_reset'
+    scene_dir.mkdir()
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 0
+    root.attrs['preprocessing_steps'] = [1, 2, 3]
+    root.attrs['preprocessing_step_versions'] = {'1': {'git_sha': 'a' * 40, 'completed_at': 'x'}}
+
+    pp_status.reset_pp_status(scene_dir)
+
+    status = pp_status.scene_pp_status(scene_dir)
+    assert status['n_complete'] == 0
+    assert all(not s['complete'] for s in status['steps'])
+    assert all(s['git_sha'] is None for s in status['steps'])
+
+
+def test_reset_pp_status_is_a_noop_without_pzarr(tmp_path: pathlib.Path):
+    """Nothing to reset when the store doesn't exist yet, and no store gets created."""
+    scene_dir = tmp_path / 'scene_nopzarr'
+    scene_dir.mkdir()
+
+    pp_status.reset_pp_status(scene_dir)
+
+    assert not (scene_dir / 'scene.zarr').exists()
+
+
+def test_run_full_pipeline_force_resets_status_before_running(tmp_path: pathlib.Path, monkeypatch):
+    """
+    A forced run clears completion marks *before* preprocessing starts, not after.
+
+    Asserted from inside the fake run_preprocessing: if the reset happened afterwards the
+    pane would show stale "complete" ticks for the whole run, which is the thing this fixes.
+    """
+    scene_dir = tmp_path / 'scene_force_reset'
+    scene_dir.mkdir()
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 0
+    root.attrs['preprocessing_steps'] = [1, 2, 3]
+
+    seen_at_start = []
+    monkeypatch.setattr(
+        'polyumi_ingest.preproc.run_preprocessing',
+        lambda *a, **k: seen_at_start.append(pp_status.scene_pp_status(scene_dir)['n_complete']),
+    )
+
+    pp_status.run_full_pipeline(scene_dir, force=True)
+
+    assert seen_at_start == [0]
+
+
+def test_run_full_pipeline_without_force_keeps_completion_marks(tmp_path: pathlib.Path, monkeypatch):
+    """
+    The non-forced "continue" run must not reset anything.
+
+    Its whole point is to skip already-complete steps; clearing the marks would make it
+    re-run the entire pipeline.
+    """
+    scene_dir = tmp_path / 'scene_continue'
+    scene_dir.mkdir()
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 0
+    root.attrs['preprocessing_steps'] = [1, 2]
+
+    monkeypatch.setattr('polyumi_ingest.preproc.run_preprocessing', lambda *a, **k: None)
+
+    pp_status.run_full_pipeline(scene_dir, force=False)
+
+    assert pp_status.scene_pp_status(scene_dir)['n_complete'] == 2

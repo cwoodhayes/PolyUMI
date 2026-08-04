@@ -78,11 +78,13 @@ def test_build_dataset_success_writes_manifest_and_rows(tmp_path: pathlib.Path, 
     """A successful build writes the buffer + manifest and upserts Dataset/DatasetMember rows."""
     calls = []
 
+    fake_provenance = [{'scene': 'scene-a', 'session': 's1', 'episode': 'episode_0', 'source': 'optitrack'}]
+
     def fake_export_scenes_to_dp(scene_paths, output_path):
         calls.append((list(scene_paths), output_path))
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b'fake-zip')
-        return 5
+        return 5, fake_provenance
 
     monkeypatch.setattr('polyumi_ingest.export.dp.export_scenes_to_dp', fake_export_scenes_to_dp)
 
@@ -118,6 +120,7 @@ def test_build_dataset_success_writes_manifest_and_rows(tmp_path: pathlib.Path, 
     assert manifest.n_episodes == 5
     assert manifest.task == 'fold_towel'
     assert {m.scene_id for m in manifest.members} == {'scene-a', 'scene-b'}
+    assert manifest.pose_provenance == fake_provenance
     assert (output_dir / 'fold_towel_v1.zarr.zip').is_file()
 
 

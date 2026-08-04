@@ -1,0 +1,41 @@
+# Tunables for the ORB-SLAM3 preprocessing step (step 2).
+#
+# Controls the data that python feeds to ORB-SLAM3, and the post-processing of the ORB-SLAM3 output.
+# Config for SLAM itself (intrinsics, distortion, IMU noise, ORB extractor settings) lives
+# separately in the ORB-SLAM3 settings YAML -- see `camera_settings_note` below --
+#
+# This file is REQUIRED, and every key below is required. There are deliberately no in-code
+# defaults: these values decide what ORB-SLAM3 ever sees, they are stamped into each episode
+# (`annotations/slam/frame_stride`), and DP export refuses to build a buffer that mixes two of
+# them -- so a code-side default silently disagreeing with this file would split a corpus
+# across incompatible time bases rather than fail loudly. Each key can still be overridden by
+# an environment variable for one-off experiments without editing the file; the env var wins.
+
+# Downsample factor applied to the camera settings (width/height and the fx/fy/cx/cy
+# intrinsics; the KannalaBrandt k1..k4 distortion coefficients act on a dimensionless
+# angle and are deliberately not scaled).
+#
+# 1 => tracking at the calibrated 1352x1014, which is what we run. (2 would halve that to
+# 676x507; we are committed to full resolution, so this stays 1.)
+#
+# Applies to BOTH map building and localization (required to be the same)
+# Env override: POLYUMI_SLAM_RES_DIV
+resolution_divisor: 1
+
+# Feed every Nth frame to the LOCALIZER. 2 => ~30 fps from the 59.94 fps source.
+#
+# Map building is not decimated. In my experiments this consistently degraded 
+# performance for the whole scene, with only marginal speed benefit (since most of the time
+# is spent localizing the many episodes).
+# Env override: POLYUMI_SLAM_LOC_STRIDE
+localization_frame_stride: 2
+
+# Where the camera/IMU calibration actually lives. Not loaded from here -- recorded
+# so this file is a complete map of SLAM configuration.
+#
+#   external/ORB_SLAM3_PolyUMI/Examples/Monocular-Inertial/gopro_hero12_slam.yaml
+#
+# It sits inside the git submodule because ORB-SLAM3 reads it directly, which means
+# a `git submodule update` can clobber it. Regenerate with
+# `ingest/integration/populate_slam_yaml.py`; see docs/camera-calibration.md.
+camera_settings_note: external/ORB_SLAM3_PolyUMI/Examples/Monocular-Inertial/gopro_hero12_slam.yaml

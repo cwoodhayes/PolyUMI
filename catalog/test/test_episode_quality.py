@@ -110,4 +110,9 @@ def test_scene_quality_summary_with_no_slam_data_returns_zeros(tmp_path: pathlib
     scene_dir = tmp_path / 'scene_g'
     scene_dir.mkdir()
     summary = episode_quality.scene_quality_summary(scene_dir, ['session_1'])
-    assert summary == {'n_episodes_with_slam': 0, 'avg_tracking_ratio': None, 'n_low_quality': 0}
+    assert summary == {
+        'n_episodes_with_slam': 0,
+        'avg_tracking_ratio': None,
+        'n_low_quality': 0,
+        'n_auto_unusable': 0,
+    }

@@ -74,17 +74,22 @@ def gopro_to_hand_transform(calib: dict) -> RigidTransform:
     shared by construction, so a frame defined against the GoPro can be — which is what makes
     the trajectories comparable across demo and deployment.
 
+    The calibration key is ``T_gopro_to_fingertip``: the hand frame is *defined* as the
+    midpoint of the closed gripper fingertips, measured against the GoPro optical frame in
+    the PolyUMI CAD assembly. ``hand`` is the name of the frame; ``fingertip`` is what it
+    physically is.
+
     Raises:
-        KeyError: if the calibration has no ``T_gopro_to_hand`` entry. Deliberately not
+        KeyError: if the calibration has no ``T_gopro_to_fingertip`` entry. Deliberately not
             defaulted: silently falling back to some other frame is precisely the failure
             this chain exists to prevent.
 
     """
     try:
-        hand = calib['T_gopro_to_hand']
+        hand = calib['T_gopro_to_fingertip']
     except KeyError:
         raise KeyError(
-            'gripper_calib.yaml has no T_gopro_to_hand entry. It defines the hand frame '
+            'gripper_calib.yaml has no T_gopro_to_fingertip entry. It defines the hand frame '
             'relative to the GoPro and is required to export poses the robot can reproduce; '
             'there is no safe default.'
         )

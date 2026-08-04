@@ -1,4 +1,10 @@
-"""Round-trip tests for the on-disk manifests."""
+"""
+Round-trip tests for the on-disk manifests, from the catalog side.
+
+Named ``test_catalog_manifests`` rather than ``test_manifests`` so it doesn't collide with
+``ingest/test/test_manifests.py``: neither test dir is a package, so pytest imports both by
+bare module name and a shared basename makes collecting the two suites together fail.
+"""
 
 from __future__ import annotations
 
@@ -79,3 +85,22 @@ def test_dataset_manifest_round_trip(tmp_path: pathlib.Path):
     assert loaded.polyumi_version == 'deadbeef'
     assert len(loaded.members) == 2
     assert loaded.members[1].episodes == [0, 2, 3]
+
+
+def test_dataset_manifest_pose_provenance_round_trip(tmp_path: pathlib.Path):
+    """pose_provenance (per-episode pose-source records) survives a write/read round trip."""
+    provenance = [{'scene': 's1', 'session': 'session_0', 'episode': 'episode_0', 'source': 'slam'}]
+    manifest = DatasetManifest(name='ds', pose_provenance=provenance)
+    path = tmp_path / 'ds.dataset.json'
+    manifest.to_file(path)
+
+    loaded = DatasetManifest.from_file(path)
+    assert loaded.pose_provenance == provenance
+
+
+def test_dataset_manifest_pose_provenance_defaults_to_empty(tmp_path: pathlib.Path):
+    """A dataset manifest written before this field existed loads with an empty list, not a crash."""
+    path = tmp_path / 'ds.dataset.json'
+    path.write_text('{"name": "ds", "created_at": "2026-01-01T00:00:00+00:00", "file_version": 1}')
+    loaded = DatasetManifest.from_file(path)
+    assert loaded.pose_provenance == []

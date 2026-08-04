@@ -3,9 +3,11 @@ Read/write helpers for the catalog's authoritative on-disk manifests.
 
 ``SceneManifest`` (``scene.json`` at a scene root) is the canonical home of a scene's
 task assignment, notes, and unusable-episode markers; it lives in ``polyumi_ingest.manifests``
-(re-exported here) because DP export needs to read it too — see that module's docstring.
+(re-exported here, along with the ``update_scene_manifest`` / ``set_episode_unusable`` writers
+every mutation goes through) because DP export needs to read it too, and ingest writes it —
+see that module's docstring.
 ``DatasetManifest`` (``<name>.dataset.json`` beside an exported buffer) records what
-scenes/episodes and which code version produced a training dataset. See docs/catalog-ui-plan.md §3.2.
+scenes/episodes and which code version produced a training dataset.
 """
 
 from __future__ import annotations
@@ -15,13 +17,20 @@ import pathlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from polyumi_ingest.manifests import SCENE_MANIFEST_NAME, SceneManifest
+from polyumi_ingest.manifests import (
+    SCENE_MANIFEST_NAME,
+    SceneManifest,
+    set_episode_unusable,
+    update_scene_manifest,
+)
 
 __all__ = [
     'SCENE_MANIFEST_NAME',
     'SceneManifest',
     'DatasetMemberSpec',
     'DatasetManifest',
+    'set_episode_unusable',
+    'update_scene_manifest',
 ]
 
 
@@ -54,6 +63,11 @@ class DatasetManifest:
     polyumi_version: str | None = None
     export_params: dict = field(default_factory=dict)
     members: list[DatasetMemberSpec] = field(default_factory=list)
+    #: Per-episode pose-source provenance from the export (scene, session, episode, source,
+    #: world_frame, n_steps, n_interp_filled) — see export.dp.buffer's module docstring. Also
+    #: embedded in the .zarr.zip's meta attrs; kept here too so it's readable without opening
+    #: the buffer.
+    pose_provenance: list[dict] = field(default_factory=list)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     file_version: int = 1
 
@@ -72,6 +86,7 @@ class DatasetManifest:
             polyumi_version=data.get('polyumi_version'),
             export_params=data.get('export_params', {}),
             members=[DatasetMemberSpec.from_dict(m) for m in data.get('members', [])],
+            pose_provenance=data.get('pose_provenance', []),
             created_at=datetime.fromisoformat(data['created_at']),
             file_version=version,
         )
@@ -85,6 +100,7 @@ class DatasetManifest:
             'polyumi_version': self.polyumi_version,
             'export_params': self.export_params,
             'members': [m.to_dict() for m in self.members],
+            'pose_provenance': self.pose_provenance,
             'output': self.output,
             'n_episodes': self.n_episodes,
             'file_version': self.file_version,

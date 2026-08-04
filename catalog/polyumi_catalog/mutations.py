@@ -3,7 +3,7 @@ Mutating operations for the catalog UI: tasks, scene/session assignment, notes, 
 
 Every mutation writes the authoritative on-disk file first (``scene.json`` for
 scene-level fields, a session's own ``metadata.json`` for session-level ones), then
-updates the corresponding DB row in the same operation, per docs/catalog-ui-plan.md §3.1/§4
+updates the corresponding DB row in the same operation
 ("task_id on scene is a cache of what scene.json says; the writer updates both
 scene.json and the row in one operation") — session notes extend that same pattern to
 metadata.json, which used to be a Pi-record-time-only, catalog-read-only file (see the
@@ -15,29 +15,29 @@ round-trips through _get_or_create_task.
 from __future__ import annotations
 
 import pathlib
-import threading
+from contextlib import AbstractContextManager
 
 from polyumi_pi.files.metadata import SessionMetadata
 from sqlmodel import Session as DBSession
 from sqlmodel import select
 
-from polyumi_catalog.manifests import SceneManifest
+from polyumi_catalog.manifests import SceneManifest, set_episode_unusable, update_scene_manifest
 from polyumi_catalog.models import Scene, Session, Task
-
-# Every scene.json mutation is a read-modify-write of the same file, so two near-simultaneous
-# writes to the *same* scene (e.g. marking several episodes unusable back-to-back) could
-# otherwise interleave and clobber one another. One process-wide lock serializes them, same
-# "guard a check/read-then-write against a fast double" rationale as app.state.pp_runs_lock.
-_SCENE_JSON_LOCK = threading.Lock()
 
 
 class MutationError(ValueError):
     """A mutation was rejected due to invalid input (e.g. a duplicate task name)."""
 
 
-def _load_scene_manifest(scene: Scene) -> SceneManifest:
-    """Load ``scene``'s scene.json, or a fresh default manifest if it doesn't exist yet."""
-    return SceneManifest.from_scene_dir(pathlib.Path(scene.dir)) or SceneManifest(scene_id=scene.scene_id)
+def _edit_scene_manifest(scene: Scene) -> AbstractContextManager[SceneManifest]:
+    """
+    Open ``scene``'s scene.json for a locked read-modify-write (see polyumi_ingest.manifests).
+
+    Ingest owns that lock and that read-modify-write, since it writes this file too — flagging
+    an episode unusable when preprocessing fails. Passing ``scene.scene_id`` keeps a
+    not-yet-written manifest seeded from the DB row rather than re-read off disk.
+    """
+    return update_scene_manifest(pathlib.Path(scene.dir), default_scene_id=scene.scene_id)
 
 
 def _clean_text(text: str | None) -> str | None:
@@ -47,10 +47,8 @@ def _clean_text(text: str | None) -> str | None:
 
 def _write_scene_task(scene: Scene, task_name: str | None) -> None:
     """Rewrite ``scene.json`` for ``scene`` with a new task name, preserving its other fields."""
-    with _SCENE_JSON_LOCK:
-        manifest = _load_scene_manifest(scene)
+    with _edit_scene_manifest(scene) as manifest:
         manifest.task = task_name
-        manifest.write_to_scene_dir(pathlib.Path(scene.dir))
 
 
 def create_task(db: DBSession, name: str, description: str | None = None) -> Task:
@@ -113,27 +111,6 @@ def set_task_description(db: DBSession, task_id: int, description: str | None) -
     return task
 
 
-def _write_session_unusable(scene: Scene, session_dir_name: str, unusable: bool) -> None:
-    """
-    Rewrite ``scene.json`` for ``scene``, adding/removing ``session_dir_name`` from the unusable set.
-
-    Keyed by the session directory's basename rather than its session_id: session directories
-    are immutable once synced (see app.py's thumbnail-caching comment for the same invariant),
-    so the name is stable, and DP export (buffer.py) only has the directory name available on
-    the pzarr episode group, not the session_id.
-    """
-    with _SCENE_JSON_LOCK:
-        scene_dir = pathlib.Path(scene.dir)
-        manifest = _load_scene_manifest(scene)
-        unusable_dirs = set(manifest.unusable_episodes)
-        if unusable:
-            unusable_dirs.add(session_dir_name)
-        else:
-            unusable_dirs.discard(session_dir_name)
-        manifest.unusable_episodes = sorted(unusable_dirs)
-        manifest.write_to_scene_dir(scene_dir)
-
-
 def set_session_unusable(db: DBSession, session_id: str, unusable: bool) -> Session:
     """Mark a session's episode usable/unusable, writing scene.json + the DB row."""
     session = db.get(Session, session_id)
@@ -143,8 +120,72 @@ def set_session_unusable(db: DBSession, session_id: str, unusable: bool) -> Sess
     if scene is None:
         raise MutationError(f'No such scene: {session.scene_id}')
 
-    _write_session_unusable(scene, pathlib.Path(session.dir).name, unusable)
+    # Keyed by the session directory's basename rather than its session_id: session directories
+    # are immutable once synced (see app.py's thumbnail-caching comment for the same invariant),
+    # so the name is stable, and DP export (buffer.py) only has the directory name available on
+    # the pzarr episode group, not the session_id.
+    set_episode_unusable(
+        pathlib.Path(scene.dir),
+        pathlib.Path(session.dir).name,
+        unusable,
+        default_scene_id=scene.scene_id,
+    )
     session.unusable = unusable
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+#: Valid values POST'd to /sessions/{id}/pose-source. 'default' clears the override (falls back
+#: to the episode's eef.attrs['default_source'] at export time), matching pose_source_overrides
+#: not having an entry at all for this session.
+_POSE_SOURCES = ('default', 'optitrack', 'slam')
+
+
+def _write_session_pose_source(scene: Scene, session_dir_name: str, source: str) -> None:
+    """Rewrite ``scene.json`` for ``scene``, setting/clearing ``session_dir_name``'s pose source."""
+    with _edit_scene_manifest(scene) as manifest:
+        overrides = dict(manifest.pose_source_overrides)
+        if source == 'default':
+            overrides.pop(session_dir_name, None)
+        else:
+            overrides[session_dir_name] = source
+        manifest.pose_source_overrides = overrides
+
+
+def set_session_pose_source(db: DBSession, session_id: str, source: str) -> Session:
+    """
+    Set (or clear, via ``'default'``) a session's DP-export pose-source override.
+
+    Writes scene.json's ``pose_source_overrides`` + the DB row, mirroring
+    ``set_session_unusable``. Rejects an unknown ``source`` value outright; when the episode's
+    available pose sources are known (pzarr built, step 5 has run), also rejects overriding to
+    a source the episode never computed — same guard ``resolve_pose_source`` applies at export
+    time, surfaced here instead of silently accepted and failing later.
+    """
+    if source not in _POSE_SOURCES:
+        raise MutationError(f'Unknown pose source {source!r}; must be one of {_POSE_SOURCES}.')
+    session = db.get(Session, session_id)
+    if session is None:
+        raise MutationError(f'No such session: {session_id}')
+    scene = db.get(Scene, session.scene_id)
+    if scene is None:
+        raise MutationError(f'No such scene: {session.scene_id}')
+
+    if source != 'default':
+        from polyumi_catalog.pzarr_inspect import available_pose_sources
+
+        session_dirname = pathlib.Path(session.dir).name
+        available = available_pose_sources(pathlib.Path(scene.dir), session_dirname)
+        if available is not None and source not in available:
+            raise MutationError(
+                f'{session_dirname} only has pose source(s) {available} — run `pingest pp 5 '
+                f'--force` if it should have {source!r} too.'
+            )
+
+    _write_session_pose_source(scene, pathlib.Path(session.dir).name, source)
+    session.pose_source_override = None if source == 'default' else source
     db.add(session)
     db.commit()
     db.refresh(session)
@@ -158,10 +199,8 @@ def set_scene_notes(db: DBSession, scene_id: str, notes: str | None) -> Scene:
         raise MutationError(f'No such scene: {scene_id}')
     notes = _clean_text(notes)
 
-    with _SCENE_JSON_LOCK:
-        manifest = _load_scene_manifest(scene)
+    with _edit_scene_manifest(scene) as manifest:
         manifest.notes = notes
-        manifest.write_to_scene_dir(pathlib.Path(scene.dir))
 
     scene.notes = notes
     db.add(scene)

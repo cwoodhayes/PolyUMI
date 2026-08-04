@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -16,6 +18,8 @@ import numpy as np
 import zarr
 from numcodecs import Blosc
 
+from polyumi_ingest.config import SLAM_CONFIG_YAML, load_slam_config
+from polyumi_ingest.episode_status import Episode, SceneContext
 from polyumi_ingest.preproc.step_base import (
     PreprocessingStep,
     register_preprocessing_step,
@@ -38,12 +42,30 @@ _DEFAULT_ORB_SLAM3_DIR = _REPO_ROOT / 'external' / 'ORB_SLAM3_PolyUMI'
 
 _DEFAULT_SETTINGS_YAML = _DEFAULT_ORB_SLAM3_DIR / 'Examples' / 'Monocular-Inertial' / 'gopro_hero12_slam.yaml'
 
-# Maximum acceptable distance (as a fraction of a frame period) between a
-# trajectory entry's timestamp and the nearest frame timestamp when
-# reconciling the C++ output back onto our frame index.
+# How far (as a fraction of a frame period) a trajectory row's timestamp may sit from the
+# frame its index maps to. Rows are indexed directly, so this is a consistency assertion on
+# the decimation stride rather than a matching tolerance — not a tuning knob, hence not in
+# slam.yaml.
 _TRAJ_TOLERANCE_FRAC = 0.5
 
 
+def _require_slam_setting(key: str) -> int:
+    """
+    Read one required tunable from ``config/slam.yaml``, raising if it isn't there.
+
+    Deliberately has no default to fall back on. These values decide what ORB-SLAM3 is fed,
+    they are stamped into every episode, and DP export refuses to mix two of them in one
+    buffer — so a default that silently disagreed with the checked-in config would split a
+    corpus across incompatible time bases rather than fail.
+    """
+    config = load_slam_config()
+    try:
+        return int(config[key])
+    except KeyError:
+        raise KeyError(
+            f'{SLAM_CONFIG_YAML} has no {key!r} entry. It controls how much data the SLAM '
+            f'step is fed and has no safe default; add it to the config file.'
+        ) from None
 
 
 def _export_telemetry_json(
@@ -136,12 +158,57 @@ def _export_episode(
     return video_path, json_path, gopro_ts
 
 
+#: Settings keys that scale linearly with image size.  ``Camera.k1..k4`` deliberately
+#: do NOT appear here: KannalaBrandt's distortion polynomial acts on the incidence
+#: angle theta, which is dimensionless and independent of resolution.
+_RESOLUTION_SCALED_KEYS = (
+    'Camera.fx',
+    'Camera.fy',
+    'Camera.cx',
+    'Camera.cy',
+    'Camera.width',
+    'Camera.height',
+)
+
+
+def _downsample_settings(content: str, res_div: int, fps_div: int) -> str:
+    """
+    Rewrite a settings YAML for reduced resolution and/or frame rate.
+
+    Derived from the canonical YAML rather than kept as a second checked-in file:
+    ``gopro_hero12_slam.yaml`` is the calibration source of truth, and a
+    hand-maintained half-res copy would silently drift the next time the camera is
+    recalibrated.
+
+    ``res_div`` scales the intrinsics and image size (see
+    ``_RESOLUTION_SCALED_KEYS``); ``fps_div`` divides ``Camera.fps``, which
+    ORB-SLAM3 turns into its keyframe-insertion window (``mMaxFrames``), so a
+    decimated run must declare its true rate or keyframes are inserted on the wrong
+    cadence.  Both default to 1 (no change) at the call sites that don't downsample.
+    """
+    if res_div == 1 and fps_div == 1:
+        return content
+    out = []
+    for line in content.splitlines(keepends=True):
+        m = re.match(r'^(\s*)([\w.]+)\s*:\s*([-\d.eE+]+)(.*)$', line)
+        if m:
+            indent, key, value, rest = m.groups()
+            if res_div != 1 and key in _RESOLUTION_SCALED_KEYS:
+                line = f'{indent}{key}: {float(value) / res_div:.10f}{rest}\n'
+            elif fps_div != 1 and key == 'Camera.fps':
+                line = f'{indent}{key}: {float(value) / fps_div:.6f}  # /{fps_div} from {value}{rest}\n'
+        out.append(line)
+    return ''.join(out)
+
+
 def _make_temp_settings_yaml(
     src: pathlib.Path,
     tmp_dir: pathlib.Path,
     save_atlas: pathlib.Path | None = None,
     load_atlas: pathlib.Path | None = None,
     viewer: bool = False,
+    res_div: int = 1,
+    fps_div: int = 1,
 ) -> pathlib.Path:
     """
     Copy ``src`` settings YAML to ``tmp_dir`` with atlas paths appended.
@@ -150,8 +217,11 @@ def _make_temp_settings_yaml(
     (``System.SaveAtlasToFile`` / ``System.LoadAtlasFromFile``); the binary
     has no CLI flag for them. We inject the right key here so the canonical
     config file stays untouched.
+
+    ``res_div`` / ``fps_div`` optionally downsample the camera settings first; see
+    ``_downsample_settings``.
     """
-    content = src.read_text()
+    content = _downsample_settings(src.read_text(), res_div, fps_div)
     if not content.endswith('\n'):
         content += '\n'
     content += f'\nSystem.Viewer: {1 if viewer else 0}\n'
@@ -164,74 +234,86 @@ def _make_temp_settings_yaml(
     return dst
 
 
-def _parse_and_reconcile_trajectory(
-    traj_path: pathlib.Path,
-    frame_ts: np.ndarray,
-) -> np.ndarray:
+def _parse_trajectory_csv(traj_path: pathlib.Path, frame_ts: np.ndarray, frame_stride: int = 1) -> np.ndarray:
     """
-    Parse an ORB-SLAM3 EuRoC-format trajectory and align it to ``frame_ts``.
+    Parse the localizer's CSV trajectory onto the full GoPro frame grid.
 
-    ``SaveTrajectoryEuRoC`` writes whitespace-separated rows::
+    ``System::SaveTrajectoryCSV`` writes one row per frame the binary was *fed*, in order,
+    with a header and an explicit lost flag::
 
-        timestamp_ns tx ty tz qx qy qz qw
+        frame_idx,timestamp,state,is_lost,is_keyframe,x,y,z,q_x,q_y,q_z,q_w
 
-    Lost frames are silently omitted, so we map each entry to its nearest
-    frame timestamp (within half a frame period) and mark every frame that
-    received no match as is_lost=True.
+    Row ``k`` is therefore the k-th fed frame, i.e. original frame ``k * frame_stride`` --
+    a direct index, which is why nothing here matches timestamps. (The EuRoC writer omitted
+    lost frames entirely, so every row had to be matched back by time within half a frame
+    period, and a mis-estimated anchor shifted poses silently.)
 
-    The trajectory timestamps are nanoseconds of *video time* (because the
-    C++ binary computes tframe from ``cap.get(CAP_PROP_POS_MSEC)``), so we
-    add ``frame_ts[0]`` to bring them back to UTC before matching.
+    Poses are in the **camera optical frame**: unlike ``SaveTrajectoryEuRoC``, whose inertial
+    branch composes ``mTbc`` and reports the IMU body pose, this writer reports ``Twc``
+    directly. See the note in ``mono_inertial_gopro_vi_localize.cc``.
 
-    Returns ``poses`` shaped (N,7) float64 ``[x,y,z, qx,qy,qz,qw]``. Lost
-    rows are all-NaN.
+    The ``timestamp`` column is video seconds, so it cross-checks the stride assumption: if
+    the binary decimated differently than we think, the times won't line up and this raises
+    rather than silently returning poses attached to the wrong frames.
+
+    Returns ``poses`` shaped (N,7) float64 ``[x,y,z, qx,qy,qz,qw]``, all-NaN where lost or
+    never fed.
     """
     n = len(frame_ts)
     poses = np.full((n, 7), np.nan, dtype=np.float64)
-
     if n < 2:
         return poses
 
     t_ref = float(frame_ts[0])
-    period = float(np.median(np.diff(frame_ts)))
-    tolerance = _TRAJ_TOLERANCE_FRAC * period
+    tolerance = _TRAJ_TOLERANCE_FRAC * float(np.median(np.diff(frame_ts)))
 
-    n_matched = 0
-    n_skipped = 0
-    with open(traj_path) as fh:
-        for line_no, line in enumerate(fh, start=1):
-            line = line.strip()
-            if not line:
+    n_tracked = n_lost = n_dropped = 0
+    with open(traj_path, newline='') as fh:
+        for row in csv.DictReader(fh):
+            idx = int(row['frame_idx']) * frame_stride
+            if idx >= n:
+                # The decoder can overrun the end of the mp4 and feed empty frames; those
+                # rows describe frames that don't exist on our grid.
+                n_dropped += 1
                 continue
-            parts = line.split()
-            if len(parts) != 8:
-                log.warning(f'  Skipping malformed trajectory line {line_no}: {line!r}')
+            if row['is_lost'].strip().lower() == 'true':
+                n_lost += 1
                 continue
-            t_ns = float(parts[0])
-            tx, ty, tz, qx, qy, qz, qw = (float(p) for p in parts[1:])
-            t_utc = t_ref + t_ns / 1e9
 
-            idx_right = int(np.searchsorted(frame_ts, t_utc))
-            candidates = []
-            if idx_right > 0:
-                candidates.append(idx_right - 1)
-            if idx_right < n:
-                candidates.append(idx_right)
-            idx = min(candidates, key=lambda i: abs(frame_ts[i] - t_utc))
-
-            if abs(frame_ts[idx] - t_utc) > tolerance:
-                log.warning(
-                    f'  Trajectory entry at video t={t_ns / 1e9:.6f}s has no '
-                    f'matching frame within {tolerance * 1000:.1f}ms — skipping'
+            drift = abs((t_ref + float(row['timestamp'])) - float(frame_ts[idx]))
+            if drift > tolerance:
+                raise RuntimeError(
+                    f'Trajectory row {row["frame_idx"]} claims video t={row["timestamp"]}s, which is '
+                    f'{drift * 1000:.1f}ms from frame {idx} (tolerance {tolerance * 1000:.1f}ms). '
+                    f'The localizer did not decimate at the stride {frame_stride} assumed here, so '
+                    f'every pose would land on the wrong frame.'
                 )
-                n_skipped += 1
-                continue
 
-            poses[idx] = [tx, ty, tz, qx, qy, qz, qw]
-            n_matched += 1
+            poses[idx] = [float(row[k]) for k in ('x', 'y', 'z', 'q_x', 'q_y', 'q_z', 'q_w')]
+            n_tracked += 1
 
-    log.info(f'  Trajectory reconciliation: {n_matched} matched, {n_skipped} skipped')
+    if n_dropped:
+        log.warning(f'  {n_dropped} trajectory row(s) past the {n}-frame grid; ignored.')
+    log.info(f'  Trajectory: {n_tracked} tracked, {n_lost} lost of {n_tracked + n_lost} fed frames')
     return poses
+
+
+def _post_chirp_start(ep_grp: zarr.Group, n_total: int) -> tuple[int, bool]:
+    """
+    First frame index at/after the sync chirp ends, and whether the marker was found.
+
+    The idle prefix before the chirp is where the localizer is still relocalizing and is
+    trimmed at export anyway, so the usability gate judges the post-chirp window — the same
+    span that actually reaches the dataset. Step 1 writes the marker, and steps run in order,
+    so it is available here; a store predating it falls back to the whole episode.
+    """
+    if 'annotations/time_sync' not in ep_grp or 'timestamps/gopro' not in ep_grp:
+        return 0, False
+    chirp_end_s = grp(ep_grp, 'annotations/time_sync').attrs.get('gopro_chirp_end_s')
+    if chirp_end_s is None:
+        return 0, False
+    gopro_ts = np.asarray(arr(ep_grp, 'timestamps/gopro')[:], dtype=np.float64)
+    return int(np.searchsorted(gopro_ts, float(chirp_end_s), side='left')), True
 
 
 def _write_slam_results(
@@ -239,13 +321,28 @@ def _write_slam_results(
     poses: np.ndarray,
     settings_path: pathlib.Path,
     atlas_path: pathlib.Path,
+    frame_stride: int = 1,
 ) -> None:
-    """Write SLAM poses and summary annotations back into ep_grp."""
+    """
+    Write SLAM poses and summary annotations back into ep_grp.
+
+    ``gopro/slam_poses`` is the localizer's forward trajectory, which is what the rest of the
+    pipeline consumes. Nothing is gap-filled here or downstream: a frame SLAM could not place
+    stays NaN, and the exporter turns runs of NaN into episode boundaries.
+
+    All the frame counts are over the frames SLAM was actually *fed*
+    (``0, stride, 2*stride, ...``), never over every frame.  Under decimation the skipped
+    frames have no pose by construction, so a whole-grid count reads ~1/stride even for a
+    perfect run and any threshold applied to it would condemn the entire corpus.  At stride 1
+    the two definitions coincide.  ``n_frames_lost`` is the one exception, kept on the whole
+    grid for backward compatibility -- do not gate on it.
+    """
     gopro_grp = ep_grp.require_group('gopro')
-
-    if 'slam_poses' in gopro_grp:
-        del gopro_grp['slam_poses']
-
+    # Delete first so a re-run can't leave a stale array behind claiming to describe the
+    # current poses -- including the slam_poses_{forward,reverse} pair that pzarr v3 wrote.
+    for name in ('slam_poses', 'slam_poses_forward', 'slam_poses_reverse'):
+        if name in gopro_grp:
+            del gopro_grp[name]
     gopro_grp.create_array('slam_poses', data=poses, compressor=_BLOSC)
 
     is_lost = np.isnan(poses[:, 0])
@@ -254,17 +351,48 @@ def _write_slam_results(
     # count transitions lost→tracked (each run of tracked frames after a gap)
     transitions = int(np.count_nonzero(np.diff(is_lost.astype(np.int8)) == -1))
 
+    fed_idx = np.arange(0, n_total, frame_stride)
+    n_fed = int(len(fed_idx))
+    n_fed_tracked = int((~is_lost[fed_idx]).sum()) if n_fed else 0
+
+    i0, chirp_gated = _post_chirp_start(ep_grp, n_total)
+    fed_post = fed_idx[fed_idx >= i0]
+    n_fed_post = int(len(fed_post))
+    n_fed_post_lost = int(is_lost[fed_post].sum()) if n_fed_post else 0
+
     slam_grp = ep_grp.require_group('annotations').require_group('slam')
+    # Same reasoning as deleting the stale arrays above: a v3 store re-run under v4 would
+    # otherwise keep attrs describing a two-pass merge that no longer happened — including
+    # reverse_pass: True, which reads as a claim about *these* poses.
+    for stale in (
+        'reverse_pass',
+        'reverse_merged',
+        'reverse_n_filled',
+        'reverse_n_forward_only',
+        'reverse_overlap_frames',
+        'reverse_overlap_median_mm',
+    ):
+        slam_grp.attrs.pop(stale, None)
     slam_grp.attrs['n_frames_total'] = n_total
     slam_grp.attrs['n_frames_lost'] = n_lost
-    slam_grp.attrs['tracking_ratio'] = float(n_total - n_lost) / n_total if n_total > 0 else 0.0
+    slam_grp.attrs['frame_stride'] = int(frame_stride)
+    slam_grp.attrs['n_frames_fed'] = n_fed
+    slam_grp.attrs['n_frames_fed_tracked'] = n_fed_tracked
+    slam_grp.attrs['n_frames_fed_post_chirp'] = n_fed_post
+    slam_grp.attrs['n_frames_fed_lost_post_chirp'] = n_fed_post_lost
+    #: False when no chirp marker was found, so the two attrs above cover the whole episode.
+    slam_grp.attrs['chirp_gated'] = chirp_gated
+    slam_grp.attrs['tracking_ratio'] = float(n_fed_tracked) / n_fed if n_fed > 0 else 0.0
     slam_grp.attrs['n_relocalization_events'] = transitions
     slam_grp.attrs['orb_slam3_settings_path'] = str(settings_path.resolve())
     slam_grp.attrs['atlas_path'] = str(atlas_path.resolve())
 
     log.info(
-        f'  SLAM results: {n_total} frames, {n_lost} lost '
-        f'({100.0 * n_lost / n_total:.1f}%), {transitions} relocalization events'
+        f'  SLAM results: {n_fed_tracked}/{n_fed} fed frames tracked '
+        f'({100.0 * slam_grp.attrs["tracking_ratio"]:.1f}%)'
+        + (f' at stride {frame_stride}' if frame_stride != 1 else '')
+        + f'; {n_lost}/{n_total} frames without a pose overall, '
+        f'{transitions} relocalization events'
     )
 
 
@@ -335,6 +463,8 @@ class OrbSlam3Step(PreprocessingStep):
         localizer_bin: str = 'mono_inertial_gopro_vi_localize',
         bin_subdir: str | None = None,
         timeout_s: float | None = None,
+        resolution_divisor: int | None = None,
+        localization_frame_stride: int | None = None,
     ) -> None:
         """
         Initialize the ORB-SLAM3 step.
@@ -355,6 +485,32 @@ class OrbSlam3Step(PreprocessingStep):
             ORB_SLAM3_PolyUMI build layout.
         timeout_s:
             Per-episode subprocess timeout; None = no timeout.
+        resolution_divisor:
+            Downsample factor applied to the camera settings for *both* passes.  Map
+            building and localization must use the same value: ORB descriptors and the
+            scale pyramid are resolution-dependent, so localizing against a
+            resolution-mismatched atlas makes relocalization unreliable.  Read from
+            ``config/slam.yaml`` unless overridden by ``POLYUMI_SLAM_RES_DIV``.
+        localization_frame_stride:
+            Feed every Nth frame to the *localizer* (2 ~= 30 fps from a 59.94 fps
+            source).  Map building is deliberately left at full rate -- decimating it
+            measured no benefit and 20 fps mapping failed outright.  Read from
+            ``config/slam.yaml`` unless overridden by ``POLYUMI_SLAM_LOC_STRIDE``.
+
+        Neither has an in-code default.  These two numbers decide what ORB-SLAM3 ever sees,
+        and they are recorded per episode (``annotations/slam/frame_stride``) and enforced to
+        be uniform across a DP export -- so a fallback quietly disagreeing with the
+        checked-in config is exactly the failure that would split a corpus across two
+        incompatible time bases.  ``config/slam.yaml`` is the single source of truth.
+
+        Raises
+        ------
+        FileNotFoundError
+            If ``config/slam.yaml`` is missing.
+        KeyError
+            If it omits either key.
+        ValueError
+            If either value is below 1.
 
         """
         if orb_slam3_dir is None:
@@ -366,6 +522,25 @@ class OrbSlam3Step(PreprocessingStep):
         self.map_builder_bin = self.orb_slam3_dir / bin_subdir / map_builder_bin
         self.localizer_bin = self.orb_slam3_dir / bin_subdir / localizer_bin
         self.timeout_s = timeout_s
+        # Precedence: explicit argument > environment override > config/slam.yaml.  There is
+        # no fourth tier: see the docstring for why a fallback is worse than a hard failure.
+        # Loaded here rather than at import so a broken config fails when a step is actually
+        # constructed, not when anything in the package is imported.
+        if resolution_divisor is None:
+            resolution_divisor = int(
+                os.environ.get('POLYUMI_SLAM_RES_DIV', _require_slam_setting('resolution_divisor'))
+            )
+        if localization_frame_stride is None:
+            localization_frame_stride = int(
+                os.environ.get('POLYUMI_SLAM_LOC_STRIDE', _require_slam_setting('localization_frame_stride'))
+            )
+        if resolution_divisor < 1 or localization_frame_stride < 1:
+            raise ValueError(
+                f'resolution_divisor and localization_frame_stride must be >= 1, got '
+                f'{resolution_divisor} and {localization_frame_stride}'
+            )
+        self.resolution_divisor = resolution_divisor
+        self.localization_frame_stride = localization_frame_stride
 
     @property
     def _vocab_path(self) -> pathlib.Path:
@@ -389,6 +564,7 @@ class OrbSlam3Step(PreprocessingStep):
         stderr_log: pathlib.Path,
         label: str,
         cwd: pathlib.Path | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
         log.info(f'  Running: {" ".join(cmd)}')
         with open(stdout_log, 'w') as fout, open(stderr_log, 'w') as ferr:
@@ -398,6 +574,7 @@ class OrbSlam3Step(PreprocessingStep):
                 stderr=ferr,
                 timeout=self.timeout_s,
                 cwd=cwd,
+                env=env,
             )
         if result.returncode != 0:
             raise RuntimeError(
@@ -415,12 +592,16 @@ class OrbSlam3Step(PreprocessingStep):
         tmp_dir = pathlib.Path(tempfile.mkdtemp(prefix='polyumi_slam_map_'))
         try:
             video_path, json_path, frame_ts = _export_episode(ep_grp, tmp_dir, gopro_mp4)
+            # Half resolution, but full frame rate: decimating the mapping pass
+            # measured no benefit and 20 fps mapping failed to initialise a map at
+            # all, so only the resolution is reduced here.
             settings_path = _make_temp_settings_yaml(
                 self.settings_yaml,
                 tmp_dir,
                 save_atlas=atlas_path,
+                res_div=self.resolution_divisor,
             )
-            traj_out = log_dir / 'mapping_trajectory.txt'
+            traj_out = log_dir / 'mapping_trajectory.csv'
             cmd = [
                 str(self.map_builder_bin),
                 str(self._vocab_path),
@@ -439,13 +620,13 @@ class OrbSlam3Step(PreprocessingStep):
             if not atlas_path.exists():
                 raise RuntimeError(f'ORB-SLAM3 map builder completed but atlas not found at {atlas_path}')
 
-            # Reconcile the mapping trajectory back onto the mapping episode
-            # and persist poses next to the localized episodes' data.  Same
-            # EuRoC format and reconciliation as Phase 2 — keeps the schema
-            # consistent across MAPPING and EPISODE sessions.
+            # Put the mapping trajectory back onto the mapping episode and persist it
+            # alongside the localized episodes' poses. Same CSV format and same parser as
+            # phase 2 — keeps the schema consistent across MAPPING and EPISODE sessions.
+            # Map building is never decimated, so its stride is 1.
             if traj_out.exists():
                 log.info(f'  Mapping trajectory saved to {traj_out}')
-                poses = _parse_and_reconcile_trajectory(traj_out, frame_ts)
+                poses = _parse_trajectory_csv(traj_out, frame_ts)
                 _write_slam_results(ep_grp, poses, self.settings_yaml, atlas_path)
 
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -465,12 +646,22 @@ class OrbSlam3Step(PreprocessingStep):
         tmp_dir = pathlib.Path(tempfile.mkdtemp(prefix=f'polyumi_slam_ep{episode_index}_'))
         try:
             video_path, json_path, frame_ts = _export_episode(ep_grp, tmp_dir, gopro_mp4)
+            # Resolution must match the atlas the map builder produced; the frame
+            # rate is additionally divided by the stride so ORB-SLAM3's
+            # keyframe-insertion window matches the rate it's actually being fed.
             settings_path = _make_temp_settings_yaml(
                 self.settings_yaml,
                 tmp_dir,
                 load_atlas=atlas_path,
+                res_div=self.resolution_divisor,
+                fps_div=self.localization_frame_stride,
             )
-            traj_out = tmp_dir / 'trajectory.txt'
+            traj_out = tmp_dir / 'trajectory.csv'
+            # Forward pass only. The binary still accepts an optional 6th argument that makes
+            # it run a second, temporally-reversed pass against the same atlas; we no longer
+            # pass it. Recovering the lead-in frames that way meant merging two trajectories
+            # and trusting the result, and the pipeline now prefers to drop or split around
+            # frames SLAM could not place. See docs and git history if it needs to come back.
             cmd = [
                 str(self.localizer_bin),
                 str(self._vocab_path),
@@ -479,93 +670,94 @@ class OrbSlam3Step(PreprocessingStep):
                 str(json_path),
                 str(traj_out),
             ]
+            stdout_log = log_dir / f'episode_{episode_index}_slam.stdout'
             self._run_subprocess(
                 cmd,
-                log_dir / f'episode_{episode_index}_slam.stdout',
+                stdout_log,
                 log_dir / f'episode_{episode_index}_slam.stderr',
                 label=f'ORB-SLAM3 localizer (episode {episode_index})',
                 cwd=log_dir,
+                env={
+                    **os.environ,
+                    'POLYUMI_SLAM_FRAME_STRIDE': str(self.localization_frame_stride),
+                },
             )
             if not traj_out.exists():
                 raise RuntimeError(f'ORB-SLAM3 localizer completed but trajectory file not found: {traj_out}')
 
-            poses = _parse_and_reconcile_trajectory(traj_out, frame_ts)
-            _write_slam_results(ep_grp, poses, self.settings_yaml, atlas_path)
+            poses = _parse_trajectory_csv(traj_out, frame_ts, frame_stride=self.localization_frame_stride)
+            _write_slam_results(
+                ep_grp,
+                poses,
+                self.settings_yaml,
+                atlas_path,
+                frame_stride=self.localization_frame_stride,
+            )
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
             log.error(f'Localization failed; temp dir preserved: {tmp_dir}')
             raise
 
-    def run_step(self, scene_zarr: pathlib.Path, force: bool = False) -> None:
+    def prepare_scene(self, scene: SceneContext) -> None:
         """
-        Run map building then per-episode localization on scene_zarr.
+        Phase 1: build the ORB-SLAM3 atlas from the scene's MAPPING session.
 
-        Expects at least one episode group with ``session_type`` attribute set
-        to ``'MAPPING'`` (written by ``build_pzarr``).  Falls back to treating
-        the first episode as the mapping session for zarr stores built before
-        this change was introduced (see OQ-4).
+        Expects one episode group with ``session_type`` set to ``'MAPPING'`` (written by
+        ``build_pzarr``). Falls back to treating the first episode as the mapping session for
+        zarr stores built before that attribute existed (see OQ-4).
+
+        A failure here is fatal to the step by design: without an atlas there is nothing for
+        any episode to localize against, so this is not an episode-shaped failure.
         """
         self._validate_settings_yaml()
 
-        scene_dir = scene_zarr.parent
-        atlas_path = scene_dir / f'{scene_dir.name}.atlas.osa'
-        log_dir = scene_dir / 'slam_logs'
-        log_dir.mkdir(exist_ok=True)
+        scene_dir = scene.scene_dir
+        self.atlas_path = scene_dir / f'{scene_dir.name}.atlas.osa'
+        self.log_dir = scene_dir / 'slam_logs'
+        self.log_dir.mkdir(exist_ok=True)
 
-        root = zarr.open_group(str(scene_zarr), mode='a')
-        episodes = sorted(k for k in root.keys() if k.startswith('episode_'))
-        if not episodes:
-            raise RuntimeError(f'No episodes found in {scene_zarr}')
-
-        mapping_key: str | None = None
-        episode_keys: list[str] = []
-        for ep_key in episodes:
-            ep = grp(root, ep_key)
-            session_type = ep.attrs.get('session_type', None)
-            if session_type == 'MAPPING':
-                mapping_key = ep_key
-            else:
-                episode_keys.append(ep_key)
+        episodes = scene.episodes
+        mapping = next((ep for ep in episodes if ep.is_mapping), None)
 
         # OQ-4 fallback: if no episode has session_type='MAPPING', treat first as mapping
-        if mapping_key is None:
+        if mapping is None:
             log.warning(
                 'No episode with session_type=MAPPING found; treating first episode as mapping. '
                 'Rebuild the zarr store to get proper session_type attributes.'
             )
-            mapping_key = episodes[0]
-            episode_keys = [k for k in episodes if k != mapping_key]
+            mapping = episodes[0]
+        self._mapping_key = mapping.key
 
-        if not episode_keys:
+        if len(episodes) == 1:
             log.warning(
-                f'No EPISODE groups found in {scene_zarr} — only {mapping_key} '
+                f'No EPISODE groups found in {scene.zarr_path} — only {mapping.key} '
                 f'(session_type=MAPPING) is present. Map will be built but no '
                 f'localization will run. Add episode sessions to localize.'
             )
 
-        # Phase 1: map building
-        if atlas_path.exists() and force:
-            log.info(f'--force: removing existing atlas at {atlas_path}')
-            atlas_path.unlink()
-        if atlas_path.exists():
-            log.info(f'Atlas already exists at {atlas_path}, skipping map building.')
-        else:
-            log.info(f'Phase 1: building map from {mapping_key}...')
-            mapping_grp = grp(root, mapping_key)
-            t0 = time.monotonic()
-            self._build_map(mapping_grp, atlas_path, log_dir, scene_zarr)
-            elapsed = time.monotonic() - t0
-            log.info(f'Map built in {elapsed:.1f}s: {atlas_path}')
+        if self.atlas_path.exists() and scene.force:
+            log.info(f'--force: removing existing atlas at {self.atlas_path}')
+            self.atlas_path.unlink()
+        if self.atlas_path.exists():
+            log.info(f'Atlas already exists at {self.atlas_path}, skipping map building.')
+            return
 
-        # Phase 2: per-episode localization
-        for i, ep_key in enumerate(episode_keys):
-            log.info(f'Phase 2: localizing {ep_key} ({i + 1}/{len(episode_keys)})...')
-            ep_grp = grp(root, ep_key)
-            # Use the zarr episode index (parsed from ep_key) so log filenames
-            # and tmp dirs line up with the episode_N group in scene.zarr,
-            # rather than the position within episode_keys (which skips MAPPING).
-            ep_index = int(ep_key.split('_')[1])
-            t0 = time.monotonic()
-            self._localize_episode(ep_grp, ep_index, atlas_path, log_dir, scene_zarr)
-            elapsed = time.monotonic() - t0
-            log.info(f'Localized {ep_key} in {elapsed:.1f}s')
+        log.info(f'Phase 1: building map from {mapping.key}...')
+        t0 = time.monotonic()
+        self._build_map(mapping.group, self.atlas_path, self.log_dir, scene.zarr_path)
+        elapsed = time.monotonic() - t0
+        log.info(f'Map built in {elapsed:.1f}s: {self.atlas_path}')
+
+    def process_episode(self, scene: SceneContext, episode: Episode) -> None:
+        """Phase 2: localize one episode against the atlas built in phase 1."""
+        # The mapping session *is* the map, so there is nothing to localize it against — its
+        # own trajectory was already reconciled onto it during the phase-1 build.
+        if episode.key == self._mapping_key:
+            return
+
+        log.info(f'Phase 2: localizing {episode.key}...')
+        t0 = time.monotonic()
+        # episode.index (parsed from the key) rather than a loop counter, so log filenames and
+        # tmp dirs line up with the episode_N group in scene.zarr even though MAPPING is skipped.
+        self._localize_episode(episode.group, episode.index, self.atlas_path, self.log_dir, scene.zarr_path)
+        log.info(f'Localized {episode.key} in {time.monotonic() - t0:.1f}s')

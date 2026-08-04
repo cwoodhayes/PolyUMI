@@ -59,10 +59,39 @@
         <dd>{{ '%.1f%%' % (detail.quality.avg_tracking_ratio * 100) if detail.quality.avg_tracking_ratio is not none else '—' }}</dd>
         <dt>Low-tracking episodes</dt>
         <dd>{{ detail.quality.n_low_quality }} / {{ detail.quality.n_episodes_with_slam }}</dd>
+        <dt title="Automatically excluded from exports by the quality thresholds in ingest/config/quality_thresholds.yaml">Auto-unusable</dt>
+        <dd>
+          {{ detail.quality.n_auto_unusable }} / {{ detail.quality.n_episodes_with_slam }}
+          {% if detail.quality.n_auto_unusable %}<span class="badge warn">excluded</span>{% endif %}
+        </dd>
         <dt>Dropped video frames</dt>
         <dd>{{ detail.total_dropped_video_frames }}</dd>
       </dl>
       {% endif %}
+      <h3>Provenance</h3>
+      <dl>
+        <dt title="Commit of polyumi running on the Pi when these sessions were recorded (metadata.json polyumi_version)">Recorded by</dt>
+        <dd>
+          {% if detail.provenance.pi_versions %}
+          {% for v in detail.provenance.pi_versions %}
+          <span class="mono" title="{{ v }}">{{ v | short_sha or v }}</span>{% if not loop.last %}, {% endif %}
+          {% endfor %}
+          {% if detail.provenance.pi_versions | length > 1 %}
+          <span class="badge warn" title="Sessions in this scene were recorded under different Pi deploys">mixed</span>
+          {% endif %}
+          {% else %}—{% endif %}
+        </dd>
+        <dt title="Commit that built scene.zarr (root git_sha attr). Individual preprocessing steps may have re-run later — see the pipeline list.">pzarr built by</dt>
+        <dd>
+          {% if detail.provenance.pzarr_git_sha | short_sha %}
+          <span class="mono" title="{{ detail.provenance.pzarr_git_sha }}">{{ detail.provenance.pzarr_git_sha | short_sha }}</span>
+          {% else %}—{% endif %}
+        </dd>
+        <dt>Ingest version</dt>
+        <dd>{{ detail.provenance.pipeline_version or '—' }}</dd>
+        <dt>pzarr built</dt>
+        <dd>{{ detail.provenance.pzarr_created_at or '—' }}</dd>
+      </dl>
       {% if detail.conflicts %}
       <div class="conflict-box">
         <strong>⚠ Task conflicts</strong>
@@ -87,6 +116,13 @@
         {% for step in detail.pp_status.steps %}
         <li class="{{ 'pp-step-done' if step.complete else 'pp-step-pending' }}">
           {{ '✓' if step.complete else '○' }} {{ step.number }}. {{ step.name }}
+          {% if step.complete %}
+          {% if step.git_sha | short_sha %}
+          <span class="mono pp-step-sha" title="Run at {{ step.completed_at or 'unknown time' }} on commit {{ step.git_sha }}">{{ step.git_sha | short_sha }}</span>
+          {% else %}
+          <span class="pp-step-sha muted" title="This step completed before per-step commit provenance was recorded; re-run it to stamp one">—</span>
+          {% endif %}
+          {% endif %}
         </li>
         {% endfor %}
       </ul>
@@ -103,17 +139,35 @@
       {% else %}
       {% set fully_processed = detail.pp_status.pzarr_exists and detail.pp_status.n_total > 0
          and detail.pp_status.n_complete == detail.pp_status.n_total %}
+      {% set has_progress = detail.pp_status.n_complete > 0 %}
+      {% if not fully_processed %}
       <button
         hx-post="/scenes/{{ detail.scene_id }}/run-pp"
+        hx-vals='{"force": false}'
         hx-target="#detail-body"
         hx-swap="outerHTML"
         hx-disabled-elt="this"
-        {% if fully_processed %}
-        hx-confirm="This scene has already completed all {{ detail.pp_status.n_total }} preprocessing steps. Run the pipeline again anyway?"
-        {% endif %}
       >
         Run full pipeline
       </button>
+      {% endif %}
+      {% if has_progress %}
+      <button
+        hx-post="/scenes/{{ detail.scene_id }}/run-pp"
+        hx-vals='{"force": true}'
+        hx-target="#detail-body"
+        hx-swap="outerHTML"
+        hx-disabled-elt="this"
+        class="warn"
+        {% if fully_processed %}
+        hx-confirm="This scene has already completed all {{ detail.pp_status.n_total }} preprocessing steps. Re-run every step from scratch anyway?"
+        {% else %}
+        hx-confirm="This will discard the {{ detail.pp_status.n_complete }} already-completed step(s) and re-run the entire pipeline from scratch. Continue?"
+        {% endif %}
+      >
+        Re-run pipeline
+      </button>
+      {% endif %}
       {% if detail.pp_error %}<p class="warn">Last run failed: {{ detail.pp_error }}</p>{% endif %}
       {% endif %}
     </div>
@@ -155,6 +209,36 @@
         {{ 'Mark usable' if detail.unusable else 'Mark unusable' }}
       </button>
       {% endif %}
+      {% if detail.session_type == 'EPISODE' %}
+      <form class="pose-source-form">
+        <label for="pose-source-select">DP export pose source</label>
+        <select
+          id="pose-source-select"
+          name="source"
+          hx-post="/sessions/{{ detail.session_id }}/pose-source"
+          hx-trigger="change"
+          hx-target="#detail-body"
+          hx-swap="outerHTML"
+        >
+          <option value="default" {% if not detail.pose_source_override %}selected{% endif %}>
+            Default{% if detail.available_pose_sources %} ({{ detail.available_pose_sources[0] }}){% endif %}
+          </option>
+          <option value="optitrack"
+            {% if detail.pose_source_override == 'optitrack' %}selected{% endif %}
+            {% if detail.available_pose_sources is not none and 'optitrack' not in detail.available_pose_sources %}disabled{% endif %}>
+            OptiTrack
+          </option>
+          <option value="slam"
+            {% if detail.pose_source_override == 'slam' %}selected{% endif %}
+            {% if detail.available_pose_sources is not none and 'slam' not in detail.available_pose_sources %}disabled{% endif %}>
+            SLAM
+          </option>
+        </select>
+        {% if detail.available_pose_sources is none %}
+        <p class="muted">Pose sources unknown until preprocessing step 5 (eef-pose) has run.</p>
+        {% endif %}
+      </form>
+      {% endif %}
       <form class="notes-form" hx-post="/sessions/{{ detail.session_id }}/notes" hx-target="#detail-body" hx-swap="outerHTML">
         <label for="session-notes">Notes</label>
         <textarea id="session-notes" name="notes" rows="3" placeholder="Add notes…">{{ detail.notes or '' }}</textarea>
@@ -170,7 +254,18 @@
         </dd>
         <dt>Frames lost</dt><dd>{{ detail.slam.n_frames_lost }} / {{ detail.slam.n_frames_total }}</dd>
         <dt>Relocalizations</dt><dd>{{ detail.slam.n_relocalization_events }}</dd>
+        {% if detail.slam.has_optitrack %}
+        <dt>OptiTrack</dt><dd>available — exempt from SLAM-based exclusion</dd>
+        {% endif %}
       </dl>
+      {% if detail.slam.auto_unusable %}
+      <p class="muted">
+        <span class="badge warn">auto-unusable</span>
+        Excluded from dataset exports: {{ detail.slam.auto_unusable_reasons | join('; ') }}.
+        Thresholds live in <code>ingest/config/quality_thresholds.yaml</code>; this verdict is
+        recomputed on read, so changing them reclassifies without reprocessing.
+      </p>
+      {% endif %}
       {% elif detail.pzarr_exists %}
       <p class="muted">No SLAM results for this session yet (run <code>pingest pp 2</code>).</p>
       {% endif %}

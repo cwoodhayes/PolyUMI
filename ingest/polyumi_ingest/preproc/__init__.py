@@ -1,8 +1,11 @@
 """Preprocessing steps for PolyUMI scenes."""
 
+from polyumi_ingest.episode_status import Episode, SceneContext
 from polyumi_ingest.preproc.step_base import (
     PreprocessingStep,
+    StepComplete,
     available_preprocessing_steps,
+    preprocessing_step_versions,
     preprocessing_steps_done,
     register_preprocessing_step,
     run_preprocessing,
@@ -18,11 +21,15 @@ __all__ = [
     'ArucoGripperWidthStep',
     'ChirpTimeSyncStep',
     'EefPoseStep',
+    'Episode',
     'OrbSlam3Step',
     'PreprocessingStep',
+    'SceneContext',
     'SlamToWorldAlignStep',
+    'StepComplete',
     'TimeSyncStep',
     'available_preprocessing_steps',
+    'preprocessing_step_versions',
     'preprocessing_steps_done',
     'register_preprocessing_step',
     'run_preprocessing',

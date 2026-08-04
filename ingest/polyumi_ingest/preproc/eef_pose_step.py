@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-import pathlib
 
 import numpy as np
 import zarr
 from numcodecs import Blosc
 
 from polyumi_ingest.config import load_gripper_calib
+from polyumi_ingest.episode_status import Episode, SceneContext
 from polyumi_ingest.preproc.step_base import PreprocessingStep, register_preprocessing_step
 from polyumi_ingest.pzarr.store import arr, grp
 from polyumi_ingest.timebase import nearest_idx
@@ -40,7 +40,7 @@ def _gopro_ts_in_finger_clock(ep: zarr.Group) -> np.ndarray:
 @register_preprocessing_step(step_number=5, step_name='eef-pose')
 class EefPoseStep(PreprocessingStep):
     """
-    Re-express each episode's pose trajectory onto the canonical hand frame as ``eef/pose``.
+    Re-express each episode's pose trajectory onto the canonical hand frame.
 
     Neither raw pose source is in a frame the policy can use. OptiTrack reports the pose of the
     marker *rigid body*, whose origin Motive places at the marker centroid — an arbitrary point
@@ -49,11 +49,15 @@ class EefPoseStep(PreprocessingStep):
     same frame as each other, so models trained from different sources are not comparable.
 
     Both sources are converted onto one canonical **body** frame — the hand — and written to
-    ``<episode>/eef/pose`` on the GoPro frame grid (the same grid as ``gopro/frames`` and
-    ``annotations/gripper_width``, so a single index serves all three downstream).
+    **one array per available source**, ``<episode>/eef/pose_optitrack`` and/or
+    ``<episode>/eef/pose_slam``, on the GoPro frame grid (the same grid as ``gopro/frames`` and
+    ``annotations/gripper_width``, so a single index serves all three downstream). Writing both
+    alternates (rather than baking in a single winner) lets pose-source selection move to
+    **export time** — see ``export.dp.buffer`` — instead of being frozen at preprocessing time.
+    ``eef.attrs['default_source']`` records which one export uses absent an override.
 
     The chain routes both sources through the **GoPro frame** and then applies one shared
-    ``T_gopro_to_hand`` hop::
+    ``T_gopro_to_fingertip`` hop::
 
         slam:      T_s_gp  ──────────────────────────────────► · T_gp_hand
         optitrack: T_o_rb · inv(T_gb_rb) · T_gb_gp  ─────────► · T_gp_hand
@@ -71,36 +75,33 @@ class EefPoseStep(PreprocessingStep):
     the body frame does not cancel, which is why it has to be fixed here. See
     ``transforms.retarget_body_frame``.
 
+    SLAM's NaN rows are carried through untouched -- both genuine tracking losses and, under
+    ``localization_frame_stride``, every frame the localizer was never fed. Nothing here invents
+    a pose: gaps become episode boundaries at export (see ``export.dp.buffer``), which is the
+    upstream UMI policy and means every exported pose is a real measurement. OptiTrack is dense
+    and has no gaps to begin with.
+
     Runs after step 3 (slam-optitrack-align), which needs the untouched source-frame poses to
     solve for T_ws, and step 4 (aruco-gripper-width), which defines the GoPro-grid convention.
 
-    Prerequisites: ``T_gopro_to_hand`` in ``config/gripper_calib.yaml``; ``timestamps/gopro``
+    Prerequisites: ``T_gopro_to_fingertip`` in ``config/gripper_calib.yaml``; ``timestamps/gopro``
     per episode; and either ``optitrack/pose`` + ``optitrack/timestamps`` in the root group or
     ``gopro/slam_poses`` in the episode.
     """
 
-    def run_step(self, scene_zarr: pathlib.Path, force: bool = False) -> None:
-        """Write ``eef/pose`` for every episode that has a usable pose source."""
-        root = zarr.open_group(str(scene_zarr), mode='a')
-        episodes = sorted(k for k in root.keys() if k.startswith('episode_'))
-        if not episodes:
-            raise RuntimeError(f'No episodes found in {scene_zarr}')
-
+    def prepare_scene(self, scene: SceneContext) -> None:
+        """Load the gripper calibration and derive each source's hop to the hand frame."""
         gripper_calib = load_gripper_calib()
         T_gb_rb, T_gb_gp, _ = gripper_calib_transforms(gripper_calib)
         T_gp_hand = gopro_to_hand_transform(gripper_calib)
-        root.attrs['gripper_calib'] = gripper_calib
+        scene.root.attrs['gripper_calib'] = gripper_calib
 
         # Per-source hop from what the sensor reports to the hand frame. Both route through the
         # GoPro frame, which is the only body both embodiments share; see the class docstring.
-        source_to_hand = {
+        self.source_to_hand = {
             'slam': T_gp_hand,
             'optitrack': T_gb_rb.inv() * T_gb_gp * T_gp_hand,
         }
-
-        for episode_key in episodes:
-            ep = root.require_group(episode_key)
-            self._process_episode(root, ep, episode_key, source_to_hand, force=force)
 
     def _available_sources(self, root: zarr.Group, ep: zarr.Group) -> list[str]:
         """Pose sources this episode can actually supply, in preference order."""
@@ -111,58 +112,73 @@ class EefPoseStep(PreprocessingStep):
             available.append('slam')
         return [s for s in _SOURCE_PREFERENCE if s in available]
 
-    def _process_episode(
-        self,
-        root: zarr.Group,
-        ep: zarr.Group,
-        episode_key: str,
-        source_to_hand: dict,
-        force: bool,
-    ) -> None:
-        """Resolve one episode's pose source, convert it to the hand frame, and write eef/pose."""
-        if 'eef/pose' in ep and not force:
-            log.info(f'  {episode_key}: eef/pose already present; use --force to recompute.')
-            return
+    def process_episode(self, scene: SceneContext, episode: Episode) -> None:
+        """Resolve this episode's available pose sources and write one eef/pose_<source> each."""
+        root, ep, episode_key = scene.root, episode.group, episode.key
+        source_to_hand = self.source_to_hand
 
         sources = self._available_sources(root, ep)
         if not sources:
             log.warning(f'  {episode_key}: no optitrack or slam pose source; skipping.')
             return
-        source = sources[0]
+
+        existing = set(ep['eef'].attrs.get('available_sources', [])) if 'eef' in ep else set()
+        if not scene.force and existing.issuperset(sources):
+            log.info(f'  {episode_key}: eef/pose_* already present for {sources}; use --force to recompute.')
+            return
 
         gopro_ts = _gopro_ts_in_finger_clock(ep)
-
-        if source == 'optitrack':
-            # OptiTrack runs on its own clock and rate; resample it onto the GoPro frame grid
-            # so eef/pose shares one index with the frames and the gripper width.
-            opti_ts = np.asarray(arr(root, 'optitrack/timestamps')[:], dtype=np.float64)
-            opti_poses = np.asarray(arr(root, 'optitrack/pose')[:], dtype=np.float64)
-            raw = opti_poses[nearest_idx(opti_ts, gopro_ts)]
-            world_frame = 'optitrack'
-        else:
-            raw = np.asarray(arr(ep, 'gopro/slam_poses')[:], dtype=np.float64)
-            world_frame = 'slam'
-
-        if len(raw) != len(gopro_ts):
-            raise RuntimeError(
-                f'{episode_key}: pose source {source!r} has {len(raw)} rows but the gopro grid '
-                f'has {len(gopro_ts)}; refusing to write a misaligned eef/pose.'
-            )
-
-        pose = retarget_body_frame(raw, source_to_hand[source])
-
-        n_nan = int(np.isnan(pose[:, 0]).sum())
         out_grp = ep.require_group('eef')
+
+        # Clean up the pre-dual-source schema: a scene preprocessed by the old EefPoseStep (a
+        # single eef/pose array plus group-level 'source'/'world_frame'/'n_nan' attrs) leaves
+        # both behind on a --force re-run otherwise, since neither is part of the new schema
+        # and nothing above would ever remove them.
         if 'pose' in out_grp:
             del out_grp['pose']
-        out_grp.create_array('pose', data=pose, compressor=_BLOSC)
-        out_grp.attrs['source'] = source
-        out_grp.attrs['world_frame'] = world_frame
+        for stale_attr in ('source', 'world_frame', 'n_nan'):
+            out_grp.attrs.pop(stale_attr, None)
+
+        for source in sources:
+            if source == 'optitrack':
+                # OptiTrack runs on its own clock and rate; resample it onto the GoPro frame
+                # grid so eef/pose_optitrack shares one index with the frames and gripper width.
+                opti_ts = np.asarray(arr(root, 'optitrack/timestamps')[:], dtype=np.float64)
+                opti_poses = np.asarray(arr(root, 'optitrack/pose')[:], dtype=np.float64)
+                raw = opti_poses[nearest_idx(opti_ts, gopro_ts)]
+                world_frame = 'optitrack'
+            else:
+                # Taken exactly as SLAM reported it. NaN rows -- wherever tracking was lost, and
+                # every frame the localizer was never fed under `localization_frame_stride` --
+                # stay NaN: the exporter selects the fed grid and turns runs of NaN into episode
+                # boundaries, so nothing downstream needs an invented pose to bridge a gap.
+                raw = np.asarray(arr(ep, 'gopro/slam_poses')[:], dtype=np.float64)
+                world_frame = 'slam'
+
+            if len(raw) != len(gopro_ts):
+                raise RuntimeError(
+                    f'{episode_key}: pose source {source!r} has {len(raw)} rows but the gopro '
+                    f'grid has {len(gopro_ts)}; refusing to write a misaligned eef/pose_{source}.'
+                )
+
+            pose = retarget_body_frame(raw, source_to_hand[source])
+            n_nan = int(np.isnan(pose[:, 0]).sum())
+
+            array_name = f'pose_{source}'
+            if array_name in out_grp:
+                del out_grp[array_name]
+            pose_arr = out_grp.create_array(array_name, data=pose, compressor=_BLOSC)
+            pose_arr.attrs['world_frame'] = world_frame
+            pose_arr.attrs['body_frame'] = 'hand'
+            pose_arr.attrs['grid'] = 'gopro'
+            pose_arr.attrs['n_nan'] = n_nan
+
+            log.info(
+                f'  {episode_key}: eef/pose_{source} {pose.shape} '
+                f'(world={world_frame}, body=hand, {n_nan}/{len(pose)} NaN)'
+            )
+
+        out_grp.attrs['available_sources'] = sources
+        out_grp.attrs['default_source'] = sources[0]  # _SOURCE_PREFERENCE order
         out_grp.attrs['body_frame'] = 'hand'
         out_grp.attrs['grid'] = 'gopro'
-        out_grp.attrs['n_nan'] = n_nan
-
-        log.info(
-            f'  {episode_key}: eef/pose {pose.shape} from {source} '
-            f'(world={world_frame}, body=hand, {n_nan}/{len(pose)} NaN)'
-        )

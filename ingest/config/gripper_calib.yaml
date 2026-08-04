@@ -33,23 +33,26 @@ T_gripper_base_to_gopro:
   rotation: [ 0.7071068, 0, 0.7071068, 0 ]
 
 # The canonical body frame every exported pose is expressed at (preprocessing step 5).
-#
-# Defined against the GoPro rather than the gripper base on purpose: the gripper base is a
-# mechanical part of the *handheld* gripper that the Franka end-effector does not have, so a
-# frame anchored to it cannot be reproduced on the robot. The GoPro-to-fingers geometry is
-# identical on both embodiments, so a frame anchored to the GoPro can be. Whatever this
-# resolves to must be the same physical point the robot reports as `eef_frame` at inference,
-# or training and deployment are in different frames and the policy cannot transfer.
-#
-# !!! PLACEHOLDER — NOT MEASURED. DO NOT TRAIN ON THIS. !!!
-# The translation is a guess: aruco_finger_tags.nominal_z_m says the finger tags sit ~72mm
-# along the GoPro's +z (forward), so the fingertips are roughly there. The rotation is a bare
-# identity and has not been checked against anything at all. Step 5 puts this on the critical
-# path for every exported pose, and a body-frame error of x leaks (R - I)*x into every
-# relative action — at this ~7cm scale a 30deg wrist rotation is already ~4cm of error.
-# Replace both with a real calibration before any training run.
-T_gopro_to_hand:
-  translation: [0.0, 0.0, 0.072] # meters — gopro frame: x right, y down, z forward
+# in other words, this is the "pose" that the model knows about.
+# This transform goes from the gopro's camera frame in optical coordinates (exactly as outputted by
+# ORB-SLAM3) to gripper fingertips, as measured in the PolyUMI CAD assembly.
+# To be more specific:
+# - "camera frame" origin is measured on the CAD as the centerpoint of the GoPro lens faceplate, 
+#   with a 5mm fudge factor added to guess at where the sensor plane is (.209->.259)
+# - "gripper fingertips" is the midpoint between the two gripper fingertips, on the plane of the upper 
+#   surface of the fingers. In other words, if you close the gripper all the way, it's the point where the
+#   two fingertips meet that is coplanar with the QR codes.
+
+# I picked this canonical body frame because A. it follows roughly UMI's approach
+# and B. this is where the gripper interacts with objects, and this may make the model learn
+# to reason about contact & manipulation more easily since it can sort of work directly in manipulanda space,
+# rather than have to learn about the geometry of the gripper.
+
+# the CAD is designed such that this geometric relationship is the same for both the gripper
+# and the franka end effector.
+T_gopro_to_fingertip:
+  translation: [0.0, 0.014, 0.259] # meters — gopro frame: x right, y down, z forward
+  # we'll work in optical coordinates (ie z out, x right, y down); no reason to change from SLAM output
   rotation: [ 0.0, 0.0, 0.0, 1.0 ] # quaternion (xyzw)
 
 

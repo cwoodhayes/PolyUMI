@@ -62,12 +62,13 @@ class VideoFile(SessionDataABC):
         import cv2
         import numpy as np
 
-        sample = cv2.imdecode(
-            np.frombuffer(frames[0].read_bytes(), dtype=np.uint8),
-            cv2.IMREAD_COLOR,
-        )
+        # cv2.imdecode raises on an *empty* buffer and returns None on a corrupt one; a recorder
+        # killed mid-write leaves zero-byte JPEGs behind, so check the size before decoding to
+        # get a ValueError naming the file rather than a bare OpenCV assertion.
+        raw = np.frombuffer(frames[0].read_bytes(), dtype=np.uint8)
+        sample = cv2.imdecode(raw, cv2.IMREAD_COLOR) if raw.size else None
         if sample is None:
-            raise ValueError(f'Failed to decode sample frame: {frames[0]}')
+            raise ValueError(f'Failed to decode sample frame ({raw.size} bytes): {frames[0]}')
 
         height, width = sample.shape[:2]
 

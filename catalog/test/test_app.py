@@ -406,6 +406,40 @@ def test_mark_unusable_unknown_session_returns_400(tmp_path: pathlib.Path):
     assert resp.status_code == 400
 
 
+def test_pose_source_round_trip(tmp_path: pathlib.Path):
+    """Setting a pose-source override then clearing it back to default updates the selector + scene.json."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    session_id = _session_id(rec)
+
+    resp = client.post(f'/sessions/{session_id}/pose-source', data={'source': 'slam'})
+    assert resp.status_code == 200
+    manifest = SceneManifest.from_scene_dir(rec / 'scene_2026-07-26_10-00-00_abcd')
+    assert manifest.pose_source_overrides == {'session_1': 'slam'}
+
+    resp = client.post(f'/sessions/{session_id}/pose-source', data={'source': 'default'})
+    assert resp.status_code == 200
+    manifest = SceneManifest.from_scene_dir(rec / 'scene_2026-07-26_10-00-00_abcd')
+    assert manifest.pose_source_overrides == {}
+
+
+def test_pose_source_unknown_session_returns_400(tmp_path: pathlib.Path):
+    """Setting a pose source on a nonexistent session id is rejected, not a crash."""
+    rec, engine = _seed(tmp_path)
+    resp = TestClient(create_app(engine, recordings_dir=rec)).post(
+        '/sessions/does-not-exist/pose-source', data={'source': 'slam'}
+    )
+    assert resp.status_code == 400
+
+
+def test_pose_source_unknown_value_returns_400(tmp_path: pathlib.Path):
+    """An unrecognized source value is rejected rather than silently accepted."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    resp = client.post(f'/sessions/{_session_id(rec)}/pose-source', data={'source': 'lidar'})
+    assert resp.status_code == 400
+
+
 def test_index_includes_empty_dataset_builder(tmp_path: pathlib.Path):
     """With no scenes added yet, the builder shows its empty state, still offering a task picker."""
     resp = _client(tmp_path).get('/')
@@ -509,7 +543,7 @@ def test_post_build_dataset_success_redirects_and_clears_draft(tmp_path: pathlib
     def fake_export_scenes_to_dp(scene_paths, output_path):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b'fake-zip')
-        return 3
+        return 3, []
 
     monkeypatch.setattr('polyumi_ingest.export.dp.export_scenes_to_dp', fake_export_scenes_to_dp)
 
@@ -542,7 +576,7 @@ def test_post_build_dataset_with_task_id_persists_it(tmp_path: pathlib.Path, mon
     def fake_export_scenes_to_dp(scene_paths, output_path):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b'fake-zip')
-        return 1
+        return 1, []
 
     monkeypatch.setattr('polyumi_ingest.export.dp.export_scenes_to_dp', fake_export_scenes_to_dp)
 
@@ -646,7 +680,7 @@ def test_run_pp_shows_running_then_done(tmp_path: pathlib.Path, monkeypatch):
     started = threading.Event()
     finish = threading.Event()
 
-    def fake_run_full_pipeline(scene_dir):
+    def fake_run_full_pipeline(scene_dir, force=False):
         started.set()
         finish.wait(timeout=5)
 
@@ -670,7 +704,7 @@ def test_run_pp_records_error_on_failure(tmp_path: pathlib.Path, monkeypatch):
     """A failing pipeline run surfaces its error message instead of leaving status stuck."""
     rec, engine = _seed(tmp_path)
 
-    def failing(scene_dir):
+    def failing(scene_dir, force=False):
         raise RuntimeError('missing gopro.mp4 in session_1')
 
     monkeypatch.setattr('polyumi_catalog.pp_status.run_full_pipeline', failing)
@@ -689,7 +723,7 @@ def test_run_pp_is_idempotent_while_already_running(tmp_path: pathlib.Path, monk
     started = threading.Event()
     finish = threading.Event()
 
-    def fake_run_full_pipeline(scene_dir):
+    def fake_run_full_pipeline(scene_dir, force=False):
         calls.append(scene_dir)
         started.set()
         finish.wait(timeout=5)
@@ -734,6 +768,68 @@ def test_run_pp_button_confirms_when_scene_already_fully_processed(tmp_path: pat
     resp = TestClient(create_app(engine, recordings_dir=rec)).get('/select/scene/scene-1')
     assert 'hx-confirm=' in resp.text
     assert 'already completed all' in resp.text
+    # "Run full pipeline" would be a no-op here (nothing left to continue) — hidden.
+    assert 'Run full pipeline' not in resp.text
+    assert 'Re-run pipeline' in resp.text
+
+
+def test_run_pp_no_rerun_button_when_nothing_complete_yet(tmp_path: pathlib.Path):
+    """With zero steps done, there's nothing to force-redo, so only the plain button shows."""
+    resp = _client(tmp_path).get('/select/scene/scene-1')
+    assert 'Run full pipeline' in resp.text
+    assert 'Re-run pipeline' not in resp.text
+
+
+def test_run_pp_both_buttons_and_no_confirm_wording_when_partially_complete(tmp_path: pathlib.Path):
+    """Some-but-not-all steps done: both buttons show; re-run confirms without the 'all N' wording."""
+    from polyumi_ingest.preproc import available_preprocessing_steps
+
+    rec, engine = _seed(tmp_path)
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 0
+    all_steps = [s.step_number for s in available_preprocessing_steps()]
+    root.attrs['preprocessing_steps'] = all_steps[:1]  # partial completion
+
+    resp = TestClient(create_app(engine, recordings_dir=rec)).get('/select/scene/scene-1')
+    assert 'Run full pipeline' in resp.text
+    assert 'Re-run pipeline' in resp.text
+    assert 'already completed all' not in resp.text
+    assert 'discard the 1 already-completed step' in resp.text
+
+
+def test_run_pp_force_true_is_passed_through_to_run_full_pipeline(tmp_path: pathlib.Path, monkeypatch):
+    """Posting force=true reaches pp_status.run_full_pipeline as force=True, not silently dropped."""
+    rec, engine = _seed(tmp_path)
+    calls = []
+
+    def fake_run_full_pipeline(scene_dir, force=False):
+        calls.append(force)
+
+    monkeypatch.setattr('polyumi_catalog.pp_status.run_full_pipeline', fake_run_full_pipeline)
+
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    client.post('/scenes/scene-1/run-pp', data={'force': 'true'})
+    _wait_until(lambda: len(calls) == 1)
+
+    assert calls == [True]
+
+
+def test_run_pp_omitted_force_defaults_to_false(tmp_path: pathlib.Path, monkeypatch):
+    """The plain 'continue' button (no force field posted) must not force a redo."""
+    rec, engine = _seed(tmp_path)
+    calls = []
+
+    def fake_run_full_pipeline(scene_dir, force=False):
+        calls.append(force)
+
+    monkeypatch.setattr('polyumi_catalog.pp_status.run_full_pipeline', fake_run_full_pipeline)
+
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    client.post('/scenes/scene-1/run-pp')
+    _wait_until(lambda: len(calls) == 1)
+
+    assert calls == [False]
 
 
 def test_run_pp_lock_prevents_concurrent_duplicate_runs(tmp_path: pathlib.Path, monkeypatch):
@@ -752,7 +848,7 @@ def test_run_pp_lock_prevents_concurrent_duplicate_runs(tmp_path: pathlib.Path, 
     barrier = threading.Barrier(n_threads)
     finish = threading.Event()
 
-    def fake_run_full_pipeline(scene_dir):
+    def fake_run_full_pipeline(scene_dir, force=False):
         with calls_lock:
             calls.append(scene_dir)
         finish.wait(timeout=5)
@@ -773,3 +869,106 @@ def test_run_pp_lock_prevents_concurrent_duplicate_runs(tmp_path: pathlib.Path, 
     finish.set()
 
     assert len(calls) == 1
+
+
+def test_scene_detail_shows_recording_and_pzarr_commits(tmp_path: pathlib.Path):
+    """The scene pane surfaces both lineages: what recorded the sessions and what built the pzarr."""
+    rec, engine = _seed(tmp_path)
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 0
+    root.attrs['git_sha'] = 'c' * 40
+    root.attrs['pipeline_version'] = '0.1.0'
+
+    resp = TestClient(create_app(engine, recordings_dir=rec)).get('/select/scene/scene-1')
+
+    assert 'Recorded by' in resp.text
+    assert 'pzarr built by' in resp.text
+    # abbreviated in the text, full sha available on hover
+    assert 'c' * 12 in resp.text
+    assert 'c' * 40 in resp.text
+    assert '0.1.0' in resp.text
+
+
+def test_scene_detail_shows_per_step_commit_for_completed_steps(tmp_path: pathlib.Path):
+    """Each completed step renders the commit it was run under, so a mixed corpus is visible."""
+    rec, engine = _seed(tmp_path)
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 0
+    root.attrs['preprocessing_steps'] = [2]
+    root.attrs['preprocessing_step_versions'] = {
+        '2': {'git_sha': 'd' * 40, 'completed_at': '2026-08-01T00:00:00+00:00'},
+    }
+
+    resp = TestClient(create_app(engine, recordings_dir=rec)).get('/select/scene/scene-1')
+
+    assert 'd' * 12 in resp.text
+    assert '2026-08-01T00:00:00+00:00' in resp.text
+
+
+def test_scene_detail_renders_without_provenance_attrs(tmp_path: pathlib.Path):
+    """A store predating provenance still renders; the fields fall back to a dash."""
+    rec, engine = _seed(tmp_path)
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 0
+    root.attrs['preprocessing_steps'] = [2]
+
+    resp = TestClient(create_app(engine, recordings_dir=rec)).get('/select/scene/scene-1')
+
+    assert resp.status_code == 200
+    assert 'Provenance' in resp.text
+
+
+def test_run_pp_force_resets_steps_before_the_response_is_rendered(tmp_path: pathlib.Path, monkeypatch):
+    """
+    Clicking "Re-run pipeline" immediately shows 0/N, without waiting for the first poll.
+
+    The reset is what makes it obvious the scene is being worked on; if it only happened
+    on the background thread, this response could still claim every step was complete.
+    """
+    rec, engine = _seed(tmp_path)
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 0
+    root.attrs['preprocessing_steps'] = [1, 2]
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_run_full_pipeline(scene_dir, force=False):
+        started.set()
+        release.wait(timeout=5)
+
+    monkeypatch.setattr('polyumi_catalog.pp_status.run_full_pipeline', fake_run_full_pipeline)
+
+    from polyumi_ingest.preproc import available_preprocessing_steps
+
+    n_steps = len(available_preprocessing_steps())
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    try:
+        resp = client.post('/scenes/scene-1/run-pp', data={'force': 'true'})
+        assert zarr.open_group(str(scene_dir / 'scene.zarr'), mode='r').attrs['preprocessing_steps'] == []
+        assert f'0 / {n_steps}' in resp.text
+        assert 'pp-step-done' not in resp.text
+        assert 'Running pipeline' in resp.text
+    finally:
+        release.set()
+        started.wait(timeout=5)
+
+
+def test_run_pp_without_force_leaves_completed_steps_ticked(tmp_path: pathlib.Path, monkeypatch):
+    """The "continue" run must not reset — it exists precisely to skip what's already done."""
+    rec, engine = _seed(tmp_path)
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 0
+    root.attrs['preprocessing_steps'] = [1, 2]
+
+    monkeypatch.setattr('polyumi_catalog.pp_status.run_full_pipeline', lambda *a, **k: None)
+
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    client.post('/scenes/scene-1/run-pp')
+
+    assert zarr.open_group(str(scene_dir / 'scene.zarr'), mode='r').attrs['preprocessing_steps'] == [1, 2]

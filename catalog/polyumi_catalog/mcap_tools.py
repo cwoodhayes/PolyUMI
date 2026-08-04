@@ -3,7 +3,7 @@ Per-episode MCAP export + local Foxglove launch (Phase 2.5).
 
 MCAP export reuses ingest's existing exporter (``polyumi_ingest.export.mcap``)
 rather than reimplementing anything, per the "ingest owns preprocessing/export"
-decision (docs/catalog-ui-plan.md §10.2). The one bit of glue this module adds is
+decision. The one bit of glue this module adds is
 resolving a catalog ``Session`` to its pzarr *episode index*: pzarr keys episodes
 by position (``episode_0``, ``episode_1``, ...) rather than by session_id, so we
 recover the mapping via each episode group's ``session_dir`` attribute, which

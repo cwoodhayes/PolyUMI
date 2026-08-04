@@ -14,7 +14,7 @@ from sqlalchemy import func
 from sqlmodel import Session as DBSession
 from sqlmodel import select
 
-from polyumi_catalog import episode_quality, mcap_tools, pp_status, pzarr_inspect, thumbnails
+from polyumi_catalog import episode_quality, mcap_tools, pp_status, provenance, pzarr_inspect, thumbnails
 from polyumi_catalog.models import Dataset, DatasetMember, Scene, Session, Task
 
 # Sentinel task filters used by the UI's pseudo-rows in the Tasks column.
@@ -167,7 +167,14 @@ def list_sessions(db: DBSession, scene_id: str) -> list[dict]:
                 'video_dropped_frames': s.video_dropped_frames,
                 'task_meta': s.task_meta,
                 'created_at': s.created_at,
-                'unusable': s.unusable,
+                # Effective unusable = the human's explicit scene.json marking OR the
+                # threshold-derived verdict. Kept as separate fields too so the UI can
+                # say *why* it's excluded and distinguish "someone decided this" from
+                # "the metrics say so" (the latter flips if thresholds change).
+                'unusable': s.unusable or (quality['auto_unusable'] if quality else False),
+                'unusable_manual': s.unusable,
+                'auto_unusable': quality['auto_unusable'] if quality else False,
+                'auto_unusable_reasons': quality['auto_unusable_reasons'] if quality else [],
                 'slam_tracking_ratio': quality['tracking_ratio'] if quality else None,
                 'slam_low_quality': quality['low_quality'] if quality else False,
             }
@@ -265,6 +272,7 @@ def scene_detail(db: DBSession, scene_id: str) -> dict:
         'quality': quality,
         'total_dropped_video_frames': sum(s.video_dropped_frames or 0 for s in sessions),
         'pp_status': pp_status.scene_pp_status(pathlib.Path(scene.dir)),
+        'provenance': provenance.scene_provenance(pathlib.Path(scene.dir)),
     }
 
 
@@ -279,6 +287,9 @@ def session_detail(db: DBSession, session_id: str) -> dict:
     mcap_path = mcap_tools.mcap_path_for_session(pathlib.Path(scene.dir), session_dirname) if pzarr_ok else None
     slam = episode_quality.session_quality(pathlib.Path(scene.dir), session_dirname) if pzarr_ok else None
     pzarr_streams = pzarr_inspect.session_pzarr_streams(pathlib.Path(scene.dir), session_dirname) if pzarr_ok else None
+    available_pose_sources = (
+        pzarr_inspect.available_pose_sources(pathlib.Path(scene.dir), session_dirname) if pzarr_ok else None
+    )
     return {
         'kind': 'session',
         'session_id': s.session_id,
@@ -298,6 +309,10 @@ def session_detail(db: DBSession, session_id: str) -> dict:
         'mcap_exists': mcap_path is not None,
         'slam': slam,
         'pzarr_streams': pzarr_streams,
+        'pose_source_override': s.pose_source_override,
+        # None means "unknown" (no pzarr yet / step 5 hasn't run) — the template renders both
+        # options enabled in that case rather than guessing which the episode can supply.
+        'available_pose_sources': available_pose_sources,
         # read straight from the gopro.mp4 sidecar, independent of pzarr build state
         'gopro_fps': thumbnails.gopro_fps(pathlib.Path(s.dir)),
     }
