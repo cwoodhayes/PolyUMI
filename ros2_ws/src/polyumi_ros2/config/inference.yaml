@@ -20,8 +20,7 @@
       # Delay from a photon hitting the GoPro sensor to the frame's ROS header stamp:
       # GoPro encode + HDMI out + capture card + USB + v4l2 dequeue. Sets both the TF lookup
       # instant and t_obs for chunk truncation, so it is the most load-bearing value here.
-      # 0.05 is a guess and probably low — UMI measured 0.125-0.17s for a plain UVC webcam,
-      # and this path is longer than that.
+      # Unmeasured - guess (TODO measure)
       gopro: 0.13
       # Finger camera latency. Declared but never consumed — the policy has no tactile input
       # yet (blocking issue 4). Left at 0 so it cannot skew anything until it is wired.
@@ -35,8 +34,8 @@
       # Delay from the hand's true aperture to it appearing on /fr3_gripper/joint_states.
       # Kept separate from proprio because the gripper is a different device on its own link and
       # its own (slower, jitterier) topic — UMI splits these too (gripper_action_latency vs
-      # robot_action_latency). Unmeasured; the topic jitters 24-100 ms, so 0 is certainly wrong,
-      # but a wrong non-zero guess is worse than a known-zero placeholder.
+      # robot_action_latency). 
+      # Unmeasured - placeholder guess.
       gripper: 0.05
 
     # --- Gripper width conversion. ---

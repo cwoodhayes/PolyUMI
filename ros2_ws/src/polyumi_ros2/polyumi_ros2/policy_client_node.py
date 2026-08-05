@@ -150,6 +150,13 @@ class PolicyClientNode(Node):
         # default so setups without a hand — motion_only bringup, a bare arm — still run, feeding
         # the closed width with a throttled warning rather than stalling the whole loop.
         self.declare_parameter('require_gripper_state', False)
+        # Reject a cached gripper sample older than this at lookup time. The gripper is the only
+        # observation channel that can go stale *silently*: a dead camera trips max_image_age_s
+        # and dead TF raises ExtrapolationException, but _gripper_width_at just keeps holding its
+        # last sample forever, feeding the policy a frozen width with no complaint. 0.5s is ~5x
+        # the worst observed publish interval (the topic jitters 24-100ms) so ordinary jitter
+        # cannot trip it, and well short of the ~2.3s the buffer can hold. <= 0 disables the check.
+        self.declare_parameter('max_gripper_age_s', 0.5)
         # Finger-tag separation with the gripper fully closed, subtracted to get jaw aperture.
         # !!! NEVER MEASURED — it is gripper_calib.yaml's closed_mm, a value no code reads. !!!
         # UMI measures its equivalent from a calibration video; see polyumi_ros2.gripper_map.
@@ -178,6 +185,7 @@ class PolicyClientNode(Node):
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
         gripper_topic = self.get_parameter('gripper_state_topic').get_parameter_value().string_value
         self._require_gripper_state = self.get_parameter('require_gripper_state').get_parameter_value().bool_value
+        self._max_gripper_age_s = self.get_parameter('max_gripper_age_s').get_parameter_value().double_value
         self._gripper_offset_m = self.get_parameter('gripper_offset_m').get_parameter_value().double_value
         self._gripper_max_width_m = self.get_parameter('gripper_max_width_m').get_parameter_value().double_value
         self._latency = {
@@ -304,8 +312,11 @@ class PolicyClientNode(Node):
             f'act={self._latency_act}s vs action_dt={self._action_dt}s'
         )
         gripper_missing = 'skip tick' if self._require_gripper_state else 'warn + use closed width'
+        gripper_stale = 'skip tick' if self._require_gripper_state else 'warn + hold last width'
+        max_age = f'{self._max_gripper_age_s}s' if self._max_gripper_age_s > 0 else 'disabled'
         self.get_logger().info(
-            f'gripper — state: {gripper_topic} (missing: {gripper_missing}), '
+            f'gripper — state: {gripper_topic} (missing: {gripper_missing}; '
+            f'stale > {max_age}: {gripper_stale}), '
             f'offset={self._gripper_offset_m}m (UNMEASURED), max_width={self._gripper_max_width_m}m'
         )
 
@@ -402,7 +413,7 @@ class PolicyClientNode(Node):
         with self._gripper_lock:
             self._gripper_buffer.append((rclpy.time.Time.from_msg(msg.header.stamp), width))
 
-    def _gripper_width_at(self, target: rclpy.time.Time) -> float | None:
+    def _gripper_width_at(self, target: rclpy.time.Time | None) -> float | None:
         """
         Linearly interpolate the cached gripper aperture to ``target``, or None if unavailable.
 
@@ -411,13 +422,18 @@ class PolicyClientNode(Node):
         rather than extrapolating: the hand moves slowly relative to the ~60 ms sample interval, so
         a held value is a far smaller error than a linear extrapolation off the end would be.
 
-        :param target: instant to sample the aperture at.
+        :param target: instant to sample the aperture at, or None for "latest available".
+            Note this is deliberately **not** tf2's convention, where a zero ``Time()`` means
+            latest — here a zero stamp is just an instant before every sample, and would return
+            the *oldest* one. Callers with a tf2-style sentinel must translate it to None.
         :returns: aperture in metres, or None if no gripper state has been received at all.
         """
         with self._gripper_lock:
             samples = list(self._gripper_buffer)
         if not samples:
             return None
+        if target is None:
+            return samples[-1][1]
 
         t_ns = target.nanoseconds
         if t_ns <= samples[0][0].nanoseconds:
@@ -435,6 +451,20 @@ class PolicyClientNode(Node):
         # Unreachable given the endpoint guards above, but a bad stamp ordering shouldn't crash
         # the control loop — fall back to the freshest sample.
         return samples[-1][1]
+
+    def _newest_gripper_age_s(self) -> float | None:
+        """
+        Seconds between now and the freshest cached gripper sample, or None if there are none.
+
+        Measured against the node clock rather than against the sample spacing, so a topic that
+        stops entirely — the failure _gripper_width_at cannot see, since holding an endpoint looks
+        identical to a slow publisher — grows this without bound.
+        """
+        with self._gripper_lock:
+            if not self._gripper_buffer:
+                return None
+            newest = self._gripper_buffer[-1][0]
+        return (self.get_clock().now() - newest).nanoseconds * 1e-9
 
     # ------------------------------------------------------------------
     # Control loop
@@ -569,9 +599,11 @@ class PolicyClientNode(Node):
 
         :param image_stamp: header stamp of the camera frame this observation belongs to.
         :returns: width in policy units (finger-tag separation), or None if the tick should be
-            skipped because require_gripper_state is set and no state has arrived.
+            skipped because require_gripper_state is set and no usable state is available.
         """
-        target_time = rclpy.time.Time() if self._tf_use_latest else (
+        # None (not a zero Time()) is this buffer's "latest available" sentinel — tf2's zero-stamp
+        # convention does not carry over, and passing it through would return the OLDEST sample.
+        target_time = None if self._tf_use_latest else (
             image_stamp - Duration(seconds=self._latency['gopro'])
             + Duration(seconds=self._latency['gripper'])
         )
@@ -591,6 +623,27 @@ class PolicyClientNode(Node):
                 'Set require_gripper_state:=true to skip these ticks instead.'
             )
             return robot_to_policy_width(0.0, self._gripper_offset_m)
+
+        # A topic that stops publishing is invisible to _gripper_width_at — it just keeps holding
+        # its newest sample — so the age is checked explicitly, as the camera path does. Skipped
+        # under tf_use_latest, which exists precisely because the stamps are known to be skewed
+        # against this clock and would false-trip it.
+        age_s = self._newest_gripper_age_s()
+        if not self._tf_use_latest and self._max_gripper_age_s > 0 and age_s is not None \
+                and age_s > self._max_gripper_age_s:
+            if self._require_gripper_state:
+                self._warn_throttled(
+                    f'Dropped control tick: newest gripper state is {age_s * 1e3:.0f} ms old '
+                    f'(limit {self._max_gripper_age_s * 1e3:.0f} ms) — has the gripper topic died?'
+                )
+                return None
+            # Holding the last known width beats substituting closed: if the hand stopped
+            # reporting mid-grasp, "closed" is a bigger lie than "still where we last saw it".
+            self._warn_throttled(
+                f'Newest gripper state is {age_s * 1e3:.0f} ms old '
+                f'(limit {self._max_gripper_age_s * 1e3:.0f} ms) — has the gripper topic died? '
+                'Holding the last known width for agent_pos[7].'
+            )
         return robot_to_policy_width(width, self._gripper_offset_m)
 
     def _n_stale_actions(self, t_obs: rclpy.time.Time) -> int:

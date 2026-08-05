@@ -529,6 +529,77 @@ def test_malformed_gripper_state_is_ignored(make_node):
     assert node._gripper_width_at(_t(1.0)) is None
 
 
+def test_tf_use_latest_takes_the_newest_gripper_sample(make_node):
+    """
+    Under tf_use_latest the gripper reads the NEWEST sample, not the oldest.
+
+    tf2 spells "latest available" as a zero ``Time()``, but this buffer is hand-rolled and a zero
+    stamp is simply an instant before every sample — passing the tf2 sentinel straight through
+    returns ``samples[0]``, i.e. the oldest entry, which at the buffer's depth is seconds stale.
+    A dry run is exactly where someone would be watching whether the width tracks, so it has to
+    be the fresh end.
+    """
+    node = make_node(tf_use_latest=True, gripper_offset_m=0.0)
+    for stamp, width in ((1.0, 0.01), (1.1, 0.05), (1.2, 0.08)):
+        _push_gripper(node, stamp, width)
+
+    assert node._gripper_width_at(None) == pytest.approx(0.08)
+    assert node._gripper_width_policy_units(image_stamp=_t(1.2)) == pytest.approx(0.08)
+
+
+def test_stale_gripper_state_holds_the_last_width_and_warns(make_node):
+    """
+    A gripper topic that *stops* is caught by age, and the last width is held rather than zeroed.
+
+    _gripper_width_at cannot see this failure — holding its newest endpoint looks identical to a
+    slow publisher — so without the age check the policy is fed a frozen width indefinitely and
+    in silence. Holding beats substituting closed: if the hand stopped reporting mid-grasp,
+    "closed" is the bigger lie.
+    """
+    node = make_node(gripper_offset_m=0.0, max_gripper_age_s=0.5, **{'latency.gopro': 0.0})
+    _push_gripper(node, 1.0, 0.06)
+
+    with patch.object(node, 'get_clock', return_value=_FakeClock(_t(3.0))), \
+            patch.object(node, '_warn_throttled') as warn:
+        width = node._gripper_width_policy_units(image_stamp=_t(3.0))
+
+    assert width == pytest.approx(0.06)
+    assert 'gripper topic died' in warn.call_args[0][0]
+
+
+def test_stale_gripper_state_skips_the_tick_when_required(make_node):
+    """With require_gripper_state, a stale width drops the tick like a missing one."""
+    node = make_node(require_gripper_state=True, max_gripper_age_s=0.5, **{'latency.gopro': 0.0})
+    _push_gripper(node, 1.0, 0.06)
+
+    with patch.object(node, 'get_clock', return_value=_FakeClock(_t(3.0))):
+        assert node._gripper_width_policy_units(image_stamp=_t(3.0)) is None
+
+
+def test_fresh_gripper_state_is_not_treated_as_stale(make_node):
+    """A width inside the age limit passes even under require_gripper_state."""
+    node = make_node(
+        require_gripper_state=True, gripper_offset_m=0.0, max_gripper_age_s=0.5,
+        **{'latency.gopro': 0.0},
+    )
+    _push_gripper(node, 1.0, 0.06)
+
+    with patch.object(node, 'get_clock', return_value=_FakeClock(_t(1.2))):
+        assert node._gripper_width_policy_units(image_stamp=_t(1.0)) == pytest.approx(0.06)
+
+
+def test_gripper_age_check_can_be_disabled(make_node):
+    """max_gripper_age_s <= 0 turns the check off, for setups with an odd clock or rate."""
+    node = make_node(
+        require_gripper_state=True, gripper_offset_m=0.0, max_gripper_age_s=0.0,
+        **{'latency.gopro': 0.0},
+    )
+    _push_gripper(node, 1.0, 0.06)
+
+    with patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))):
+        assert node._gripper_width_policy_units(image_stamp=_t(100.0)) == pytest.approx(0.06)
+
+
 # ----------------------------------------------------------------------
 # Gripper — command chunk
 # ----------------------------------------------------------------------

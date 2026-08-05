@@ -332,7 +332,8 @@ pose with a stale image against a model trained on same-instant pairs.
 | `eef_frame` | `fr3_hand_tcp` | TF EEF/tool frame — **wrong frame**, see Status blocker 1 |
 | `execute_motion` | `false` | Off by default: the arm does not move until explicitly enabled |
 | `gripper_state_topic` | `/fr3_gripper/joint_states` | Gripper joint-state source for `agent_pos[7]` |
-| `require_gripper_state` | `false` | If true, skip the tick when no gripper state has arrived (like a TF failure). Default false so `motion_only` / no-hand setups still run, substituting the closed width with a throttled warning |
+| `require_gripper_state` | `false` | If true, skip the tick when no gripper state is available — never arrived, or gone stale. Default false so `motion_only` / no-hand setups still run: missing → closed width, stale → hold the last width, both with a throttled warning |
+| `max_gripper_age_s` | `0.5` | Age limit on the newest gripper sample. The gripper is the only observation channel that can freeze *silently* (a dead camera trips `max_image_age_s`, dead TF raises `ExtrapolationException`, but the width buffer just holds its last sample), so the age is checked explicitly. ~5x the worst observed publish interval; `<= 0` disables. Not applied under `tf_use_latest`, whose whole premise is skewed stamps |
 | `gripper_offset_m` | `0.005` | ArUco tag separation → jaw aperture offset. **Never measured** — see Phase 2.5 |
 | `gripper_max_width_m` | `0.08` | Commanded widths clamp here; the FR3 hand reads ~0.0817 open |
 | `latency.gopro` | `0.0` | Camera capture→stamp delay. **Placeholder**, see Status blocker 2 |

@@ -366,6 +366,12 @@ node deliberately does **not** track every chunk: it deadbands (`width_deadband_
 and rate-limits (`min_command_period_s`, default 0.25 s), sending only the latest desired width.
 A quiet log with occasional goals is correct; a stream of `Command aborted!` is not.
 
+The deadband is measured against the width the hand actually **accepted**, not the last one
+attempted — so a goal that never lands (action server gone, goal rejected) is retried on the next
+tick rather than being deadbanded away, which would otherwise park the fingers at a width they
+never received. Parameters are validated at startup and the node refuses to start on a bad one;
+`min_command_period_s: 0` in particular used to divide by zero inside the timer callback.
+
 **First time on hardware, run the arm bridge in plan-only (`execute:=false`) and only this node
 with `execute:=true`**, so a bad width command moves fingers and nothing else. Keep the hand clear
 of objects and of the table.
