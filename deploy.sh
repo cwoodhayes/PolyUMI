@@ -46,12 +46,24 @@ echo "==> Syncing Pi venv (and regenerating protobuf bindings ON the Pi)..."
 # regenerates the *_pb2.py excluded above (setup.py's compile_protos()). Without it, uv sees
 # an already-installed editable package and skips the build, leaving the Pi with whatever
 # stale bindings it had. Costs a few seconds per deploy; correctness is worth it.
-ssh "${PI_HOST}" '
+#
+# The name is the DISTRIBUTION name (hyphens), not the import name — and uv treats an unknown
+# --reinstall-package as a silent no-op, so a typo here would quietly restore exactly the stale-
+# bindings bug this flag exists to prevent. The `uv pip show` below is the check that the name
+# still resolves to something; the import check after it is what proves the build was any good.
+PKG=polyumi-pi-msgs
+ssh "${PI_HOST}" "
     set -euo pipefail
     [ -d ~/PolyUMI/pi/.venv ] || ~/.local/bin/uv venv --system-site-packages ~/PolyUMI/pi/.venv
     cd ~/PolyUMI/pi && ~/.local/bin/uv sync --no-dev --frozen --extra pi \
-        --reinstall-package polyumi-pi-msgs
-'
+        --reinstall-package ${PKG}
+    ~/.local/bin/uv pip show --quiet ${PKG} 2>/dev/null || {
+        echo \"ERROR: '${PKG}' is not installed in the Pi venv — --reinstall-package matched\" >&2
+        echo \"       nothing, so the protobuf bindings were NOT regenerated. Has the package\" >&2
+        echo \"       name in ros2_ws/src/polyumi_pi_msgs/setup.py changed?\" >&2
+        exit 1
+    }
+"
 
 echo "==> Verifying protobuf bindings import on the Pi..."
 # Fail the deploy here rather than at stream time: a gencode/runtime mismatch is an IMPORT

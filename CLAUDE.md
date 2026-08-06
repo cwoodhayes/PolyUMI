@@ -40,6 +40,16 @@ bash -c 'unset VIRTUAL_ENV; cd ros2_ws && source /opt/ros/kilted/setup.bash \
   && colcon test --packages-select polyumi_ros2 \
   && colcon test-result --test-result-base build/polyumi_ros2'
 ```
+The **NUC bridges** in `nuc/` are standalone scripts, not an ament package, so `colcon test`
+never sees them. `nuc/test_fr3_gripper_bridge.py` runs on the laptop anyway — it needs only the
+`franka_msgs` message definitions (built in `ros2_ws`) and mocks the action clients, so no
+hardware or NUC is involved:
+```bash
+bash -c 'unset VIRTUAL_ENV; source /opt/ros/kilted/setup.bash \
+  && source ros2_ws/install/setup.bash \
+  && /usr/bin/python3 -m pytest nuc/test_fr3_gripper_bridge.py -q'
+```
+
 The generated `ament_copyright` / `ament_flake8` / `ament_pep257` linter tests were **deleted** —
 their ROS defaults (99 cols, ament import order) contradicted this repo's ruff config, so
 `colcon test` failed regardless of whether real tests passed. Python style is ruff's job alone;

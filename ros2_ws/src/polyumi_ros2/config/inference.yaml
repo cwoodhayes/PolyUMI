@@ -34,7 +34,7 @@
       # Delay from the hand's true aperture to it appearing on /fr3_gripper/joint_states.
       # Kept separate from proprio because the gripper is a different device on its own link and
       # its own (slower, jitterier) topic — UMI splits these too (gripper_action_latency vs
-      # robot_action_latency). 
+      # robot_action_latency).
       # Unmeasured - placeholder guess.
       gripper: 0.05
 

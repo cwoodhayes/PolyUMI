@@ -37,10 +37,16 @@ SESSION="${SESSION:-polyumi}"
 SHELL_SETTLE_S="${SHELL_SETTLE_S:-5}"
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Where the repo lives on each remote (verified on both hosts). Left unexpanded so the REMOTE
-# shell resolves the tilde against its own $HOME — franka on the NUC, xhy7159 on the GPU box.
-# Override from the environment if these ever move.
+
+# ssh aliases for the three remotes, and where the repo lives on each. All overridable together
+# — a host and its repo path travel as a pair, so parameterizing one without the other would let
+# you point NUC_REPO somewhere new while still ssh'ing to the old box.
+#   NUC_SSH_HOST=otherfranka NUC_REPO=~/src/PolyUMI ./fr3_session.sh
+# The repo paths are left unexpanded so the REMOTE shell resolves the tilde against its own
+# $HOME — franka on the NUC, xhy7159 on the GPU box.
+NUC_SSH_HOST="${NUC_SSH_HOST:-jailfranka}"
 NUC_REPO="${NUC_REPO:-~/Documents/PolyUMI}"
+SHEEP_SSH_HOST="${SHEEP_SSH_HOST:-sheep}"
 SHEEP_REPO="${SHEEP_REPO:-~/repos/PolyUMI}"
 
 # ssh alias for the Pi. "polyumi-pi" is the name other users are expected to set up in their
@@ -55,7 +61,7 @@ MAX_IMAGE_AGE_S="${MAX_IMAGE_AGE_S:-0.3}"
 if [ "${1:-}" = "--kill-local" ] || [ "${1:-}" = "--kill" ]; then
   tmux kill-session -t "$SESSION" 2>/dev/null && echo "Killed local session '$SESSION'."
   if [ "${1:-}" = "--kill-local" ]; then
-    echo "NOTE: the remote tmux sessions on jailfranka/sheep are still running by design."
+    echo "NOTE: the remote tmux sessions on $NUC_SSH_HOST/$SHEEP_SSH_HOST are still running by design."
     echo "      To stop those too:  ./fr3_session.sh --kill"
     exit 0
   fi
@@ -70,9 +76,9 @@ if [ "${1:-}" = "--kill-local" ] || [ "${1:-}" = "--kill" ]; then
       echo "No remote session '$sess' on $host (already gone, or host unreachable)."
     fi
   }
-  kill_remote_session jailfranka fr3-bringup
-  kill_remote_session jailfranka fr3-inference
-  kill_remote_session sheep polyumi
+  kill_remote_session "$NUC_SSH_HOST" fr3-bringup
+  kill_remote_session "$NUC_SSH_HOST" fr3-inference
+  kill_remote_session "$SHEEP_SSH_HOST" polyumi
   exit 0
 fi
 
@@ -84,13 +90,23 @@ fi
 
 # The Pi is on DHCP and its address really does change between sessions, so resolve it from the
 # ssh config rather than baking in a literal that is wrong by next week. One source of truth.
-PI_HOST="$(ssh -G "$PI_SSH_HOST" 2>/dev/null | awk '/^hostname /{print $2}')"
-if [ -z "$PI_HOST" ]; then
-  echo "ERROR: could not resolve '$PI_SSH_HOST' from your ssh config." >&2
-  echo "       Set PI_SSH_HOST to your Pi's ssh alias, e.g.: PI_SSH_HOST=conorpi ./fr3_session.sh" >&2
-  exit 1
+#
+# Checking this for emptiness would prove nothing: with no matching Host block, `ssh -G foo`
+# still exits 0 and echoes back `hostname foo`, so a typo'd alias yields a non-empty PI_HOST
+# that is just the typo — and it would then ride all the way into `pi_host:=` on the laptop's
+# launch line. Actually connecting is the only check that distinguishes the two, and it catches
+# a powered-off Pi at the same time. Non-fatal, matching how the deploy section below treats an
+# unreachable machine: one box being down should not block bringing the others up.
+PI_HOST="$(ssh -G "$PI_SSH_HOST" 2>/dev/null | awk '/^hostname /{print $2}')" || true
+if ssh -o ConnectTimeout=5 -o BatchMode=yes "$PI_SSH_HOST" true 2>/dev/null; then
+  echo "Pi resolved to $PI_HOST (ssh alias: $PI_SSH_HOST)"
+else
+  echo "WARNING: cannot reach the Pi at ssh alias '$PI_SSH_HOST' (resolved: '${PI_HOST:-nothing}')." >&2
+  echo "         Either the Pi is off, or the alias is not in your ssh config — in which case" >&2
+  echo "         ssh hands back the alias verbatim and pi_host:= below will be wrong." >&2
+  echo "         Set it with:  PI_SSH_HOST=conorpi ./fr3_session.sh" >&2
+  echo "         Continuing; the Pi panes will just fail to connect." >&2
 fi
-echo "Pi resolved to $PI_HOST (ssh alias: $PI_SSH_HOST)"
 
 # ---------------------------------------------------------------------------
 # Deploy: bring the NUC and Pi source trees in line with this working copy before anything
@@ -103,12 +119,12 @@ echo "Pi resolved to $PI_HOST (ssh alias: $PI_SSH_HOST)"
 if [ "${SKIP_DEPLOY:-0}" = 1 ]; then
   echo "SKIP_DEPLOY=1 — leaving the NUC and Pi source trees as they are."
 else
-  echo "==> Syncing nuc/ to jailfranka:$NUC_REPO ..."
+  echo "==> Syncing nuc/ to $NUC_SSH_HOST:$NUC_REPO ..."
   if rsync -a --delete --mkpath --exclude='__pycache__/' --exclude='*.pyc' \
-      nuc "jailfranka:${NUC_REPO}/"; then
+      nuc "${NUC_SSH_HOST}:${NUC_REPO}/"; then
     echo "    done."
   else
-    echo "WARNING: rsync to jailfranka failed — it may be running stale nuc/ code." >&2
+    echo "WARNING: rsync to $NUC_SSH_HOST failed — it may be running stale nuc/ code." >&2
   fi
 
   echo "==> Deploying pi/ to $PI_SSH_HOST via ./deploy.sh ..."
@@ -127,9 +143,9 @@ remote_session_exists() {
 # a pre-typed line the operator has not pressed Enter on yet — and send-keys appends to that
 # readline buffer rather than replacing it, so a second pass concatenates two commands and
 # submits the result. Re-attaching is supposed to hand the pane back exactly as it was.
-NUC_BRINGUP_FRESH=1; remote_session_exists jailfranka fr3-bringup   && NUC_BRINGUP_FRESH=0
-NUC_INFER_FRESH=1;   remote_session_exists jailfranka fr3-inference && NUC_INFER_FRESH=0
-SHEEP_FRESH=1;       remote_session_exists sheep polyumi            && SHEEP_FRESH=0
+NUC_BRINGUP_FRESH=1; remote_session_exists "$NUC_SSH_HOST" fr3-bringup   && NUC_BRINGUP_FRESH=0
+NUC_INFER_FRESH=1;   remote_session_exists "$NUC_SSH_HOST" fr3-inference && NUC_INFER_FRESH=0
+SHEEP_FRESH=1;       remote_session_exists "$SHEEP_SSH_HOST" polyumi     && SHEEP_FRESH=0
 if [ "$NUC_BRINGUP_FRESH$NUC_INFER_FRESH$SHEEP_FRESH" != "111" ]; then
   echo "Re-attaching to remote sessions that are already running; leaving those panes untouched."
 fi
@@ -156,81 +172,93 @@ remote_shell() {
   fi
 }
 
+# Every pane below is addressed by the pane ID tmux hands back from -P -F (%0, %7, ...), never
+# by a "window.index" string. Indices are not ours to predict: `pane-base-index 1` in the
+# operator's ~/.tmux.conf — a common setting — makes every ".0" target here miss, and the script
+# would then type robot commands into whatever pane it did find. IDs are assigned by tmux,
+# unique for the life of the server, and immune to both that option and to later splits.
+#
+# Window IDs (@0, @1, ...) are captured alongside the pane IDs where a window gets used as an
+# anchor: `new-window -t` and `select-window -t` take a target-WINDOW and reject a pane spec
+# outright ("can't specify pane here"), so a pane ID cannot stand in for one.
+#
 # ---------------------------------------------------------------------------
 # Window 1: the NUC — hardware session and inference stack, one pane each.
 # Split because bringup is the piece that crashes mid-session and needs restarting on its own
 # (docs/crb-fr3-inference.md, "TF lookup fails"), which is also why they are two launch files.
 # ---------------------------------------------------------------------------
-tmux new-session -d -s "$SESSION" -n nuc -c "$REPO_DIR"
-tmux send-keys -t "$SESSION:nuc.0" "$(remote_shell jailfranka fr3-bringup)" C-m
-tmux split-window -t "$SESSION:nuc" -h -c "$REPO_DIR"
-tmux send-keys -t "$SESSION:nuc.1" "$(remote_shell jailfranka fr3-inference)" C-m
+read -r NUC_BRINGUP_PANE NUC_WINDOW < <(
+  tmux new-session -d -P -F '#{pane_id} #{window_id}' -s "$SESSION" -n nuc -c "$REPO_DIR")
+tmux send-keys -t "$NUC_BRINGUP_PANE" "$(remote_shell "$NUC_SSH_HOST" fr3-bringup)" C-m
+NUC_INFER_PANE="$(tmux split-window -t "$NUC_BRINGUP_PANE" -h -P -F '#{pane_id}' -c "$REPO_DIR")"
+tmux send-keys -t "$NUC_INFER_PANE" "$(remote_shell "$NUC_SSH_HOST" fr3-inference)" C-m
 
 # ---------------------------------------------------------------------------
 # Window 2: the Pi (camera/audio stream) and the GPU box (policy server).
 # ---------------------------------------------------------------------------
-# `-a -t "$SESSION:nuc"` (a WINDOW target, by name), not `-t "$SESSION"` (a session target).
-# tmux resolves a bare session target to its CURRENT ACTIVE window and tries to create the new
-# window there — and by this point that's window 0 ("nuc", still active since nothing has
-# switched off it). Without -a that fails outright with "index 0 in use" the moment two windows
-# exist; -a instead means "insert right after this window, shifting later ones if needed",
-# which is what we actually want and cannot fail this way. Verified empirically: the plain
-# `-t "$SESSION"` form intermittently threw exactly that error once >= 2 windows existed.
-tmux new-window -a -t "$SESSION:nuc" -n polyumi-pi -c "$REPO_DIR"
-tmux send-keys -t "$SESSION:polyumi-pi.0" "ssh -t $PI_SSH_HOST" C-m
-tmux split-window -t "$SESSION:polyumi-pi" -h -c "$REPO_DIR"
-tmux send-keys -t "$SESSION:polyumi-pi.1" "$(remote_shell sheep polyumi)" C-m
+# `-a -t "$NUC_WINDOW"` (a WINDOW target), not `-t "$SESSION"` (a session target). tmux resolves
+# a bare session target to its CURRENT ACTIVE window and tries to create the new window there —
+# and by this point that's the "nuc" window, still active since nothing has switched off it.
+# Without -a that fails outright with "index N in use" the moment two windows exist; -a instead
+# means "insert right after this window, shifting later ones if needed", which is what we
+# actually want and cannot fail this way. Verified empirically: the plain `-t "$SESSION"` form
+# intermittently threw exactly that error once >= 2 windows existed.
+read -r PI_PANE PI_WINDOW < <(
+  tmux new-window -a -t "$NUC_WINDOW" -n polyumi-pi -P -F '#{pane_id} #{window_id}' -c "$REPO_DIR")
+tmux send-keys -t "$PI_PANE" "ssh -t $PI_SSH_HOST" C-m
+SHEEP_PANE="$(tmux split-window -t "$PI_PANE" -h -P -F '#{pane_id}' -c "$REPO_DIR")"
+tmux send-keys -t "$SHEEP_PANE" "$(remote_shell "$SHEEP_SSH_HOST" polyumi)" C-m
 
 # ---------------------------------------------------------------------------
 # Window 3: this laptop — DDS env sourced, ready to launch the client.
 # ---------------------------------------------------------------------------
-tmux new-window -a -t "$SESSION:polyumi-pi" -n laptop -c "$REPO_DIR"
-tmux send-keys -t "$SESSION:laptop.0" "source setup_franka_env.sh" C-m
+LAPTOP_PANE="$(tmux new-window -a -t "$PI_WINDOW" -n laptop -P -F '#{pane_id}' -c "$REPO_DIR")"
+tmux send-keys -t "$LAPTOP_PANE" "source setup_franka_env.sh" C-m
 
 # Everything above only opened shells. Let them finish before typing into them.
 sleep "$SHELL_SETTLE_S"
 
-# --- NUC pane 0: RUN bringup. Safe (no motion) and everything else waits on it. If FCI is not
-# --- enabled on the Desk UI it fails loudly and you re-run it; that is cheap.
+# --- NUC, left pane: RUN bringup. Safe (no motion) and everything else waits on it. If FCI is
+# --- not enabled on the Desk UI it fails loudly and you re-run it; that is cheap.
 if [ "$NUC_BRINGUP_FRESH" = 1 ]; then
-  tmux send-keys -t "$SESSION:nuc.0" "cd $NUC_REPO && ros2 launch nuc/launch/fr3_bringup.launch.py" C-m
+  tmux send-keys -t "$NUC_BRINGUP_PANE" "cd $NUC_REPO && ros2 launch nuc/launch/fr3_bringup.launch.py" C-m
 fi
 
-# --- NUC pane 1: PRETYPE. Carries the execute flags, so it is yours to press Enter on. 
+# --- NUC, right pane: PRETYPE. Carries the execute flags, so it is yours to press Enter on.
 if [ "$NUC_INFER_FRESH" = 1 ]; then
-  tmux send-keys -t "$SESSION:nuc.1" "cd $NUC_REPO" C-m
-  pretype "$SESSION:nuc.1" "ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true execute_arm:=true max_velocity_scaling:=0.2"
+  tmux send-keys -t "$NUC_INFER_PANE" "cd $NUC_REPO" C-m
+  pretype "$NUC_INFER_PANE" "ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true execute_arm:=true max_velocity_scaling:=0.2"
 fi
 
 # --- Pi: RUN the stream. Stateless, moves nothing, and the laptop warns without it.
-tmux send-keys -t "$SESSION:polyumi-pi.0" "polyumi-pi stream" C-m
+tmux send-keys -t "$PI_PANE" "polyumi-pi stream" C-m
 
 # --- Sheep: PRETYPE. The checkpoint changes every training run, so the path is yours to pick.
 # --- The five most recent are listed above the prompt to save a hunt through dp_outputs/.
 if [ "$SHEEP_FRESH" = 1 ]; then
-  tmux send-keys -t "$SESSION:polyumi-pi.1" "cd $SHEEP_REPO" C-m
-  tmux send-keys -t "$SESSION:polyumi-pi.1" \
+  tmux send-keys -t "$SHEEP_PANE" "cd $SHEEP_REPO" C-m
+  tmux send-keys -t "$SHEEP_PANE" \
     "ls -t data/dp_outputs/*/*/checkpoints/latest.ckpt 2>/dev/null | head -5" C-m
-  pretype "$SESSION:polyumi-pi.1" "CKPT=\$(ls -t $SHEEP_REPO/data/dp_outputs/*/*/checkpoints/latest.ckpt | head -1) ./serve_policy.sh"
+  pretype "$SHEEP_PANE" "CKPT=\$(ls -t $SHEEP_REPO/data/dp_outputs/*/*/checkpoints/latest.ckpt | head -1) ./serve_policy.sh"
 fi
 
 # --- Laptop: PRETYPE. Depends on every pane above being live, and there is no readiness gate
 # --- here, so this is the one you press Enter on last.
-pretype "$SESSION:laptop.0" "ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=$INFERENCE_URL execute_motion:=true max_image_age_s:=$MAX_IMAGE_AGE_S pi_host:=$PI_HOST"
+pretype "$LAPTOP_PANE" "ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=$INFERENCE_URL execute_motion:=true max_image_age_s:=$MAX_IMAGE_AGE_S pi_host:=$PI_HOST"
 
-tmux select-window -t "$SESSION:nuc"
+tmux select-window -t "$NUC_WINDOW"
 cat <<EOF
 
 Session '$SESSION' is up. Order to press Enter in:
-  1. nuc.0     already running bringup (enable FCI on the Desk UI first if it errors)
-  2. nuc.1     the inference stack — check the execute flags on the line before you run it
-  3. polyumi-pi.1    the policy server — edit CKPT to the checkpoint you want
-  4. laptop.0  the client, last
+  1. nuc, left      already running bringup (enable FCI on the Desk UI first if it errors)
+  2. nuc, right     the inference stack — check the execute flags on the line before you run it
+  3. polyumi-pi, right   the policy server — edit CKPT to the checkpoint you want
+  4. laptop         the client, last
 
 tmux, minimum viable:
   C-b n / C-b p    next / previous window        C-b o     next pane
   C-b d            detach (everything keeps running)
-  C-b C-b          send a prefix to the INNER tmux on jailfranka/sheep
+  C-b C-b          send a prefix to the INNER tmux on $NUC_SSH_HOST/$SHEEP_SSH_HOST
 Re-attach any time with ./fr3_session.sh — remote panes pick up where they left off.
 
 EOF

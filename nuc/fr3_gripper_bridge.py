@@ -319,8 +319,20 @@ class Fr3GripperBridge(Node):
         future.add_done_callback(lambda f: self._on_goal_response(f, label, width))
 
     def _on_goal_response(self, future, label: str, width: float) -> None:
-        """Handle goal acceptance, record what was commanded, then chain to the result."""
-        handle = future.result()
+        """
+        Handle goal acceptance, record what was commanded, then chain to the result.
+
+        rclpy's ``Future.result()`` **re-raises** whatever exception the send stored rather than
+        returning None, and this runs as a done-callback — so an unguarded raise here escapes into
+        rclpy internals and skips _clear_in_flight, wedging the slot until the watchdog expires.
+        Catching it turns a silent GOAL_RESULT_TIMEOUT_S stall into an immediate retry.
+        """
+        try:
+            handle = future.result()
+        except Exception as e:  # broad on purpose: ANY send failure must still free the slot
+            self.get_logger().warning(f'{label} goal failed to send: {e} (will retry).')
+            self._clear_in_flight()
+            return
         if handle is None or not handle.accepted:
             # Leave _last_commanded alone: the hand never got this width, so the next tick should
             # be free to try again rather than treating it as already satisfied.
@@ -340,8 +352,16 @@ class Fr3GripperBridge(Node):
         moving target legitimately produces these. Treating them as faults would generate
         exactly the log spam the rate limiting exists to prevent. A *steady stream* of them
         still means the deadband or period is too small — see docs/crb-fr3-inference.md.
+
+        Guarded for the same reason as _on_goal_response: ``Future.result()`` re-raises, and an
+        escaping exception here would skip _clear_in_flight and wedge the slot.
         """
-        result = future.result()
+        try:
+            result = future.result()
+        except Exception as e:  # broad on purpose: ANY result failure must still free the slot
+            self.get_logger().warning(f'{label} result raised: {e}')
+            self._clear_in_flight()
+            return
         if result is None:
             self.get_logger().warning(f'{label} returned no result.')
         elif not result.result.success:
