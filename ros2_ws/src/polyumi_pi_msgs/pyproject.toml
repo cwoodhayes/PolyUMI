@@ -2,7 +2,21 @@
 requires = [
     "setuptools>=68",
     "wheel",
-    "grpcio-tools>=1.78.0",
-    "protobuf",
+    # WHAT BREAKS IF YOU LOOSEN THIS CEILING. grpcio-tools bundles its own protoc, which stamps
+    # every generated _pb2.py with a gencode version. protobuf REFUSES AT IMPORT to load gencode
+    # newer than the installed runtime ("Runtime version cannot be older than the linked gencode
+    # version") — all-or-nothing, unlike most version skew, so it takes down every polyumi-pi
+    # command at once. This bit the Pi for real: a PEP-517 build pulled grpcio-tools 1.82.1,
+    # whose protoc stamps gencode 7.35.1, against pi/.venv's protobuf 6.33.6.
+    #
+    # 1.82.1 is the first release to stamp 7.x, so that is the cap. Raise it only together with
+    # the protobuf runtime pin in pi/pyproject.toml, and re-run ./deploy.sh — its import check
+    # on the Pi is what actually proves the pair agrees.
+    "grpcio-tools>=1.78.0,<1.82.1",
+    # Belt to the cap's braces, and the runtime constraint this package declares anyway. NOTE it
+    # does NOT by itself keep grpcio-tools in range: 1.82.0 declares `protobuf<8,>=6.33.5`, which
+    # a resolver satisfies at 6.x while still shipping a newer bundled protoc. Constraining the
+    # gencode means constraining grpcio-tools directly — hence the cap above.
+    "protobuf>=6,<7",
 ]
 build-backend = "setuptools.build_meta"

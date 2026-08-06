@@ -40,6 +40,16 @@ bash -c 'unset VIRTUAL_ENV; cd ros2_ws && source /opt/ros/kilted/setup.bash \
   && colcon test --packages-select polyumi_ros2 \
   && colcon test-result --test-result-base build/polyumi_ros2'
 ```
+The **NUC bridges** in `nuc/` are standalone scripts, not an ament package, so `colcon test`
+never sees them. `nuc/test_fr3_gripper_bridge.py` runs on the laptop anyway — it needs only the
+`franka_msgs` message definitions (built in `ros2_ws`) and mocks the action clients, so no
+hardware or NUC is involved:
+```bash
+bash -c 'unset VIRTUAL_ENV; source /opt/ros/kilted/setup.bash \
+  && source ros2_ws/install/setup.bash \
+  && /usr/bin/python3 -m pytest nuc/test_fr3_gripper_bridge.py -q'
+```
+
 The generated `ament_copyright` / `ament_flake8` / `ament_pep257` linter tests were **deleted** —
 their ROS defaults (99 cols, ament import order) contradicted this repo's ruff config, so
 `colcon test` failed regardless of whether real tests passed. Python style is ruff's job alone;
@@ -75,7 +85,19 @@ camera, Foxglove, and `policy_client_node`. They interoperate over **CycloneDDS*
 ```bash
 source setup_franka_env.sh   # RMW=cyclonedds, domain 0, CYCLONEDDS_URI, 10.0.0.1 on enp0s31f6
 ```
-On the NUC: `fr3-bringup` + `fr3-arm-controller`. Full reference and the exact
+On the NUC, two launch files: `nuc/launch/fr3_bringup.launch.py` (the hardware session —
+franka_bringup + the `fr3_arm_controller` spawner, replacing the `fr3-bringup` +
+`fr3-arm-controller` alias pair) and `nuc/launch/fr3_inference.launch.py` (move_group + both
+PolyUMI bridges, with separate `execute_arm` / `execute_gripper` flags, both defaulting false).
+They are deliberately two files: bringup is the crash-prone, FCI-gated piece and must be
+restartable on its own.
+
+**`./fr3_session.sh`** (repo root) builds the whole wall — NUC, Pi, GPU box, laptop — as one
+tmux session, running the safe commands and pre-typing the robot-moving ones for you to
+confirm. Every fresh start (not a re-attach) also rsyncs `nuc/` to the NUC and runs
+`./deploy.sh` for the Pi, so both run this working copy rather than whatever they last had —
+`SKIP_DEPLOY=1` skips that for a faster re-launch. Re-run to re-attach after a disconnect; the
+NUC/GPU-box panes are remote tmux, so they survive. Full reference and the exact
 environment assumptions live in [docs/crb-fr3-inference.md](docs/crb-fr3-inference.md).
 
 **Clock sync (this setup):** the NUC and laptop must agree on wall time or TF lookups fail

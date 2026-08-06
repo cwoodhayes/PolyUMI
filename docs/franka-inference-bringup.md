@@ -19,8 +19,8 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
 | Latency compensation, gopro + proprio | **done** — matches UMI's scheme; unit-tested |
 | Latency compensation, finger cam + piezo | **not started** — params declared, never consumed |
 | Pose body frame (training ↔ inference) | **half** — ingest emits `hand`; robot still reports `fr3_hand_tcp` |
-| Gripper — observation | **not started** — hardcoded `0.0` |
-| Gripper — command | **not started** — `action[7]` dropped before publish |
+| Gripper — observation | **done** — Phase 2.5: `/fr3_gripper/joint_states` → `agent_pos[7]` |
+| Gripper — command | **done** — Phase 2.5: `action[7]` → `/polyumi/target_gripper` → NUC `fr3_gripper_bridge` |
 | DP export | **exists** for pose+image+gripper; no tactile; wrong schema for UMI; untested |
 | Real inference server | **in progress** — Phase 3: `serve_policy.py` verified standalone on sheep; client dry-run wiring done + unit-tested (image 224, viz preview, `/reset`); on-arm dry-run pending hardware |
 
@@ -42,10 +42,12 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
      PolyUMI CAD assembly (GoPro lens faceplate → closed-fingertip midpoint), rotation an
      identity because both frames are the GoPro optical convention. Feeds every exported pose.
 
-3. **Gripper is unwired in both directions.** `_lookup_agent_pos` hardcodes
-   `gripper_width = 0.0`, so `agent_pos[7]` is a constant the policy learns nothing from; and
-   `_actions_to_pose_array` drops `action[7]`, so a commanded width goes nowhere. A
-   `PoseArray` cannot carry the width — the chunk topic needs a type that can, or a parallel one.
+3. **Gripper — RESOLVED in Phase 2.5.** Width now flows both ways: `/fr3_gripper/joint_states`
+   → `agent_pos[7]`, and `action[7]` → a parallel `trajectory_msgs/JointTrajectory` on
+   `/polyumi/target_gripper` which the NUC-side `fr3_gripper_bridge` turns into `Move`/`Grasp`
+   goals. What remains is a *calibration* gap, not a wiring one: `gripper_offset_m` (the ArUco
+   tag-separation → jaw-width offset) is taken from `gripper_calib.yaml`'s `closed_mm` and has
+   never been measured. See Phase 2.5 and open question 7.
 
 4. **The DP exporter needs a rework, and has no tests at all.** Deliberately deferred to one
    chunk of work rather than patched piecemeal, since the UMI migration rewrites this file
@@ -153,7 +155,18 @@ without remapping.
     **[0, 1]**, RGB, H=W=**224**. Not nested JSON lists: at 224×224×3×`n_obs_steps` that's
     ~1 MB/frame of JSON and too slow to encode at 10 Hz.
   - `agent_pos`: `[n_obs_steps, 8]` — `[x, y, z, qx, qy, qz, qw, gripper_width]` in robot base
-    frame (absolute). **`gripper_width` is currently always `0.0`** — see Status blocker 3.
+    frame (absolute).
+
+> **`gripper_width` on this wire is raw ArUco tag separation, not jaw aperture.** Both
+> `agent_pos[7]` and `action[7]` are in the units the *training data* uses — the x-separation of
+> the two finger tags as measured by ingest step 4 (`annotations/gripper_width/width_m`), which
+> reads ~0.005 m with the handheld gripper fully closed, not 0. The conversion to real jaw width
+> is a constant subtraction (`gripper_offset_m`) applied **client-side** by `policy_client_node`,
+> so the server never sees robot units. This mirrors UMI's calibration
+> (`get_gripper_calibration_interpolator` = `aruco_actual_width - aruco_min_width`, slope 1) — the
+> difference being that UMI applies it at dataset-generation time, so its stored data is already
+> jaw width and its inference path does no conversion at all. Moving ours into ingest is deferred
+> to the exporter rework (blocker 4).
 
 **Coordinate convention (UMI):**
 - **Observations** (`agent_pos`) are sent as **absolute** EEF coordinates in robot base frame.
@@ -272,7 +285,7 @@ print(json.dumps({
 |---|---|---|
 | `/gopro/image_raw` | `sensor_msgs/Image` | wrist camera via HDMI capture card → `v4l2_camera_node` (1920×1080@60, resized to 224×224) |
 | TF `eef_frame` → `base_frame` | via `tf2_ros.Buffer` | absolute EEF pose (xyz + quat) |
-| `/fr3_gripper/joint_states` | `sensor_msgs/JointState` | gripper width — **not implemented**, `agent_pos[7]` is hardcoded `0.0` |
+| `/fr3_gripper/joint_states` | `sensor_msgs/JointState` | gripper aperture = `position[0] + position[1]` (each finger reports half); interpolated to the frame's capture instant, offset into policy units, → `agent_pos[7]` |
 
 **Timer:** `control_hz` (10 Hz).
 
@@ -318,10 +331,16 @@ pose with a stale image against a model trained on same-instant pairs.
 | `base_frame` | `fr3_link0` | TF base frame for the EEF lookup |
 | `eef_frame` | `fr3_hand_tcp` | TF EEF/tool frame — **wrong frame**, see Status blocker 1 |
 | `execute_motion` | `false` | Off by default: the arm does not move until explicitly enabled |
+| `gripper_state_topic` | `/fr3_gripper/joint_states` | Gripper joint-state source for `agent_pos[7]` |
+| `require_gripper_state` | `false` | If true, skip the tick when no gripper state is available — never arrived, or gone stale. Default false so `motion_only` / no-hand setups still run: missing → closed width, stale → hold the last width, both with a throttled warning |
+| `max_gripper_age_s` | `0.5` | Age limit on the newest gripper sample. The gripper is the only observation channel that can freeze *silently* (a dead camera trips `max_image_age_s`, dead TF raises `ExtrapolationException`, but the width buffer just holds its last sample), so the age is checked explicitly. ~5x the worst observed publish interval; `<= 0` disables. Not applied under `tf_use_latest`, whose whole premise is skewed stamps |
+| `gripper_offset_m` | `0.005` | ArUco tag separation → jaw aperture offset. **Never measured** — see Phase 2.5 |
+| `gripper_max_width_m` | `0.08` | Commanded widths clamp here; the FR3 hand reads ~0.0817 open |
 | `latency.gopro` | `0.0` | Camera capture→stamp delay. **Placeholder**, see Status blocker 2 |
 | `latency.finger_cam` | `0.0` | Declared, **never consumed** |
 | `latency.piezo_mic` | `0.0` | Declared, **never consumed** |
 | `latency.proprio` | `0.0` | EEF-pose measurement delay |
+| `latency.gripper` | `0.0` | Gripper-width measurement delay. UMI keeps this separate from the arm's (`gripper_action_latency` vs `robot_action_latency`); **unmeasured** |
 | `latency.arm_exec` | `0.0` | Publish→arm-moves delay; used for chunk truncation |
 | `buffers.ee_pose_s` | `1.0` | TF buffer `cache_time`; must exceed the largest compensated latency |
 
@@ -405,7 +424,94 @@ What changed vs. the original plan, and why:
 - [x] `nuc/fr3_moveit_bridge.py` implemented: plans+executes chunks via local move_group
 - [x] EEF target execution tested and verified moving the **real** robot (reduced velocity)
 - [X] full 10 Hz dummy-sine loop run end-to-end (single chunks verified; continuous loop not yet)
-- [ ] executing gripper control in addition to pose.
+- [x] executing gripper control in addition to pose — see Phase 2.5
+
+---
+
+## Phase 2.5 — Gripper control
+
+Closes Status blocker 3 and open question 7. Width flows both directions; the arm path is
+untouched.
+
+### The Franka Hand cannot be servoed — this is a hardware ceiling, not an API gap
+
+Worth stating plainly, because the obvious next instinct is to fold the gripper into Phase 4's
+streaming-servo redesign, and that is not possible.
+
+**UMI servos its gripper continuously.** `WSGController`
+(`umi/real_world/wsg_controller.py:144-250`) is a 30 Hz loop around the *same*
+`PoseTrajectoryInterpolator` the arm uses: each cycle it evaluates the interpolator, finite-
+differences a velocity, and sends `script_position_pd(position, velocity)` to a WSG50. Chunks
+arrive via `schedule_waypoint(pos, target_time)`, and `bimanual_umi_env.py:501-515` schedules every
+waypoint with a per-gripper `gripper_action_latency` distinct from `robot_action_latency`.
+
+**The Franka Hand offers nothing equivalent.** `franka::Gripper` (libfranka `gripper.h`) exposes
+exactly `homing()`, `grasp()`, `move()`, `stop()`, `readOnce()` — all blocking, all discrete. There
+is no position/velocity streaming interface at any layer, and `ros2 control
+list_hardware_interfaces` shows the hand has **zero** ros2_control interfaces (the arm's
+`cartesian_pose` interface, which Phase 4 builds on, has no gripper analogue). The ROS2 action API
+is not hiding a better path; it is the full extent of the hardware.
+
+**It also must be rate-limited.** `gripper_action_server.cpp` returns `ACCEPT_AND_EXECUTE` for
+every goal unconditionally and spawns a detached `std::thread` per goal — no queue, no preemption,
+no rejection when busy. libfranka aborts the superseded command, which the wrapper turns into
+`goal_handle->abort()`. Streaming at the 10 Hz control rate would mean ~9 spurious
+`Command aborted!` results/sec plus unbounded thread churn.
+
+So the commander is **discrete, deadbanded, and rate-limited**. That is a documented deviation from
+UMI forced by the hardware.
+
+### Width units — a pure offset, following UMI
+
+`agent_pos[7]` / `action[7]` carry raw ArUco tag separation (see the API contract note). The
+conversion to jaw aperture is a constant subtraction, matching UMI:
+`get_gripper_calibration_interpolator` (`umi/common/interpolation_util.py:36-51`) computes
+`aruco_actual_width - aruco_min_width`, and `06_generate_dataset_plan.py:136-139` passes the same
+array as both arguments — so the map has **slope 1 and no rescaling**. UMI derives the offset
+empirically as the minimum ArUco width over a calibration video in which the gripper fully closes
+(`scripts/calibrate_gripper_range.py`).
+
+Ours is currently the *declared* `closed_mm: 5.0` from `ingest/config/gripper_calib.yaml` — a value
+no code has ever read or validated. It is a ROS parameter (`gripper_offset_m`), correctable without
+a code change. A PolyUMI equivalent of UMI's calibration script is the proper fix.
+
+Note this aligns the zero point, not the stroke: the handheld gripper may open wider than the
+hand's ~0.0817 m, and commands past `gripper_max_width_m` clamp — showing up as saturation rather
+than an error.
+
+### Wiring
+
+```
+policy_client_node (laptop)                     fr3_gripper_bridge (NUC)
+  /fr3_gripper/joint_states ──► agent_pos[7]
+  action[7] ──► /polyumi/target_gripper ───────► deadband + rate limit ──► /fr3_gripper/{move,grasp}
+               (JointTrajectory)                 speed from time_from_start
+```
+
+`trajectory_msgs/JointTrajectory` because it exists identically on Kilted and Humble, is flat and
+small (so it crosses the rmw-major gap like `PoseArray` does, unlike MoveIt goals), and carries
+per-point `time_from_start` — which lets the bridge pick a lead waypoint and derive a move speed
+rather than using a fixed one. `joint_names: ['fr3_gripper_width']` is deliberately *not* a real
+joint name: the value is the full aperture, not a finger joint position.
+
+The commander is a **separate node** from `fr3_moveit_bridge` because that node's `_busy` lock
+serialises everything — a gripper command issued inside its `_on_target` would be dropped precisely
+while an arm chunk executes, i.e. during manipulation.
+
+`Move` is the default action; `Grasp` (force-controlled, the only one that actually *holds* an
+object) is opt-in via `use_grasp_below_m`, shipped disabled so bringup is pure motion.
+
+- [x] `gripper_map.py` + tests (offset conversion, clamping)
+- [x] `policy_client_node`: `/fr3_gripper/joint_states` → `agent_pos[7]`, time-interpolated
+- [x] `policy_client_node`: `action[7]` → `/polyumi/target_gripper` (+ `_preview`)
+- [x] `nuc/fr3_gripper_bridge.py`: deadbanded, rate-limited `Move`/`Grasp` commander
+- [x] `dummy_server.py`: gripper sine, 90° out of phase with X so a routing bug is visible
+- [x] `JointTrajectory` verified crossing the laptop↔NUC rmw gap intact (published from the
+      laptop, echoed on the NUC — all fields byte-for-byte; see crb-fr3-inference.md)
+- [ ] on-arm dry run (`fr3_gripper_bridge` with `execute:=false`)
+- [ ] on-arm execution (`execute:=true`, arm bridge plan-only)
+- [ ] measure `gripper_offset_m` (PolyUMI equivalent of `calibrate_gripper_range.py`)
+- [ ] measure `latency.gripper`
 
 ---
 
@@ -620,8 +726,11 @@ Franka package set present: `franka_bringup`, `franka_description`, `franka_fr3_
   template (or vendor just the interface-claiming + write loop).
 - **Confirm `MultiDOFJointTrajectory` crosses the rmw gap** (laptop Kilted 4.x ↔ NUC Humble 1.x)
   intact, like `PoseArray` does and MoveIt goals don't.
-- **Gripper** still rides separately (Q7) — the trajectory message carries pose; width needs its own
-  channel + a gripper action on the NUC.
+- **Gripper cannot join this redesign** — and not merely as a scheduling convenience. The Franka
+  Hand has **no ros2_control interface at all** and libfranka's `franka::Gripper` offers only
+  blocking `move`/`grasp`/`homing`/`stop`, so there is no gripper analogue of the `cartesian_pose`
+  command interface this stage is built on. It keeps its own channel (`/polyumi/target_gripper`)
+  and its own discrete, deadbanded commander on the NUC. See Phase 2.5.
 
 ### Checklist
 
@@ -648,8 +757,8 @@ Franka package set present: `franka_bringup`, `franka_description`, `franka_fr3_
 | 4 | Gripper width topic on Franka? | **Resolved:** `/fr3_gripper/joint_states`; actions `/fr3_gripper/{grasp,move,gripper_action,homing}`. |
 | 5 | Subprocess vs direct import for Phase 3 | **Resolved — direct import (subprocess retired).** The original answer was subprocess, but the training work produced a single Docker image whose `umi` env has both `diffusion_policy`/torch and fastapi/uvicorn, so `serve_policy.py` direct-imports the policy and the container is the isolation boundary. See Phase 3. |
 | 6 | Which physical point is the canonical `hand` frame, and what publishes it on the FR3? | **Open — blocking.** Ingest step 5 emits poses on a `hand` frame defined by `T_gopro_to_fingertip` — the closed-fingertip midpoint, measured from CAD. The FR3 must report that same point as `eef_frame`; today it reports `fr3_hand_tcp`. Needs a mounting calibration + a static TF. |
-| 7 | How do gripper width (obs) and gripper command (action) get wired? | **Open.** Obs: subscribe `/fr3_gripper/joint_states` and fill `agent_pos[7]` (currently `0.0`). Action: `PoseArray` can't carry width — either change the chunk message type or publish a parallel one, then drive `/fr3_gripper/{grasp,move}` from the NUC bridge. |
-| 8 | Do finger cam / piezo feed the policy, and at what latency? | **Open.** Params exist and are unconsumed. If they become obs, the capture instant becomes the *oldest* across streams (an observation is only as fresh as its slowest signal), and they must also be added to the DP export, which carries none of them today. |
+| 7 | How do gripper width (obs) and gripper command (action) get wired? | **Resolved — Phase 2.5.** Obs: `policy_client_node` subscribes `/fr3_gripper/joint_states` (aperture = `position[0]+position[1]`), interpolates to the frame's capture instant, offsets into policy units → `agent_pos[7]`. Action: a **parallel** `trajectory_msgs/JointTrajectory` on `/polyumi/target_gripper` (chosen over changing `PoseArray`'s type because it carries per-point timing and crosses the rmw gap), consumed by a **separate** NUC node `fr3_gripper_bridge` that deadbands + rate-limits into `Move`/`Grasp` goals. What's left is calibrating `gripper_offset_m`, not wiring. |
+| 8 | Do finger cam / piezo feed the policy, and at what latency? | **Open.** Params exist and are unconsumed. If they become obs, the capture instant becomes the *oldest* across streams (an observation is only as fresh as its slowest signal), and they must also be added to the DP export, which carries none of them today. (`latency.gripper` is now consumed — it is not in this category.) |
 | 9 | What is `latency.gopro` actually? | **Open — needs measurement, not a guess.** See Status blocker 2. |
 | 10 | How is the arm driven for smooth latency-tolerant control? | **Decided (Phase 4), not built.** Plan-then-execute (`fr3_moveit_bridge`) is the wrong model. Move to a UMI-style 1 kHz streaming Cartesian-pose `ros2_control` controller around a `PoseTrajectoryInterpolator`, using `franka_hardware`'s native `cartesian_pose` command interface (confirmed present, 1 kHz). See Phase 4. |
-| 11 | Message type for the action chunk laptop→NUC? | **Proposed (Phase 4):** `trajectory_msgs/MultiDOFJointTrajectory` (per-point transform + `time_from_start`, header stamp = `t_obs`), replacing `PoseArray` so absolute per-waypoint timing crosses. Must verify it survives the rmw-major gap. |
+| 11 | Message type for the action chunk laptop→NUC? | **Proposed (Phase 4):** `trajectory_msgs/MultiDOFJointTrajectory` (per-point transform + `time_from_start`, header stamp = `t_obs`), replacing `PoseArray` so absolute per-waypoint timing crosses. **Encouraging evidence:** Phase 2.5's `trajectory_msgs/JointTrajectory` was verified crossing the rmw-major gap intact (joint names, per-point positions and `time_from_start` all byte-for-byte), so the `trajectory_msgs` family and per-point timing are not themselves a problem. `MultiDOFJointTrajectory` is nested deeper (each point holds arrays of `Transform`/`Twist`), so it still warrants its own check. |

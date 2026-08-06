@@ -20,18 +20,39 @@
       # Delay from a photon hitting the GoPro sensor to the frame's ROS header stamp:
       # GoPro encode + HDMI out + capture card + USB + v4l2 dequeue. Sets both the TF lookup
       # instant and t_obs for chunk truncation, so it is the most load-bearing value here.
-      # 0.05 is a guess and probably low — UMI measured 0.125-0.17s for a plain UVC webcam,
-      # and this path is longer than that.
-      gopro: 0.05
+      # Unmeasured - guess (TODO measure)
+      gopro: 0.13
       # Finger camera latency. Declared but never consumed — the policy has no tactile input
       # yet (blocking issue 4). Left at 0 so it cannot skew anything until it is wired.
       finger_cam: 0.0
       # Piezo mic latency. Declared but never consumed, as above.
       piezo_mic: 0.0
       # Delay from the arm's true EE pose to its measurement appearing on TF.
-      proprio: 0.01
+      proprio: 0.03
       # Delay from publishing a target pose to the arm actually starting to move.
-      arm_exec: 0.01
+      arm_exec: 0.03
+      # Delay from the hand's true aperture to it appearing on /fr3_gripper/joint_states.
+      # Kept separate from proprio because the gripper is a different device on its own link and
+      # its own (slower, jitterier) topic — UMI splits these too (gripper_action_latency vs
+      # robot_action_latency).
+      # Unmeasured - placeholder guess.
+      gripper: 0.05
+
+    # --- Gripper width conversion. ---
+    # The policy speaks ArUco finger-tag separation (what ingest step 4 measures); the robot
+    # speaks jaw aperture. The conversion is a constant subtraction, following UMI — see
+    # polyumi_ros2/gripper_map.py and docs/franka-inference-bringup.md ("Phase 2.5").
+    #
+    # !!! NEVER MEASURED. !!! This is gripper_calib.yaml's closed_mm (5 mm), a value no code
+    # reads and nobody has checked against a closing video. UMI derives its equivalent
+    # empirically (scripts/calibrate_gripper_range.py takes the minimum tag separation over a
+    # video in which the gripper fully closes); we have no such script yet. If commanded widths
+    # look systematically too open or too closed, this is the first number to suspect.
+    gripper_offset_m: 0.005
+    # Commanded aperture clamps here. The FR3 hand reads ~0.0817 m fully open, but franka_gripper
+    # does not publish max_width on any topic, so it cannot be read back at runtime.
+    gripper_max_width_m: 0.08
+
     buffers:
       # How far back (seconds) the EE-pose TF buffer retains history, so a past pose can
       # still be looked up/interpolated to align with a delayed observation (e.g. the gopro
