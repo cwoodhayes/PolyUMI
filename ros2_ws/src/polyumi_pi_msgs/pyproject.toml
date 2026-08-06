@@ -3,6 +3,20 @@ requires = [
     "setuptools>=68",
     "wheel",
     "grpcio-tools>=1.78.0",
-    "protobuf",
+    # Pinned to match the RUNTIME constraint everywhere this package is actually used
+    # (pi/pyproject.toml, this package's own [project] deps below: protobuf>=6,<7).
+    # Without this, pip/uv's build-isolation resolver is free to pick whatever grpcio-tools
+    # is newest on PyPI, and that bundles ITS OWN protoc — which stamps generated _pb2.py
+    # files with a gencode-version marker tied to grpcio-tools' bundled protobuf, entirely
+    # independent of the runtime pin below. A too-new stamp fails at IMPORT time on any
+    # machine whose installed protobuf is older than the gencode marker (breaks all-or-
+    # nothing, unlike most version skew): "Detected incompatible Protobuf Gencode/Runtime
+    # versions ... Runtime version cannot be older than the linked gencode version." This bit
+    # the Pi for real — a PEP-517 build (uv run/uv sync touching this editable dependency,
+    # or `pip install`/`python -m build` directly) pulled a fresh grpcio-tools whose bundled
+    # protoc stamped gencode 7.35.1, while pi/.venv's pinned runtime was 6.33.6. `colcon
+    # build`'s direct setup.py invocation (see setup.py's compile_protos()) doesn't hit this,
+    # since it never triggers build isolation — only PEP 517 entry points do.
+    "protobuf>=6,<7",
 ]
 build-backend = "setuptools.build_meta"

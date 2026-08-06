@@ -20,8 +20,8 @@ laptop talk to a Humble NUC. If something here drifts from reality, fix it here 
 Laptop (Kilted, Noble)                        NUC (Humble, Jammy)  [nu-crb]
 RMW=rmw_cyclonedds_cpp, DOMAIN=0  ◄─ DDS over ─►  RMW=rmw_cyclonedds_cpp, DOMAIN=0
 enp0s31f6 = 10.0.0.1/24            10.0.0.x      enx00249b860356 = 10.0.0.2/24
-  - foxglove_bridge                               - fr3-bringup (franka_bringup, arm_id:=fr3)
-  - v4l2_camera (GoPro)                           - fr3-arm-controller
+  - foxglove_bridge                               - fr3_bringup.launch.py (franka_bringup
+  - v4l2_camera (GoPro)                             + fr3_arm_controller spawner)
   - pi_receiver_node                              - move_group  (nuc/launch/fr3_move_group.launch.py)
   - policy_client_node ──HTTP──┐                  - fr3_moveit_bridge  (nuc/fr3_moveit_bridge.py)
   - dummy_server (localhost:8000) ◄┘              - fr3_gripper_bridge (nuc/fr3_gripper_bridge.py)
@@ -282,20 +282,37 @@ publishes it to `/polyumi/target_poses_preview` for Foxglove (always) and — on
 
 Start the pieces in separate terminals, in this order.
 
+> **Shortcut: `./fr3_session.sh`** builds this entire wall as one tmux session — NUC, Pi, GPU
+> box, and laptop — with the safe commands already running and the robot-moving ones typed at
+> the prompt for you to confirm. The steps below are what it automates, and remain the
+> reference for doing it by hand or debugging a pane that misbehaves. See
+> [Session launcher](#session-launcher-fr3_sessionsh).
+
 ### **1. NUC — bring up the FR3** (enable FCI on the Desk UI first):
 
 ```bash
-fr3-bringup          # franka_bringup, arm_id:=fr3, robot @ 192.168.51.20
-fr3-arm-controller   # in a second terminal: spawn the joint-trajectory controller
+ros2 launch nuc/launch/fr3_bringup.launch.py   # franka_bringup + fr3_arm_controller spawner
 ```
 
-Steps **1b** and **1c** are **only needed to actually move the arm** (the Phase 2
-`execute_motion:=true` path). The log-only inference loop skips them.
+This is the **hardware session**: `franka_bringup` plus the joint-trajectory controller
+move_group executes through. It replaces the old two-terminal `fr3-bringup` +
+`fr3-arm-controller` pair — those were only ever split because the controller spawner has to
+run *after* `controller_manager` exists, not because they are independent. (The spawner exits
+once the controller is active; it never needed a terminal of its own.) The aliases still work
+if you want the pieces separately.
 
-Both run on the NUC from a clone of this repo, in their own terminals. Each needs the
-NUC's ROS + DDS env — a non-interactive shell does **not** source `~/.bashrc`, and
+Kept deliberately separate from step 1b so it can be **restarted on its own** — this is the
+component that crashes mid-session (see [TF lookup fails](#tf-lookup-fails-fr3_link0--does-not-exist--no-tf-at-all--fr3-bringup-crashed)),
+and the one gated on enabling FCI by hand.
+
+Step **1b** is **only needed to actually move the arm** (the Phase 2
+`execute_motion:=true` path). The log-only inference loop skips it.
+
+Both launch files run on the NUC from a clone of this repo, in their own terminals. Each needs
+the NUC's ROS + DDS env — a non-interactive shell does **not** source `~/.bashrc`, and
 without `CYCLONEDDS_URI` the node comes up on the wrong RMW and is invisible to
-everything else:
+everything else (this is one reason `fr3_session.sh` opens a *tmux* on the NUC rather than
+running commands over a bare `ssh`):
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -304,13 +321,24 @@ export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export CYCLONEDDS_URI=file://$HOME/franka_ws/config/cyclonedds.xml
 ```
 
-#### **1b. NUC — start MoveIt `move_group`** (third NUC terminal):
+#### **1b. NUC — start the inference stack** (second NUC terminal):
 
 ```bash
-ros2 launch nuc/launch/fr3_move_group.launch.py robot_ip:=192.168.51.20
+ros2 launch nuc/launch/fr3_inference.launch.py                        # dry run, nothing moves
+ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true  # fingers only
+ros2 launch nuc/launch/fr3_inference.launch.py \
+    execute_arm:=true execute_gripper:=true max_velocity_scaling:=0.2
 ```
 
-This adds **only** the `move_group` planner (exposing `/move_action`,
+Starts **move_group + both PolyUMI bridges** — the three things that sit on top of the
+hardware session. They start, fail, and restart together without touching the arm's state,
+which is why they share one launch file where step 1 gets its own.
+
+**Two execute flags, not one**, and both default false: launching this file never moves the
+robot on its own. Keeping them separate is what makes the first-run-on-hardware sequence below
+possible (gripper executing, arm planning-only). The three components are described next.
+
+**move_group** adds **only** the planner (exposing `/move_action`,
 `/execute_trajectory`, `/compute_cartesian_path`) — no controllers or
 robot_state_publisher — so it runs alongside the already-up `fr3-bringup` without
 collision. Expect a harmless `No 3D sensor plugin(s) defined for octomap updates` error
@@ -334,32 +362,21 @@ Trajectory execution is managing controllers
 (Do **not** use upstream `moveit.launch.py` — it starts a *second* controller_manager +
 robot_state_publisher and collides with `fr3-bringup`.)
 
-#### **1c. NUC — start the MoveIt bridge** (fourth NUC terminal):
-
-```bash
-# from the PolyUMI repo
-python3 nuc/fr3_moveit_bridge.py --ros-args -p execute:=true -p max_velocity_scaling:=0.8
-```
-
-Subscribes `/polyumi/target_poses` (a `PoseArray` — one action chunk) and drives the local
+**`fr3_moveit_bridge`** (`execute_arm`) subscribes `/polyumi/target_poses` (a `PoseArray` — one
+action chunk) and drives the local
 move_group, planning the whole chunk as a single multi-waypoint Cartesian path.
-**`execute` defaults to `false`** (plan-only, no motion) — pass `execute:=true` to
-actually move the arm. `max_velocity_scaling` (default `0.1`, max `1.0` = the full speed
+`max_velocity_scaling` (default `0.1`, max `1.0` = the full speed
 move_group already planned at) time-scales the trajectory; **start low** (e.g. `0.1`–`0.3`)
 with a hand on the e-stop, then raise it once you trust the motion. It logs
 `move_group found (compute_cartesian_path ready).` at
-startup — if it instead says `NOT found after 10s`, step 1b isn't running.
+startup — if it instead says `NOT found after 10s`, move_group failed to come up (check the
+same launch file's output).
 
-#### **1d. NUC — start the gripper bridge** (fifth NUC terminal, only if you want the hand to move):
-
-```bash
-python3 nuc/fr3_gripper_bridge.py --ros-args -p execute:=true
-```
-
-Subscribes `/polyumi/target_gripper` (a `trajectory_msgs/JointTrajectory` — the width half of the
-action chunk) and drives `/fr3_gripper/{move,grasp}`. Like the MoveIt bridge, **`execute` defaults
-to `false`** (logs the goal it would send, commands nothing) — pass `execute:=true` to move the
-fingers. Independent of `move_group`, so it runs without steps 1b/1c.
+**`fr3_gripper_bridge`** (`execute_gripper`) subscribes `/polyumi/target_gripper` (a
+`trajectory_msgs/JointTrajectory` — the width half of the
+action chunk) and drives `/fr3_gripper/{move,grasp}`. With its flag false it logs the goal it
+would send and commands nothing. Independent of `move_group`, so it works even if move_group
+failed to start.
 
 Because the hand cannot be servoed (see [Gripper interface](#gripper-interface-franka-hand)), this
 node deliberately does **not** track every chunk: it deadbands (`width_deadband_m`, default 5 mm)
@@ -372,9 +389,10 @@ tick rather than being deadbanded away, which would otherwise park the fingers a
 never received. Parameters are validated at startup and the node refuses to start on a bad one;
 `min_command_period_s: 0` in particular used to divide by zero inside the timer callback.
 
-**First time on hardware, run the arm bridge in plan-only (`execute:=false`) and only this node
-with `execute:=true`**, so a bad width command moves fingers and nothing else. Keep the hand clear
-of objects and of the table.
+**First time on hardware, launch with `execute_gripper:=true execute_arm:=false`**, so a bad
+width command moves fingers and nothing else. Keep the hand clear of objects and of the table.
+`fr3_session.sh` pre-types this line for you but with `execute_arm:=true` — it is pre-typed,
+not run, precisely so you can edit the flags before pressing Enter.
 
 ### **2. Inference server — real (GPU box) or dummy (laptop).**
 
@@ -427,8 +445,8 @@ source install/setup.bash           # (build first if needed: colcon build)
 ros2 launch polyumi_ros2 inference_demo.launch.xml pi_host:=<raspberry pi IP address>
 # default inference_server_url is http://localhost:8000/predict_cartesian/
 # To MOVE the arm (Phase 2), add: execute_motion:=true
-#   -> publishes each action chunk on /polyumi/target_poses; needs steps 1b + 1c on the NUC.
-#   Speed is set on the BRIDGE (step 1c max_velocity_scaling), not here.
+#   -> publishes each action chunk on /polyumi/target_poses; needs step 1b on the NUC with
+#      execute_arm:=true. Speed is set there (max_velocity_scaling), not here.
 #   Chunk size is n_action_steps (default 8) -- see "Action-chunk execution" above.
 # Default is log-only: actions are logged, no pose published, arm does not move.
 # To iterate on FR3 motion alone without the Pi running, add: motion_only:=true
@@ -466,6 +484,63 @@ ros2 topic pub -1 /polyumi/target_poses geometry_msgs/msg/PoseArray \
 
 Use your measured pose with ~2 cm added to one axis (`-1` publishes once). The bridge
 should log `Executed chunk (1 waypoints).` and the arm should creep to it.
+
+### Session launcher (`fr3_session.sh`)
+
+Steps 1–4 as one tmux session, from the repo root:
+
+```bash
+./fr3_session.sh                # create, or re-attach if it is already up
+SKIP_DEPLOY=1 ./fr3_session.sh  # ...without re-syncing the NUC/Pi source trees first
+./fr3_session.sh --kill-local   # tear down the LOCAL session only (remote ones survive)
+./fr3_session.sh --kill         # --kill-local, plus stop the remote sessions too
+```
+
+Three windows: `nuc` (bringup | inference stack), `polyumi-pi` (Pi | GPU box), `laptop`.
+
+**Every fresh start (not a re-attach) deploys first.** `nuc/` is rsynced to the NUC, and
+`./deploy.sh` (see CLAUDE.md / README.md, also runnable standalone: `./deploy.sh <pi_ssh_host>`)
+is called for the Pi — so what runs on both machines matches this working copy, not whatever
+they last had checked out. Sheep is deliberately excluded: it tracks its own training branch,
+and force-syncing it would silently swap out the checkpoint code from under you.
+Skip both with `SKIP_DEPLOY=1` once you know they're already current — useful for a fast
+re-launch while iterating on the tmux layout itself rather than on NUC/Pi code. Each target is
+independent and non-fatal: an unreachable Pi (powered off, say) warns and is skipped rather
+than blocking the NUC and laptop panes from coming up.
+
+**Safe commands run; robot-moving ones are typed at the prompt and left for you to press
+Enter on.** So bringup and the Pi stream start themselves, while the inference stack (carries
+the execute flags), the policy server (carries the checkpoint path), and the laptop client
+(depends on everything above, and there is no readiness gate) wait for you. Nothing in the
+script can move the robot on its own.
+
+**The NUC and GPU-box panes run tmux on the remote host**, not a bare ssh — so a laptop sleep
+or wifi blip costs nothing (re-run the script to re-attach, everything is still running), and
+the interactive shell means `CYCLONEDDS_URI` and the `fr3-*` aliases are actually set, which a
+bare `ssh host 'cmd'` would silently skip. The Pi is a plain ssh: stateless, cheap to restart.
+Consequences worth knowing:
+
+- `--kill-local` only kills the **local** session — the NUC and GPU-box sessions survive by
+  design, for the re-attach case. `--kill` also stops those specific remote sessions
+  (`tmux kill-session`, not `kill-server`, so any unrelated session on that host is left alone).
+- Those panes are **nested tmux**, so `C-b` goes to the outer one. `C-b C-b` sends a prefix
+  through to the inner session.
+- **Re-attaching never types into a live remote pane.** The script probes each remote session
+  first and leaves the ones already running completely alone — a shell mid-bringup, or holding
+  a pre-typed line you have not pressed Enter on, is handed back untouched. (`send-keys`
+  *appends* to a readline buffer rather than replacing it, so a second pass would otherwise
+  concatenate two commands and submit the result.)
+- A host with no tmux installed, or one that is not answering, degrades to a plain `ssh` with
+  a warning rather than failing — one machine being down should not block the others. That
+  pane just will not survive a disconnect.
+
+The Pi's address is resolved from your ssh config (`ssh -G $PI_SSH_HOST`) at launch rather than
+hardcoded, since it is on DHCP and does move. `PI_SSH_HOST` defaults to `polyumi-pi` — the alias
+other users are expected to set up — so if yours is named differently, override it:
+`PI_SSH_HOST=conorpi ./fr3_session.sh`. Repo paths and URLs are further environment overrides at
+the top of the script: `NUC_REPO`, `SHEEP_REPO`, `INFERENCE_URL`, `MAX_IMAGE_AGE_S`,
+`SHELL_SETTLE_S` (raise the last one if pre-typed lines land mangled — typing races the
+remote shell's startup).
 
 ## Troubleshooting
 
