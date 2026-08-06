@@ -1,19 +1,17 @@
 {
   "configById": {
-    "Image!3rp9676": {
-      "imageMode": {
-        "imageTopic": "/gopro/image_raw/compressed"
-      },
+    "3D!oah9y3": {
       "cameraState": {
-        "distance": 20,
         "perspective": true,
-        "phi": 60,
-        "target": [
-          0,
-          0,
-          0
-        ],
+        "distance": 1.4619545302575006,
+        "phi": 88.94111917862351,
+        "thetaOffset": 169.1858414070775,
         "targetOffset": [
+          -0.04629132964247405,
+          0.3185080682925513,
+          -3.817679320690948e-18
+        ],
+        "target": [
           0,
           0,
           0
@@ -24,106 +22,45 @@
           0,
           1
         ],
-        "thetaOffset": 60,
         "fovy": 45,
         "near": 0.5,
         "far": 5000
       },
       "followMode": "follow-pose",
-      "scene": {},
-      "transforms": {},
-      "topics": {},
-      "layers": {},
-      "publish": {
-        "type": "point",
-        "poseTopic": "/move_base_simple/goal",
-        "pointTopic": "/clicked_point",
-        "poseEstimateTopic": "/initialpose",
-        "poseEstimateXDeviation": 0.5,
-        "poseEstimateYDeviation": 0.5,
-        "poseEstimateThetaDeviation": 0.26179939
+      "followTf": "slam",
+      "scene": {
+        "meshUpAxis": "z_up"
       },
-      "foxglovePanelTitle": "Wrist Camera",
-      "synchronize": false
-    },
-    "RawMessages!29pqw16": {
-      "topicPath": "/gopro/camera_info",
-      "defaultExpanded": false
-    },
-    "3D!2sy03nw": {
-      "cameraState": {
-        "distance": 3.3216676797518208,
-        "perspective": true,
-        "phi": 60.0000000000026,
-        "target": [
-          0,
-          0,
-          0
-        ],
-        "targetOffset": [
-          0.6096747460899009,
-          0.09649498132275064,
-          -2.5847736039516347e-17
-        ],
-        "targetOrientation": [
-          0,
-          0,
-          0,
-          1
-        ],
-        "thetaOffset": 60.000000000004704,
-        "fovy": 45,
-        "near": 0.5,
-        "far": 5000
-      },
-      "followMode": "follow-pose",
-      "scene": {},
       "transforms": {
-        "frame:fr3_hand": {
+        "frame:slam": {
           "visible": false
         },
-        "frame:fr3_link8": {
+        "frame:optitrack": {
           "visible": false
         },
-        "frame:fr3_link7": {
+        "frame:world": {
+          "visible": true
+        },
+        "frame:gopro": {
           "visible": false
         },
-        "frame:fr3_link6": {
-          "visible": false
-        },
-        "frame:fr3_link5": {
-          "visible": false
-        },
-        "frame:fr3_link4": {
-          "visible": false
-        },
-        "frame:fr3_link3": {
-          "visible": false
-        },
-        "frame:fr3_link2": {
-          "visible": false
-        },
-        "frame:fr3_link1": {
-          "visible": false
-        },
-        "frame:fr3_link0": {
-          "visible": false
-        },
-        "frame:fr3_leftfinger": {
-          "visible": false
-        },
-        "frame:fr3_rightfinger": {
+        "frame:finger": {
           "visible": false
         }
       },
       "topics": {
-        "/polyumi/target_poses": {
+        "/optitrack/pose": {
+          "visible": true,
+          "axisScale": 0.3
+        },
+        "/slam/pose": {
           "visible": true
         },
-        "/robot_description": {
-          "visible": false
+        "/optitrack/pose_raw": {
+          "visible": false,
+          "axisScale": 0.1
         },
-        "/polyumi/target_poses_preview": {
+        "/eef/pose_slam": {
           "visible": true
         }
       },
@@ -131,7 +68,7 @@
         "grid": {
           "visible": true,
           "drawBehind": false,
-          "instanceId": "4de0cf7a-13de-48ba-b386-a4ac5ebde0c3",
+          "instanceId": "f21a88ed-cc7d-4285-91f8-9811ca4f02a0",
           "layerId": "foxglove.Grid",
           "size": 10,
           "divisions": 10,
@@ -161,7 +98,7 @@
       "synchronize": false,
       "imageMode": {}
     },
-    "Image!2gdeq90": {
+    "Image!3zkla5f": {
       "cameraState": {
         "distance": 20,
         "perspective": true,
@@ -201,54 +138,198 @@
         "poseEstimateYDeviation": 0.5,
         "poseEstimateThetaDeviation": 0.26179939
       },
+      "synchronize": false,
       "imageMode": {
-        "imageTopic": "/pi/camera/image/compressed",
-        "flipHorizontal": false,
-        "rotation": 0
-      },
-      "foxglovePanelTitle": "Touch Sensor",
-      "synchronize": false
+        "imageTopic": "/finger/image"
+      }
     },
-    "Tab!2xvuj86": {
-      "activeTabIdx": 0,
-      "tabs": [
-        {
-          "title": "Overview",
-          "layout": {
-            "direction": "column",
-            "first": "Image!3rp9676",
-            "second": "RawMessages!29pqw16",
-            "splitPercentage": 66.66666666666666
+    "Image!24wk5v": {
+      "cameraState": {
+        "distance": 20,
+        "perspective": true,
+        "phi": 60,
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "thetaOffset": 60,
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followMode": "follow-pose",
+      "scene": {},
+      "transforms": {},
+      "topics": {},
+      "layers": {},
+      "publish": {
+        "type": "point",
+        "poseTopic": "/move_base_simple/goal",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "synchronize": false,
+      "imageMode": {
+        "imageTopic": "/gopro/image",
+        "annotations": {
+          "/gopro/aruco_annotations": {
+            "visible": false
           }
+        }
+      }
+    },
+    "Plot!3ahq65t": {
+      "xAxisLabel": "",
+      "foxglovePanelTitle": "Linear Accel",
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gopro/accel.linear_acceleration.x",
+          "enabled": true,
+          "color": "#4e98e2",
+          "id": "06c76180-5e97-4141-9891-a39f0b7c4457",
+          "label": "a_x"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gopro/accel.linear_acceleration.y",
+          "enabled": true,
+          "color": "#f5774d",
+          "id": "00912f57-58af-4d8c-837b-234209c744a4",
+          "label": "a_y"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gopro/accel.linear_acceleration.z",
+          "enabled": true,
+          "color": "#2cff00",
+          "id": "68fd08fe-7862-40dd-a2b9-e0731a3f6f75",
+          "label": "a_z"
+        }
+      ],
+      "yAxisLabel": "m/s^2"
+    },
+    "Plot!35segx7": {
+      "foxglovePanelTitle": "Gyro",
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gopro/gyro.angular_velocity.x",
+          "enabled": true,
+          "color": "#4e98e2",
+          "id": "2301c2b4-5e13-4885-88b0-35e034923f5b",
+          "label": "w_x"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gopro/gyro.angular_velocity.y",
+          "enabled": true,
+          "color": "#f5774d",
+          "id": "30bc5f80-395d-4ee8-a0aa-1f863a9d3e0f",
+          "label": "w_y"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gopro/gyro.angular_velocity.z",
+          "enabled": true,
+          "color": "#2cff00",
+          "id": "1fc81e24-484c-4edd-a0fe-878e3ce2c66f",
+          "label": "w_z"
         }
       ]
     },
-    "Audio!1ops55o": {
-      "volume": 0.68,
+    "Plot!3z3pxs": {
+      "foxglovePanelTitle": "Gripper",
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gripper/width.width_m",
+          "enabled": true,
+          "color": "#4e98e2",
+          "id": "b7a60942-bf94-4200-b3d5-85eb5f763be2",
+          "label": "Gripper Width (m)"
+        }
+      ]
+    },
+    "Audio!3nxj4f9": {
+      "volume": 0.89,
       "slidingViewWidth": 10,
-      "topic": "/pi/audio/raw",
-      "muted": false,
-      "foxglovePanelTitle": "Fingertip Mic"
+      "topic": "/gopro/audio",
+      "muted": true
+    },
+    "Audio!2w9y83j": {
+      "volume": 0.98,
+      "slidingViewWidth": 10,
+      "topic": "/finger/piezo",
+      "muted": false
+    },
+    "Audio!1v0aezy": {
+      "volume": 0,
+      "slidingViewWidth": 10,
+      "topic": "/finger/air",
+      "muted": true
     }
   },
-  "layout": {
-    "first": {
-      "first": "3D!2sy03nw",
-      "second": {
-        "first": "Image!2gdeq90",
-        "second": "Tab!2xvuj86",
-        "direction": "row"
-      },
-      "direction": "row",
-      "splitPercentage": 43.78513429106808
-    },
-    "second": "Audio!1ops55o",
-    "direction": "column",
-    "splitPercentage": 67.49246735855372
-  },
   "globalVariables": {},
+  "userNodes": {},
   "playbackConfig": {
     "speed": 1
   },
-  "userNodes": {}
+  "drawerConfig": {
+    "tracks": []
+  },
+  "layout": {
+    "first": {
+      "first": {
+        "first": "3D!oah9y3",
+        "second": "Image!3zkla5f",
+        "direction": "row"
+      },
+      "second": "Image!24wk5v",
+      "direction": "row",
+      "splitPercentage": 71.28001014564859
+    },
+    "second": {
+      "first": {
+        "first": "Plot!3ahq65t",
+        "second": {
+          "first": "Plot!35segx7",
+          "second": "Plot!3z3pxs",
+          "direction": "row"
+        },
+        "direction": "row",
+        "splitPercentage": 33.166770768269835
+      },
+      "second": {
+        "first": {
+          "first": "Audio!3nxj4f9",
+          "second": "Audio!2w9y83j",
+          "direction": "column",
+          "splitPercentage": 49.15541131221808
+        },
+        "second": "Audio!1v0aezy",
+        "direction": "column",
+        "splitPercentage": 69.96619345713718
+      },
+      "direction": "column",
+      "splitPercentage": 33.79404020668456
+    },
+    "direction": "column",
+    "splitPercentage": 42.63565891472868
+  }
 }
