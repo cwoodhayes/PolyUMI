@@ -24,6 +24,17 @@
        are global, so callers set them exactly as they would on fr3.urdf.xacro itself. -->
   <xacro:include filename="$(find franka_description)/robots/fr3/fr3.urdf.xacro" />
 
+  <!-- polyumi_tcp hangs off ${arm_id}_hand, which fr3.urdf.xacro only creates when hand:=true
+       (its default). With hand:=false the joint below would reference a link that does not exist,
+       and the URDF parser reports that as a dangling parent somewhere in a 400-line generated
+       file. Referencing an undefined name instead fails here, naming the actual problem — the
+       same trick as the UNSET_* arg defaults above, and for the same reason. xacro has no
+       fail/assert, and property values are lazy, so the reference has to sit in an attribute to
+       be evaluated at all. -->
+  <xacro:unless value="$(arg hand)">
+    <link name="${POLYUMI_TCP_NEEDS_hand_true}" />
+  </xacro:unless>
+
   <link name="polyumi_tcp" />
   <joint name="polyumi_tcp_joint" type="fixed">
     <parent link="$(arg arm_id)_hand" />

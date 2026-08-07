@@ -184,3 +184,54 @@ def test_close_gripper_tolerates_fingers_stalling_just_short():
         assert node.close_gripper()
     finally:
         node.destroy_node()
+
+
+class _Pub:
+    """A publisher stub whose subscription count appears after `after` polls."""
+
+    topic_name = '/polyumi/target_poses'
+
+    def __init__(self, after: int):
+        self._after = after
+        self.polls = 0
+
+    def get_subscription_count(self) -> int:
+        self.polls += 1
+        return 1 if self.polls > self._after else 0
+
+
+def test_wait_for_subscriber_returns_once_the_bridge_matches():
+    """DDS discovery is asynchronous, so the wait has to poll rather than sample once."""
+    node = TcpPivotTest(parameter_overrides=[])
+    try:
+        assert node.wait_for_subscriber(_Pub(after=2), 'fr3_moveit_bridge', timeout_s=5.0)
+    finally:
+        node.destroy_node()
+
+
+def test_wait_for_subscriber_gives_up_when_nothing_is_listening():
+    """
+    A chunk published into an unmatched topic vanishes with no error anywhere.
+
+    That must fail here, naming the bridge — not later as 'the arm never moved', which sends you
+    to look at execute_arm instead of at discovery.
+    """
+    node = TcpPivotTest(parameter_overrides=[])
+    try:
+        assert not node.wait_for_subscriber(_Pub(after=10**6), 'fr3_moveit_bridge', timeout_s=0.3)
+    finally:
+        node.destroy_node()
+
+
+def test_rate_baseline_is_older_than_one_sample():
+    """
+    The motion threshold is only meaningful against a window, not adjacent samples.
+
+    At vscale=0.05 the sweep turns ~0.03 rad/s; over one 0.05 s sample that is 1.5 mrad, close
+    enough to arm jitter that noise latches `moved` and starves the quiet detector.
+    """
+    from polyumi_ros2.tcp_pivot_test import MOTION_RATE_RAD_S, RATE_WINDOW_S, SAMPLE_PERIOD_S
+
+    assert RATE_WINDOW_S >= 5 * SAMPLE_PERIOD_S
+    # The smallest rotation the window can resolve must stay well under one waypoint of the sweep.
+    assert MOTION_RATE_RAD_S * RATE_WINDOW_S < math.radians(1.0)

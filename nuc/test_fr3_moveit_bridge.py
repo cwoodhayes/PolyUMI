@@ -17,7 +17,7 @@ so these tests exercise the bridge's logic and nothing else.
 
 from unittest.mock import MagicMock, patch
 
-from moveit_msgs.msg import MoveItErrorCodes
+from moveit_msgs.msg import MoveItErrorCodes, RobotTrajectory
 import pytest
 import rclpy
 from rclpy.parameter import Parameter
@@ -164,3 +164,41 @@ def test_home_rejects_a_wrong_length_home_joints(make_node):
     assert not response.success
     assert 'expected 7' in response.message
     assert executed == []
+
+
+def test_execute_timeout_cancels_the_goal_and_waits_for_the_abort(make_node):
+    """
+    A timed-out goal keeps driving the arm, and the caller releases the busy lock on the way out.
+
+    Without a cancel the next chunk plans a Cartesian path from a start state the arm has already
+    left. The wait after the cancel matters just as much: returning while it decelerates puts us
+    back in the same race, one deceleration narrower.
+    """
+    node = make_node(execute=True)
+    waits = []
+
+    def _wait(_future, timeout_s):
+        """Time out only on the second wait — the goal result — and succeed on the others."""
+        waits.append(timeout_s)
+        return len(waits) != 2
+
+    node._wait = _wait
+
+    assert not node._run_execute(RobotTrajectory(), timeout_s=7.0)
+
+    goal_handle = node._exec.send_goal_async.return_value.result.return_value
+    goal_handle.cancel_goal_async.assert_called_once()
+    assert waits == [mb.PLAN_TIMEOUT_S, 7.0, mb.CANCEL_TIMEOUT_S], (
+        'must wait for the abort to land, bounded by CANCEL_TIMEOUT_S'
+    )
+
+
+def test_execute_success_does_not_cancel(make_node):
+    """The cancel path must not fire on the happy path — it would abort every good chunk."""
+    node = make_node(execute=True)
+    result = node._exec.send_goal_async.return_value.result.return_value.get_result_async.return_value
+    result.result.return_value.result.error_code.val = MoveItErrorCodes.SUCCESS
+
+    assert node._run_execute(RobotTrajectory())
+
+    node._exec.send_goal_async.return_value.result.return_value.cancel_goal_async.assert_not_called()

@@ -63,6 +63,9 @@ PLAN_TIMEOUT_S = 5.0
 # Chunks can be several waypoints at a low velocity scaling, so give execution more room
 # than a single-waypoint move would need.
 EXECUTE_TIMEOUT_S = 30.0
+# How long to let a cancelled goal actually abort before giving up on it. Short: move_group stops
+# the controller immediately, so this is deceleration, not motion.
+CANCEL_TIMEOUT_S = 3.0
 
 # --- Homing (the /polyumi/home service) ---
 # The SRDF's own `ready` group state for fr3_arm (franka_fr3_moveit_config, group_definition.xacro).
@@ -336,7 +339,17 @@ class Fr3MoveItBridge(Node):
             return False
         rf = gh.get_result_async()
         if not self._wait(rf, timeout_s):
-            self.get_logger().warning('Execution timed out.')
+            # Cancel, and wait for the abort to land. Returning here releases the caller's busy
+            # lock, and an uncancelled goal keeps driving the arm — so the next chunk would plan
+            # a Cartesian path from a start state the arm has already left. Bounded, because a
+            # server that ignores the cancel must not wedge the bridge instead.
+            self.get_logger().warning(f'Execution timed out after {timeout_s:.0f}s — cancelling.')
+            gh.cancel_goal_async()
+            if not self._wait(rf, CANCEL_TIMEOUT_S):
+                self.get_logger().error(
+                    'Cancel did not take effect — the arm may still be moving. Stop it from the '
+                    'Desk UI before sending anything else.'
+                )
             return False
         res = rf.result()
         if res is None or res.result.error_code.val != MoveItErrorCodes.SUCCESS:

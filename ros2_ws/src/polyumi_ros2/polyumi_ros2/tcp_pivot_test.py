@@ -67,6 +67,15 @@ DEFAULT_STEP_DEG = 5.0
 MOTION_RATE_RAD_S = 0.01
 QUIET_S = 2.0
 SAMPLE_PERIOD_S = 0.05
+# The rate is measured against a sample this old, NOT against the previous one. At vscale=0.05 the
+# sweep's real rate is only ~0.03 rad/s, so an adjacent-sample delta (0.05 s of travel) sits close
+# enough to the arm's own jitter that noise can latch `moved` and then keep resetting the quiet
+# timer — the sweep would never be seen to finish and would burn the whole sweep_timeout_s.
+# A longer baseline divides the noise by the window while leaving the real signal untouched.
+RATE_WINDOW_S = 0.5
+# Give DDS time to match the bridge's subscription. Discovery is asynchronous, so a chunk
+# published before the endpoints pair goes nowhere, silently.
+SUBSCRIBER_TIMEOUT_S = 10.0
 
 
 def quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -242,6 +251,25 @@ class TcpPivotTest(Node):
             time.sleep(0.1)
         return None
 
+    def wait_for_subscriber(self, pub, bridge: str, timeout_s: float = SUBSCRIBER_TIMEOUT_S) -> bool:
+        """
+        Block until `pub` has matched a subscriber, so the first message is not silently dropped.
+
+        Publishing into an unmatched topic loses the message with no error anywhere. That would
+        surface much later as "the arm never moved" (or a gripper that never closed), whose
+        diagnosis blames execute_arm or an in-flight chunk — sending you to the wrong pane.
+        """
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if pub.get_subscription_count() > 0:
+                return True
+            time.sleep(0.1)
+        self.get_logger().error(
+            f'Nothing is subscribed to {pub.topic_name} after {timeout_s:.0f}s — is {bridge} '
+            'running on the NUC (ros2 launch nuc/launch/fr3_inference.launch.py)?'
+        )
+        return False
+
     def _publish_sweep(self, axis: str, position: np.ndarray, start_quat: np.ndarray) -> int:
         """Publish one PoseArray holding `position` while rotating about the TCP's own `axis`."""
         msg = PoseArray()
@@ -274,7 +302,7 @@ class TcpPivotTest(Node):
         """
         start = time.monotonic()
         max_drift = 0.0
-        last_quat, last_t = None, None
+        ref_quat, ref_t = None, None
         moved = False
         quiet_since = None
         while time.monotonic() - start < self._timeout_s:
@@ -284,9 +312,14 @@ class TcpPivotTest(Node):
                 continue
             current, quat = pose
             now = time.monotonic()
+            # Drift is sampled every period; the rate is only evaluated once the baseline is
+            # RATE_WINDOW_S old, so intermediate samples are recorded but leave the baseline alone.
             max_drift = max(max_drift, float(np.linalg.norm(current - position)))
-            if last_quat is not None:
-                rate = quat_angle(last_quat, quat) / max(now - last_t, 1e-6)
+            if ref_quat is None:
+                ref_quat, ref_t = quat, now
+            elif now - ref_t >= RATE_WINDOW_S:
+                rate = quat_angle(ref_quat, quat) / (now - ref_t)
+                ref_quat, ref_t = quat, now
                 if rate > MOTION_RATE_RAD_S:
                     moved = True
                     quiet_since = None
@@ -294,7 +327,6 @@ class TcpPivotTest(Node):
                     quiet_since = quiet_since or now
                     if now - quiet_since > QUIET_S:
                         return max_drift, True
-            last_quat, last_t = quat, now
             if not moved and now - start > self._motion_start_timeout_s:
                 return max_drift, False
         self.get_logger().warning(f'Sweep did not settle within {self._timeout_s}s.')
@@ -309,8 +341,13 @@ class TcpPivotTest(Node):
                 'source setup_franka_env.sh?'
             )
             return 1
-        if self._close_gripper and not self.close_gripper():
+        if not self.wait_for_subscriber(self._pub, 'fr3_moveit_bridge'):
             return 1
+        if self._close_gripper:
+            if not self.wait_for_subscriber(self._gripper_pub, 'fr3_gripper_bridge'):
+                return 1
+            if not self.close_gripper():
+                return 1
         position, quat = start
         self.get_logger().info(
             f'{self._eef} starts at [{position[0]:.4f}, {position[1]:.4f}, {position[2]:.4f}] '
@@ -364,7 +401,14 @@ class TcpPivotTest(Node):
 def main():
     """Spin the node on a background thread and run the sweeps in the foreground."""
     rclpy.init()
-    node = TcpPivotTest()
+    try:
+        # Inside the try: the parameter validation in __init__ raises, and letting that escape
+        # would skip rclpy.shutdown() and bury the message under a traceback.
+        node = TcpPivotTest()
+    except ValueError as exc:
+        print(f'tcp_pivot_test: {exc}')
+        rclpy.shutdown()
+        return 2
     executor = MultiThreadedExecutor()
     executor.add_node(node)
     spin = threading.Thread(target=executor.spin, daemon=True)

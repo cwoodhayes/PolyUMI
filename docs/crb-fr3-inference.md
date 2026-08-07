@@ -98,9 +98,9 @@ hardware differs.
 latches `/robot_description`, which reaches the laptop over DDS, so Foxglove's 3D panel can draw
 the arm: add a **URDF** custom layer sourced from the `/robot_description` *topic*, then enable
 the `polyumi_tcp` and `fr3_hand_tcp` TF frames on top of it. This is the fastest way to check the
-TCP calibration — the `polyumi_tcp` triad must sit between the fingertips with z out along the
-approach axis and x along the finger-opening axis, which is where a flipped `Rz` sign in
-`nuc/tcp_calib.py` is caught by eye before anything moves.
+TCP calibration — the `polyumi_tcp` frame must sit between the fingertips with z out along the
+approach axis and x along the finger-opening axis. If this looks wrong, you need
+to fix the polyumi_tcp constants in `nuc/tcp_calib.py`.
 
 The meshes are `package://franka_description/...` URIs that `foxglove_bridge` resolves on **this**
 machine (it is launched with the `assets` capability), and `franka_description` is not in
