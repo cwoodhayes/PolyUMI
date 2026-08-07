@@ -90,8 +90,14 @@ class PolicyClientNode(Node):
         self.declare_parameter('max_image_age_s', 0.0)
         # Frame IDs for the EEF pose lookup. Defaults match the FR3 TF tree; on a
         # different arm override base_frame / eef_frame instead of editing code.
+        #
+        # eef_frame is polyumi_tcp, NOT the stock fr3_hand_tcp: the policy's poses — both the
+        # ones it observes here and the ones it predicts — live on the closed-fingertip midpoint
+        # in optical axes (ingest step 5's `hand` body frame). Reading fr3_hand_tcp would hand it
+        # a different physical point in a different axis convention. nuc/tcp_calib.py defines the
+        # frame; the NUC's fr3_bringup.launch.py publishes it.
         self.declare_parameter('base_frame', 'fr3_link0')
-        self.declare_parameter('eef_frame', 'fr3_hand_tcp')
+        self.declare_parameter('eef_frame', 'polyumi_tcp')
         # Look up the LATEST available EEF transform (tf2 time=0) instead of the latency-aligned
         # historical instant. For a stationary dry-run arm this sidesteps a laptop↔NUC clock skew
         # (TF stamps from another machine landing outside our buffer) at the cost of the

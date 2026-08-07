@@ -8,9 +8,9 @@
 #     ./fr3_session.sh --kill-local   # tear down the LOCAL session only (remote ones survive)
 #     ./fr3_session.sh --kill         # --kill-local, plus stop the remote sessions too
 #
-# Every fresh start (not a re-attach) also pushes this working copy to the machines that run
-# it — rsyncs nuc/ to the NUC, and calls ./deploy.sh for the Pi — so what runs remotely always
-# matches what you have checked out here. See the "Deploy" section below.
+# Every fresh start (not a re-attach) also makes each machine run this working copy — builds
+# polyumi_ros2 here, rsyncs nuc/ to the NUC, and calls ./deploy.sh for the Pi — so nothing runs
+# code you no longer have checked out. See the "Deploy" section below.
 #
 # WHERE TMUX RUNS, AND WHY IT MATTERS
 # The NUC and GPU-box panes run tmux *on the remote host* (`ssh -t host tmux new -A -s ...`),
@@ -117,8 +117,19 @@ fi
 # it tracks its own training branch, not this one, so force-syncing it would be wrong.
 # ---------------------------------------------------------------------------
 if [ "${SKIP_DEPLOY:-0}" = 1 ]; then
-  echo "SKIP_DEPLOY=1 — leaving the NUC and Pi source trees as they are."
+  echo "SKIP_DEPLOY=1 — leaving the laptop build and the NUC/Pi source trees as they are."
 else
+  # The laptop needs this as much as the remotes do, and it is easier to forget: colcon COPIES
+  # sources into install/, so an edited node keeps running the old code until you rebuild, with
+  # no error and no clue — a stale `eef_frame` default cost an on-arm debugging session once.
+  # Only polyumi_ros2: it holds the nodes this session launches, and the two msgs packages are
+  # slow to build and change roughly never.
+  echo "==> Building polyumi_ros2 (this laptop) ..."
+  if ! (unset VIRTUAL_ENV; cd "$REPO_DIR/ros2_ws" \
+      && source /opt/ros/kilted/setup.bash && colcon build --packages-select polyumi_ros2); then
+    echo "WARNING: colcon build failed — the laptop may run stale polyumi_ros2 code." >&2
+  fi
+
   echo "==> Syncing nuc/ to $NUC_SSH_HOST:$NUC_REPO ..."
   if rsync -a --delete --mkpath --exclude='__pycache__/' --exclude='*.pyc' \
       nuc "${NUC_SSH_HOST}:${NUC_REPO}/"; then

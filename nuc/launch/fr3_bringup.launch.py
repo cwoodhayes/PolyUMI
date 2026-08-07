@@ -20,12 +20,22 @@ Run on the NUC, after enabling FCI on the Desk UI:
 See docs/crb-fr3-inference.md for the full bringup order and its gotchas.
 """
 
+from pathlib import Path
+import sys
+
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+
+# ros2 launch loads this file by path without touching sys.path, so a sibling import needs the
+# repo's nuc/ directory put there by hand. Same NUC_DIR idiom as fr3_inference.launch.py.
+NUC_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(NUC_DIR))
+
+import tcp_calib  # noqa: E402
 
 # How long the spawner waits for controller_manager to appear. franka.launch.py brings the arm
 # up inside an OpaqueFunction, so there is no node handle here to hang an OnProcessStart event
@@ -81,5 +91,20 @@ def generate_launch_description():
                 ]),
                 '--controller-manager-timeout', CONTROLLER_MANAGER_TIMEOUT_S,
             ],
+        ),
+
+        # The frame the policy actually speaks in. It lives here rather than in the inference
+        # launch so it exists whenever the arm does — Foxglove and `tf2_echo fr3_hand
+        # polyumi_tcp` are how you check the calibration, and neither should need move_group.
+        # franka.launch.py owns robot_state_publisher and hardcodes its xacro mappings, so an
+        # extra URDF link cannot be threaded through it; a static publisher is the way in.
+        # move_group gets the same numbers as xacro args — see nuc/tcp_calib.py.
+        LogInfo(msg=f'[fr3_bringup] TCP {tcp_calib.describe()}'),
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='polyumi_tcp_static_tf',
+            output='screen',
+            arguments=tcp_calib.static_transform_publisher_args(),
         ),
     ])

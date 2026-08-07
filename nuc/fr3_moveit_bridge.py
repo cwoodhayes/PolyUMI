@@ -37,10 +37,16 @@ from rclpy.node import Node
 # FR3 SRDF names. IMPORTANT: use group 'fr3_arm', NOT 'fr3_manipulator'. Only fr3_arm has
 # an IK solver entry in kinematics.yaml, and Humble's computeCartesianPath needs it — with
 # fr3_manipulator every Cartesian request returns fraction=0.0 (verified on hardware).
-# fr3_arm still accepts fr3_hand_tcp as the target link (fraction=1.0), even though its SRDF
-# tip is fr3_link8, so we keep controlling the true TCP.
+# fr3_arm still accepts an arbitrary target link (fraction=1.0), even though its SRDF tip is
+# fr3_link8, so we keep controlling the true TCP.
+#
+# That target is polyumi_tcp, NOT the stock fr3_hand_tcp: incoming poses are the policy's, and
+# the policy's body frame is the closed-fingertip midpoint in optical axes. See nuc/tcp_calib.py
+# for the transform and where it comes from. move_group only knows the link because
+# fr3_move_group.launch.py feeds it nuc/description/fr3_polyumi.urdf.xacro — planning against a
+# stock franka_description will fail here with "Link 'polyumi_tcp' not found".
 DEFAULT_GROUP = 'fr3_arm'
-DEFAULT_LINK = 'fr3_hand_tcp'
+DEFAULT_LINK = 'polyumi_tcp'
 DEFAULT_BASE = 'fr3_link0'
 
 MIN_CARTESIAN_FRACTION = 0.9

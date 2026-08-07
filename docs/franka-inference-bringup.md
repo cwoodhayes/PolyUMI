@@ -18,7 +18,7 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
 | Action-chunk execution on real hardware | **done** (single chunks); continuous 10 Hz loop unverified. **Executor redesign planned — Phase 4** (plan-then-execute → UMI-style 1 kHz streaming Cartesian servo) |
 | Latency compensation, gopro + proprio | **done** — matches UMI's scheme; unit-tested |
 | Latency compensation, finger cam + piezo | **not started** — params declared, never consumed |
-| Pose body frame (training ↔ inference) | **half** — ingest emits `hand`; robot still reports `fr3_hand_tcp` |
+| Pose body frame (training ↔ inference) | **done, unverified on hardware** — `polyumi_tcp` plumbed end to end and measured from CAD (`nuc/tcp_calib.py`); the `Rz(+90°)` sign wants an eyeball in Foxglove |
 | Gripper — observation | **done** — Phase 2.5: `/fr3_gripper/joint_states` → `agent_pos[7]` |
 | Gripper — command | **done** — Phase 2.5: `action[7]` → `/polyumi/target_gripper` → NUC `fr3_gripper_bridge` |
 | DP export | **exists** for pose+image+gripper; no tactile; wrong schema for UMI; untested |
@@ -26,11 +26,22 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
 
 ### Blocking issues
 
-1. **`eef_frame` is the wrong frame.** Ingest step 5 exports poses on the canonical `hand`
-   frame (anchored to the GoPro, the only body the handheld gripper and the FR3 share). The
-   client still reads `fr3_hand_tcp`, which is the *Franka Hand* TCP — a different physical
-   point. Until a static TF puts `eef_frame` on the `hand` frame, training and inference are in
-   different frames and no policy can transfer. See [data-format.md](data-format.md).
+1. **The TCP frame has never been checked on hardware.** The plumbing and the numbers are done:
+   `polyumi_tcp` is a fixed child of `fr3_hand` defined once in `nuc/tcp_calib.py`, published into
+   TF by `fr3_bringup.launch.py` and into move_group's model by
+   `nuc/description/fr3_polyumi.urdf.xacro`, and both `eef_frame` and the bridge's `eef_link` name
+   it. Translation is a CAD read (0.0584 m to the finger carriage plane from franka_description,
+   plus 0.1985 m to the fingertips from the PolyUMI assembly; 0.019612 m up to the tag plane),
+   cross-checking against `T_gopro_to_fingertip`'s 0.259 m to within ~2 mm. What is unverified is
+   the **`Rz(+90°)` sign** — catch it by eye in Foxglove before the arm moves — and real GoPro
+   mount tilt versus the CAD-nominal optical axis. See [data-format.md](data-format.md).
+
+   Note the x currently in force is **not** 0.019612 but 0.076302: `T_gopro_to_fingertip`'s y was
+   corrected from 0.014 to 0.07069 on 2026-08-06, and checkpoints exported before that learned the
+   older body frame. `LEGACY_TRAINING_Y_ERROR` in `nuc/tcp_calib.py` shifts the TCP to match what
+   the policy was trained on — a policy needs training and inference to agree on the body frame,
+   not for the frame to be anatomically right. Zero that constant after retraining on corrected
+   data.
 
 2. **Two placeholder constants sit on critical paths**, both currently claiming more rigour
    than they have:
@@ -329,7 +340,7 @@ pose with a stale image against a model trained on same-instant pairs.
 | `image_width` | `224` | Resize width (matches `shape_meta image: [3, 224, 224]`); INTER_AREA per the camera0_rgb contract |
 | `image_height` | `224` | Resize height |
 | `base_frame` | `fr3_link0` | TF base frame for the EEF lookup |
-| `eef_frame` | `fr3_hand_tcp` | TF EEF/tool frame — **wrong frame**, see Status blocker 1 |
+| `eef_frame` | `polyumi_tcp` | TF EEF/tool frame — the policy's fingertip frame, defined in `nuc/tcp_calib.py` and published by the NUC's `fr3_bringup.launch.py`. Its translation is still provisional, see Status blocker 1 |
 | `execute_motion` | `false` | Off by default: the arm does not move until explicitly enabled |
 | `gripper_state_topic` | `/fr3_gripper/joint_states` | Gripper joint-state source for `agent_pos[7]` |
 | `require_gripper_state` | `false` | If true, skip the tick when no gripper state is available — never arrived, or gone stale. Default false so `motion_only` / no-hand setups still run: missing → closed width, stale → hold the last width, both with a throttled warning |
@@ -756,7 +767,7 @@ Franka package set present: `franka_bringup`, `franka_description`, `franka_fr3_
 | 3 | `moveit_py` availability — and on which machine (Phase 2)? | **Resolved:** not used at all. Raw `moveit_msgs` calls from a small node (`nuc/fr3_moveit_bridge.py`) running on the NUC, same-rmw as move_group — see Phase 2 / crb-fr3-inference.md. |
 | 4 | Gripper width topic on Franka? | **Resolved:** `/fr3_gripper/joint_states`; actions `/fr3_gripper/{grasp,move,gripper_action,homing}`. |
 | 5 | Subprocess vs direct import for Phase 3 | **Resolved — direct import (subprocess retired).** The original answer was subprocess, but the training work produced a single Docker image whose `umi` env has both `diffusion_policy`/torch and fastapi/uvicorn, so `serve_policy.py` direct-imports the policy and the container is the isolation boundary. See Phase 3. |
-| 6 | Which physical point is the canonical `hand` frame, and what publishes it on the FR3? | **Open — blocking.** Ingest step 5 emits poses on a `hand` frame defined by `T_gopro_to_fingertip` — the closed-fingertip midpoint, measured from CAD. The FR3 must report that same point as `eef_frame`; today it reports `fr3_hand_tcp`. Needs a mounting calibration + a static TF. |
+| 6 | Which physical point is the canonical `hand` frame, and what publishes it on the FR3? | **Resolved (plumbing) / open (number).** The point is the closed-fingertip midpoint in optical axes, defined by `T_gopro_to_fingertip`. On the FR3 it is `polyumi_tcp`, a fixed child of `fr3_hand` whose transform lives in `nuc/tcp_calib.py` and reaches both consumers from there: TF via a `static_transform_publisher` in `fr3_bringup.launch.py` (for `eef_frame`) and move_group's RobotModel via `nuc/description/fr3_polyumi.urdf.xacro` (for the bridge's `link_name`). Note `franka_msgs/SetTCPFrame` → `robot.setEE()` is *not* the lever — it only changes libfranka's `O_T_EE` reporting, while TF and MoveIt are driven by the URDF. What remains is the CAD measurement of the translation. |
 | 7 | How do gripper width (obs) and gripper command (action) get wired? | **Resolved — Phase 2.5.** Obs: `policy_client_node` subscribes `/fr3_gripper/joint_states` (aperture = `position[0]+position[1]`), interpolates to the frame's capture instant, offsets into policy units → `agent_pos[7]`. Action: a **parallel** `trajectory_msgs/JointTrajectory` on `/polyumi/target_gripper` (chosen over changing `PoseArray`'s type because it carries per-point timing and crosses the rmw gap), consumed by a **separate** NUC node `fr3_gripper_bridge` that deadbands + rate-limits into `Move`/`Grasp` goals. What's left is calibrating `gripper_offset_m`, not wiring. |
 | 8 | Do finger cam / piezo feed the policy, and at what latency? | **Open.** Params exist and are unconsumed. If they become obs, the capture instant becomes the *oldest* across streams (an observation is only as fresh as its slowest signal), and they must also be added to the DP export, which carries none of them today. (`latency.gripper` is now consumed — it is not in this category.) |
 | 9 | What is `latency.gopro` actually? | **Open — needs measurement, not a guess.** See Status blocker 2. |

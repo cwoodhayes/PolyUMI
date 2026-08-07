@@ -17,7 +17,7 @@
 # `fr3-bringup` on the NUC — it starts ONLY the move_group node (no hardware, no
 # controllers, no robot_state_publisher), so there is no collision.
 #
-# Two changes vs. upstream:
+# Three changes vs. upstream:
 #   1. Declare robot_ip / use_fake_hardware / fake_sensor_commands. Upstream references
 #      these LaunchConfigurations without declaring them, so it can't launch at all
 #      ("launch configuration 'fake_sensor_commands' does not exist").
@@ -27,11 +27,15 @@
 #      logs "No controller_names specified" -> /execute_trajectory cannot move the arm.
 #      These are copied from franka_fr3_moveit_config's OWN moveit.launch.py (minus the
 #      hardware/RViz/controller nodes that fr3-bringup already provides).
+#   3. Build robot_description from nuc/description/fr3_polyumi.urdf.xacro instead of
+#      franka_description's fr3.urdf.xacro, so the model carries `polyumi_tcp`.
 # See docs/crb-fr3-inference.md for how to run this and the gotchas around it.
 
 """Launch a standalone MoveIt move_group for the FR3, alongside a running fr3-bringup."""
 
 import os
+from pathlib import Path
+import sys
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -41,6 +45,13 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
 import yaml
+
+# ros2 launch loads this file by path without touching sys.path, so a sibling import needs the
+# repo's nuc/ directory put there by hand. Same NUC_DIR idiom as fr3_inference.launch.py.
+NUC_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(NUC_DIR))
+
+import tcp_calib  # noqa: E402
 
 
 def load_yaml(package_name, file_path):
@@ -94,9 +105,10 @@ def generate_launch_description():
 
     db_arg = DeclareLaunchArgument('db', default_value='False', description='Database flag')
 
-    franka_xacro_file = os.path.join(
-        get_package_share_directory('franka_description'), 'robots', 'fr3', 'fr3.urdf.xacro'
-    )
+    # PolyUMI change 3 (see header): the stock fr3.urdf.xacro, wrapped so move_group's
+    # RobotModel also carries `polyumi_tcp` — the frame the bridge names as GetCartesianPath's
+    # link_name. TF gets the same transform from fr3_bringup.launch.py; both read tcp_calib.
+    franka_xacro_file = str(NUC_DIR / 'description' / 'fr3_polyumi.urdf.xacro')
 
     robot_description_command = Command(
         [
@@ -112,6 +124,7 @@ def generate_launch_description():
             use_fake_hardware,
             ' fake_sensor_commands:=',
             fake_sensor_commands,
+            *tcp_calib.xacro_args(),
         ]
     )
 

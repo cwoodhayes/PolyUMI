@@ -92,6 +92,20 @@ PolyUMI bridges, with separate `execute_arm` / `execute_gripper` flags, both def
 They are deliberately two files: bringup is the crash-prone, FCI-gated piece and must be
 restartable on its own.
 
+**The TCP frame is `polyumi_tcp`, not `fr3_hand_tcp`.** The policy's poses live on the
+closed-fingertip midpoint in GoPro-optical axes (ingest step 5's `hand` body frame), so both the
+observation TF lookup (`eef_frame`) and the MoveIt bridge's target link name that frame. Its
+transform is defined **once**, in `nuc/tcp_calib.py`, and reaches its two consumers from there:
+TF via a `static_transform_publisher` in `fr3_bringup.launch.py`, and move_group's RobotModel via
+`nuc/description/fr3_polyumi.urdf.xacro` (a thin wrapper over `fr3.urdf.xacro`) which
+`fr3_move_group.launch.py` feeds it. Never hardcode the numbers a second time. Note
+`franka_msgs/srv/SetTCPFrame` (libfranka `setEE`) is *not* the lever — it only changes `O_T_EE`
+reporting, while TF and MoveIt are driven entirely by the URDF. The transform is measured from
+CAD (the same method UMI uses), not from a calibration rig; what remains unvalidated is the
+`Rz(+90°)` sign, checkable by eye in Foxglove, and real GoPro mount tilt. It also carries
+`LEGACY_TRAINING_Y_ERROR`, deliberately offsetting the TCP off the true fingertips so it names the
+body frame pre-2026-08-06 checkpoints were trained on — zero it after retraining on corrected data.
+
 **`./fr3_session.sh`** (repo root) builds the whole wall — NUC, Pi, GPU box, laptop — as one
 tmux session, running the safe commands and pre-typing the robot-moving ones for you to
 confirm. Every fresh start (not a re-attach) also rsyncs `nuc/` to the NUC and runs
