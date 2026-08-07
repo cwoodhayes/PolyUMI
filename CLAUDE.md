@@ -41,13 +41,13 @@ bash -c 'unset VIRTUAL_ENV; cd ros2_ws && source /opt/ros/kilted/setup.bash \
   && colcon test-result --test-result-base build/polyumi_ros2'
 ```
 The **NUC bridges** in `nuc/` are standalone scripts, not an ament package, so `colcon test`
-never sees them. `nuc/test_fr3_gripper_bridge.py` runs on the laptop anyway — it needs only the
-`franka_msgs` message definitions (built in `ros2_ws`) and mocks the action clients, so no
-hardware or NUC is involved:
+never sees them. `nuc/test_*.py` run on the laptop anyway — they need only the `franka_msgs` /
+`moveit_msgs` message definitions (built in `ros2_ws`, or from `/opt/ros`) and mock the service
+and action clients, so no hardware, no move_group, and no NUC is involved:
 ```bash
 bash -c 'unset VIRTUAL_ENV; source /opt/ros/kilted/setup.bash \
   && source ros2_ws/install/setup.bash \
-  && /usr/bin/python3 -m pytest nuc/test_fr3_gripper_bridge.py -q'
+  && /usr/bin/python3 -m pytest nuc/ -q'
 ```
 
 The generated `ament_copyright` / `ament_flake8` / `ament_pep257` linter tests were **deleted** —
@@ -91,6 +91,23 @@ franka_bringup + the `fr3_arm_controller` spawner, replacing the `fr3-bringup` +
 PolyUMI bridges, with separate `execute_arm` / `execute_gripper` flags, both defaulting false).
 They are deliberately two files: bringup is the crash-prone, FCI-gated piece and must be
 restartable on its own.
+
+**The TCP frame is `polyumi_tcp`, not `fr3_hand_tcp`.** The policy's poses live on the
+closed-fingertip midpoint in GoPro-optical axes (ingest step 5's `hand` body frame), so both the
+observation TF lookup (`eef_frame`) and the MoveIt bridge's target link name that frame. Its
+transform is defined **once**, in `nuc/tcp_calib.py`, and reaches its two consumers from there:
+TF via a `static_transform_publisher` in `fr3_bringup.launch.py`, and move_group's RobotModel via
+`nuc/description/fr3_polyumi.urdf.xacro` (a thin wrapper over `fr3.urdf.xacro`) which
+`fr3_move_group.launch.py` feeds it. Never hardcode the numbers a second time. Note
+`franka_msgs/srv/SetTCPFrame` (libfranka `setEE`) is *not* the lever — it only changes `O_T_EE`
+reporting, while TF and MoveIt are driven entirely by the URDF. The transform is measured from
+CAD (the same method UMI uses), not from a calibration rig; what remains unvalidated is the
+real GoPro mount tilt — the geometry itself, `Rz(+90°)` sign included, is confirmed on hardware by
+`ros2 run polyumi_ros2 tcp_pivot_test`, which pivots about the TCP so you can watch whether the
+closed fingertips hold still. Re-run it after any change to the mount, the fingers, or this file.
+`tcp_calib.py` also carries
+`LEGACY_TRAINING_Y_ERROR`, deliberately offsetting the TCP off the true fingertips so it names the
+body frame pre-2026-08-06 checkpoints were trained on — zero it after retraining on corrected data.
 
 **`./fr3_session.sh`** (repo root) builds the whole wall — NUC, Pi, GPU box, laptop — as one
 tmux session, running the safe commands and pre-typing the robot-moving ones for you to

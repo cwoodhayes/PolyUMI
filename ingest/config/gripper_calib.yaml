@@ -38,7 +38,7 @@ T_gripper_base_to_gopro:
 # ORB-SLAM3) to gripper fingertips, as measured in the PolyUMI CAD assembly.
 # To be more specific:
 # - "camera frame" origin is measured on the CAD as the centerpoint of the GoPro lens faceplate, 
-#   with a 5mm fudge factor added to guess at where the sensor plane is (.209->.259)
+#   with a 5mm fudge factor added to guess at where the sensor plane is (.254->.259)
 # - "gripper fingertips" is the midpoint between the two gripper fingertips, on the plane of the upper 
 #   surface of the fingers. In other words, if you close the gripper all the way, it's the point where the
 #   two fingertips meet that is coplanar with the QR codes.
@@ -50,8 +50,20 @@ T_gripper_base_to_gopro:
 
 # the CAD is designed such that this geometric relationship is the same for both the gripper
 # and the franka end effector.
+#
+# The .259 is corroborated independently of this CAD read, via the FR3 chain: franka_description
+# puts the finger carriage plane 0.0584 m out from fr3_hand, and the fingertips are 0.1985 m past
+# that (nuc/tcp_calib.py) = 0.2569 m. The two agree to ~2 mm, which says the sensor plane sits
+# essentially in the fr3_hand/flange plane. Don't "fix" this number without redoing that check —
+# it has been mistaken for a typo once already.
+#
+# The y was 0.014 until 2026-08-06, which was wrong: it implied the sensor sat only 33.6 mm above
+# the fr3_hand x-midline, roughly flush with the top of the hand shell, when the bracket clearly
+# lifts it further. 0.07069 puts it ~90 mm up, matching the CAD. Every pose exported before that
+# date is on a body frame ~57 mm off along this axis — see LEGACY_TRAINING_Y_ERROR in
+# nuc/tcp_calib.py, which keeps inference speaking the frame those checkpoints were trained in.
 T_gopro_to_fingertip:
-  translation: [0.0, 0.014, 0.259] # meters — gopro frame: x right, y down, z forward
+  translation: [0.0, 0.07069, 0.259] # meters — gopro frame: x right, y down, z forward
   # we'll work in optical coordinates (ie z out, x right, y down); no reason to change from SLAM output
   rotation: [ 0.0, 0.0, 0.0, 1.0 ] # quaternion (xyzw)
 

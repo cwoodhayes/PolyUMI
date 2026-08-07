@@ -94,6 +94,23 @@ while the profile is up. To revert manually: `nmcli connection down fr3-link`.
 Override `FR3_IFACE` / `FR3_LAPTOP_IP` / `FR3_NM_PROFILE` before sourcing if the
 hardware differs.
 
+**Seeing the arm in Foxglove (`FRANKA_DESCRIPTION_WS`).** The NUC's `robot_state_publisher`
+latches `/robot_description`, which reaches the laptop over DDS, so Foxglove's 3D panel can draw
+the arm: add a **URDF** custom layer sourced from the `/robot_description` *topic*, then enable
+the `polyumi_tcp` and `fr3_hand_tcp` TF frames on top of it. This is the fastest way to check the
+TCP calibration — the `polyumi_tcp` frame must sit between the fingertips with z out along the
+approach axis and x along the finger-opening axis. If this looks wrong, you need
+to fix the polyumi_tcp constants in `nuc/tcp_calib.py`.
+
+The meshes are `package://franka_description/...` URIs that `foxglove_bridge` resolves on **this**
+machine (it is launched with the `assets` capability), and `franka_description` is not in
+`/opt/ros/kilted`. `setup_franka_env.sh` therefore prepends `FRANKA_DESCRIPTION_WS` (default
+`~/ws/franka/install`) to `AMENT_PREFIX_PATH`; export it before sourcing if yours lives elsewhere.
+Missing workspace = frames but no meshes, and a warning — nothing else breaks.
+
+Known limitation: the finger joints never reach `robot_state_publisher` (see *Known upstream
+`franka_ros2` bugs* below), so the fingers render static while the arm links animate.
+
 ### NUC (`nu-crb`)
 
 | | |
@@ -134,9 +151,13 @@ Both machines must agree on all of:
 
 ### FR3 specifics
 
-- **TF tree:** `base → fr3_link0 → … → fr3_link7 → fr3_link8 → fr3_hand → fr3_hand_tcp`.
+- **TF tree:** `base → fr3_link0 → … → fr3_link7 → fr3_link8 → fr3_hand → {fr3_hand_tcp, polyumi_tcp}`.
   - Base frame: **`fr3_link0`**
-  - EEF / tool frame: **`fr3_hand_tcp`** (tool center point, 0.1034 m past `fr3_hand`)
+  - EEF / tool frame: **`polyumi_tcp`** — the *policy's* frame: the closed-fingertip midpoint in
+    GoPro-optical axes, a fixed child of `fr3_hand` defined in `nuc/tcp_calib.py` and published
+    by a `static_transform_publisher` in `fr3_bringup.launch.py`. The stock **`fr3_hand_tcp`**
+    (0.1034 m past `fr3_hand`, Franka's axis convention) is a *different physical point* and is
+    no longer used by anything in PolyUMI.
   - `policy_client_node` reads `base_frame` / `eef_frame` params (defaults above).
 - **Gripper (Franka Hand):** see [Gripper interface](#gripper-interface-franka-hand) below — it
   behaves quite differently from the arm and has several traps.
@@ -148,8 +169,10 @@ Both machines must agree on all of:
   `fr3_arm` has a kinematics solver entry in `franka_fr3_moveit_config/config/kinematics.yaml`,
   and Humble's `computeCartesianPath` needs one — with `fr3_manipulator` **every**
   Cartesian request returns `fraction=0.0` (error_code SUCCESS, 1 trajectory point).
-  Verified on hardware: `fr3_arm` → `fraction=1.000`. `fr3_arm` still accepts
-  `fr3_hand_tcp` as the target `link_name`, so we plan for the real TCP either way.
+  Verified on hardware: `fr3_arm` → `fraction=1.000`. `fr3_arm` still accepts an arbitrary
+  target `link_name`, so we plan for `polyumi_tcp` either way — which is why
+  `fr3_move_group.launch.py` must feed move_group `nuc/description/fr3_polyumi.urdf.xacro`
+  rather than the stock `fr3.urdf.xacro`, or planning fails with "Link 'polyumi_tcp' not found".
 - **Humble `GetCartesianPath` has no velocity scaling.** `max_velocity_scaling_factor` /
   `max_acceleration_scaling_factor` don't exist on the request in Humble (added later);
   setting them raises `AttributeError`. `fr3_moveit_bridge` instead scales the planned
@@ -222,9 +245,30 @@ directly, but it will bite anyone expecting finger frames in TF.
 ```bash
 # laptop, after `source setup_franka_env.sh` and with `fr3-bringup` up on the NUC:
 ping 10.0.0.2
-ros2 node list                                   # NUC nodes appear
-ros2 run tf2_ros tf2_echo fr3_link0 fr3_hand_tcp # live transform
+ros2 topic list                                  # NUC topics appear (nodes will NOT — see below)
+ros2 run tf2_ros tf2_echo fr3_link0 polyumi_tcp  # live transform (the policy's frame)
+ros2 run tf2_ros tf2_echo fr3_hand polyumi_tcp   # must equal nuc/tcp_calib.py exactly
+
+# Send the arm back to the SRDF `ready` pose (needs fr3_inference up). MOVES THE ARM — it is an
+# explicit request, so it runs even when execute_arm:=false. Override the target with the
+# fr3_moveit_bridge `home_joints` param.
+ros2 service call /polyumi/home std_srvs/srv/Trigger "{}"
+
+# Verify polyumi_tcp is physically at the fingertips: pure rotation about the TCP, gripper
+# closed, watch whether the fingertips hold still or trace an arc. MOVES THE ARM; needs
+# execute_arm:=true and policy_client_node NOT running (it shares /polyumi/target_poses).
+# Re-run after any change to the mount, the fingers, or nuc/tcp_calib.py.
+ros2 run polyumi_ros2 tcp_pivot_test --ros-args -p angle_deg:=20.0
 ```
+
+**`ros2 node list` and `ros2 param get <nuc node>` come back empty from the laptop, and that is
+expected.** The ROS *graph* does not cross the Humble↔Kilted rmw boundary — the
+`Failed to parse type hash ... from USER_DATA '(null)'` warnings are exactly this. Topics, TF and
+service *calls* all work regardless, because DDS matches them on endpoints rather than on the
+graph; a service call just has to name its type explicitly, as `/polyumi/home` does above.
+Verified live: `ros2 service call /franka_robot_state_broadcaster/get_parameters
+rcl_interfaces/srv/GetParameters "{names: []}"` answers from the laptop while `ros2 service list`
+reports nothing at all. So don't debug a "missing" NUC node — check its topics instead.
 
 ### rmw version mismatch — what is and isn't harmless
 
@@ -476,7 +520,7 @@ from the laptop — read the current pose, then target a small offset. A single-
 is a valid (trivial) chunk:
 
 ```bash
-ros2 run tf2_ros tf2_echo fr3_link0 fr3_hand_tcp     # note x,y,z + quat, then Ctrl-C
+ros2 run tf2_ros tf2_echo fr3_link0 polyumi_tcp      # note x,y,z + quat, then Ctrl-C
 ros2 topic pub -1 /polyumi/target_poses geometry_msgs/msg/PoseArray \
   "{header: {frame_id: fr3_link0}, poses: [{position: {x: 0.322, y: -0.001, z: 0.446}, \
     orientation: {x: -1, y: 0, z: 0, w: 0}}]}"
@@ -572,7 +616,7 @@ skew.) Two fixes:
   do NOT use it for execution — a moving arm needs the time-aligned pose.
 
 ### TF lookup fails: "fr3_link0 ... does not exist" / no TF at all — fr3-bringup crashed
-If `ros2 topic info /tf_static` shows `Publisher count: 0` and `tf2_echo fr3_link0 fr3_hand_tcp`
+If `ros2 topic info /tf_static` shows `Publisher count: 0` and `tf2_echo fr3_link0 polyumi_tcp`
 reports the frame doesn't exist, the NUC's `fr3-bringup` has died (it can crash mid-session).
 Restart `fr3-bringup` (and `fr3-arm-controller`) on the NUC; TF returns within a second or two.
 

@@ -52,18 +52,19 @@
     },
     "3D!2sy03nw": {
       "cameraState": {
-        "distance": 3.3216676797518208,
         "perspective": true,
-        "phi": 60.0000000000026,
+        "distance": 2.2036622046977348,
+        "phi": 58.75000000001608,
+        "thetaOffset": 151.25000000001282,
+        "targetOffset": [
+          0.2724812578730412,
+          0.23407143682378673,
+          -1.7596109702112486e-17
+        ],
         "target": [
           0,
           0,
           0
-        ],
-        "targetOffset": [
-          0.6096747460899009,
-          0.09649498132275064,
-          -2.5847736039516347e-17
         ],
         "targetOrientation": [
           0,
@@ -71,7 +72,6 @@
           0,
           1
         ],
-        "thetaOffset": 60.000000000004704,
         "fovy": 45,
         "near": 0.5,
         "far": 5000
@@ -80,7 +80,7 @@
       "scene": {},
       "transforms": {
         "frame:fr3_hand": {
-          "visible": false
+          "visible": true
         },
         "frame:fr3_link8": {
           "visible": false
@@ -114,14 +114,20 @@
         },
         "frame:fr3_rightfinger": {
           "visible": false
+        },
+        "frame:base": {
+          "visible": false
+        },
+        "frame:fr3_hand_tcp": {
+          "visible": false
         }
       },
       "topics": {
         "/polyumi/target_poses": {
-          "visible": true
+          "visible": false
         },
         "/robot_description": {
-          "visible": false
+          "visible": true
         },
         "/polyumi/target_poses_preview": {
           "visible": true
@@ -159,7 +165,8 @@
         "poseEstimateThetaDeviation": 0.26179939
       },
       "synchronize": false,
-      "imageMode": {}
+      "imageMode": {},
+      "fixedFrame": "base"
     },
     "Image!2gdeq90": {
       "cameraState": {

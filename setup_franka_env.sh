@@ -52,6 +52,24 @@ unset _polyumi_self
 : "${FR3_LAPTOP_IP:=10.0.0.1/24}"
 : "${FR3_NM_PROFILE:=fr3-link}"
 
+# --- franka_description, for Foxglove's URDF panel ---
+# The NUC latches /robot_description, so Foxglove can draw the arm on this laptop — but the
+# meshes it references are package:// URIs that foxglove_bridge resolves on ITS machine, i.e.
+# here. franka_description is not in /opt/ros/kilted, so point at whatever workspace has it.
+# Purely a debugging nicety: a missing workspace costs meshes, not a run.
+#
+# Extending AMENT_PREFIX_PATH rather than sourcing that workspace's setup.bash is deliberate:
+# the ament index is all package:// resolution needs (franka_description is data-only), and
+# sourcing ROS setup.bash chains from zsh is the failure documented in CLAUDE.md.
+: "${FRANKA_DESCRIPTION_WS:=${HOME}/ws/franka/install}"
+if [ -d "${FRANKA_DESCRIPTION_WS}/share/franka_description" ]; then
+  export AMENT_PREFIX_PATH="${FRANKA_DESCRIPTION_WS}:${AMENT_PREFIX_PATH}"
+  echo "[setup_franka_env] franka_description from ${FRANKA_DESCRIPTION_WS}"
+else
+  echo "[setup_franka_env] WARNING: no franka_description at ${FRANKA_DESCRIPTION_WS} —"
+  echo "  Foxglove will show TF frames but no arm meshes. Export FRANKA_DESCRIPTION_WS to fix."
+fi
+
 # --- DDS: match the NUC (CycloneDDS, domain 0, unicast peers) ---
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export ROS_DOMAIN_ID=0

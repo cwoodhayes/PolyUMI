@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  PolyUMI: the stock FR3 description plus the one frame the policy speaks in.
+
+  `polyumi_tcp` is the closed-fingertip midpoint in GoPro-optical axes — the body frame every
+  exported training pose is expressed at. move_group needs it as a real link (it is the
+  `link_name` of the bridge's GetCartesianPath request); TF gets the same transform from a
+  static_transform_publisher in fr3_bringup.launch.py. Both read nuc/tcp_calib.py, which is
+  where the numbers and their derivation live.
+
+  The two args default to a sentinel rather than to real numbers: a real default here would be a
+  second copy of the calibration, free to drift from tcp_calib.py. xacro insists on *some*
+  default, so forgetting to pass them fails in the URDF parser with the sentinel in the message
+  instead of silently placing the TCP somewhere plausible-looking.
+
+  robot name MUST stay "fr3" — move_group matches it against the SRDF's robot name.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="fr3">
+
+  <xacro:arg name="polyumi_tcp_xyz" default="UNSET_see_nuc_tcp_calib_py" />
+  <xacro:arg name="polyumi_tcp_rpy" default="UNSET_see_nuc_tcp_calib_py" />
+
+  <!-- Every fr3 arg (hand, ros2_control, robot_ip, ...) passes through untouched; xacro args
+       are global, so callers set them exactly as they would on fr3.urdf.xacro itself. -->
+  <xacro:include filename="$(find franka_description)/robots/fr3/fr3.urdf.xacro" />
+
+  <!-- polyumi_tcp hangs off ${arm_id}_hand, which fr3.urdf.xacro only creates when hand:=true
+       (its default). With hand:=false the joint below would reference a link that does not exist,
+       and the URDF parser reports that as a dangling parent somewhere in a 400-line generated
+       file. Referencing an undefined name instead fails here, naming the actual problem — the
+       same trick as the UNSET_* arg defaults above, and for the same reason. xacro has no
+       fail/assert, and property values are lazy, so the reference has to sit in an attribute to
+       be evaluated at all. -->
+  <xacro:unless value="$(arg hand)">
+    <link name="${POLYUMI_TCP_NEEDS_hand_true}" />
+  </xacro:unless>
+
+  <link name="polyumi_tcp" />
+  <joint name="polyumi_tcp_joint" type="fixed">
+    <parent link="$(arg arm_id)_hand" />
+    <child link="polyumi_tcp" />
+    <origin xyz="$(arg polyumi_tcp_xyz)" rpy="$(arg polyumi_tcp_rpy)" />
+  </joint>
+
+</robot>

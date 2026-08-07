@@ -56,6 +56,7 @@ setup(
         'console_scripts': [
             'pi_receiver_node = polyumi_ros2.pi_receiver_node:main',
             'policy_client_node = polyumi_ros2.policy_client_node:main',
+            'tcp_pivot_test = polyumi_ros2.tcp_pivot_test:main',
         ],
     },
 )

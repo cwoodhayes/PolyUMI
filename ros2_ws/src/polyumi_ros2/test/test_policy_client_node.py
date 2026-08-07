@@ -22,7 +22,7 @@ from sensor_msgs.msg import JointState
 from polyumi_ros2.policy_client_node import PolicyClientNode
 
 BASE_FRAME = 'fr3_link0'
-EEF_FRAME = 'fr3_hand_tcp'
+EEF_FRAME = 'polyumi_tcp'
 
 
 @pytest.fixture(scope='module', autouse=True)

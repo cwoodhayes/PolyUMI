@@ -388,3 +388,45 @@ def test_invalid_parameters_fail_fast(make_node, bad):
     """
     with pytest.raises(ValueError, match='Invalid fr3_gripper_bridge configuration'):
         make_node(**bad)
+
+
+def test_deadband_hold_is_logged_once_with_the_actual_width(make_node):
+    """
+    A stall must be visible in the log, and must name the hand's real width.
+
+    The bridge only logs when it sends, so without this a suppressing deadband is
+    indistinguishable from no chunks arriving. The actual width is what tells the two apart:
+    if it has drifted from _last_commanded, the hand never reached what it accepted.
+    """
+    node = make_node(execute=True)
+    node._last_commanded = 0.050
+    node._current_width = 0.070  # hand stalled 20mm away from what it accepted
+    node._desired_width = 0.052  # inside the 5mm deadband -> suppressed
+
+    node._tick()
+    node._tick()
+
+    holds = [c for c in node.get_logger().info.call_args_list if 'Holding' in str(c)]
+    assert len(holds) == 1, 'the hold must be logged exactly once per stall, not every period'
+    message = str(holds[0])
+    assert '0.0500' in message, 'must report what was last commanded'
+    assert '0.0700' in message, 'must report where the hand actually is'
+
+
+def test_deadband_hold_logs_again_after_the_target_moves_away(make_node):
+    """The latch has to reset, or a second stall in the same run goes unreported."""
+    node = make_node(execute=True)
+    node._last_commanded = 0.050
+    node._current_width = 0.050
+    node._desired_width = 0.052
+    node._tick()
+
+    node._desired_width = 0.070  # past the deadband: sends, clearing the latch
+    node._tick()
+    node._clear_in_flight()
+    node._last_commanded = 0.070
+    node._desired_width = 0.072  # inside the deadband again
+    node._tick()
+
+    holds = [c for c in node.get_logger().info.call_args_list if 'Holding' in str(c)]
+    assert len(holds) == 2
