@@ -122,6 +122,8 @@ class Fr3GripperBridge(Node):
         self._current_width: float | None = None
         self._goal_in_flight = False
         self._goal_sent_at: float | None = None
+        # Latched so entering the deadband says so once, rather than every period. See _tick.
+        self._holding_logged = False
 
         self.create_subscription(JointTrajectory, topic, self._on_target, 10, callback_group=self._cbgroup)
         self.create_subscription(JointState, state_topic, self._on_state, 10, callback_group=self._cbgroup)
@@ -248,7 +250,22 @@ class Fr3GripperBridge(Node):
             if desired is None:
                 return
             if last is not None and abs(desired - last) < self._deadband:
+                # Say this once per stall. The bridge otherwise only logs when it SENDS, so
+                # "deadband is suppressing everything" and "no chunks are arriving" look
+                # identical from the log — both are silence. The numbers matter: `last` is what
+                # the hand *accepted*, not what it *reached*, so if `at` has drifted far from
+                # `last` the hand never got there (an aborted Move stalls on contact) and the
+                # deadband is now suppressing every retry against a width that never happened.
+                if not self._holding_logged:
+                    self._holding_logged = True
+                    at = 'unknown' if current is None else f'{current:.4f}m'
+                    self.get_logger().info(
+                        f'Holding — desired={desired:.4f}m is within deadband {self._deadband}m '
+                        f'of last commanded={last:.4f}m; hand at {at}. No goal until the target '
+                        'moves further.'
+                    )
                 return
+            self._holding_logged = False
             if self._execute:
                 self._goal_in_flight = True
                 self._goal_sent_at = now
