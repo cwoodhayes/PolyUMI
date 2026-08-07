@@ -20,19 +20,28 @@ Self-contained (no PolyUMI package deps) so it runs from a plain clone on the NU
     python3 nuc/fr3_moveit_bridge.py --ros-args -p execute:=false   # dry-run (no motion)
 
 Set execute:=true to actually move the arm. Default is false (plan only) for safety.
+
+Also serves /polyumi/home (std_srvs/Trigger), a joint-space move to the SRDF `ready` pose.
+Callable from the laptop despite the rmw gap, as long as the type is given explicitly (the ROS
+*graph* does not cross Humble<->Kilted, so `ros2 node list` and node-name lookups come back
+empty, but service calls match on DDS endpoints and work fine):
+
+    ros2 service call /polyumi/home std_srvs/srv/Trigger "{}"
 """
 
+import math
 import threading
 
 from geometry_msgs.msg import Pose, PoseArray
 from moveit_msgs.action import ExecuteTrajectory
-from moveit_msgs.msg import MoveItErrorCodes, RobotTrajectory
-from moveit_msgs.srv import GetCartesianPath
+from moveit_msgs.msg import Constraints, JointConstraint, MoveItErrorCodes, RobotTrajectory
+from moveit_msgs.srv import GetCartesianPath, GetMotionPlan
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from std_srvs.srv import Trigger
 
 # FR3 SRDF names. IMPORTANT: use group 'fr3_arm', NOT 'fr3_manipulator'. Only fr3_arm has
 # an IK solver entry in kinematics.yaml, and Humble's computeCartesianPath needs it — with
@@ -55,13 +64,25 @@ PLAN_TIMEOUT_S = 5.0
 # than a single-waypoint move would need.
 EXECUTE_TIMEOUT_S = 30.0
 
+# --- Homing (the /polyumi/home service) ---
+# The SRDF's own `ready` group state for fr3_arm (franka_fr3_moveit_config, group_definition.xacro).
+# Overridable via the `home_joints` param when a task wants to start somewhere else.
+HOME_JOINT_NAMES = [f'fr3_joint{i}' for i in range(1, 8)]
+HOME_JOINTS = [0.0, -math.pi / 4, 0.0, -3 * math.pi / 4, 0.0, math.pi / 2, math.pi / 4]
+HOME_TOLERANCE_RAD = 0.01
+HOME_PLAN_TIME_S = 5.0
+# Homing is a joint-space sweep across the workspace, not a few-centimetre chunk, and it runs at
+# the same max_velocity_scaling — a 3 s planned move at 0.1 takes 30 s. EXECUTE_TIMEOUT_S would
+# abort it partway.
+HOME_EXECUTE_TIMEOUT_S = 120.0
+
 
 class Fr3MoveItBridge(Node):
     """Receive target EEF pose chunks and drive the FR3 via the local move_group."""
 
-    def __init__(self):
+    def __init__(self, **kwargs):
         """Declare params, create the target-pose subscription and move_group clients."""
-        super().__init__('fr3_moveit_bridge')
+        super().__init__('fr3_moveit_bridge', **kwargs)
 
         self.declare_parameter('execute', False)
         self.declare_parameter('planning_group', DEFAULT_GROUP)
@@ -69,6 +90,7 @@ class Fr3MoveItBridge(Node):
         self.declare_parameter('base_frame', DEFAULT_BASE)
         self.declare_parameter('max_velocity_scaling', 0.1)
         self.declare_parameter('target_topic', '/polyumi/target_poses')
+        self.declare_parameter('home_joints', HOME_JOINTS)
 
         self._execute = self.get_parameter('execute').get_parameter_value().bool_value
         self._group = self.get_parameter('planning_group').get_parameter_value().string_value
@@ -77,9 +99,13 @@ class Fr3MoveItBridge(Node):
         self._vscale = self.get_parameter('max_velocity_scaling').get_parameter_value().double_value
         topic = self.get_parameter('target_topic').get_parameter_value().string_value
 
+        self._home_joints = list(self.get_parameter('home_joints').get_parameter_value().double_array_value)
+
         self._cbgroup = ReentrantCallbackGroup()
         self._cartesian = self.create_client(GetCartesianPath, 'compute_cartesian_path', callback_group=self._cbgroup)
+        self._joint_plan = self.create_client(GetMotionPlan, 'plan_kinematic_path', callback_group=self._cbgroup)
         self._exec = ActionClient(self, ExecuteTrajectory, 'execute_trajectory', callback_group=self._cbgroup)
+        self.create_service(Trigger, '/polyumi/home', self._on_home, callback_group=self._cbgroup)
 
         # Latest-goal, skip-while-busy: drop poses that arrive while a plan/execute is in
         # flight so we always act on the freshest target without queuing up stale ones.
@@ -108,6 +134,10 @@ class Fr3MoveItBridge(Node):
 
         mode = 'EXECUTE (arm will move)' if self._execute else 'plan-only (no motion)'
         self.get_logger().info(f'fr3_moveit_bridge started — listening on {topic} — mode: {mode}')
+        self.get_logger().info(
+            '/polyumi/home is up (std_srvs/Trigger). It MOVES THE ARM even in plan-only mode — '
+            'it is an explicit request, unlike the streamed chunks `execute` guards.'
+        )
 
     def _on_target(self, msg: PoseArray) -> None:
         """Plan (and optionally execute) a multi-waypoint Cartesian path through the chunk."""
@@ -129,6 +159,86 @@ class Fr3MoveItBridge(Node):
                 self.get_logger().info(f'Executed chunk ({len(msg.poses)} waypoints).')
         finally:
             self._busy.release()
+
+    def _on_home(self, _request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
+        """
+        Move the arm to the home joint pose. THIS MOVES THE ARM, regardless of `execute`.
+
+        That is deliberate. `execute` gates the *policy's* streamed chunks — the danger there is
+        motion you did not ask for, arriving on a topic at 10 Hz. Calling a service named `home`
+        is the opposite: an explicit, one-shot operator request. Gating it on `execute` would
+        also make it a no-op in the default configuration, since fr3_inference.launch.py defaults
+        execute_arm:=false, which is exactly when you most want to reposition the arm by hand.
+
+        Joint-space, not Cartesian: a Cartesian path from an arbitrary pose back to home is
+        happy to fail the fraction check, or to drag the gripper straight through the table.
+        """
+        if len(self._home_joints) != len(HOME_JOINT_NAMES):
+            response.success = False
+            response.message = (f'home_joints has {len(self._home_joints)} values, '
+                                f'expected {len(HOME_JOINT_NAMES)}')
+            self.get_logger().error(response.message)
+            return response
+        if not self._busy.acquire(blocking=False):
+            response.success = False
+            response.message = 'busy: a plan/execute is already in flight'
+            self.get_logger().warn(f'/polyumi/home refused — {response.message}')
+            return response
+        try:
+            self.get_logger().warn('/polyumi/home called — MOVING THE ARM to the home pose.')
+            trajectory = self._plan_to_joints(self._home_joints)
+            if trajectory is None:
+                response.success = False
+                response.message = 'planning to the home pose failed — see the bridge log'
+                return response
+            if self._run_execute(trajectory, HOME_EXECUTE_TIMEOUT_S):
+                response.success = True
+                response.message = 'homed'
+                self.get_logger().info('Homed.')
+            else:
+                response.success = False
+                response.message = 'execution failed — see the bridge log'
+            return response
+        finally:
+            self._busy.release()
+
+    def _plan_to_joints(self, positions: list[float]) -> RobotTrajectory | None:
+        """Plan a collision-checked joint-space move to `positions`; return the trajectory or None."""
+        if not self._joint_plan.service_is_ready():
+            self.get_logger().error(
+                'plan_kinematic_path is NOT available — is move_group running on this NUC? '
+                '(ros2 launch nuc/launch/fr3_move_group.launch.py robot_ip:=192.168.51.20)'
+            )
+            return None
+
+        req = GetMotionPlan.Request()
+        mpr = req.motion_plan_request
+        mpr.group_name = self._group
+        mpr.num_planning_attempts = 10
+        mpr.allowed_planning_time = HOME_PLAN_TIME_S
+        # Scaling is left at the planner's default and applied by _slow_trajectory instead, so
+        # max_velocity_scaling stays the single speed knob for both this and the Cartesian path.
+        goal = Constraints()
+        for name, position in zip(HOME_JOINT_NAMES, positions):
+            jc = JointConstraint()
+            jc.joint_name = name
+            jc.position = position
+            jc.tolerance_above = HOME_TOLERANCE_RAD
+            jc.tolerance_below = HOME_TOLERANCE_RAD
+            jc.weight = 1.0
+            goal.joint_constraints.append(jc)
+        mpr.goal_constraints.append(goal)
+
+        future = self._joint_plan.call_async(req)
+        if not self._wait(future, HOME_PLAN_TIME_S + PLAN_TIMEOUT_S):
+            self.get_logger().warning('Joint-space planning timed out.')
+            return None
+        resp = future.result()
+        if resp is None or resp.motion_plan_response.error_code.val != MoveItErrorCodes.SUCCESS:
+            code = None if resp is None else resp.motion_plan_response.error_code.val
+            self.get_logger().warning(f'Joint-space planning failed (error_code={code}).')
+            return None
+        return resp.motion_plan_response.trajectory
 
     def _plan_cartesian(self, poses: list[Pose], frame_id: str) -> RobotTrajectory | None:
         """Request a multi-waypoint Cartesian path through poses; return the trajectory or None."""
@@ -203,7 +313,7 @@ class Fr3MoveItBridge(Node):
             )
         return trajectory
 
-    def _run_execute(self, trajectory: RobotTrajectory) -> bool:
+    def _run_execute(self, trajectory: RobotTrajectory, timeout_s: float = EXECUTE_TIMEOUT_S) -> bool:
         """Execute a planned trajectory via ExecuteTrajectory; block until done."""
         # Same rationale as _plan_cartesian's service_is_ready() check: send_goal_async on a
         # server that isn't there hangs until PLAN_TIMEOUT_S instead of failing immediately,
@@ -225,7 +335,7 @@ class Fr3MoveItBridge(Node):
             self.get_logger().warning('Execute goal rejected.')
             return False
         rf = gh.get_result_async()
-        if not self._wait(rf, EXECUTE_TIMEOUT_S):
+        if not self._wait(rf, timeout_s):
             self.get_logger().warning('Execution timed out.')
             return False
         res = rf.result()

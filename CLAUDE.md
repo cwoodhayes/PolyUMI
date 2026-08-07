@@ -41,13 +41,13 @@ bash -c 'unset VIRTUAL_ENV; cd ros2_ws && source /opt/ros/kilted/setup.bash \
   && colcon test-result --test-result-base build/polyumi_ros2'
 ```
 The **NUC bridges** in `nuc/` are standalone scripts, not an ament package, so `colcon test`
-never sees them. `nuc/test_fr3_gripper_bridge.py` runs on the laptop anyway — it needs only the
-`franka_msgs` message definitions (built in `ros2_ws`) and mocks the action clients, so no
-hardware or NUC is involved:
+never sees them. `nuc/test_*.py` run on the laptop anyway — they need only the `franka_msgs` /
+`moveit_msgs` message definitions (built in `ros2_ws`, or from `/opt/ros`) and mock the service
+and action clients, so no hardware, no move_group, and no NUC is involved:
 ```bash
 bash -c 'unset VIRTUAL_ENV; source /opt/ros/kilted/setup.bash \
   && source ros2_ws/install/setup.bash \
-  && /usr/bin/python3 -m pytest nuc/test_fr3_gripper_bridge.py -q'
+  && /usr/bin/python3 -m pytest nuc/ -q'
 ```
 
 The generated `ament_copyright` / `ament_flake8` / `ament_pep257` linter tests were **deleted** —

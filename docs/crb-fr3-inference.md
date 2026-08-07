@@ -245,10 +245,24 @@ directly, but it will bite anyone expecting finger frames in TF.
 ```bash
 # laptop, after `source setup_franka_env.sh` and with `fr3-bringup` up on the NUC:
 ping 10.0.0.2
-ros2 node list                                   # NUC nodes appear
+ros2 topic list                                  # NUC topics appear (nodes will NOT — see below)
 ros2 run tf2_ros tf2_echo fr3_link0 polyumi_tcp  # live transform (the policy's frame)
 ros2 run tf2_ros tf2_echo fr3_hand polyumi_tcp   # must equal nuc/tcp_calib.py exactly
+
+# Send the arm back to the SRDF `ready` pose (needs fr3_inference up). MOVES THE ARM — it is an
+# explicit request, so it runs even when execute_arm:=false. Override the target with the
+# fr3_moveit_bridge `home_joints` param.
+ros2 service call /polyumi/home std_srvs/srv/Trigger "{}"
 ```
+
+**`ros2 node list` and `ros2 param get <nuc node>` come back empty from the laptop, and that is
+expected.** The ROS *graph* does not cross the Humble↔Kilted rmw boundary — the
+`Failed to parse type hash ... from USER_DATA '(null)'` warnings are exactly this. Topics, TF and
+service *calls* all work regardless, because DDS matches them on endpoints rather than on the
+graph; a service call just has to name its type explicitly, as `/polyumi/home` does above.
+Verified live: `ros2 service call /franka_robot_state_broadcaster/get_parameters
+rcl_interfaces/srv/GetParameters "{names: []}"` answers from the laptop while `ros2 service list`
+reports nothing at all. So don't debug a "missing" NUC node — check its topics instead.
 
 ### rmw version mismatch — what is and isn't harmless
 

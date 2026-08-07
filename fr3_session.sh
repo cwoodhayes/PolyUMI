@@ -266,6 +266,9 @@ Session '$SESSION' is up. Order to press Enter in:
   3. polyumi-pi, right   the policy server — edit CKPT to the checkpoint you want
   4. laptop         the client, last
 
+Send the arm home (needs pane 2 running; MOVES THE ARM even in plan-only mode):
+  ros2 service call /polyumi/home std_srvs/srv/Trigger "{}"
+
 tmux, minimum viable:
   C-b n / C-b p    next / previous window        C-b o     next pane
   C-b d            detach (everything keeps running)
