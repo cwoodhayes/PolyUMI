@@ -42,11 +42,17 @@ trained in. What matters for a policy is that training and inference agree on th
 that the frame is anatomically correct — see that constant for the full story and for how to
 retire it.
 
-It cross-checks against the handheld gripper's chain to ~2 mm, which is the only independent
-evidence available without hardware. ``T_gopro_to_fingertip`` puts the fingertips 0.259 m forward
-of the GoPro; this file puts them 0.2569 m forward of ``fr3_hand``. The two agreeing means the
-camera's sensor plane sits within a couple of mm of the ``fr3_hand`` plane — consistent with the
-mount, and the sort of thing that would be off by centimetres if either measurement were wrong.
+It cross-checks against the handheld gripper's chain to ~2 mm. ``T_gopro_to_fingertip`` puts the
+fingertips 0.259 m forward of the GoPro; this file puts them 0.2569 m forward of ``fr3_hand``. The
+two agreeing means the camera's sensor plane sits within a couple of mm of the ``fr3_hand`` plane —
+consistent with the mount, and the sort of thing that would be off by centimetres if either
+measurement were wrong.
+
+**Verified on hardware, 2026-08-07** (``ros2 run polyumi_ros2 tcp_pivot_test``): with
+``LEGACY_TRAINING_Y_ERROR`` zeroed, pivoting about the TCP holds the closed fingertips visibly
+still. So the geometry below — including the ``Rz(+90°)`` sign, which a pivot test would expose as
+a ~15 cm sweep if mirrored — is right. Note this validates the FINGERTIP frame, not ``TCP_XYZ`` as
+shipped, which deliberately sits off it while the legacy offset is non-zero.
 
 Residual error, deliberately not chased: real GoPro mount tilt versus the CAD-nominal "optical
 axis parallel to the approach axis". That is what a camera-based hand-eye calibration would buy.

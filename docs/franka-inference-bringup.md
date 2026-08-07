@@ -18,7 +18,7 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
 | Action-chunk execution on real hardware | **done** (single chunks); continuous 10 Hz loop unverified. **Executor redesign planned — Phase 4** (plan-then-execute → UMI-style 1 kHz streaming Cartesian servo) |
 | Latency compensation, gopro + proprio | **done** — matches UMI's scheme; unit-tested |
 | Latency compensation, finger cam + piezo | **not started** — params declared, never consumed |
-| Pose body frame (training ↔ inference) | **done, unverified on hardware** — `polyumi_tcp` plumbed end to end and measured from CAD (`nuc/tcp_calib.py`); the `Rz(+90°)` sign wants an eyeball in Foxglove |
+| Pose body frame (training ↔ inference) | **done, verified on hardware** — `polyumi_tcp` plumbed end to end, measured from CAD (`nuc/tcp_calib.py`), and confirmed by `tcp_pivot_test`: with the legacy offset zeroed, pivoting about the TCP holds the fingertips still |
 | Gripper — observation | **done** — Phase 2.5: `/fr3_gripper/joint_states` → `agent_pos[7]` |
 | Gripper — command | **done** — Phase 2.5: `action[7]` → `/polyumi/target_gripper` → NUC `fr3_gripper_bridge` |
 | DP export | **exists** for pose+image+gripper; no tactile; wrong schema for UMI; untested |
@@ -26,15 +26,17 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
 
 ### Blocking issues
 
-1. **The TCP frame has never been checked on hardware.** The plumbing and the numbers are done:
-   `polyumi_tcp` is a fixed child of `fr3_hand` defined once in `nuc/tcp_calib.py`, published into
-   TF by `fr3_bringup.launch.py` and into move_group's model by
+1. **The TCP frame is resolved; what remains is the legacy training offset.** `polyumi_tcp` is a
+   fixed child of `fr3_hand` defined once in `nuc/tcp_calib.py`, published into TF by
+   `fr3_bringup.launch.py` and into move_group's model by
    `nuc/description/fr3_polyumi.urdf.xacro`, and both `eef_frame` and the bridge's `eef_link` name
    it. Translation is a CAD read (0.0584 m to the finger carriage plane from franka_description,
    plus 0.1985 m to the fingertips from the PolyUMI assembly; 0.019612 m up to the tag plane),
-   cross-checking against `T_gopro_to_fingertip`'s 0.259 m to within ~2 mm. What is unverified is
-   the **`Rz(+90°)` sign** — catch it by eye in Foxglove before the arm moves — and real GoPro
-   mount tilt versus the CAD-nominal optical axis. See [data-format.md](data-format.md).
+   cross-checking against `T_gopro_to_fingertip`'s 0.259 m to within ~2 mm. **Confirmed on
+   hardware 2026-08-07** with `ros2 run polyumi_ros2 tcp_pivot_test`: with the legacy offset
+   zeroed, pivoting about the TCP holds the closed fingertips still, which also settles the
+   `Rz(+90°)` sign (a mirrored one would sweep them ~15 cm). Still unmeasured: real GoPro mount
+   tilt versus the CAD-nominal optical axis. See [data-format.md](data-format.md).
 
    Note the x currently in force is **not** 0.019612 but 0.076302: `T_gopro_to_fingertip`'s y was
    corrected from 0.014 to 0.07069 on 2026-08-06, and checkpoints exported before that learned the

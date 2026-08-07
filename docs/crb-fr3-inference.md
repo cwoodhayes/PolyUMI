@@ -253,6 +253,12 @@ ros2 run tf2_ros tf2_echo fr3_hand polyumi_tcp   # must equal nuc/tcp_calib.py e
 # explicit request, so it runs even when execute_arm:=false. Override the target with the
 # fr3_moveit_bridge `home_joints` param.
 ros2 service call /polyumi/home std_srvs/srv/Trigger "{}"
+
+# Verify polyumi_tcp is physically at the fingertips: pure rotation about the TCP, gripper
+# closed, watch whether the fingertips hold still or trace an arc. MOVES THE ARM; needs
+# execute_arm:=true and policy_client_node NOT running (it shares /polyumi/target_poses).
+# Re-run after any change to the mount, the fingers, or nuc/tcp_calib.py.
+ros2 run polyumi_ros2 tcp_pivot_test --ros-args -p angle_deg:=20.0
 ```
 
 **`ros2 node list` and `ros2 param get <nuc node>` come back empty from the laptop, and that is

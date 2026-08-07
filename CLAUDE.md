@@ -102,7 +102,10 @@ TF via a `static_transform_publisher` in `fr3_bringup.launch.py`, and move_group
 `franka_msgs/srv/SetTCPFrame` (libfranka `setEE`) is *not* the lever — it only changes `O_T_EE`
 reporting, while TF and MoveIt are driven entirely by the URDF. The transform is measured from
 CAD (the same method UMI uses), not from a calibration rig; what remains unvalidated is the
-`Rz(+90°)` sign, checkable by eye in Foxglove, and real GoPro mount tilt. It also carries
+real GoPro mount tilt — the geometry itself, `Rz(+90°)` sign included, is confirmed on hardware by
+`ros2 run polyumi_ros2 tcp_pivot_test`, which pivots about the TCP so you can watch whether the
+closed fingertips hold still. Re-run it after any change to the mount, the fingers, or this file.
+`tcp_calib.py` also carries
 `LEGACY_TRAINING_Y_ERROR`, deliberately offsetting the TCP off the true fingertips so it names the
 body frame pre-2026-08-06 checkpoints were trained on — zero it after retraining on corrected data.
 
