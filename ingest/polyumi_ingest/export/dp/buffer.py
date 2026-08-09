@@ -258,8 +258,8 @@ def _export_episode(
     episode_key: str,
     scene_zarr: pathlib.Path,
     pose_source: str,
+    closed_width_m: float,
     min_segment_steps: int = MIN_SEGMENT_STEPS,
-    closed_width_m: float = 0.0,
 ) -> list[tuple[int, dict]]:
     """
     Export one session as one DP episode per contiguous valid segment.
@@ -280,8 +280,16 @@ def _export_episode(
     # frame), so keeping the pzarr annotation calibration-independent means re-deriving S_closed
     # costs a re-export, not a re-detect. UMI applies it at the same stage, in
     # 06_generate_dataset_plan.py, not at detection.
+    #
+    # Clamped at zero because S_closed is a percentile, so ~1% of detections sit below it by
+    # construction and would export negative. UMI clamps too, though not visibly: its
+    # get_gripper_calibration_interpolator builds interp1d over [min_width, max_width] with
+    # bounds_error=False, fill_value=(x[0], x[-1]), so anything under the calibrated minimum
+    # saturates to 0. We do not clamp the top end as UMI does — that would make open_mm
+    # load-bearing to hide a demo opening wider than the calibration recording, which is
+    # information, not error.
     gripper = np.asarray(arr(ep, 'annotations/gripper_width/width_m')[:], dtype=np.float64)
-    gripper = gripper - closed_width_m
+    gripper = np.maximum(gripper - closed_width_m, 0.0)
     frames = open_gopro_frames(ep, scene_zarr)
 
     n = len(gopro_ts)
@@ -422,9 +430,9 @@ def _append_scene_episodes(
     episode_ends: list[int],
     total: int,
     provenance: list[dict],
+    closed_width_m: float,
     enforce_preprocessing: bool = True,
     min_segment_steps: int = MIN_SEGMENT_STEPS,
-    closed_width_m: float = 0.0,
 ) -> int:
     """Append every EPISODE session of one scene onto ``data_grp``, returning the new running total."""
     zarr_path = SceneFiles.resolve_zarr_path(scene_path)

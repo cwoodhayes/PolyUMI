@@ -735,3 +735,25 @@ def test_exported_width_reaches_zero_when_the_gripper_was_fully_closed(
 
     exported = np.asarray(_open_zip(out)['data/robot0_gripper_width'][:]).ravel()
     assert exported.min() == pytest.approx(0.0, abs=1e-6)
+
+
+def test_detections_below_s_closed_clamp_to_zero_rather_than_going_negative(
+    tmp_path: pathlib.Path, monkeypatch
+) -> None:
+    """
+    S_closed is a percentile, so ~1% of real detections sit below it and would export negative.
+
+    UMI clamps here too, though not visibly: get_gripper_calibration_interpolator builds an
+    interp1d over [min_width, max_width] with fill_value=(x[0], x[-1]), so a measured width under
+    the calibrated minimum saturates to 0 instead of running past it.
+    """
+    # 0.03 lands mid-series, so the fixture's linspace(0.02, 0.08) straddles it.
+    monkeypatch.setattr(buffer, 'load_closed_width_m', lambda: 0.03)
+    scene = _build_scene(tmp_path)
+    out = tmp_path / 'buf.zarr.zip'
+
+    export_scene_to_dp(scene, out)
+
+    exported = np.asarray(_open_zip(out)['data/robot0_gripper_width'][:]).ravel()
+    assert exported.min() == 0.0, 'widths below S_closed must clamp, not go negative'
+    assert exported.max() == pytest.approx(0.08 - 0.03, abs=1e-6), 'the top end is left alone'
