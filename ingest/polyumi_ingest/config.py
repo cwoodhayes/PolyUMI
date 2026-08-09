@@ -30,10 +30,11 @@ def load_aruco_finger_config() -> dict:
 
 def load_closed_width_m() -> float:
     """
-    Load ``S_closed``: the ArUco finger-tag separation with the gripper fully closed, in metres.
+    Load the closed width: the ArUco finger-tag separation with the gripper fully closed, in metres.
 
     The DP exporter subtracts this so exported widths are opening-from-closed rather than raw tag
-    separation, matching UMI (whose ``get_gripper_calibration_interpolator`` does the same
+    separation, matching UMI (whose ``get_gripper_calibration_interpolator``, in the upstream repo's
+    ``umi/common/interpolation_util.py``, does the same
     subtraction at dataset-generation time). Stored in millimetres because that is the unit it is
     measured and reasoned about in.
 

@@ -39,32 +39,35 @@
       gripper: 0.05
 
     # --- Gripper width conversion. CALIBRATED 2026-08-09. ---
-    # The DP exporter subtracts S_closed, so the policy speaks metres of opening from fully closed
-    # (UMI's convention). The robot speaks jaw aperture. Measured:
+    # The DP exporter subtracts the closed width, so the policy speaks metres of opening from
+    # fully closed (UMI's convention). The robot speaks jaw aperture. Three measured quantities:
     #
-    #     S_closed = 0.04456 m   ArUco tag separation with the fingers touching
-    #                            (pingest calibrate-gripper, scene d044: 16320 detections, 980 of
-    #                            them within 1 mm of the value against 179 expected by chance)
-    #     A_closed = 0.0     m   jaw aperture with the fingers touching
-    #     A_open   = 0.0816  m   jaw aperture at full open
-    #                            (ros2 run polyumi_ros2 gripper_range_probe, 3 reps, 0.00 mm spread)
+    #   closed width     0.04456 m   ArUco finger-tag separation with the fingers touching.
+    #                                This is gripper_calib.yaml's closed_mm, on the handheld rig.
+    #                                (pingest calibrate-gripper, scene d044: 16320 detections, 980
+    #                                within 1 mm of the value against 358 expected by chance)
+    #   closed aperture  0.0     m   FR3 jaw aperture with the fingers touching -> min_width below
+    #   open aperture    0.0816  m   FR3 jaw aperture at full open              -> max_width below
+    #                                (ros2 run polyumi_ros2 gripper_range_probe, 3 reps, 0.00 mm
+    #                                spread)
     #
-    # gripper_offset_m = -A_closed = 0.0, so the conversion is now the IDENTITY plus clamping.
-    # That is not a coincidence or a placeholder: these fingers meet at the mechanism's true zero,
-    # so "opening from closed" and "jaw aperture" are the same quantity. UMI's WSG is in the same
-    # position, which is why their inference path converts nothing either.
+    # gripper_offset_m is -(closed aperture) = 0.0, so the conversion is now the IDENTITY plus
+    # clamping. That is not a coincidence or a placeholder: these fingers meet at the mechanism's
+    # true zero, so "opening from closed" and "jaw aperture" are the same quantity. UMI's WSG is in
+    # the same position, which is why their inference path converts nothing either.
     #
-    # It stays a parameter because fingers whose tips collide early would make A_closed non-zero,
-    # and then this becomes -A_closed. A negative value is legitimate, and the validation permits
-    # it. Re-derive with the two commands above after any change to the fingers or tags.
+    # It stays a parameter because fingers whose tips collided before the mechanism bottomed out
+    # would make the closed aperture non-zero, and then this becomes -(closed aperture). A negative
+    # value is legitimate, and the validation permits it. Re-derive with the two commands above
+    # after any change to the fingers or tags.
     gripper_offset_m: 0.0
     # Measured reachable aperture, not the Franka Hand's nominal 0-0.0817 m — neither end is
     # readable at runtime (franka_gripper publishes max_width on no topic). Here the fingers turn
     # out not to be the limit at either end: they close to true zero, and 0.0816 is the hand's own
     # maximum (it stopped 0.1 mm short of a 0.0817 clamp, and franka_gripper aborts anything wider).
     #
-    # Cross-check, independent of the encoder: S_closed + A_open = 126.2 mm of tag separation at
-    # full open, against the 132.3 mm the handheld gripper reaches. The handheld opens 6.2 mm wider,
+    # Cross-check, independent of the encoder: closed width + open aperture = 126.2 mm of tag
+    # separation at full open, against the 132.3 mm the handheld reaches. The handheld opens 6.2 mm wider,
     # so the top ~7% of the policy's commanded range saturates here. That shows up as intent
     # clipping, not an error, and is inherent to the two mechanisms having different strokes.
     gripper_max_width_m: 0.0816

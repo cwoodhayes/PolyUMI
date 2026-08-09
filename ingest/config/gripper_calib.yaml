@@ -75,12 +75,13 @@ T_optitrack_to_world:
   # rotation: [0, 0, 0, 1] # quaternion
 
 gripper_fingers:
-  # S_closed and its open-end counterpart: the ArUco finger-tag separation at 
-  # fully-open and fully-closed states on the handheld PolyUMI gripper.
+  # The ArUco finger-tag separation at the fully-open and fully-closed states
+  # of the handheld PolyUMI gripper.
   #
   # closed_mm is LOAD-BEARING: the DP exporter subtracts it from every width so that exported
   # `robot0_gripper_width` is metres of opening from fully closed rather than raw tag separation
-  # (UMI's convention — their 06_generate_dataset_plan.py does the same subtraction). Changing it
+  # (UMI's convention — the same subtraction their upstream repo does in
+  # scripts_slam_pipeline/06_generate_dataset_plan.py). Changing it
   # changes the meaning of every dataset exported afterwards, and mixing conventions in one
   # training run is silent, so re-export everything together. Each buffer records the value it was
   # built with as meta.attrs['gripper_closed_width_m'].

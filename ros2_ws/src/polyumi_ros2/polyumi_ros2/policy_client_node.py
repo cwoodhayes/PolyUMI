@@ -168,7 +168,7 @@ class PolicyClientNode(Node):
         # the worst observed publish interval (the topic jitters 24-100ms) so ordinary jitter
         # cannot trip it, and well short of the ~2.3s the buffer can hold. <= 0 disables the check.
         self.declare_parameter('max_gripper_age_s', 0.5)
-        # Subtracted from the policy's width to get jaw aperture; equals -A_closed, the hand's
+        # Subtracted from the policy's width to get jaw aperture; equals -closed aperture, the hand's
         # aperture with the fingers touching. Measured 2026-08-09 as 0.0 — the policy's width IS
         # jaw aperture — but kept a parameter because fingers that met tip-to-tip before the
         # mechanism bottomed out would make it non-zero. MAY BE NEGATIVE, and the validation
@@ -376,8 +376,8 @@ class PolicyClientNode(Node):
         for name, seconds in self._latency.items():
             if seconds < 0:
                 errors.append(f'latency.{name} must be >= 0, got {seconds}')
-        # gripper_offset_m is deliberately unconstrained in sign: it is S_closed - A_closed (or
-        # -A_closed), a difference of two independently measured quantities, and rejecting
+        # gripper_offset_m is deliberately unconstrained in sign: it is closed width - closed aperture (or
+        # -closed aperture), a difference of two independently measured quantities, and rejecting
         # negatives would throw out a correct calibration. See polyumi_ros2.gripper_map.
         if self._gripper_max_width_m <= 0:
             errors.append(f'gripper_max_width_m must be > 0, got {self._gripper_max_width_m}')

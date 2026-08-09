@@ -704,7 +704,7 @@ def test_mixing_frame_strides_in_one_buffer_raises(tmp_path: pathlib.Path) -> No
 
 def test_gripper_width_is_exported_as_opening_from_closed(tmp_path: pathlib.Path, monkeypatch) -> None:
     """
-    Widths must leave the exporter shifted by S_closed, matching UMI's convention.
+    Widths must leave the exporter shifted by closed width, matching UMI's convention.
 
     The fixture writes raw ArUco tag separation (what step 4 stores); the buffer must contain
     opening-from-closed. Skipping this subtraction is invisible — the numbers stay plausible and
@@ -741,11 +741,12 @@ def test_detections_below_s_closed_clamp_to_zero_rather_than_going_negative(
     tmp_path: pathlib.Path, monkeypatch
 ) -> None:
     """
-    S_closed is a percentile, so ~1% of real detections sit below it and would export negative.
+    The closed width is a percentile, so ~1% of real detections sit under it and would go negative.
 
-    UMI clamps here too, though not visibly: get_gripper_calibration_interpolator builds an
-    interp1d over [min_width, max_width] with fill_value=(x[0], x[-1]), so a measured width under
-    the calibrated minimum saturates to 0 instead of running past it.
+    UMI clamps here too, though not visibly: get_gripper_calibration_interpolator (in the upstream
+    repo's umi/common/interpolation_util.py) builds an interp1d over [min_width, max_width] with
+    fill_value=(x[0], x[-1]), so a measured width under the calibrated minimum saturates to 0
+    instead of running past it.
     """
     # 0.03 lands mid-series, so the fixture's linspace(0.02, 0.08) straddles it.
     monkeypatch.setattr(buffer, 'load_closed_width_m', lambda: 0.03)
@@ -755,5 +756,5 @@ def test_detections_below_s_closed_clamp_to_zero_rather_than_going_negative(
     export_scene_to_dp(scene, out)
 
     exported = np.asarray(_open_zip(out)['data/robot0_gripper_width'][:]).ravel()
-    assert exported.min() == 0.0, 'widths below S_closed must clamp, not go negative'
+    assert exported.min() == 0.0, 'widths below closed width must clamp, not go negative'
     assert exported.max() == pytest.approx(0.08 - 0.03, abs=1e-6), 'the top end is left alone'

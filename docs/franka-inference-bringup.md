@@ -21,7 +21,7 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
 | Pose body frame (training ↔ inference) | **done, verified on hardware** — `polyumi_tcp` plumbed end to end, measured from CAD (`nuc/tcp_calib.py`), and confirmed by `tcp_pivot_test`: pivoting about the TCP holds the closed fingertips still |
 | Gripper — observation | **done** — Phase 2.5: `/fr3_gripper/joint_states` → `agent_pos[7]` |
 | Gripper — command | **done** — Phase 2.5: `action[7]` → `/polyumi/target_gripper` → NUC `fr3_gripper_bridge` |
-| Gripper width calibration | **done, measured on hardware 2026-08-09** — `S_closed = 0.04456`, `A_closed = 0.0`, `A_open = 0.0816`; offset is 0.0, i.e. policy width **is** jaw aperture |
+| Gripper width calibration | **done, measured on hardware 2026-08-09** — closed width 0.04456 m, closed aperture 0.0 m, open aperture 0.0816 m; offset is 0.0, i.e. policy width **is** jaw aperture |
 | DP export | **exists** for pose+image+gripper; no tactile; wrong schema for UMI; untested |
 | Real inference server | **in progress** — Phase 3: `serve_policy.py` verified standalone on sheep; client dry-run wiring done + unit-tested (image 224, viz preview, `/reset`); on-arm dry-run pending hardware |
 
@@ -77,8 +77,9 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
 
 4. **Gripper — RESOLVED, wiring and calibration both.** Width flows both ways
    (`/fr3_gripper/joint_states` → `agent_pos[7]`, `action[7]` → `/polyumi/target_gripper` →
-   `fr3_gripper_bridge`), and the constants are measured as of 2026-08-09: `S_closed = 0.04456 m`
-   from `pingest calibrate-gripper`, `A_closed = 0.0` and `A_open = 0.0816 m` from
+   `fr3_gripper_bridge`), and the constants are measured as of 2026-08-09: a **closed width** of
+   0.04456 m from `pingest calibrate-gripper`, a **closed aperture** of 0.0 and an **open
+   aperture** of 0.0816 m from
    `ros2 run polyumi_ros2 gripper_range_probe`. Since the fingers close to the mechanism's true
    zero, `gripper_offset_m` is **0.0** — the policy's width is jaw aperture directly, the same
    place UMI's WSG ends up. What remains is only `latency.gripper`. See Phase 2.5.
@@ -498,18 +499,27 @@ UMI forced by the hardware.
 
 ### Width units — a pure offset, following UMI
 
-`agent_pos[7]` / `action[7]` carry raw ArUco tag separation (see the API contract note). The
-conversion to jaw aperture is a constant subtraction, matching UMI:
-`get_gripper_calibration_interpolator` (`umi/common/interpolation_util.py:36-51`) computes
-`aruco_actual_width - aruco_min_width`, and `06_generate_dataset_plan.py:136-139` passes the same
-array as both arguments — so the map has **slope 1 and no rescaling**. UMI derives the offset
-empirically as the minimum ArUco width over a calibration video in which the gripper fully closes
-(`scripts/calibrate_gripper_range.py`).
+Three measured quantities, named the same way everywhere in the codebase:
 
-Ours **now follows UMI all the way**: the DP exporter subtracts `S_closed` (from
+| Term | What it is | Where it lives |
+|---|---|---|
+| **closed width** | ArUco finger-tag separation with the *handheld* gripper's fingers touching | `ingest/config/gripper_calib.yaml` → `closed_mm` |
+| **closed aperture** | the *FR3's* jaw aperture in that same physical configuration | `config/inference.yaml` → `gripper_min_width_m` |
+| **open aperture** | the FR3's jaw aperture at full open | `config/inference.yaml` → `gripper_max_width_m` |
+
+`agent_pos[7]` / `action[7]` carry raw ArUco tag separation (see the API contract note). The
+conversion to jaw aperture is a constant subtraction, matching UMI. **The file names in the rest of
+this paragraph are upstream `universal_manipulation_interface`'s, not ours:**
+`get_gripper_calibration_interpolator` (`umi/common/interpolation_util.py:36-51`) computes
+`aruco_actual_width - aruco_min_width`, and `scripts_slam_pipeline/06_generate_dataset_plan.py:136-139`
+passes the same array as both arguments — so the map has **slope 1 and no rescaling**. UMI derives
+the offset empirically as the minimum ArUco width over a calibration video in which the gripper
+fully closes (`scripts/calibrate_gripper_range.py`).
+
+Ours **now follows UMI all the way**: the DP exporter subtracts the closed width (from
 `gripper_calib.yaml`'s `closed_mm`) so exported widths are opening-from-closed, and each buffer
-records the value as `meta.attrs['gripper_closed_width_m']`. Widths below `S_closed` clamp to 0
-rather than going negative — `S_closed` is a percentile, so ~1% of detections sit under it by
+records the value as `meta.attrs['gripper_closed_width_m']`. Widths below the closed width clamp to 0
+rather than going negative — the closed width is a percentile, so ~1% of detections sit under it by
 construction. UMI clamps here too, invisibly: its `get_gripper_calibration_interpolator` builds an
 `interp1d` over `[min_width, max_width]` with `fill_value=(x[0], x[-1])`, so anything below the
 calibrated minimum saturates to 0. (We do not clamp the top end as UMI does; a demo opening wider
@@ -519,9 +529,10 @@ tag separation only for checkpoints exported before 2026-08.
 Where we *could* differ from UMI, and happen not to: a WSG homes to a true zero aperture, and
 fingers that collided tip-to-tip before the mechanism bottomed out would leave the FR3 reporting a
 non-zero aperture when shut. "Fingers touching fingers" is the same physical configuration on both
-rigs, so the offset is `S_closed - A_closed` (or `-A_closed` post-change) rather than simply
-`S_closed`, and it can come out **negative** — the parameter validation permits that deliberately.
-**Measured 2026-08-09, `A_closed` is 0.0**: the current fingers meet exactly at the mechanism's
+rigs, so the offset is `closed_width - closed_aperture` (or just `-closed_aperture` post-change)
+rather than simply the closed width, and it can come out **negative** — the parameter validation
+permits that deliberately.
+**Measured 2026-08-09, the closed aperture is 0.0**: the current fingers meet exactly at the mechanism's
 zero, so the offset is 0 and we land in the same place as UMI after all. Re-measure with
 `pingest calibrate-gripper` and `ros2 run polyumi_ros2 gripper_range_probe` after any finger
 change.
@@ -562,8 +573,8 @@ object) is opt-in via `use_grasp_below_m`, shipped disabled so bringup is pure m
 - [ ] on-arm dry run (`fr3_gripper_bridge` with `execute:=false`)
 - [ ] on-arm execution (`execute:=true`, arm bridge plan-only)
 - [x] tooling to measure `gripper_offset_m` (PolyUMI equivalent of `calibrate_gripper_range.py`):
-      `pingest calibrate-gripper` for `S_closed`, `ros2 run polyumi_ros2 gripper_range_probe` for
-      `A_closed`/`A_open`
+      `pingest calibrate-gripper` for the closed width, `ros2 run polyumi_ros2 gripper_range_probe`
+      for both apertures
 - [x] both run on hardware 2026-08-09; numbers in `inference.yaml` / `gripper_calib.yaml`
 - [ ] measure `latency.gripper`
 

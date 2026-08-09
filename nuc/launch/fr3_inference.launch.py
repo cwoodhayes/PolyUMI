@@ -61,7 +61,7 @@ def generate_launch_description():
                                           "Hand's own maximum so nothing software-side narrows the "
                                           'range: franka_gripper aborts wider goals anyway, and '
                                           'gripper_range_probe needs the full stroke to measure '
-                                          'A_open. policy_client_node clamps to its own (measured) '
+                                          'open aperture. policy_client_node clamps to its own (measured) '
                                           'gripper_max_width_m first, so this is a backstop.'),
 
         IncludeLaunchDescription(

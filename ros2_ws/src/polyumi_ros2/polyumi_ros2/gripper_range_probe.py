@@ -2,35 +2,39 @@
 """
 Measure the FR3 hand's real reachable aperture range, with the PolyUMI fingers fitted.
 
-Gives the two robot-side numbers the gripper width map needs:
+Gives the two robot-side numbers the gripper width map needs, both of them jaw apertures read off
+``/fr3_gripper/joint_states``:
 
-    A_closed  jaw aperture with the fingers touching  ->  pairs with S_closed to give the offset
-    A_open    jaw aperture at full open               ->  gripper_max_width_m
+    the **closed aperture**  with the fingers touching  ->  ``gripper_min_width_m``, and pairs with
+                                                            the closed width to give the offset
+    the **open aperture**    at full open               ->  ``gripper_max_width_m``
 
 Neither can be assumed. The Franka Hand's nominal stroke is 0–0.0817 m, but the custom fingers can
 collide before the mechanism bottoms out and can foul at the open end, so both limits are properties
 of *these fingers*. `franka_gripper` does not publish max_width on any topic either, so there is
 nothing to read back.
 
-Measured 2026-08-09: ``A_closed = 0.0000 m``, ``A_open = 0.0816 m``. These fingers meet exactly at
-the mechanism's zero rather than colliding early — which matches how ``gripper_calib.yaml`` defines
-the fingertip frame ("the point where the two fingertips meet" when fully closed) — and they do not
-foul at the open end either, so both limits are the hand's own rather than the fingers'. The first
-run reported 0.0800 because the bridge's default clamp stopped it, which is why this probe now
-*asks* the bridge for its clamp instead of guessing.
+Measured 2026-08-09: the closed aperture is **0.0000 m** and the open aperture **0.0816 m**. These
+fingers meet exactly at the mechanism's zero rather than colliding early — which matches how
+``gripper_calib.yaml`` defines the fingertip frame ("the point where the two fingertips meet" when
+fully closed) — and they do not foul at the open end either, so both limits are the hand's own
+rather than the fingers'. The first run reported 0.0800 because the bridge's default clamp stopped
+it, which is why this probe now *asks* the bridge for its clamp instead of guessing.
 
-Cross-check against the ArUco side, which is independent of everything here: ``S_closed`` = 44.56 mm
-tag separation at zero aperture, so the FR3 at full open corresponds to 44.56 + 81.6 = 126.2 mm of
-tag separation, against 132.3 mm the handheld actually reaches. The handheld therefore opens 6.2 mm
-wider — about 7% of the policy's commanded range saturates at the top, which is expected and shows
-up as intent clipping rather than an error.
+Cross-check against the ArUco side, which is independent of everything here: the **closed width**
+(``gripper_calib.yaml``'s ``closed_mm``, the tag separation with the fingers touching) is 44.56 mm,
+so the FR3 at full open corresponds to 44.56 + 81.6 = 126.2 mm of tag separation, against the
+132.3 mm the handheld actually reaches. The handheld therefore opens 6.2 mm wider — about 7% of the
+policy's commanded range saturates at the top, which is expected and shows up as intent clipping
+rather than an error.
 
 The offset then comes from pairing this with the ArUco side. "Fingers touching fingers" is the same
-physical configuration on the handheld rig and on the arm, so with S_closed from
+physical configuration on the handheld rig and on the arm, so with the closed width from
 ``pingest calibrate-gripper``::
 
-    gripper_offset_m = S_closed - A_closed      # checkpoints trained on raw tag separation
-    gripper_offset_m = -A_closed                # checkpoints trained after the exporter subtracts
+    gripper_offset_m = closed_mm/1000 - closed_aperture   # checkpoints trained on raw tag separation
+    gripper_offset_m = -closed_aperture                   # checkpoints exported after the
+                                                          # exporter began subtracting closed_mm
 
 Both are plausibly negative. That is fine and expected — see docs/franka-inference-bringup.md.
 
@@ -305,10 +309,10 @@ class GripperRangeProbe(Node):
         a_closed, spread_closed = statistics.fmean(closeds), max(closeds) - min(closeds)
 
         self.get_logger().info(
-            f'A_open   = {a_open:.4f} m  (spread {spread_open * 1000:.2f} mm over {len(opens)} reps)'
+            f'open aperture   = {a_open:.4f} m  (spread {spread_open * 1000:.2f} mm over {len(opens)} reps)'
         )
         self.get_logger().info(
-            f'A_closed = {a_closed:.4f} m  (spread {spread_closed * 1000:.2f} mm over {len(closeds)} reps)'
+            f'closed aperture = {a_closed:.4f} m  (spread {spread_closed * 1000:.2f} mm over {len(closeds)} reps)'
         )
         self.get_logger().info(f'usable stroke = {(a_open - a_closed) * 1000:.1f} mm')
 
@@ -331,18 +335,18 @@ class GripperRangeProbe(Node):
             # Not fatal: the endpoints are still measured, they are just unverified against the
             # software limit. Say so rather than inventing a verdict.
             self.get_logger().warning(
-                f"Could not read the bridge's max_width_m, so A_open = {a_open:.4f} m might be the "
+                f"Could not read the bridge's max_width_m, so open aperture = {a_open:.4f} m might be the "
                 'software clamp rather than a physical stop. Check it by hand before using this.'
             )
         elif a_open < clamp_m - CLAMP_MARGIN_M:
             self.get_logger().info(
-                f'A_open = {a_open:.4f} m stopped {(clamp_m - a_open) * 1000:.1f} mm below the '
+                f'open aperture = {a_open:.4f} m stopped {(clamp_m - a_open) * 1000:.1f} mm below the '
                 f"bridge's clamp ({clamp_m:.4f} m), so hardware stopped it, not software. This is "
                 'the number you want.'
             )
         elif clamp_m >= HAND_MAX_WIDTH_M - CLAMP_MARGIN_M:
             self.get_logger().info(
-                f'A_open = {a_open:.4f} m sits at the clamp ({clamp_m:.4f} m), but that clamp is '
+                f'open aperture = {a_open:.4f} m sits at the clamp ({clamp_m:.4f} m), but that clamp is '
                 f"already the Franka Hand's own maximum ({HAND_MAX_WIDTH_M:.4f} m) and "
                 'franka_gripper aborts anything wider — so there is nothing further to command and '
                 'this IS the hardware limit. The number you want.'
@@ -350,7 +354,7 @@ class GripperRangeProbe(Node):
         else:
             ok = False
             self.get_logger().error(
-                f"A_open = {a_open:.4f} m is the bridge's max_width_m clamp ({clamp_m:.4f} m), not "
+                f"open aperture = {a_open:.4f} m is the bridge's max_width_m clamp ({clamp_m:.4f} m), not "
                 'a physical stop — the hand was never allowed to open further, so this measures '
                 'the software limit. Re-run with a higher clamp:\n'
                 '    ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true '
@@ -363,7 +367,8 @@ class GripperRangeProbe(Node):
             'Put in ros2_ws/src/polyumi_ros2/config/inference.yaml:\n'
             f'    gripper_max_width_m: {a_open:.4f}\n'
             f'    gripper_min_width_m: {a_closed:.4f}\n'
-            '  and combine A_closed with S_closed from `pingest calibrate-gripper` for '
+            '  and combine the closed aperture with the closed width from `pingest '
+            'calibrate-gripper` for '
             'gripper_offset_m (see the module docstring for which formula).'
         )
         return 0 if ok else 1

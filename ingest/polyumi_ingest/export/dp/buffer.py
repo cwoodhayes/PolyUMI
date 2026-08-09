@@ -55,7 +55,8 @@ One session can produce **several episodes**. Where the pose source has no pose 
 tracking — the session is split into the contiguous runs either side, each exported as its own
 episode, and runs shorter than ``MIN_SEGMENT_STEPS`` are dropped. Bridging a gap would put a
 step of the wrong duration inside an episode, which the fixed-rate sampler cannot see; splitting
-keeps every episode honest. This follows upstream UMI's ``06_generate_dataset_plan.py``.
+keeps every episode honest. This follows the upstream UMI repo's
+``scripts_slam_pipeline/06_generate_dataset_plan.py``.
 
 Images use **Blosc**, not JpegXl, on purpose. The training container pins Python 3.9 with
 ``imagecodecs==2023.9.18``, whose JpegXl codec cannot parse the config that our Python-3.13
@@ -147,7 +148,8 @@ def _valid_segments(valid: np.ndarray, min_steps: int) -> list[tuple[int, int]]:
     One episode per run, rather than the single longest run we used to keep: a demo whose pose
     source drops out in the middle is two usable demonstrations either side of the hole, not one
     truncated one. This mirrors upstream UMI's ``get_bool_segments`` in
-    ``06_generate_dataset_plan.py``. Runs shorter than ``min_steps`` are too short to sample a
+    the upstream UMI repo's ``scripts_slam_pipeline/06_generate_dataset_plan.py``. Runs shorter
+    than ``min_steps`` are too short to sample a
     horizon from and are discarded rather than emitted as degenerate episodes.
 
     Splitting rather than bridging is the whole point: UMI's fixed-rate sampler assumes uniform
@@ -277,13 +279,14 @@ def _export_episode(
     pose = np.asarray(arr(ep, f'eef/{array_name}')[:], dtype=np.float64)  # (N,7) [xyz, quat] hand frame
     # Raw ArUco tag separation, converted here to opening-from-closed. The subtraction lives in
     # the exporter rather than in step 4 on purpose: step 4 is the expensive pass (ArUco over every
-    # frame), so keeping the pzarr annotation calibration-independent means re-deriving S_closed
+    # frame), so keeping the pzarr annotation calibration-independent means re-deriving closed width
     # costs a re-export, not a re-detect. UMI applies it at the same stage, in
-    # 06_generate_dataset_plan.py, not at detection.
+    # the upstream UMI repo's scripts_slam_pipeline/06_generate_dataset_plan.py, not at detection.
     #
-    # Clamped at zero because S_closed is a percentile, so ~1% of detections sit below it by
+    # Clamped at zero because closed width is a percentile, so ~1% of detections sit below it by
     # construction and would export negative. UMI clamps too, though not visibly: its
-    # get_gripper_calibration_interpolator builds interp1d over [min_width, max_width] with
+    # get_gripper_calibration_interpolator (umi/common/interpolation_util.py, upstream) builds
+    # an interp1d over [min_width, max_width] with
     # bounds_error=False, fill_value=(x[0], x[-1]), so anything under the calibrated minimum
     # saturates to 0. We do not clamp the top end as UMI does — that would make open_mm
     # load-bearing to hide a demo opening wider than the calibration recording, which is
@@ -554,7 +557,7 @@ def export_scenes_to_dp(
     # be in the same width units, and re-reading the config mid-export would silently mix two
     # calibrations if the file changed underneath.
     closed_width_m = load_closed_width_m()
-    log.info(f'Gripper widths exported as opening-from-closed (S_closed = {closed_width_m * 1000:.2f} mm).')
+    log.info(f'Gripper widths exported as opening-from-closed (closed width = {closed_width_m * 1000:.2f} mm).')
 
     with tempfile.TemporaryDirectory(prefix='dp_export_') as tmp:
         build_dir = pathlib.Path(tmp) / 'buffer.zarr'

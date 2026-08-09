@@ -116,7 +116,7 @@ def test_report_rejects_a_non_repeatable_closed_endpoint():
 
 def test_landing_on_the_clamp_is_reported_as_a_software_limit():
     """
-    Regression: the first hardware run reported A_open = 0.0800 against a 0.08 clamp.
+    Regression: the first hardware run reported open aperture = 0.0800 against a 0.08 clamp.
 
     That is the bridge refusing to command wider, not the fingers stopping — a measurement of the
     software, which reads exactly like a measurement of the hardware unless it is called out.

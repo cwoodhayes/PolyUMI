@@ -556,7 +556,7 @@ def calibrate_gripper(
     ),
 ):
     """
-    Derive S_closed, the ArUco tag separation with the gripper fully closed.
+    Derive closed width, the ArUco tag separation with the gripper fully closed.
 
     Record a scene in which the gripper is opened and closed fully several times in front of the
     GoPro, holding it shut for a few seconds each cycle, then:
@@ -612,7 +612,7 @@ def calibrate_gripper(
     print()
     print('Put this in ingest/config/gripper_calib.yaml (the DP exporter reads it):')
     print('  gripper_fingers:')
-    print(f'    closed_mm: {stats.s_closed_m * 1000:.2f}')
+    print(f'    closed_mm: {stats.closed_width_m * 1000:.2f}')
     print(f'    open_mm: {stats.max_m * 1000:.2f}')
     print()
     print('Then measure the FR3 side, which pairs with this to give gripper_offset_m:')

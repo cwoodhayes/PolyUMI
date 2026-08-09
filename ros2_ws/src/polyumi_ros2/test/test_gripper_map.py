@@ -76,7 +76,7 @@ def test_zero_offset_is_a_passthrough():
 
 def test_negative_offset_is_supported():
     """
-    offset_m = S_closed - A_closed is a difference of two measurements; its sign is not knowable.
+    offset_m = closed width - closed aperture is a difference of two measurements; its sign is not knowable.
 
     If the fingers bottom out at an aperture wider than the tag separation, the correct offset is
     negative. Rejecting or clamping that would silently discard a valid calibration.
@@ -86,10 +86,10 @@ def test_negative_offset_is_supported():
 
 def test_low_clamp_is_the_fingers_minimum_not_zero():
     """
-    The low clamp tracks A_closed, for fingers whose tips meet before the mechanism bottoms out.
+    The low clamp tracks closed aperture, for fingers whose tips meet before the mechanism bottoms out.
 
-    The current fingers do not — A_closed measured 0.0 — so this is the hypothetical the parameter
-    exists for. Commanding below A_closed makes Move stall and abort, which is what leaves
+    The current fingers do not — closed aperture measured 0.0 — so this is the hypothetical the parameter
+    exists for. Commanding below closed aperture makes Move stall and abort, which is what leaves
     fr3_gripper_bridge's deadband measuring against a width the hand never reached.
     """
     assert policy_to_robot_width(0.0, 0.005, 0.08, 0.006) == pytest.approx(0.006)
