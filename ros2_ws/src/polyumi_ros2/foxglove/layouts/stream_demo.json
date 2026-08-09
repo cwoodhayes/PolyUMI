@@ -53,13 +53,13 @@
     "3D!2sy03nw": {
       "cameraState": {
         "perspective": true,
-        "distance": 2.2036622046977348,
-        "phi": 58.75000000001608,
-        "thetaOffset": 151.25000000001282,
+        "distance": 2.4417309747328084,
+        "phi": 75.20319722652513,
+        "thetaOffset": 161.17969953776426,
         "targetOffset": [
-          0.2724812578730412,
-          0.23407143682378673,
-          -1.7596109702112486e-17
+          0.24764460938257093,
+          -0.38571512577157546,
+          -1.2253186654752361e-17
         ],
         "target": [
           0,
@@ -130,7 +130,8 @@
           "visible": true
         },
         "/polyumi/target_poses_preview": {
-          "visible": true
+          "visible": true,
+          "axisScale": 0.1
         }
       },
       "layers": {
@@ -216,6 +217,19 @@
       "foxglovePanelTitle": "Touch Sensor",
       "synchronize": false
     },
+    "Plot!1hd44t4": {
+      "foxglovePanelTitle": "Gripper Command",
+      "paths": [
+        {
+          "timestampMethod": "headerStamp",
+          "value": "/polyumi/target_gripper_preview.points[0].positions[:]",
+          "enabled": true,
+          "color": "#4e98e2",
+          "id": "62baf26a-07a1-43f5-b5e2-281fe686ad1d",
+          "label": "Gripper Width (m)"
+        }
+      ]
+    },
     "Tab!2xvuj86": {
       "activeTabIdx": 0,
       "tabs": [
@@ -242,7 +256,12 @@
     "first": {
       "first": "3D!2sy03nw",
       "second": {
-        "first": "Image!2gdeq90",
+        "first": {
+          "first": "Image!2gdeq90",
+          "second": "Plot!1hd44t4",
+          "direction": "column",
+          "splitPercentage": 68.13875060221615
+        },
         "second": "Tab!2xvuj86",
         "direction": "row"
       },
@@ -251,7 +270,7 @@
     },
     "second": "Audio!1ops55o",
     "direction": "column",
-    "splitPercentage": 67.49246735855372
+    "splitPercentage": 75.54812208607034
   },
   "globalVariables": {},
   "playbackConfig": {
