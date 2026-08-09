@@ -69,14 +69,14 @@ def test_flags_a_recording_where_the_gripper_was_never_held_shut():
     assert 'WARNING' in format_report(stats)
 
 
-def test_plateau_tally_counts_only_samples_near_the_minimum():
-    """The tally is the evidence for the minimum, so it must not count the whole low tail."""
+def test_plateau_tally_counts_only_samples_near_s_closed():
+    """The tally is the evidence for the chosen value, so it must not count the whole low tail."""
     closed = np.full(120, 0.005)
     elsewhere = np.full(500, 0.005 + 10 * PLATEAU_TOL_M)
 
     stats = closed_width_stats(np.concatenate([closed, elsewhere]))
 
-    assert stats.n_near_min == 120
+    assert stats.n_near_s_closed == 120
 
 
 def test_nans_are_dropped_rather_than_poisoning_the_percentiles():
@@ -131,7 +131,7 @@ def test_a_dense_slow_sweep_does_not_fake_a_plateau():
     """
     stats = closed_width_stats(np.linspace(0.005, 0.090, 2000))
 
-    assert stats.n_near_min >= MIN_PLATEAU_SAMPLES, 'precondition: the absolute count is satisfied'
+    assert stats.n_near_s_closed >= MIN_PLATEAU_SAMPLES, 'precondition: the absolute count passes'
     assert not stats.plateau_is_convincing, 'but the density is not'
 
 
@@ -142,3 +142,22 @@ def test_plateau_check_is_scale_free():
 
     assert closed_width_stats(slow).plateau_is_convincing
     assert closed_width_stats(fast).plateau_is_convincing
+
+
+def test_a_plateau_sitting_above_a_stray_minimum_is_still_convincing():
+    """
+    Regression: scene d044, 16320 detections at 100% detection rate.
+
+    Its closed dwell sat ~44.5 mm with one stray solve 3.5 mm below. Anchoring the tally on the
+    raw minimum counted 8 samples beside that outlier and condemned a perfectly good recording —
+    while min_is_outlier was simultaneously reporting that the minimum was not the plateau.
+    """
+    plateau = np.full(700, 0.0445)
+    ramp = np.linspace(0.0455, 0.1323, 15000)
+    stray = np.array([0.04109])
+
+    stats = closed_width_stats(np.concatenate([plateau, ramp, stray]))
+
+    assert stats.min_is_outlier, 'precondition: the raw minimum is a stray detection'
+    assert stats.plateau_is_convincing, 'the dwell above it is what should be judged'
+    assert stats.s_closed_m == pytest.approx(0.0445, abs=2e-4)

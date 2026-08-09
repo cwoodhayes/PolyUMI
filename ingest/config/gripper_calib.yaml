@@ -75,7 +75,8 @@ T_optitrack_to_world:
   # rotation: [0, 0, 0, 1] # quaternion
 
 gripper_fingers:
-  # S_closed and its open-end counterpart: the ArUco finger-tag separation at each extreme.
+  # S_closed and its open-end counterpart: the ArUco finger-tag separation at 
+  # fully-open and fully-closed states on the handheld PolyUMI gripper.
   #
   # closed_mm is LOAD-BEARING: the DP exporter subtracts it from every width so that exported
   # `robot0_gripper_width` is metres of opening from fully closed rather than raw tag separation
@@ -86,12 +87,8 @@ gripper_fingers:
   #
   # Derive both with:  pingest calibrate-gripper --scene <a scene where the gripper fully opens
   # and closes several times, held at each extreme for a few seconds>
-  #
-  # !!! STILL UNMEASURED — these are the original declared guesses. !!! open_mm is informational
-  # (it tells you the width span the policy saw, hence where FR3 commands will clamp, since the
-  # handheld gripper opens wider than the Franka Hand can).
-  closed_mm: 5.0 # mm between the finger tags when closed
-  open_mm: 100.0 # mm between the finger tags when open
+  closed_mm: 44.56 # mm between the finger tags when closed
+  open_mm: 132.33 # mm between the finger tags when open
 
 # ArUco markers placed on the gripper fingers, used by the gripper-width
 # preprocessing step (aruco_step.py) to derive a 1DOF gripper width from

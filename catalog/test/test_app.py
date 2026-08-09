@@ -555,6 +555,43 @@ def test_post_dataset_draft_remove_never_added_is_a_noop(tmp_path: pathlib.Path)
     assert resp.status_code == 200
 
 
+def test_post_dataset_draft_from_dataset_seeds_builder_with_its_scenes(tmp_path: pathlib.Path, monkeypatch):
+    """'Duplicate into builder' loads an existing dataset's member scenes into the draft, replacing it."""
+
+    def fake_export_scenes_to_dp(scene_paths, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b'fake-zip')
+        return 3, []
+
+    monkeypatch.setattr('polyumi_ingest.export.dp.export_scenes_to_dp', fake_export_scenes_to_dp)
+
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    client.post('/dataset-draft/add/scene-1')
+    client.post('/datasets', data={'name': 'fold_towel_v1', 'scene_ids': ['scene-1']})
+    with DBSession(engine) as db:
+        from polyumi_catalog.models import Dataset
+
+        dataset_id = db.exec(select(Dataset).where(Dataset.name == 'fold_towel_v1')).first().id
+
+    # a leftover draft entry should be replaced, not appended to
+    client.post('/dataset-draft/add/scene-1')
+    resp = client.post(f'/dataset-draft/from-dataset/{dataset_id}')
+    assert resp.status_code == 200
+    assert 'hx-swap-oob' in resp.text
+
+    index_resp = client.get('/')
+    assert index_resp.text.count('name="scene_ids" value="scene-1"') == 1
+
+
+def test_post_dataset_draft_from_dataset_unknown_id_returns_404(tmp_path: pathlib.Path):
+    """Duplicating a nonexistent dataset id is a clean 404, not a crash."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    resp = client.post('/dataset-draft/from-dataset/999')
+    assert resp.status_code == 404
+
+
 def test_post_build_dataset_success_redirects_and_clears_draft(tmp_path: pathlib.Path, monkeypatch):
     """Building a dataset (via the draft-populated hidden inputs) redirects and clears the draft."""
 

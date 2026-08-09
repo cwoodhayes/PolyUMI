@@ -328,6 +328,7 @@
     <dt>PolyUMI version</dt><dd class="mono">{{ detail.polyumi_version or '—' }}</dd>
     <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
   </dl>
+  <button hx-post="/dataset-draft/from-dataset/{{ detail.id }}" hx-swap="none">Duplicate into builder</button>
   <h3>Member scenes</h3>
   {% if detail.members %}
   <ul>

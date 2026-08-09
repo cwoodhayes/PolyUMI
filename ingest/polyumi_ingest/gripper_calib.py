@@ -39,9 +39,9 @@ REPORT_PERCENTILES = (0.5, 1.0, 2.0, 5.0)
 #: the gripper is actually shut for a reasonable fraction of the time.
 DEFAULT_PERCENTILE = 1.0
 
-#: A sample this close to the minimum counts as "at the minimum" for the plateau tally. Loose
-#: relative to ArUco's real precision on a 16 mm tag, deliberately: the question it answers is
-#: "was the gripper parked here", not "how repeatable is the detector".
+#: Half-width of the band counted as "at the plateau". Loose relative to ArUco's real precision on
+#: a 16 mm tag, deliberately: the question it answers is "was the gripper parked here", not "how
+#: repeatable is the detector".
 PLATEAU_TOL_M = 0.001
 
 #: Below this many samples on the plateau, the minimum is probably noise rather than a dwell.
@@ -64,8 +64,14 @@ class ClosedWidthStats:
     min_m: float
     max_m: float
     percentiles_m: dict[float, float]
-    #: Samples within :data:`PLATEAU_TOL_M` of ``min_m`` — the evidence that ``min_m`` is a dwell.
-    n_near_min: int
+    #: Samples within :data:`PLATEAU_TOL_M` of ``s_closed_m`` — the evidence that it is a dwell.
+    #:
+    #: Anchored on the chosen value, NOT on ``min_m``. Anchoring on the minimum measures the
+    #: neighbourhood of whatever the worst detection was: on a real recording whose plateau sat
+    #: 3.5 mm above a stray solve, it counted 8 samples beside the outlier and declared a perfectly
+    #: good session unusable, while ``min_is_outlier`` was simultaneously reporting that the
+    #: minimum was not the plateau.
+    n_near_s_closed: int
     #: The value to use, i.e. ``percentiles_m[DEFAULT_PERCENTILE]``.
     s_closed_m: float
 
@@ -75,8 +81,8 @@ class ClosedWidthStats:
         return self.max_m - self.min_m
 
     @property
-    def expected_uniform_near_min(self) -> float:
-        """How many samples would land near the minimum if the width swept uniformly."""
+    def expected_uniform_in_band(self) -> float:
+        """How many samples would fall in a PLATEAU_TOL_M band if the width swept uniformly."""
         if self.span_m <= PLATEAU_TOL_M:
             # Everything is within tolerance of everything: there is no travel to sweep, so the
             # comparison is meaningless and the absolute count is the only test that applies.
@@ -85,11 +91,9 @@ class ClosedWidthStats:
 
     @property
     def plateau_is_convincing(self) -> bool:
-        """Whether the minimum looks like a dwell rather than a stray detection or a fly-through."""
-        return (
-            self.n_near_min >= MIN_PLATEAU_SAMPLES
-            and self.n_near_min >= PLATEAU_DENSITY_FACTOR * self.expected_uniform_near_min
-        )
+        """Whether S_closed sits in a dwell rather than on a ramp the width merely passed through."""
+        dense_enough = self.n_near_s_closed >= PLATEAU_DENSITY_FACTOR * self.expected_uniform_in_band
+        return self.n_near_s_closed >= MIN_PLATEAU_SAMPLES and dense_enough
 
     @property
     def min_is_outlier(self) -> bool:
@@ -114,13 +118,14 @@ def closed_width_stats(widths_m: np.ndarray) -> ClosedWidthStats:
         float(p): float(np.percentile(finite, p)) for p in REPORT_PERCENTILES
     }
     minimum = float(finite.min())
+    s_closed = percentiles[DEFAULT_PERCENTILE]
     return ClosedWidthStats(
         n_samples=int(finite.size),
         min_m=minimum,
         max_m=float(finite.max()),
         percentiles_m=percentiles,
-        n_near_min=int(np.count_nonzero(finite <= minimum + PLATEAU_TOL_M)),
-        s_closed_m=percentiles[DEFAULT_PERCENTILE],
+        n_near_s_closed=int(np.count_nonzero(np.abs(finite - s_closed) <= PLATEAU_TOL_M)),
+        s_closed_m=s_closed,
     )
 
 
@@ -138,12 +143,13 @@ def format_report(stats: ClosedWidthStats) -> str:
     lines += [
         f'max              {stats.max_m * 1000:.2f} mm',
         f'span             {stats.span_m * 1000:.2f} mm   (width range seen in training)',
-        f'within {PLATEAU_TOL_M * 1000:.0f}mm of min  {stats.n_near_min} samples',
+        f'within {PLATEAU_TOL_M * 1000:.0f}mm of S_closed  {stats.n_near_s_closed} samples '
+        f'({stats.expected_uniform_in_band:.0f} expected if it were only passing through)',
     ]
     if not stats.plateau_is_convincing:
         lines.append(
-            f'WARNING: {stats.n_near_min} samples near the minimum, against '
-            f'{stats.expected_uniform_near_min:.0f} expected from a uniform sweep '
+            f'WARNING: only {stats.n_near_s_closed} samples near S_closed, against '
+            f'{stats.expected_uniform_in_band:.0f} expected from a uniform sweep '
             f'(want >= {MIN_PLATEAU_SAMPLES} and >= {PLATEAU_DENSITY_FACTOR:g}x that). The gripper '
             'looks like it passed through the closed position rather than resting at it — hold it '
             'shut for a few seconds per cycle and re-record.'

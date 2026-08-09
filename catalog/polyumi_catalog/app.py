@@ -72,11 +72,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import Engine
 from sqlmodel import Session as DBSession
+from sqlmodel import select
 
 from polyumi_catalog import mcap_tools, pp_status, provenance, queries, thumbnails
 from polyumi_catalog.db import default_datasets_dir
 from polyumi_catalog.dataset_builder import DatasetBuildError, build_dataset
-from polyumi_catalog.models import Scene
+from polyumi_catalog.models import Dataset, DatasetMember, Scene
 from polyumi_catalog.models import Session as SessionRow
 from polyumi_catalog.mutations import (
     MutationError,
@@ -303,6 +304,17 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
             if scene_id in app.state.pending_dataset_scene_ids:
                 app.state.pending_dataset_scene_ids.remove(scene_id)
         with DBSession(engine) as db:
+            return render_dataset_builder(request, db, oob=True)
+
+    @app.post('/dataset-draft/from-dataset/{dataset_id}', response_class=HTMLResponse)
+    def post_dataset_draft_from_dataset(request: Request, dataset_id: int) -> HTMLResponse:
+        """Replace the draft with an existing dataset's member scenes, to re-export it after export logic changes."""
+        with DBSession(engine) as db:
+            if db.get(Dataset, dataset_id) is None:
+                return PlainTextResponse('No such dataset.', status_code=404)
+            members = db.exec(select(DatasetMember).where(DatasetMember.dataset_id == dataset_id)).all()
+            with app.state.pending_dataset_lock:
+                app.state.pending_dataset_scene_ids = [m.scene_id for m in members]
             return render_dataset_builder(request, db, oob=True)
 
     @app.post('/sessions/{session_id}/export-mcap', response_class=HTMLResponse)
