@@ -18,15 +18,16 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
 | Action-chunk execution on real hardware | **done** (single chunks); continuous 10 Hz loop unverified. **Executor redesign planned — Phase 4** (plan-then-execute → UMI-style 1 kHz streaming Cartesian servo) |
 | Latency compensation, gopro + proprio | **done** — matches UMI's scheme; unit-tested |
 | Latency compensation, finger cam + piezo | **not started** — params declared, never consumed |
-| Pose body frame (training ↔ inference) | **done, verified on hardware** — `polyumi_tcp` plumbed end to end, measured from CAD (`nuc/tcp_calib.py`), and confirmed by `tcp_pivot_test`: with the legacy offset zeroed, pivoting about the TCP holds the fingertips still |
+| Pose body frame (training ↔ inference) | **done, verified on hardware** — `polyumi_tcp` plumbed end to end, measured from CAD (`nuc/tcp_calib.py`), and confirmed by `tcp_pivot_test`: pivoting about the TCP holds the closed fingertips still |
 | Gripper — observation | **done** — Phase 2.5: `/fr3_gripper/joint_states` → `agent_pos[7]` |
 | Gripper — command | **done** — Phase 2.5: `action[7]` → `/polyumi/target_gripper` → NUC `fr3_gripper_bridge` |
+| Gripper width calibration | **done, measured on hardware 2026-08-09** — `S_closed = 0.04456`, `A_closed = 0.0`, `A_open = 0.0816`; offset is 0.0, i.e. policy width **is** jaw aperture |
 | DP export | **exists** for pose+image+gripper; no tactile; wrong schema for UMI; untested |
 | Real inference server | **in progress** — Phase 3: `serve_policy.py` verified standalone on sheep; client dry-run wiring done + unit-tested (image 224, viz preview, `/reset`); on-arm dry-run pending hardware |
 
 ### Blocking issues
 
-1. **The TCP frame is resolved; what remains is the legacy training offset.** `polyumi_tcp` is a
+1. **RESOLVED 2026-08-09.** `polyumi_tcp` is a
    fixed child of `fr3_hand` defined once in `nuc/tcp_calib.py`, published into TF by
    `fr3_bringup.launch.py` and into move_group's model by
    `nuc/description/fr3_polyumi.urdf.xacro`, and both `eef_frame` and the bridge's `eef_link` name
@@ -38,12 +39,10 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
    `Rz(+90°)` sign (a mirrored one would sweep them ~15 cm). Still unmeasured: real GoPro mount
    tilt versus the CAD-nominal optical axis. See [data-format.md](data-format.md).
 
-   Note the x currently in force is **not** 0.019612 but 0.076302: `T_gopro_to_fingertip`'s y was
-   corrected from 0.014 to 0.07069 on 2026-08-06, and checkpoints exported before that learned the
-   older body frame. `LEGACY_TRAINING_Y_ERROR` in `nuc/tcp_calib.py` shifts the TCP to match what
-   the policy was trained on — a policy needs training and inference to agree on the body frame,
-   not for the frame to be anatomically right. Zero that constant after retraining on corrected
-   data.
+   The TCP is now the true fingertip frame. `T_gopro_to_fingertip`'s y was corrected from 0.014 to
+   0.07069 on 2026-08-06, and the temporary offset that kept inference speaking the older body
+   frame was **removed on 2026-08-09** — checkpoints exported before that date are no longer
+   supported and must be re-exported and retrained.
 
 2. **The camera the policy trains on is not the camera it runs on.** Training frames come from
    the GoPro's own SD recording — `ingest/config/gopro_intrinsics.json` is calibrated at
@@ -72,14 +71,13 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
      PolyUMI CAD assembly (GoPro lens faceplate → closed-fingertip midpoint), rotation an
      identity because both frames are the GoPro optical convention. Feeds every exported pose.
 
-4. **Gripper — RESOLVED in Phase 2.5.** Width now flows both ways: `/fr3_gripper/joint_states`
-   → `agent_pos[7]`, and `action[7]` → a parallel `trajectory_msgs/JointTrajectory` on
-   `/polyumi/target_gripper` which the NUC-side `fr3_gripper_bridge` turns into `Move`/`Grasp`
-   goals. What remains is a *calibration* gap, not a wiring one, and the tooling for it now
-   exists: `pingest calibrate-gripper` derives `S_closed` from an open/close recording and
-   `ros2 run polyumi_ros2 gripper_range_probe` measures the fingers' real aperture range. Neither
-   has been **run** yet, so `gripper_offset_m` and `gripper_max_width_m` are still the original
-   guesses. See Phase 2.5 and open question 7.
+4. **Gripper — RESOLVED, wiring and calibration both.** Width flows both ways
+   (`/fr3_gripper/joint_states` → `agent_pos[7]`, `action[7]` → `/polyumi/target_gripper` →
+   `fr3_gripper_bridge`), and the constants are measured as of 2026-08-09: `S_closed = 0.04456 m`
+   from `pingest calibrate-gripper`, `A_closed = 0.0` and `A_open = 0.0816 m` from
+   `ros2 run polyumi_ros2 gripper_range_probe`. Since the fingers close to the mechanism's true
+   zero, `gripper_offset_m` is **0.0** — the policy's width is jaw aperture directly, the same
+   place UMI's WSG ends up. What remains is only `latency.gripper`. See Phase 2.5.
 
 5. **The DP exporter needs a rework, and has no tests at all.** Deliberately deferred to one
    chunk of work rather than patched piecemeal, since the UMI migration rewrites this file
@@ -554,7 +552,7 @@ object) is opt-in via `use_grasp_below_m`, shipped disabled so bringup is pure m
 - [x] tooling to measure `gripper_offset_m` (PolyUMI equivalent of `calibrate_gripper_range.py`):
       `pingest calibrate-gripper` for `S_closed`, `ros2 run polyumi_ros2 gripper_range_probe` for
       `A_closed`/`A_open`
-- [ ] actually run both and put the numbers in `inference.yaml` / `gripper_calib.yaml`
+- [x] both run on hardware 2026-08-09; numbers in `inference.yaml` / `gripper_calib.yaml`
 - [ ] measure `latency.gripper`
 
 ---

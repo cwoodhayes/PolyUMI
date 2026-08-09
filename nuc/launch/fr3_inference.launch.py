@@ -41,6 +41,7 @@ def generate_launch_description():
     execute_arm = LaunchConfiguration('execute_arm')
     execute_gripper = LaunchConfiguration('execute_gripper')
     max_velocity_scaling = LaunchConfiguration('max_velocity_scaling')
+    gripper_max_width = LaunchConfiguration('gripper_max_width')
 
     return LaunchDescription([
         DeclareLaunchArgument('robot_ip', default_value='192.168.51.20',
@@ -55,6 +56,9 @@ def generate_launch_description():
                               description='Let fr3_gripper_bridge send goals (MOVES THE FINGERS).'),
         DeclareLaunchArgument('max_velocity_scaling', default_value='0.1',
                               description='Arm speed cap. Start low, raise once you trust it.'),
+        DeclareLaunchArgument('gripper_max_width', default_value='0.0817',
+                              description="Gripper aperture clamp (m). Raise to 0.0817 to measure "
+                                          'the fingers true open limit with gripper_range_probe.'),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(NUC_DIR / 'launch' / 'fr3_move_group.launch.py')),
@@ -69,7 +73,8 @@ def generate_launch_description():
         ),
         ExecuteProcess(
             cmd=['python3', str(NUC_DIR / 'fr3_gripper_bridge.py'), '--ros-args',
-                 '-p', ['execute:=', execute_gripper]],
+                 '-p', ['execute:=', execute_gripper],
+                 '-p', ['max_width_m:=', gripper_max_width]],
             output='screen',
         ),
     ])

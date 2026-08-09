@@ -7,10 +7,23 @@ Gives the two robot-side numbers the gripper width map needs:
     A_closed  jaw aperture with the fingers touching  ->  pairs with S_closed to give the offset
     A_open    jaw aperture at full open               ->  gripper_max_width_m
 
-Neither can be assumed. The Franka Hand's nominal stroke is 0–0.0817 m, but the custom fingers
-collide well before the mechanism bottoms out and may also foul at the open end, so both limits are
-properties of *these fingers* and have to be measured. `franka_gripper` does not publish max_width
-on any topic either, so there is nothing to read back.
+Neither can be assumed. The Franka Hand's nominal stroke is 0–0.0817 m, but the custom fingers can
+collide before the mechanism bottoms out and can foul at the open end, so both limits are properties
+of *these fingers*. `franka_gripper` does not publish max_width on any topic either, so there is
+nothing to read back.
+
+Measured 2026-08-09: ``A_closed = 0.0000 m``, ``A_open = 0.0816 m``. These fingers meet exactly at
+the mechanism's zero rather than colliding early — which matches how ``gripper_calib.yaml`` defines
+the fingertip frame ("the point where the two fingertips meet" when fully closed) — and they do not
+foul at the open end either, so both limits are the hand's own rather than the fingers'. The first
+run reported 0.0800 because the bridge's default clamp stopped it, which is why this probe now
+*asks* the bridge for its clamp instead of guessing.
+
+Cross-check against the ArUco side, which is independent of everything here: ``S_closed`` = 44.56 mm
+tag separation at zero aperture, so the FR3 at full open corresponds to 44.56 + 81.6 = 126.2 mm of
+tag separation, against 132.3 mm the handheld actually reaches. The handheld therefore opens 6.2 mm
+wider — about 7% of the policy's commanded range saturates at the top, which is expected and shows
+up as intent clipping rather than an error.
 
 The offset then comes from pairing this with the ArUco side. "Fingers touching fingers" is the same
 physical configuration on the handheld rig and on the arm, so with S_closed from
@@ -29,8 +42,10 @@ decides where closed is. Don't reach for that pre-emptively; let the measurement
 
 Usage (laptop, after `source setup_franka_env.sh`):
 
-    # 1. NUC: the gripper must be allowed to move, or every command is a silent no-op
-    ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true
+    # 1. NUC: the gripper must be allowed to move, or every command is a silent no-op. Raise the
+    #    bridge's clamp too, or the open endpoint measures the clamp instead of the fingers —
+    #    0.0817 m is the Franka Hand's own maximum, so the fingers stop it first if anything does.
+    ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true gripper_max_width:=0.0817
 
     # 2. Nothing should be in the way of the fingers
     ros2 run polyumi_ros2 gripper_range_probe
@@ -43,6 +58,7 @@ import statistics
 import threading
 import time
 
+from rcl_interfaces.srv import GetParameters
 import rclpy
 from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
@@ -70,9 +86,23 @@ SAMPLE_PERIOD_S = 0.05
 #: Spread above which the endpoint is not repeatable enough to calibrate against.
 REPEATABILITY_WARN_M = 0.001
 
-#: If the open endpoint lands this close to what we commanded, we measured the bridge's clamp
-#: rather than the hardware limit.
+#: How close the open endpoint has to sit to the bridge's clamp before we call it clamped rather
+#: than a real stop.
 CLAMP_MARGIN_M = 0.001
+
+#: The bridge's parameter service. Queried rather than guessed: "did I measure the fingers or the
+#: software limit" is otherwise undecidable from this side, and guessing it from the spread gets it
+#: wrong — a hand that reaches its own maximum every time is just as repeatable as one hitting a
+#: clamp. Service calls DO cross the Humble<->Kilted rmw gap even though the ROS graph does not, so
+#: this works from the laptop; see docs/crb-fr3-inference.md.
+BRIDGE_PARAM_SERVICE = '/fr3_gripper_bridge/get_parameters'
+BRIDGE_PARAM_TIMEOUT_S = 5.0
+
+#: The Franka Hand's own maximum aperture after homing. Once the clamp is here there is nothing
+#: further to try — franka_gripper ABORTS widths past max_width rather than clamping them — so
+#: "settled at the clamp" stops being a software artifact and becomes the hardware answer. Without
+#: this the probe would keep telling you to raise a clamp that cannot usefully go higher.
+HAND_MAX_WIDTH_M = 0.0817
 
 
 class GripperRangeProbe(Node):
@@ -115,9 +145,36 @@ class GripperRangeProbe(Node):
 
         self._state_topic = state_topic
         self._pub = self.create_publisher(JointTrajectory, topic, 10)
+        self._bridge_params = self.create_client(GetParameters, BRIDGE_PARAM_SERVICE)
         self._lock = threading.Lock()
         self._aperture: float | None = None
         self.create_subscription(JointState, state_topic, self._on_state, 10)
+
+    def bridge_max_width(self) -> float | None:
+        """
+        Ask the bridge what it clamps commanded widths to, or None if it cannot be reached.
+
+        Without this the probe cannot distinguish "the fingers stopped here" from "the software
+        stopped here", and the two demand opposite responses: one is the number you want, the
+        other means re-run with a higher clamp.
+        """
+        if not self._bridge_params.wait_for_service(timeout_sec=BRIDGE_PARAM_TIMEOUT_S):
+            self.get_logger().warning(
+                f'{BRIDGE_PARAM_SERVICE} did not answer; cannot tell whether the open endpoint is '
+                "the fingers or the bridge's clamp."
+            )
+            return None
+        request = GetParameters.Request()
+        request.names = ['max_width_m']
+        future = self._bridge_params.call_async(request)
+        done = threading.Event()
+        future.add_done_callback(lambda _f: done.set())
+        if not done.wait(timeout=BRIDGE_PARAM_TIMEOUT_S):
+            return None
+        response = future.result()
+        if response is None or not response.values:
+            return None
+        return float(response.values[0].double_value)
 
     def _on_state(self, msg: JointState) -> None:
         """Cache the aperture; each FR3 finger reports half of it."""
@@ -232,9 +289,9 @@ class GripperRangeProbe(Node):
             opens.append(measured_open)
             closeds.append(measured_closed)
 
-        return self._report(opens, closeds)
+        return self._report(opens, closeds, clamp_m=self.bridge_max_width())
 
-    def _report(self, opens: list[float], closeds: list[float]) -> int:
+    def _report(self, opens: list[float], closeds: list[float], clamp_m: float | None = None) -> int:
         """Print the endpoints with their spreads, and the config lines they feed."""
         a_open, spread_open = statistics.fmean(opens), max(opens) - min(opens)
         a_closed, spread_closed = statistics.fmean(closeds), max(closeds) - min(closeds)
@@ -262,13 +319,36 @@ class GripperRangeProbe(Node):
                 f'The open endpoint varies by {spread_open * 1000:.2f} mm between reps — unexpected '
                 'for a free move, so suspect something fouling the fingers.'
             )
-        if abs(a_open - self._open_width) > CLAMP_MARGIN_M and a_open < self._open_width:
-            # Landing short of the command is the normal case (the fingers or the bridge's clamp
-            # stop it first); saying which is what makes the number actionable.
+        if clamp_m is None:
+            # Not fatal: the endpoints are still measured, they are just unverified against the
+            # software limit. Say so rather than inventing a verdict.
             self.get_logger().warning(
-                f'Open settled {(self._open_width - a_open) * 1000:.1f} mm short of the command. If '
-                "that is the bridge's max_width_m rather than the fingers, raise it and re-run — "
-                'otherwise this IS the fingers, which is the number you want.'
+                f"Could not read the bridge's max_width_m, so A_open = {a_open:.4f} m might be the "
+                'software clamp rather than a physical stop. Check it by hand before using this.'
+            )
+        elif a_open < clamp_m - CLAMP_MARGIN_M:
+            self.get_logger().info(
+                f'A_open = {a_open:.4f} m stopped {(clamp_m - a_open) * 1000:.1f} mm below the '
+                f"bridge's clamp ({clamp_m:.4f} m), so hardware stopped it, not software. This is "
+                'the number you want.'
+            )
+        elif clamp_m >= HAND_MAX_WIDTH_M - CLAMP_MARGIN_M:
+            self.get_logger().info(
+                f'A_open = {a_open:.4f} m sits at the clamp ({clamp_m:.4f} m), but that clamp is '
+                f"already the Franka Hand's own maximum ({HAND_MAX_WIDTH_M:.4f} m) and "
+                'franka_gripper aborts anything wider — so there is nothing further to command and '
+                'this IS the hardware limit. The number you want.'
+            )
+        else:
+            ok = False
+            self.get_logger().error(
+                f"A_open = {a_open:.4f} m is the bridge's max_width_m clamp ({clamp_m:.4f} m), not "
+                'a physical stop — the hand was never allowed to open further, so this measures '
+                'the software limit. Re-run with a higher clamp:\n'
+                '    ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true '
+                f'gripper_max_width:={HAND_MAX_WIDTH_M}\n'
+                "  (that is the Franka Hand's own maximum; do not go higher, franka_gripper aborts "
+                'widths past it rather than clamping.)'
             )
 
         self.get_logger().info(

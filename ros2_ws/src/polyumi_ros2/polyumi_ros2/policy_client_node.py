@@ -163,16 +163,15 @@ class PolicyClientNode(Node):
         # the worst observed publish interval (the topic jitters 24-100ms) so ordinary jitter
         # cannot trip it, and well short of the ~2.3s the buffer can hold. <= 0 disables the check.
         self.declare_parameter('max_gripper_age_s', 0.5)
-        # Subtracted from the policy's width to get jaw aperture. Which value is correct depends
-        # on when the loaded checkpoint was exported — see polyumi_ros2.gripper_map. MAY BE
-        # NEGATIVE: the fingers collide at a non-zero aperture, so it is a difference of two
-        # measured quantities and its sign is not knowable in advance.
-        self.declare_parameter('gripper_offset_m', 0.005)
-        # The fingers' reachable aperture range, measured with `ros2 run polyumi_ros2
-        # gripper_range_probe`. Not the Franka Hand's nominal 0-0.0817 m: the PolyUMI fingers
-        # collide before the mechanism bottoms out, and may foul at the open end too. max_width is
-        # not published on any topic, so neither end can be read back at runtime.
-        self.declare_parameter('gripper_max_width_m', 0.08)
+        # Subtracted from the policy's width to get jaw aperture; equals -A_closed, the hand's
+        # aperture with the fingers touching. Measured 2026-08-09 as 0.0 — the policy's width IS
+        # jaw aperture — but kept a parameter because fingers that collide early make it non-zero.
+        # MAY BE NEGATIVE, and the validation deliberately permits that. See gripper_map.
+        self.declare_parameter('gripper_offset_m', 0.0)
+        # Measured reachable aperture (`ros2 run polyumi_ros2 gripper_range_probe`), not the Franka
+        # Hand's nominal range: max_width is published on no topic, so neither end is readable at
+        # runtime. 0.0816 is the hand's own maximum here; the fingers limit neither end.
+        self.declare_parameter('gripper_max_width_m', 0.0816)
         self.declare_parameter('gripper_min_width_m', 0.0)
         # How far back (seconds) the EE-pose TF buffer retains history — must be >= the
         # largest latency being compensated for (see _lookup_agent_pos).

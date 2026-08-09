@@ -8,31 +8,31 @@ as both of its arguments — so despite the ``interp1d`` machinery the map reduc
 no rescaling. Slope 1 is right on geometry: ``tag_sep = aperture + const``, so a fitted slope would
 only absorb the ArUco pipeline's scale error, which the training data already carries.
 
-**What the policy's width means depends on when its checkpoint was exported**, and that decides
-``offset_m``:
+The policy speaks **metres of opening from fully closed**: the DP exporter subtracts ``S_closed``
+(see ``polyumi_ingest.config.load_closed_width_m``) from step 4's raw ArUco tag separation, so
+exported widths are already a physical opening rather than a tag measurement. A buffer records the
+value it was built with as ``meta.attrs['gripper_closed_width_m']``.
 
-- Exports from 2026-08 onward: the DP exporter subtracts ``S_closed`` (see
-  ``polyumi_ingest.config.load_closed_width_m``), so the policy speaks *opening from fully closed*,
-  matching UMI. The correct offset is then ``-A_closed``.
-- Earlier exports: the policy speaks *raw ArUco tag separation* — the x-separation of the two finger
-  tags from ingest step 4, which is not aperture at all, since the tags sit on the fingers and a
-  fully-closed gripper still measures several millimetres. The correct offset is
-  ``S_closed - A_closed``.
+The offset is then ``-A_closed``, the FR3's aperture with the fingers touching. **Measured
+2026-08-09 that is 0.0**, so this map is currently the identity plus clamping — these fingers meet
+at the mechanism's true zero, which puts us in the same position as UMI's WSG, whose inference path
+likewise converts nothing. Fingers whose tips collided early would make ``A_closed`` non-zero and
+the offset negative; that is legitimate and the validation permits it, which is also why the low
+clamp is ``min_width_m`` rather than a hardcoded 0.
 
-A buffer records which it is as ``meta.attrs['gripper_closed_width_m']``.
-
-``A_closed`` is the FR3's aperture with the fingers touching, which is **not zero** — the PolyUMI
-fingers collide before the mechanism bottoms out. That is also why ``offset_m`` can legitimately
-come out negative, and why the low clamp is ``min_width_m`` rather than 0.
-
-Derive the three numbers with::
+Derive the numbers with::
 
     pingest calibrate-gripper --scene <scene>     # S_closed, from an open/close recording
     ros2 run polyumi_ros2 gripper_range_probe     # A_closed and A_open, from the hand itself
 
-**This aligns the zero point, not the stroke.** The handheld gripper opens wider than the Franka
-Hand, so commands past ``max_width_m`` clamp — which shows up as the policy's intent saturating,
-not as an error.
+Checkpoints exported before 2026-08-09 speak raw tag separation instead and would need
+``offset_m = S_closed - A_closed``. Support for them was dropped rather than carried; the value is
+recorded here only so an old buffer can be identified from its missing metadata attr.
+
+**This aligns the zero point, not the stroke**, and the two mechanisms genuinely differ: the
+handheld reaches 132.3 mm of tag separation where the FR3 manages 126.2 mm, so the top ~7% of the
+policy's commanded range clamps at ``max_width_m``. That surfaces as the policy's intent saturating
+rather than as an error.
 """
 
 

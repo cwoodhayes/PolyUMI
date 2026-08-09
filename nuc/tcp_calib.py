@@ -36,23 +36,15 @@ This is the same method UMI uses; they hardcode their camera→TCP transform fro
 (``06_generate_dataset_plan.py``, ``franka_interpolation_controller.py``) and ship no calibration
 procedure for it at all.
 
-**``TCP_XYZ`` is deliberately not the true fingertip right now.** It carries
-``LEGACY_TRAINING_Y_ERROR`` on top, so that it names the frame the checkpoint in use was actually
-trained in. What matters for a policy is that training and inference agree on the body frame, not
-that the frame is anatomically correct — see that constant for the full story and for how to
-retire it.
-
 It cross-checks against the handheld gripper's chain to ~2 mm. ``T_gopro_to_fingertip`` puts the
 fingertips 0.259 m forward of the GoPro; this file puts them 0.2569 m forward of ``fr3_hand``. The
 two agreeing means the camera's sensor plane sits within a couple of mm of the ``fr3_hand`` plane —
 consistent with the mount, and the sort of thing that would be off by centimetres if either
 measurement were wrong.
 
-**Verified on hardware, 2026-08-07** (``ros2 run polyumi_ros2 tcp_pivot_test``): with
-``LEGACY_TRAINING_Y_ERROR`` zeroed, pivoting about the TCP holds the closed fingertips visibly
-still. So the geometry below — including the ``Rz(+90°)`` sign, which a pivot test would expose as
-a ~15 cm sweep if mirrored — is right. Note this validates the FINGERTIP frame, not ``TCP_XYZ`` as
-shipped, which deliberately sits off it while the legacy offset is non-zero.
+**Verified on hardware, 2026-08-07** (``ros2 run polyumi_ros2 tcp_pivot_test``): pivoting about
+this TCP holds the closed fingertips visibly still, so the geometry below — including the
+``Rz(+90°)`` sign, which a mirrored version would expose as a ~15 cm sweep — is right.
 
 Residual error, deliberately not chased: real GoPro mount tilt versus the CAD-nominal "optical
 axis parallel to the approach axis". That is what a camera-based hand-eye calibration would buy.
@@ -76,24 +68,8 @@ CARRIAGE_TO_FINGERTIP_Z = 0.1985  # that plane -> the closed fingertips, PolyUMI
 # is symmetric about x=0 (hand mesh spans -0.0316..+0.0316, stock finger -0.0105..+0.0105).
 FINGERTIP_X = 0.019612
 
-# ponytail: a temporary train/inference pairing, not geometry. Set to 0.0 once a checkpoint
-# trained on corrected data is in use — that is the whole upgrade path.
-#
-# T_gopro_to_fingertip's y was 0.014 until 2026-08-06 and is now 0.07069 (the old value put the
-# GoPro sensor roughly flush with the top of the hand shell, which the mount plainly isn't).
-# Checkpoints exported before that fix therefore learned a body frame sitting this far toward the
-# camera from the real fingertips — a perfectly self-consistent frame, just not the fingertips.
-# Inference has to speak the frame the policy was trained in, so we shift the TCP to match rather
-# than re-export and retrain. Optical +y is "down", so a too-small y means the trained frame is
-# ABOVE the fingertips, i.e. further along +x of fr3_hand.
-LEGACY_TRAINING_Y_ERROR = 0.07069 - 0.014
-
 # y is 0 by symmetry: the fingers close on the y=0 plane, so the closed-fingertip midpoint is on it.
-TCP_XYZ = (
-    FINGERTIP_X + LEGACY_TRAINING_Y_ERROR,
-    0.0,
-    FINGER_CARRIAGE_Z + CARRIAGE_TO_FINGERTIP_Z,
-)
+TCP_XYZ = (FINGERTIP_X, 0.0, FINGER_CARRIAGE_Z + CARRIAGE_TO_FINGERTIP_Z)
 
 # Rz(+90°), not -90°: the policy's y is the camera's "down", which points from the tagged upper
 # surface into the finger body, i.e. -x of fr3_hand. With z shared and x_policy = +y_hand, that

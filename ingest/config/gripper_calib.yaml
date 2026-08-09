@@ -60,8 +60,8 @@ T_gripper_base_to_gopro:
 # The y was 0.014 until 2026-08-06, which was wrong: it implied the sensor sat only 33.6 mm above
 # the fr3_hand x-midline, roughly flush with the top of the hand shell, when the bracket clearly
 # lifts it further. 0.07069 puts it ~90 mm up, matching the CAD. Every pose exported before that
-# date is on a body frame ~57 mm off along this axis — see LEGACY_TRAINING_Y_ERROR in
-# nuc/tcp_calib.py, which keeps inference speaking the frame those checkpoints were trained in.
+# date is on a body frame ~57 mm off along this axis; inference support for those checkpoints was
+# dropped on 2026-08-09 rather than carried, so anything exported earlier must be re-exported.
 T_gopro_to_fingertip:
   translation: [0.0, 0.07069, 0.259] # meters — gopro frame: x right, y down, z forward
   # we'll work in optical coordinates (ie z out, x right, y down); no reason to change from SLAM output

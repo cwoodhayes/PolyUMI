@@ -105,9 +105,6 @@ CAD (the same method UMI uses), not from a calibration rig; what remains unvalid
 real GoPro mount tilt — the geometry itself, `Rz(+90°)` sign included, is confirmed on hardware by
 `ros2 run polyumi_ros2 tcp_pivot_test`, which pivots about the TCP so you can watch whether the
 closed fingertips hold still. Re-run it after any change to the mount, the fingers, or this file.
-`tcp_calib.py` also carries
-`LEGACY_TRAINING_Y_ERROR`, deliberately offsetting the TCP off the true fingertips so it names the
-body frame pre-2026-08-06 checkpoints were trained on — zero it after retraining on corrected data.
 
 **`./fr3_session.sh`** (repo root) builds the whole wall — NUC, Pi, GPU box, laptop — as one
 tmux session, running the safe commands and pre-typing the robot-moving ones for you to

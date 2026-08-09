@@ -109,16 +109,70 @@ def test_report_rejects_a_non_repeatable_closed_endpoint():
     assert 'use_grasp_below_m' in message, 'must name the fix, not just the symptom'
 
 
-def test_report_flags_landing_short_of_the_commanded_open():
-    """Short of the command is either the fingers or the bridge's clamp — the operator must know."""
+def test_landing_on_the_clamp_is_reported_as_a_software_limit():
+    """
+    Regression: the first hardware run reported A_open = 0.0800 against a 0.08 clamp.
+
+    That is the bridge refusing to command wider, not the fingers stopping — a measurement of the
+    software, which reads exactly like a measurement of the hardware unless it is called out.
+    """
     node, _ = _probe(open_width_m=0.09)
     try:
-        node._report([0.0800, 0.0800, 0.0800], [0.0061, 0.0061, 0.0061])
+        assert node._report([0.08, 0.08, 0.08], [0.0, 0.0, 0.0], clamp_m=0.08) == 1
+        errors = str(node.get_logger().error.call_args_list)
+    finally:
+        node.destroy_node()
+
+    assert 'gripper_max_width:=0.0817' in errors, 'must name the exact re-run command'
+    assert 'software limit' in errors
+
+
+def test_sitting_at_a_clamp_that_is_the_hands_own_maximum_is_the_hardware_answer():
+    """
+    Regression: the second run reported 0.0816 against a 0.0817 clamp.
+
+    Only 0.1 mm apart, so no margin separates "hit the clamp" from "hit the hardware" — and the
+    spread was 0.00 mm in BOTH runs, so the earlier spread heuristic called this a clamp too. What
+    settles it is that 0.0817 is the hand's own maximum: franka_gripper aborts anything wider, so
+    there is nothing further to command and telling the operator to raise the clamp again would
+    send them in a circle.
+    """
+    node, _ = _probe(open_width_m=0.09)
+    try:
+        assert node._report([0.0816, 0.0816, 0.0816], [0.0, 0.0, 0.0], clamp_m=0.0817) == 0
+        info = str(node.get_logger().info.call_args_list)
+    finally:
+        node.destroy_node()
+
+    assert 'nothing further to command' in info
+
+
+def test_stopping_clear_of_the_clamp_is_reported_as_a_physical_stop():
+    """The unambiguous case: the fingers foul well before the software would have stopped them."""
+    node, _ = _probe(open_width_m=0.09)
+    try:
+        assert node._report([0.0700, 0.0701, 0.0700], [0.0, 0.0, 0.0], clamp_m=0.0817) == 0
+        info = str(node.get_logger().info.call_args_list)
+    finally:
+        node.destroy_node()
+
+    assert 'hardware stopped it' in info
+
+
+def test_an_unreachable_bridge_param_is_admitted_not_guessed():
+    """
+    Without the clamp the verdict is unknowable, and saying so beats inventing one.
+
+    Non-fatal on purpose: the endpoints were still measured, they are merely unverified.
+    """
+    node, _ = _probe(open_width_m=0.09)
+    try:
+        assert node._report([0.0816, 0.0816, 0.0816], [0.0, 0.0, 0.0], clamp_m=None) == 0
         warnings = str(node.get_logger().warning.call_args_list)
     finally:
         node.destroy_node()
 
-    assert 'max_width_m' in warnings
+    assert 'might be the' in warnings
 
 
 @pytest.mark.parametrize('bad', [
