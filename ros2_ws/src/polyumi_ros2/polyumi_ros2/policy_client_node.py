@@ -50,7 +50,12 @@ from sensor_msgs.msg import Image, JointState
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException  # type: ignore[attr-defined]
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-from polyumi_ros2.camera_preproc import CAMERA0_RGB_INTERPOLATION, crop_to_source_aspect
+from polyumi_ros2.camera_preproc import (
+    CAMERA0_RGB_INTERPOLATION,
+    MAX_BAR_INTENSITY,
+    crop_to_source_aspect,
+    discarded_bar_intensity,
+)
 from polyumi_ros2.gripper_map import policy_to_robot_width, robot_to_policy_width
 
 # Name used for the single "joint" in the gripper trajectory chunk. Deliberately NOT a real joint
@@ -230,6 +235,9 @@ class PolicyClientNode(Node):
         self._latest_image: np.ndarray | None = None
         self._latest_image_stamp: rclpy.time.Time | None = None
         self._latest_image_lock = threading.Lock()
+        # One-shot: the crop assumes the incoming frame is pillarboxed, and only a real frame can
+        # confirm it. See _check_pillarbox_once.
+        self._pillarbox_checked = False
         # Gripper aperture history, (stamp, width_m) oldest-first, for the same reason TF keeps a
         # buffer: the width must be sampled at the *frame's* capture instant, not at tick time.
         # tf2 does that interpolation for the pose; there's no equivalent for a plain topic, so we
@@ -395,6 +403,35 @@ class PolicyClientNode(Node):
     # Subscribers
     # ------------------------------------------------------------------
 
+    def _check_pillarbox_once(self, frame_rgb: np.ndarray) -> None:
+        """
+        On the first frame, confirm the crop is discarding black bars and not real image.
+
+        Deferred to a frame rather than done at startup because there is nothing to inspect until
+        one arrives. Logged, not fatal: a wrong crop still produces a running policy, and stopping
+        the node mid-session is worse than telling the operator the observation is not what the
+        policy trained on.
+        """
+        if self._pillarbox_checked:
+            return
+        self._pillarbox_checked = True
+        bar = discarded_bar_intensity(frame_rgb)
+        cropped = crop_to_source_aspect(frame_rgb)
+        if bar <= MAX_BAR_INTENSITY:
+            self.get_logger().info(
+                f'camera crop: {frame_rgb.shape[1]}x{frame_rgb.shape[0]} → '
+                f'{cropped.shape[1]}x{cropped.shape[0]}, discarded bars mean {bar:.1f}/255 — '
+                'pillarbox as expected.'
+            )
+            return
+        self.get_logger().error(
+            f'camera crop is eating real image: the pixels dropped from this '
+            f'{frame_rgb.shape[1]}x{frame_rgb.shape[0]} frame average {bar:.1f}/255, well above '
+            f'{MAX_BAR_INTENSITY} — they are not a black pillarbox. The policy is being fed a '
+            'narrower field of view than it trained on. Check the GoPro is in a 4:3 mode and the '
+            'capture card is not rescaling. See docs/data-format.md ("Why the crop exists").'
+        )
+
     def _image_cb(self, msg: Image) -> None:
         """Convert incoming ROS image to float32 numpy array and cache it with its stamp."""
         if msg.encoding not in ('rgb8', 'bgr8'):
@@ -408,6 +445,7 @@ class PolicyClientNode(Node):
         # anti-aliased downscale; any mismatch here is train/inference skew. The crop drops the
         # GoPro HDMI pillarbox so this 16:9 capture squashes the same 4:3 field of view the 4:3
         # gopro.mp4 does. See camera_preproc.crop_to_source_aspect and docs/data-format.md.
+        self._check_pillarbox_once(img)
         img = crop_to_source_aspect(img)
         resized = cv2.resize(img, (self._image_w, self._image_h), interpolation=CAMERA0_RGB_INTERPOLATION)
         float_img = resized.astype(np.float32) / 255.0

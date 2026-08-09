@@ -1,13 +1,21 @@
 """The camera0_rgb preprocessing contract must match the inference node's transform."""
 
+import hashlib
+
 import cv2
 import numpy as np
+import pytest
+
+# Shared verbatim with the ROS-side suite, which loads this same file by path — see its docstring.
+from camera0_rgb_golden import GOLDEN_VECTORS, golden_frame
 
 from polyumi_ingest.camera_preproc import (
     CAMERA0_RGB_INTERPOLATION,
     CAMERA0_RGB_RESOLUTION,
+    MAX_BAR_INTENSITY,
     SOURCE_ASPECT,
     crop_to_source_aspect,
+    discarded_bar_intensity,
     resize_camera0_rgb,
 )
 
@@ -65,6 +73,32 @@ def test_letterboxed_input_is_cropped_the_other_way() -> None:
     assert cropped.min() == 200
 
 
+def test_black_pillarbox_bars_read_as_bars() -> None:
+    """The expected case: the discarded columns are the HDMI black the crop assumes they are."""
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    frame[:, 240:1680] = 200
+
+    assert discarded_bar_intensity(frame) <= MAX_BAR_INTENSITY
+
+
+def test_a_real_16_9_frame_is_flagged_rather_than_silently_narrowed() -> None:
+    """
+    The failure the check exists for: a genuine 16:9 source loses a quarter of its FOV, quietly.
+
+    On this side that would be a non-4:3 gopro.mp4, and the narrowing is baked into the exported
+    dataset permanently rather than merely being served to a running policy.
+    """
+    frame = np.full((1080, 1920, 3), 200, dtype=np.uint8)  # content edge to edge, no bars
+
+    assert discarded_bar_intensity(frame) == pytest.approx(200.0)
+    assert discarded_bar_intensity(frame) > MAX_BAR_INTENSITY
+
+
+def test_no_crop_means_nothing_discarded() -> None:
+    """A 4:3 frame discards nothing, so the check must not invent an intensity for it."""
+    assert discarded_bar_intensity(np.full((2028, 2704, 3), 200, dtype=np.uint8)) == 0.0
+
+
 def test_resize_preserves_channel_order() -> None:
     """A pure-red RGB frame stays red (channel order untouched by the resize)."""
     frame = np.zeros((100, 100, 3), dtype=np.uint8)
@@ -75,3 +109,19 @@ def test_resize_preserves_channel_order() -> None:
     assert out[..., 0].min() == 255
     assert out[..., 1].max() == 0
     assert out[..., 2].max() == 0
+
+
+@pytest.mark.parametrize(('h', 'w', 'expected'), GOLDEN_VECTORS)
+def test_golden_vector_is_stable_across_environments(h: int, w: int, expected: str) -> None:
+    """
+    The two real source resolutions must produce these exact bytes, in either Python environment.
+
+    The expectations live in camera0_rgb_golden.py, which the ROS suite reads by path, so this
+    assertion and its inference-side twin cannot drift apart.
+    """
+    out = resize_camera0_rgb(golden_frame(h, w))
+
+    assert hashlib.sha256(out.tobytes()).hexdigest() == expected, (
+        'the camera0_rgb transform changed. Unless that was deliberate, training and inference no '
+        'longer agree on pixels — see docs/data-format.md ("camera0_rgb preprocessing contract").'
+    )

@@ -20,6 +20,10 @@ import numpy as np
 CAMERA0_RGB_RESOLUTION = 224
 CAMERA0_RGB_INTERPOLATION = cv2.INTER_AREA
 SOURCE_ASPECT = 4 / 3
+# Above this mean intensity the pixels the crop discards are not a black bar, so the crop is
+# eating real image. Loose: HDMI black sits a little above 0 and the capture card adds noise,
+# while the failure being caught is gross (a quarter of a real scene, not a dim bar).
+MAX_BAR_INTENSITY = 16.0
 
 
 def crop_to_source_aspect(frame_rgb: np.ndarray) -> np.ndarray:
@@ -46,6 +50,30 @@ def crop_to_source_aspect(frame_rgb: np.ndarray) -> np.ndarray:
         y0 = (h - crop_h) // 2
         return frame_rgb[y0 : y0 + crop_h]
     return frame_rgb
+
+
+def discarded_bar_intensity(frame_rgb: np.ndarray) -> float:
+    """
+    Mean channel intensity (0-255) of the pixels :func:`crop_to_source_aspect` would throw away.
+
+    The crop assumes anything wider than 4:3 is a pillarbox, i.e. that the columns it drops are
+    black bars. If that assumption is ever wrong — a GoPro configured to a genuine 16:9 mode, a
+    capture card doing its own scaling, a ``gopro.mp4`` recorded at some other aspect — the crop
+    silently removes a quarter of the real field of view instead. That is the same invisible
+    train/inference skew the crop exists to fix, just pointing the other way: the policy keeps
+    running, on pixels nobody chose.
+
+    So: sample this once and compare against :data:`MAX_BAR_INTENSITY`. Returns 0.0 when the crop
+    is a no-op, since nothing is discarded.
+    """
+    kept = crop_to_source_aspect(frame_rgb)
+    if kept.shape == frame_rgb.shape:
+        return 0.0
+    # Derived by subtraction rather than by re-deriving the crop geometry, so this cannot drift
+    # out of step with the function it is checking.
+    n_discarded = (frame_rgb.shape[0] * frame_rgb.shape[1] - kept.shape[0] * kept.shape[1]) * frame_rgb.shape[2]
+    total = frame_rgb.sum(dtype=np.float64) - kept.sum(dtype=np.float64)
+    return float(total / n_discarded)
 
 
 def resize_camera0_rgb(frame_rgb: np.ndarray) -> np.ndarray:
