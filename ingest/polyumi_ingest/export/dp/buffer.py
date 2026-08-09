@@ -11,7 +11,7 @@ and ``get_normalizer`` raises on any low-dim key it can't name-match)::
       data/camera0_rgb                  (T,224,224,3) uint8  Blosc(zstd), chunks (1,224,224,3)
       data/robot0_eef_pos               (T,3)  float32  hand-frame position
       data/robot0_eef_rot_axis_angle    (T,3)  float32  hand-frame rotation as a rotvec
-      data/robot0_gripper_width         (T,1)  float32  metres
+      data/robot0_gripper_width         (T,1)  float32  metres of opening from fully closed
       data/robot0_demo_start_pose       (T,6)  float32  episode's first [pos, rotvec], repeated
       data/robot0_demo_end_pose         (T,6)  float32  episode's last  [pos, rotvec], repeated
 
@@ -88,6 +88,7 @@ from scipy.spatial.transform import Rotation
 
 from polyumi_ingest import quality
 from polyumi_ingest.camera_preproc import CAMERA0_RGB_RESOLUTION, resize_camera0_rgb
+from polyumi_ingest.config import load_closed_width_m
 from polyumi_ingest.manifests import SceneManifest
 from polyumi_ingest.preproc import available_preprocessing_steps, preprocessing_steps_done
 from polyumi_ingest.pzarr.scene_files import SceneFiles
@@ -258,6 +259,7 @@ def _export_episode(
     scene_zarr: pathlib.Path,
     pose_source: str,
     min_segment_steps: int = MIN_SEGMENT_STEPS,
+    closed_width_m: float = 0.0,
 ) -> list[tuple[int, dict]]:
     """
     Export one session as one DP episode per contiguous valid segment.
@@ -273,7 +275,13 @@ def _export_episode(
     pose_attrs = arr(ep, f'eef/{array_name}').attrs
     gopro_ts = np.asarray(arr(ep, 'timestamps/gopro')[:], dtype=np.float64)
     pose = np.asarray(arr(ep, f'eef/{array_name}')[:], dtype=np.float64)  # (N,7) [xyz, quat] hand frame
+    # Raw ArUco tag separation, converted here to opening-from-closed. The subtraction lives in
+    # the exporter rather than in step 4 on purpose: step 4 is the expensive pass (ArUco over every
+    # frame), so keeping the pzarr annotation calibration-independent means re-deriving S_closed
+    # costs a re-export, not a re-detect. UMI applies it at the same stage, in
+    # 06_generate_dataset_plan.py, not at detection.
     gripper = np.asarray(arr(ep, 'annotations/gripper_width/width_m')[:], dtype=np.float64)
+    gripper = gripper - closed_width_m
     frames = open_gopro_frames(ep, scene_zarr)
 
     n = len(gopro_ts)
@@ -416,6 +424,7 @@ def _append_scene_episodes(
     provenance: list[dict],
     enforce_preprocessing: bool = True,
     min_segment_steps: int = MIN_SEGMENT_STEPS,
+    closed_width_m: float = 0.0,
 ) -> int:
     """Append every EPISODE session of one scene onto ``data_grp``, returning the new running total."""
     zarr_path = SceneFiles.resolve_zarr_path(scene_path)
@@ -464,7 +473,13 @@ def _append_scene_episodes(
         # One session can yield several episodes — a pose gap splits it into the usable runs
         # either side — or none, if nothing survived the chirp trim and the length floor.
         for t, ep_provenance in _export_episode(
-            ep, data_grp, f'{scene_label}/{ep_key}', zarr_path, pose_source, min_segment_steps=min_segment_steps
+            ep,
+            data_grp,
+            f'{scene_label}/{ep_key}',
+            zarr_path,
+            pose_source,
+            min_segment_steps=min_segment_steps,
+            closed_width_m=closed_width_m,
         ):
             total += t
             episode_ends.append(total)
@@ -527,6 +542,12 @@ def export_scenes_to_dp(
     if not scene_paths:
         raise ValueError('No scenes given to export.')
 
+    # Resolved once for the whole buffer, not per scene: every episode in one ReplayBuffer has to
+    # be in the same width units, and re-reading the config mid-export would silently mix two
+    # calibrations if the file changed underneath.
+    closed_width_m = load_closed_width_m()
+    log.info(f'Gripper widths exported as opening-from-closed (S_closed = {closed_width_m * 1000:.2f} mm).')
+
     with tempfile.TemporaryDirectory(prefix='dp_export_') as tmp:
         build_dir = pathlib.Path(tmp) / 'buffer.zarr'
         out = zarr.open_group(str(build_dir), mode='w', zarr_format=2)
@@ -545,6 +566,7 @@ def export_scenes_to_dp(
                 provenance,
                 enforce_preprocessing=enforce_preprocessing,
                 min_segment_steps=min_segment_steps,
+                closed_width_m=closed_width_m,
             )
 
         # Every episode in one buffer must share a time base: UmiDataset reads a single
@@ -567,6 +589,10 @@ def export_scenes_to_dp(
         # external manifest/sidecar too. See module docstring.
         meta.attrs['pose_provenance'] = provenance
         meta.attrs['episode_pose_source'] = [p['source'] for p in provenance]
+        # What ``robot0_gripper_width`` means, carried with the data. Without it a buffer is
+        # indistinguishable from one exported before the subtraction existed, and the inference
+        # side needs to know which convention a checkpoint was trained under to pick its offset.
+        meta.attrs['gripper_closed_width_m'] = float(closed_width_m)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         _zip_zarr_dir(build_dir, output_path)
 

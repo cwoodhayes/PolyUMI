@@ -163,13 +163,17 @@ class PolicyClientNode(Node):
         # the worst observed publish interval (the topic jitters 24-100ms) so ordinary jitter
         # cannot trip it, and well short of the ~2.3s the buffer can hold. <= 0 disables the check.
         self.declare_parameter('max_gripper_age_s', 0.5)
-        # Finger-tag separation with the gripper fully closed, subtracted to get jaw aperture.
-        # !!! NEVER MEASURED — it is gripper_calib.yaml's closed_mm, a value no code reads. !!!
-        # UMI measures its equivalent from a calibration video; see polyumi_ros2.gripper_map.
+        # Subtracted from the policy's width to get jaw aperture. Which value is correct depends
+        # on when the loaded checkpoint was exported — see polyumi_ros2.gripper_map. MAY BE
+        # NEGATIVE: the fingers collide at a non-zero aperture, so it is a difference of two
+        # measured quantities and its sign is not knowable in advance.
         self.declare_parameter('gripper_offset_m', 0.005)
-        # Commanded widths clamp here. The FR3 hand reads ~0.0817 m fully open, but max_width is
-        # not published on any topic, so this is a constant rather than something we can read back.
+        # The fingers' reachable aperture range, measured with `ros2 run polyumi_ros2
+        # gripper_range_probe`. Not the Franka Hand's nominal 0-0.0817 m: the PolyUMI fingers
+        # collide before the mechanism bottoms out, and may foul at the open end too. max_width is
+        # not published on any topic, so neither end can be read back at runtime.
         self.declare_parameter('gripper_max_width_m', 0.08)
+        self.declare_parameter('gripper_min_width_m', 0.0)
         # How far back (seconds) the EE-pose TF buffer retains history — must be >= the
         # largest latency being compensated for (see _lookup_agent_pos).
         self.declare_parameter('buffers.ee_pose_s', 1.0)
@@ -194,6 +198,7 @@ class PolicyClientNode(Node):
         self._max_gripper_age_s = self.get_parameter('max_gripper_age_s').get_parameter_value().double_value
         self._gripper_offset_m = self.get_parameter('gripper_offset_m').get_parameter_value().double_value
         self._gripper_max_width_m = self.get_parameter('gripper_max_width_m').get_parameter_value().double_value
+        self._gripper_min_width_m = self.get_parameter('gripper_min_width_m').get_parameter_value().double_value
         self._latency = {
             'gopro': self.get_parameter('latency.gopro').get_parameter_value().double_value,
             'finger_cam': self.get_parameter('latency.finger_cam').get_parameter_value().double_value,
@@ -323,7 +328,8 @@ class PolicyClientNode(Node):
         self.get_logger().info(
             f'gripper — state: {gripper_topic} (missing: {gripper_missing}; '
             f'stale > {max_age}: {gripper_stale}), '
-            f'offset={self._gripper_offset_m}m (UNMEASURED), max_width={self._gripper_max_width_m}m'
+            f'offset={self._gripper_offset_m}m, '
+            f'aperture range [{self._gripper_min_width_m}, {self._gripper_max_width_m}]m'
         )
 
     def _validate_params(self, control_hz: float) -> None:
@@ -362,10 +368,18 @@ class PolicyClientNode(Node):
         for name, seconds in self._latency.items():
             if seconds < 0:
                 errors.append(f'latency.{name} must be >= 0, got {seconds}')
-        if self._gripper_offset_m < 0:
-            errors.append(f'gripper_offset_m must be >= 0, got {self._gripper_offset_m}')
+        # gripper_offset_m is deliberately unconstrained in sign: it is S_closed - A_closed (or
+        # -A_closed), a difference of two independently measured quantities, and rejecting
+        # negatives would throw out a correct calibration. See polyumi_ros2.gripper_map.
         if self._gripper_max_width_m <= 0:
             errors.append(f'gripper_max_width_m must be > 0, got {self._gripper_max_width_m}')
+        if self._gripper_min_width_m < 0:
+            errors.append(f'gripper_min_width_m must be >= 0, got {self._gripper_min_width_m}')
+        if self._gripper_min_width_m >= self._gripper_max_width_m:
+            errors.append(
+                f'gripper_min_width_m ({self._gripper_min_width_m}) must be < '
+                f'gripper_max_width_m ({self._gripper_max_width_m})'
+            )
         # The TF buffer must reach back at least as far as the instant we look poses up at,
         # or _lookup_agent_pos asks for a transform the buffer has already dropped.
         compensated = self._latency['gopro'] - self._latency['proprio']
@@ -748,7 +762,10 @@ class PolicyClientNode(Node):
         # Log the width in both spaces: policy units are what the model emitted, robot units are
         # what the hand will be commanded. A surprising gap between them is the offset being wrong.
         grip_robot = policy_to_robot_width(
-            float(first[7]), self._gripper_offset_m, self._gripper_max_width_m
+            float(first[7]),
+            self._gripper_offset_m,
+            self._gripper_max_width_m,
+            self._gripper_min_width_m,
         )
         self.get_logger().info(
             f'action chunk n={len(actions)} (dropped {n_stale}/{n_received} stale, '
@@ -804,7 +821,12 @@ class PolicyClientNode(Node):
         for i, action in enumerate(actions):
             point = JointTrajectoryPoint()
             point.positions = [
-                policy_to_robot_width(float(action[7]), self._gripper_offset_m, self._gripper_max_width_m)
+                policy_to_robot_width(
+                    float(action[7]),
+                    self._gripper_offset_m,
+                    self._gripper_max_width_m,
+                    self._gripper_min_width_m,
+                )
             ]
             point.time_from_start = Duration(seconds=i * self._action_dt).to_msg()
             msg.points.append(point)

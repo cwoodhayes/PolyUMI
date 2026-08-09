@@ -28,6 +28,24 @@ def load_aruco_finger_config() -> dict:
     return load_gripper_calib()['aruco_finger_tags']
 
 
+def load_closed_width_m() -> float:
+    """
+    Load ``S_closed``: the ArUco finger-tag separation with the gripper fully closed, in metres.
+
+    The DP exporter subtracts this so exported widths are opening-from-closed rather than raw tag
+    separation, matching UMI (whose ``get_gripper_calibration_interpolator`` does the same
+    subtraction at dataset-generation time). Stored in millimetres because that is the unit it is
+    measured and reasoned about in.
+
+    Required, not defaulted: a wrong-by-default value here shifts every exported width by that
+    amount and there is nothing downstream that would notice. Derive it with
+    ``pingest calibrate-gripper``.
+
+    :raises KeyError: if ``gripper_fingers.closed_mm`` is missing from the config.
+    """
+    return float(load_gripper_calib()['gripper_fingers']['closed_mm']) / 1000.0
+
+
 def load_slam_config() -> dict:
     """
     Load SLAM step tunables from config/slam.yaml.

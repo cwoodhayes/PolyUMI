@@ -43,15 +43,27 @@
     # speaks jaw aperture. The conversion is a constant subtraction, following UMI — see
     # polyumi_ros2/gripper_map.py and docs/franka-inference-bringup.md ("Phase 2.5").
     #
-    # !!! NEVER MEASURED. !!! This is gripper_calib.yaml's closed_mm (5 mm), a value no code
-    # reads and nobody has checked against a closing video. UMI derives its equivalent
-    # empirically (scripts/calibrate_gripper_range.py takes the minimum tag separation over a
-    # video in which the gripper fully closes); we have no such script yet. If commanded widths
-    # look systematically too open or too closed, this is the first number to suspect.
+    # Derive the three numbers these are built from with:
+    #     pingest calibrate-gripper --scene <scene>   -> S_closed  (ArUco tag sep, fully closed)
+    #     ros2 run polyumi_ros2 gripper_range_probe   -> A_closed and A_open (jaw aperture)
+    #
+    # Which offset is correct depends on when the LOADED CHECKPOINT was exported, because the DP
+    # exporter now subtracts S_closed itself (UMI's convention — see polyumi_ros2/gripper_map.py):
+    #     exported 2026-08 onward, width = opening from closed:   gripper_offset_m = -A_closed
+    #     exported before that,    width = raw ArUco tag sep:     gripper_offset_m = S_closed - A_closed
+    # A buffer records which it is as meta.attrs['gripper_closed_width_m'].
+    #
+    # !!! STILL UNMEASURED — placeholders until the two commands above have been run. !!!
+    # A negative value here is legitimate, not a mistake: it is a difference of two independently
+    # measured quantities and the validation deliberately permits it.
     gripper_offset_m: 0.005
-    # Commanded aperture clamps here. The FR3 hand reads ~0.0817 m fully open, but franka_gripper
-    # does not publish max_width on any topic, so it cannot be read back at runtime.
+    # The FINGERS' reachable aperture range, not the Franka Hand's nominal 0-0.0817 m: the PolyUMI
+    # fingers collide before the mechanism bottoms out, and may foul at the open end too. Neither
+    # end is readable at runtime (franka_gripper publishes max_width on no topic). The low clamp is
+    # A_closed rather than 0 because commanding below the collision point makes Move stall and
+    # abort, which is what wedges fr3_gripper_bridge's deadband.
     gripper_max_width_m: 0.08
+    gripper_min_width_m: 0.0
 
     buffers:
       # How far back (seconds) the EE-pose TF buffer retains history, so a past pose can

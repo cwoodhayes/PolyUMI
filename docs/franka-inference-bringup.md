@@ -45,7 +45,24 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
    not for the frame to be anatomically right. Zero that constant after retraining on corrected
    data.
 
-2. **Two placeholder constants sit on critical paths**, both currently claiming more rigour
+2. **The camera the policy trains on is not the camera it runs on.** Training frames come from
+   the GoPro's own SD recording — `ingest/config/gopro_intrinsics.json` is calibrated at
+   **1352×1014, 4:3**. Inference frames come from the Elgato capture card, which
+   `stream_demo.launch.xml` configures as **1920×1080, 16:9**. Both are then squashed to 224×224
+   with **no crop** by the shared `camera_preproc` contract, so the *pixel transform* is in
+   lock-step but the thing being transformed is not: the same physical scene arrives horizontally
+   compressed at inference relative to training. If clean-HDMI-out crops rather than letterboxes,
+   the inference frame is also missing the top and bottom of the training field of view.
+
+   This is a train/inference domain gap on **every** policy output, and is independent of the
+   INTER_AREA/INTER_LINEAR resize skew tracked separately. Not yet quantified — what the GoPro
+   currently records at, and whether HDMI crops or letterboxes, both need checking.
+
+   The check: export one `camera0_rgb` frame from a dataset, grab one live `/gopro/image_raw`
+   frame, and compare field of view and stretch side by side. If they differ, the fix is upstream
+   of `camera_preproc` (match the capture aspect, or crop rather than squash) — not in the resize.
+
+3. **Two placeholder constants sit on critical paths**, both currently claiming more rigour
    than they have:
    - `latency.gopro: 0.05` in `config/inference.yaml`, commented "as measured by calibration
      scripts" — **no such script exists**. UMI measured 0.125–0.17 s for a plain UVC webcam;
@@ -55,14 +72,16 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
      PolyUMI CAD assembly (GoPro lens faceplate → closed-fingertip midpoint), rotation an
      identity because both frames are the GoPro optical convention. Feeds every exported pose.
 
-3. **Gripper — RESOLVED in Phase 2.5.** Width now flows both ways: `/fr3_gripper/joint_states`
+4. **Gripper — RESOLVED in Phase 2.5.** Width now flows both ways: `/fr3_gripper/joint_states`
    → `agent_pos[7]`, and `action[7]` → a parallel `trajectory_msgs/JointTrajectory` on
    `/polyumi/target_gripper` which the NUC-side `fr3_gripper_bridge` turns into `Move`/`Grasp`
-   goals. What remains is a *calibration* gap, not a wiring one: `gripper_offset_m` (the ArUco
-   tag-separation → jaw-width offset) is taken from `gripper_calib.yaml`'s `closed_mm` and has
-   never been measured. See Phase 2.5 and open question 7.
+   goals. What remains is a *calibration* gap, not a wiring one, and the tooling for it now
+   exists: `pingest calibrate-gripper` derives `S_closed` from an open/close recording and
+   `ros2 run polyumi_ros2 gripper_range_probe` measures the fingers' real aperture range. Neither
+   has been **run** yet, so `gripper_offset_m` and `gripper_max_width_m` are still the original
+   guesses. See Phase 2.5 and open question 7.
 
-4. **The DP exporter needs a rework, and has no tests at all.** Deliberately deferred to one
+5. **The DP exporter needs a rework, and has no tests at all.** Deliberately deferred to one
    chunk of work rather than patched piecemeal, since the UMI migration rewrites this file
    anyway. Four things to fix together in `ingest/polyumi_ingest/export/dp/buffer.py`:
    - **It hard-requires OptiTrack even for SLAM-sourced poses.** `_export_episode` reads
@@ -83,10 +102,11 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
      unified yet because picking one strictness is a behaviour change that belongs with this
      rework. (`nearest_idx` was the other duplicate; it now lives in `polyumi_ingest/timebase.py`.)
 
-   No tests cover this file, which is how the OptiTrack coupling survived a contract change.
-   Write them as part of the rework.
+   `ingest/test/test_dp_export.py` now covers this file (schema, segmentation, pose-source
+   resolution, quality gating, the gripper-width convention). It postdates the OptiTrack coupling
+   above, which is what survived a contract change untested; extend it as part of the rework.
 
-5. **Training stack not chosen in this doc yet.** The decision (recorded in conversation, not
+6. **Training stack not chosen in this doc yet.** The decision (recorded in conversation, not
    here) is to build on a fork of `universal_manipulation_interface` rather than base
    diffusion_policy, since UMI already has rot6d actions, relative pose frames, per-sensor
    latency in `shape_meta`, a `_target_`-swappable timm vision encoder, and — relevant to
@@ -484,9 +504,17 @@ array as both arguments — so the map has **slope 1 and no rescaling**. UMI der
 empirically as the minimum ArUco width over a calibration video in which the gripper fully closes
 (`scripts/calibrate_gripper_range.py`).
 
-Ours is currently the *declared* `closed_mm: 5.0` from `ingest/config/gripper_calib.yaml` — a value
-no code has ever read or validated. It is a ROS parameter (`gripper_offset_m`), correctable without
-a code change. A PolyUMI equivalent of UMI's calibration script is the proper fix.
+Ours **now follows UMI all the way**: the DP exporter subtracts `S_closed` (from
+`gripper_calib.yaml`'s `closed_mm`) so exported widths are opening-from-closed, and each buffer
+records the value as `meta.attrs['gripper_closed_width_m']`. `agent_pos[7]` therefore carries raw
+tag separation only for checkpoints exported before 2026-08.
+
+Where we differ from UMI, and must: a WSG homes to a true zero aperture, but the PolyUMI fingers
+collide first, so the FR3 still reports a non-zero aperture when shut. "Fingers touching fingers"
+is the same physical configuration on both rigs, which makes the offset `S_closed - A_closed`
+(or `-A_closed` post-change) rather than simply `S_closed`. It can come out **negative**, and the
+parameter validation permits that deliberately. Measure with `pingest calibrate-gripper` and
+`ros2 run polyumi_ros2 gripper_range_probe`.
 
 Note this aligns the zero point, not the stroke: the handheld gripper may open wider than the
 hand's ~0.0817 m, and commands past `gripper_max_width_m` clamp — showing up as saturation rather
@@ -523,7 +551,10 @@ object) is opt-in via `use_grasp_below_m`, shipped disabled so bringup is pure m
       laptop, echoed on the NUC — all fields byte-for-byte; see crb-fr3-inference.md)
 - [ ] on-arm dry run (`fr3_gripper_bridge` with `execute:=false`)
 - [ ] on-arm execution (`execute:=true`, arm bridge plan-only)
-- [ ] measure `gripper_offset_m` (PolyUMI equivalent of `calibrate_gripper_range.py`)
+- [x] tooling to measure `gripper_offset_m` (PolyUMI equivalent of `calibrate_gripper_range.py`):
+      `pingest calibrate-gripper` for `S_closed`, `ros2 run polyumi_ros2 gripper_range_probe` for
+      `A_closed`/`A_open`
+- [ ] actually run both and put the numbers in `inference.yaml` / `gripper_calib.yaml`
 - [ ] measure `latency.gripper`
 
 ---

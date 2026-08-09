@@ -18,7 +18,7 @@ import zarr
 from scipy.spatial.transform import Rotation
 
 from polyumi_catalog import episode_quality
-from polyumi_ingest.export.dp import export_scene_to_dp, export_scenes_to_dp
+from polyumi_ingest.export.dp import buffer, export_scene_to_dp, export_scenes_to_dp
 from polyumi_ingest.manifests import SceneManifest
 from polyumi_ingest.preproc import available_preprocessing_steps
 
@@ -700,3 +700,38 @@ def test_mixing_frame_strides_in_one_buffer_raises(tmp_path: pathlib.Path) -> No
 
     with pytest.raises(RuntimeError, match='mixed-rate'):
         export_scenes_to_dp([scene_a, scene_b], tmp_path / 'combined.zarr.zip')
+
+
+def test_gripper_width_is_exported_as_opening_from_closed(tmp_path: pathlib.Path, monkeypatch) -> None:
+    """
+    Widths must leave the exporter shifted by S_closed, matching UMI's convention.
+
+    The fixture writes raw ArUco tag separation (what step 4 stores); the buffer must contain
+    opening-from-closed. Skipping this subtraction is invisible — the numbers stay plausible and
+    the policy just learns a frame offset from every commanded width.
+    """
+    monkeypatch.setattr(buffer, 'load_closed_width_m', lambda: 0.0052)
+    scene = _build_scene(tmp_path)
+    out = tmp_path / 'buf.zarr.zip'
+
+    export_scene_to_dp(scene, out)
+
+    g = _open_zip(out)
+    exported = np.asarray(g['data/robot0_gripper_width'][:]).ravel()
+    # The fixture's raw series is linspace(0.02, 0.08, n), subsampled by the frame stride.
+    assert exported.min() == pytest.approx(0.02 - 0.0052, abs=1e-6)
+    assert float(g['meta'].attrs['gripper_closed_width_m']) == pytest.approx(0.0052)
+
+
+def test_exported_width_reaches_zero_when_the_gripper_was_fully_closed(
+    tmp_path: pathlib.Path, monkeypatch
+) -> None:
+    """The point of the convention: a fully-closed gripper reads 0, not 'whatever the tags say'."""
+    monkeypatch.setattr(buffer, 'load_closed_width_m', lambda: 0.02)
+    scene = _build_scene(tmp_path)
+    out = tmp_path / 'buf.zarr.zip'
+
+    export_scene_to_dp(scene, out)
+
+    exported = np.asarray(_open_zip(out)['data/robot0_gripper_width'][:]).ravel()
+    assert exported.min() == pytest.approx(0.0, abs=1e-6)

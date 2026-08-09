@@ -542,6 +542,83 @@ def preprocessing_pipeline(
         raise typer.Exit(1)
 
 
+@app.command(name='calibrate-gripper')
+def calibrate_gripper(
+    scene: pathlib.Path = typer.Option(
+        ...,
+        '--scene',
+        help='Scene directory containing scene.zarr, or a scene.zarr path directly.',
+    ),
+    session: str | None = typer.Option(
+        None,
+        '--session',
+        help='Only use this episode key (e.g. episode_1). Default: pool every episode in the scene.',
+    ),
+):
+    """
+    Derive S_closed, the ArUco tag separation with the gripper fully closed.
+
+    Record a scene in which the gripper is opened and closed fully several times in front of the
+    GoPro, holding it shut for a few seconds each cycle, then:
+
+        pingest pp 4 --scene <scene>        # detect the finger tags
+        pingest calibrate-gripper --scene <scene>
+
+    Reads the per-frame detections (``raw_widths_m``), NOT the resampled ``width_m`` series — the
+    latter is hold-extrapolated onto the GoPro grid and would drag the extremes around. See
+    polyumi_ingest.gripper_calib for why the output is a table rather than a single number.
+    """
+    import numpy as np
+    import zarr
+
+    from polyumi_ingest.episode_status import episode_keys
+    from polyumi_ingest.gripper_calib import closed_width_stats, format_report
+    from polyumi_ingest.pzarr.scene_files import SceneFiles
+
+    scene_zarr = SceneFiles.resolve_zarr_path(scene)
+    if not scene_zarr.exists():
+        log.error(f'No scene.zarr found at {scene}. Run `pingest pp 4 --scene {scene}` first.')
+        raise typer.Exit(1)
+
+    # Read-only: a calibration read must never restamp provenance or create groups, unlike the
+    # preprocessing steps' SceneContext.open (mode 'a').
+    root = zarr.open_group(str(scene_zarr), mode='r')
+    keys = [session] if session else episode_keys(root)
+
+    pooled: list[np.ndarray] = []
+    for key in keys:
+        path = f'{key}/annotations/gripper_width'
+        if path not in root:
+            log.warning(f'{key}: no gripper_width annotation; run `pingest pp 4 --force` on this scene.')
+            continue
+        grp = root[path]
+        widths = np.asarray(grp['raw_widths_m'][:], dtype=np.float64)  # type: ignore[index]
+        rate = float(grp.attrs.get('detection_rate', float('nan')))  # type: ignore[union-attr]
+        log.info(f'{key}: {widths.size} detections, {rate:.1%} of frames')
+        pooled.append(widths)
+
+    if not pooled:
+        log.error('No gripper-width detections found in any episode.')
+        raise typer.Exit(1)
+
+    try:
+        stats = closed_width_stats(np.concatenate(pooled))
+    except ValueError as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+
+    print()
+    print(format_report(stats))
+    print()
+    print('Put this in ingest/config/gripper_calib.yaml (the DP exporter reads it):')
+    print('  gripper_fingers:')
+    print(f'    closed_mm: {stats.s_closed_m * 1000:.2f}')
+    print(f'    open_mm: {stats.max_m * 1000:.2f}')
+    print()
+    print('Then measure the FR3 side, which pairs with this to give gripper_offset_m:')
+    print('  ros2 run polyumi_ros2 gripper_range_probe')
+
+
 @app.command(name='archive-scene')
 def archive_scene(
     scene_path: pathlib.Path = typer.Argument(

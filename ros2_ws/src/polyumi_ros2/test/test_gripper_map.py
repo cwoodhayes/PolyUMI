@@ -72,3 +72,28 @@ def test_zero_offset_is_a_passthrough():
     """With no offset configured the conversion degrades to a plain clamp."""
     assert policy_to_robot_width(0.03, 0.0, MAX_WIDTH) == pytest.approx(0.03)
     assert robot_to_policy_width(0.03, 0.0) == pytest.approx(0.03)
+
+
+def test_negative_offset_is_supported():
+    """
+    offset_m = S_closed - A_closed is a difference of two measurements; its sign is not knowable.
+
+    If the fingers bottom out at an aperture wider than the tag separation, the correct offset is
+    negative. Rejecting or clamping that would silently discard a valid calibration.
+    """
+    assert policy_to_robot_width(0.030, -0.004, 0.08, 0.006) == pytest.approx(0.034)
+
+
+def test_low_clamp_is_the_fingers_minimum_not_zero():
+    """
+    The PolyUMI fingers collide before the mechanism bottoms out.
+
+    Commanding below that point makes Move stall and abort, which is exactly what leaves
+    fr3_gripper_bridge's deadband measuring against a width the hand never reached.
+    """
+    assert policy_to_robot_width(0.0, 0.005, 0.08, 0.006) == pytest.approx(0.006)
+
+
+def test_low_clamp_defaults_to_zero_for_callers_that_do_not_pass_it():
+    """The parameter is additive: existing two-and-three-arg call sites keep their behaviour."""
+    assert policy_to_robot_width(0.0, 0.005, 0.08) == pytest.approx(0.0)
