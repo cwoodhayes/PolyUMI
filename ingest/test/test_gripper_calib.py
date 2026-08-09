@@ -30,10 +30,10 @@ def _open_close_series(closed_m=0.005, open_m=0.090, cycles=3, dwell=200, travel
 
 
 def test_recovers_the_closed_plateau():
-    """The basic case: S_closed lands on the dwell value, not somewhere up the travel ramp."""
+    """The basic case: closed width lands on the dwell value, not somewhere up the travel ramp."""
     stats = closed_width_stats(_open_close_series(closed_m=0.0052))
 
-    assert stats.s_closed_m == pytest.approx(0.0052, abs=1e-4)
+    assert stats.closed_width_m == pytest.approx(0.0052, abs=1e-4)
     assert stats.max_m == pytest.approx(0.090, abs=1e-4)
     assert stats.plateau_is_convincing
     assert not stats.min_is_outlier
@@ -52,7 +52,7 @@ def test_a_single_bad_detection_does_not_move_the_answer():
     stats = closed_width_stats(series)
 
     assert stats.min_m == pytest.approx(0.002)
-    assert stats.s_closed_m == pytest.approx(0.005, abs=1e-4), 'the outlier must not reach S_closed'
+    assert stats.closed_width_m == pytest.approx(0.005, abs=1e-4), 'the outlier must not reach closed width'
     assert stats.min_is_outlier, 'and it must be reported as detached from the plateau'
 
 
@@ -76,7 +76,7 @@ def test_plateau_tally_counts_only_samples_near_s_closed():
 
     stats = closed_width_stats(np.concatenate([closed, elsewhere]))
 
-    assert stats.n_near_s_closed == 120
+    assert stats.n_near_closed_width == 120
 
 
 def test_nans_are_dropped_rather_than_poisoning_the_percentiles():
@@ -86,7 +86,7 @@ def test_nans_are_dropped_rather_than_poisoning_the_percentiles():
 
     stats = closed_width_stats(series)
 
-    assert np.isfinite(stats.s_closed_m)
+    assert np.isfinite(stats.closed_width_m)
     assert stats.n_samples == int(np.count_nonzero(np.isfinite(series)))
 
 
@@ -100,7 +100,7 @@ def test_report_shows_the_percentile_table_and_marks_the_chosen_value():
     """The table is the deliverable — a human reads it to decide whether to trust the number."""
     report = format_report(closed_width_stats(_open_close_series()))
 
-    assert 'S_closed' in report
+    assert 'closed width' in report
     assert f'p{DEFAULT_PERCENTILE:g}' in report
     assert 'min' in report and 'max' in report
     assert 'span' in report
@@ -131,8 +131,25 @@ def test_a_dense_slow_sweep_does_not_fake_a_plateau():
     """
     stats = closed_width_stats(np.linspace(0.005, 0.090, 2000))
 
-    assert stats.n_near_s_closed >= MIN_PLATEAU_SAMPLES, 'precondition: the absolute count passes'
+    assert stats.n_near_closed_width >= MIN_PLATEAU_SAMPLES, 'precondition: the absolute count passes'
     assert not stats.plateau_is_convincing, 'but the density is not'
+
+
+def test_uniform_expectation_uses_the_same_band_width_the_tally_counts():
+    """
+    The tally is two-sided (``abs(w - closed_width) <= tol``), so the baseline must be too.
+
+    Comparing a two-sided count against a one-sided expectation understated the baseline by
+    exactly 2x, which made the density test half as strict as its own message claimed. A uniform
+    sweep is the calibrating case: by construction it should score a ratio of 1.0, and it only
+    does if both sides of the comparison span the same interval.
+    """
+    n = 4000
+    stats = closed_width_stats(np.linspace(0.005, 0.090, n))
+
+    assert stats.expected_uniform_in_band == pytest.approx(n * 2 * PLATEAU_TOL_M / stats.span_m)
+    # A ramp is exactly the uniform case, so observed/expected must sit at ~1.0, not ~2.0.
+    assert stats.n_near_closed_width / stats.expected_uniform_in_band == pytest.approx(1.0, abs=0.1)
 
 
 def test_plateau_check_is_scale_free():
@@ -160,4 +177,4 @@ def test_a_plateau_sitting_above_a_stray_minimum_is_still_convincing():
 
     assert stats.min_is_outlier, 'precondition: the raw minimum is a stray detection'
     assert stats.plateau_is_convincing, 'the dwell above it is what should be judged'
-    assert stats.s_closed_m == pytest.approx(0.0445, abs=2e-4)
+    assert stats.closed_width_m == pytest.approx(0.0445, abs=2e-4)
