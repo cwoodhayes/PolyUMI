@@ -72,8 +72,13 @@ def test_settle_returns_without_motion_when_the_hand_is_already_there():
         node.destroy_node()
 
 
-def test_settle_gives_up_and_still_reports_the_last_reading():
-    """A never-settling hand must yield something diagnosable, not None or a hang."""
+def test_settle_gives_up_rather_than_hanging_when_nothing_is_reporting():
+    """
+    A hand that never reports must time out and return None, not block forever.
+
+    None is the honest answer here — there is no last reading to fall back on — and _endpoint
+    turns it into an error rather than a number that would land in a config file.
+    """
     node, _ = _probe(settle_timeout_s=0.1)
     node._aperture = None
     try:

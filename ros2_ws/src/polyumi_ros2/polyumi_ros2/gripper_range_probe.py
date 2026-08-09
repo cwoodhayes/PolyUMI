@@ -42,10 +42,11 @@ decides where closed is. Don't reach for that pre-emptively; let the measurement
 
 Usage (laptop, after `source setup_franka_env.sh`):
 
-    # 1. NUC: the gripper must be allowed to move, or every command is a silent no-op. Raise the
-    #    bridge's clamp too, or the open endpoint measures the clamp instead of the fingers —
-    #    0.0817 m is the Franka Hand's own maximum, so the fingers stop it first if anything does.
-    ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true gripper_max_width:=0.0817
+    # 1. NUC: the gripper must be allowed to move, or every command is a silent no-op. The
+    #    bridge's clamp already defaults to 0.0817 m — the Franka Hand's own maximum — so the
+    #    fingers stop the open sweep first if anything does. Pass gripper_max_width only if you
+    #    have deliberately lowered it; a clamp below the hand's maximum measures the software.
+    ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true
 
     # 2. Nothing should be in the way of the fingers
     ros2 run polyumi_ros2 gripper_range_probe
@@ -119,9 +120,10 @@ class GripperRangeProbe(Node):
 
         self.declare_parameter('gripper_topic', '/polyumi/target_gripper')
         self.declare_parameter('gripper_state_topic', '/fr3_gripper/joint_states')
-        # Commanded wide. The bridge clamps this to its own max_width_m (0.08 by default), which
-        # is itself a guess — if the measured open endpoint lands at the clamp we say so, because
-        # then the number is the software limit and not the fingers'.
+        # Commanded past the hand's maximum on purpose, so the fingers decide where open is. The
+        # bridge clamps it to its own max_width_m, which the inference launch file defaults to the
+        # hand's 0.0817 m — if the measured endpoint lands on a clamp *below* that we say so,
+        # because then the number is a software limit and not the fingers'.
         self.declare_parameter('open_width_m', 0.09)
         self.declare_parameter('closed_width_m', 0.0)
         self.declare_parameter('reps', 3)
@@ -136,12 +138,18 @@ class GripperRangeProbe(Node):
         topic = self.get_parameter('gripper_topic').get_parameter_value().string_value
         state_topic = self.get_parameter('gripper_state_topic').get_parameter_value().string_value
 
+        # Node.__init__ has already registered us with the rclpy context, so tear that down before
+        # raising — otherwise every rejected construction leaves an orphan node behind.
+        errors = []
         if self._reps < 1:
-            raise ValueError(f'reps must be >= 1, got {self._reps}')
+            errors.append(f'reps must be >= 1, got {self._reps}')
         if self._open_width <= self._closed_width:
-            raise ValueError(
+            errors.append(
                 f'open_width_m ({self._open_width}) must exceed closed_width_m ({self._closed_width})'
             )
+        if errors:
+            self.destroy_node()
+            raise ValueError('; '.join(errors))
 
         self._state_topic = state_topic
         self._pub = self.create_publisher(JointTrajectory, topic, 10)

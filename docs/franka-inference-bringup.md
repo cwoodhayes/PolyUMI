@@ -508,15 +508,23 @@ empirically as the minimum ArUco width over a calibration video in which the gri
 
 Ours **now follows UMI all the way**: the DP exporter subtracts `S_closed` (from
 `gripper_calib.yaml`'s `closed_mm`) so exported widths are opening-from-closed, and each buffer
-records the value as `meta.attrs['gripper_closed_width_m']`. `agent_pos[7]` therefore carries raw
+records the value as `meta.attrs['gripper_closed_width_m']`. Widths below `S_closed` clamp to 0
+rather than going negative — `S_closed` is a percentile, so ~1% of detections sit under it by
+construction. UMI clamps here too, invisibly: its `get_gripper_calibration_interpolator` builds an
+`interp1d` over `[min_width, max_width]` with `fill_value=(x[0], x[-1])`, so anything below the
+calibrated minimum saturates to 0. (We do not clamp the top end as UMI does; a demo opening wider
+than the calibration recording is information, not error.) `agent_pos[7]` therefore carries raw
 tag separation only for checkpoints exported before 2026-08.
 
-Where we differ from UMI, and must: a WSG homes to a true zero aperture, but the PolyUMI fingers
-collide first, so the FR3 still reports a non-zero aperture when shut. "Fingers touching fingers"
-is the same physical configuration on both rigs, which makes the offset `S_closed - A_closed`
-(or `-A_closed` post-change) rather than simply `S_closed`. It can come out **negative**, and the
-parameter validation permits that deliberately. Measure with `pingest calibrate-gripper` and
-`ros2 run polyumi_ros2 gripper_range_probe`.
+Where we *could* differ from UMI, and happen not to: a WSG homes to a true zero aperture, and
+fingers that collided tip-to-tip before the mechanism bottomed out would leave the FR3 reporting a
+non-zero aperture when shut. "Fingers touching fingers" is the same physical configuration on both
+rigs, so the offset is `S_closed - A_closed` (or `-A_closed` post-change) rather than simply
+`S_closed`, and it can come out **negative** — the parameter validation permits that deliberately.
+**Measured 2026-08-09, `A_closed` is 0.0**: the current fingers meet exactly at the mechanism's
+zero, so the offset is 0 and we land in the same place as UMI after all. Re-measure with
+`pingest calibrate-gripper` and `ros2 run polyumi_ros2 gripper_range_probe` after any finger
+change.
 
 Note this aligns the zero point, not the stroke: the handheld gripper may open wider than the
 hand's ~0.0817 m, and commands past `gripper_max_width_m` clamp — showing up as saturation rather

@@ -57,8 +57,12 @@ def generate_launch_description():
         DeclareLaunchArgument('max_velocity_scaling', default_value='0.1',
                               description='Arm speed cap. Start low, raise once you trust it.'),
         DeclareLaunchArgument('gripper_max_width', default_value='0.0817',
-                              description="Gripper aperture clamp (m). Raise to 0.0817 to measure "
-                                          'the fingers true open limit with gripper_range_probe.'),
+                              description="Bridge-side aperture clamp (m). Defaults to the Franka "
+                                          "Hand's own maximum so nothing software-side narrows the "
+                                          'range: franka_gripper aborts wider goals anyway, and '
+                                          'gripper_range_probe needs the full stroke to measure '
+                                          'A_open. policy_client_node clamps to its own (measured) '
+                                          'gripper_max_width_m first, so this is a backstop.'),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(NUC_DIR / 'launch' / 'fr3_move_group.launch.py')),

@@ -16,9 +16,10 @@ value it was built with as ``meta.attrs['gripper_closed_width_m']``.
 The offset is then ``-A_closed``, the FR3's aperture with the fingers touching. **Measured
 2026-08-09 that is 0.0**, so this map is currently the identity plus clamping — these fingers meet
 at the mechanism's true zero, which puts us in the same position as UMI's WSG, whose inference path
-likewise converts nothing. Fingers whose tips collided early would make ``A_closed`` non-zero and
-the offset negative; that is legitimate and the validation permits it, which is also why the low
-clamp is ``min_width_m`` rather than a hardcoded 0.
+likewise converts nothing. **With the current fingers nothing collides early at either end** — the
+hand's own limits are the binding ones. A redesign whose tips met before the mechanism bottomed out
+would make ``A_closed`` non-zero and the offset negative; that is legitimate and the validation
+permits it, which is why the low clamp is ``min_width_m`` rather than a hardcoded 0.
 
 Derive the numbers with::
 
@@ -46,10 +47,12 @@ def policy_to_robot_width(
         since it depends on when the checkpoint was exported.
     :param offset_m: subtracted off. May legitimately be **negative**; see the module docstring.
     :param max_width_m: the fingers' maximum reachable aperture (``A_open``).
-    :param min_width_m: the fingers' minimum reachable aperture (``A_closed``). Not 0: the PolyUMI
-        fingers collide before the mechanism bottoms out, and commanding below that point makes
-        ``Move`` stall and abort — which is precisely what wedges ``fr3_gripper_bridge``'s deadband,
-        since it records what a goal *accepted* rather than what the hand *reached*.
+    :param min_width_m: the fingers' minimum reachable aperture (``A_closed``). **0.0 with the
+        current fingers**, which meet exactly at the mechanism's zero — so this defaults to 0 and
+        the parameter is presently inert. It exists because fingers whose tips collided before the
+        mechanism bottomed out would make it non-zero, and commanding below that point makes
+        ``Move`` stall and abort — which is what wedges ``fr3_gripper_bridge``'s deadband, since it
+        records what a goal *accepted* rather than what the hand *reached*.
     :returns: jaw aperture in metres, clamped to the fingers' reachable range.
     """
     return min(max(width_m - offset_m, min_width_m), max_width_m)

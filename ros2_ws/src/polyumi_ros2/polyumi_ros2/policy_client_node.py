@@ -170,8 +170,9 @@ class PolicyClientNode(Node):
         self.declare_parameter('max_gripper_age_s', 0.5)
         # Subtracted from the policy's width to get jaw aperture; equals -A_closed, the hand's
         # aperture with the fingers touching. Measured 2026-08-09 as 0.0 — the policy's width IS
-        # jaw aperture — but kept a parameter because fingers that collide early make it non-zero.
-        # MAY BE NEGATIVE, and the validation deliberately permits that. See gripper_map.
+        # jaw aperture — but kept a parameter because fingers that met tip-to-tip before the
+        # mechanism bottomed out would make it non-zero. MAY BE NEGATIVE, and the validation
+        # deliberately permits that. See gripper_map.
         self.declare_parameter('gripper_offset_m', 0.0)
         # Measured reachable aperture (`ros2 run polyumi_ros2 gripper_range_probe`), not the Franka
         # Hand's nominal range: max_width is published on no topic, so neither end is readable at
