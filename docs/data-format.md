@@ -213,12 +213,19 @@ These live alongside the zarr, not inside it:
 The policy only compares like with like, so the frame the DP exporter bakes into `camera0_rgb` at training time and the frame the ROS inference node feeds the policy must go through the **same** pixel transform. That transform is a single contract:
 
 - input is an **RGB** `(H, W, 3)` uint8 frame;
-- output is `(224, 224, 3)` uint8, resized with **`cv2.INTER_AREA`** (the anti-aliased choice for downscaling), squashed to the target with **no crop**;
+- it is **centre-cropped to 4:3**, the GoPro's recording aspect (`crop_to_source_aspect`) — a no-op on a frame already at that aspect;
+- output is `(224, 224, 3)` uint8, resized with **`cv2.INTER_AREA`** (the anti-aliased choice for downscaling), squashed to the target;
 - any `float32/255` normalization is applied downstream (the training loader / the inference node), not baked into the stored uint8.
 
 It is implemented once per side because the two live in separate Python environments (the ingest uv workspace vs. the ROS venv) and can't share an import: `ingest/polyumi_ingest/camera_preproc.py` (`resize_camera0_rgb`, used by `export/dp/buffer.py`) and `ros2_ws/src/polyumi_ros2/polyumi_ros2/camera_preproc.py` (used by `policy_client_node.py`). Both are pinned by unit tests. **Keep them byte-identical.**
 
-> **Known residual skew (not a bug):** training frames are resized from the **4K** `gopro.mp4`, while the inference feed is the **1080p** Elgato/v4l2 capture of the GoPro HDMI output. Even with identical interpolation the two 224² results differ slightly because the source resolutions differ. Closing this fully (e.g. downscaling training frames to 1080p first, or matching capture resolution) is out of scope; it is recorded here so it is not mistaken for a defect. Audio is **not** part of the policy observation, so it has no export-alignment requirement.
+### Why the crop exists
+
+Training frames come from `gopro.mp4` at **2704x2028 (4:3)**. Inference frames come off the Elgato at **1920x1080 (16:9)**. Measured on hardware (2026-08-09): the GoPro's clean-HDMI output **pillarboxes** — the image occupies columns 240..1679 of the 1080p frame, exactly 1440x1080, with pure black bars either side, and the fisheye image circle sits at the same fraction of frame width as in the recording. **The field of view is identical; only the framing differs.**
+
+So without the crop the inference 224² was **25.4% black pixels** with the real content squeezed into three-quarters of the width — a train/inference domain gap on every policy output, and a silent one, since the policy runs perfectly happily on the wrong pixels. The crop recovers precisely the 1440x1080 the camera framed, so both paths squash the same field of view. It is a no-op on 2704x2028, so **no dataset needs re-exporting for this** and old buffers stay valid.
+
+> **Known residual skew (not a bug):** even after the crop, training frames are downscaled from 2704 px wide and inference frames from 1440 px, so the two 224² results differ slightly in resampling detail. Same FOV, same aspect, different source resolution. Closing that fully is out of scope; it is recorded here so it is not mistaken for a defect. Audio is **not** part of the policy observation, so it has no export-alignment requirement.
 
 ## Export targets
 

@@ -50,7 +50,7 @@ from sensor_msgs.msg import Image, JointState
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException  # type: ignore[attr-defined]
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-from polyumi_ros2.camera_preproc import CAMERA0_RGB_INTERPOLATION
+from polyumi_ros2.camera_preproc import CAMERA0_RGB_INTERPOLATION, crop_to_source_aspect
 from polyumi_ros2.gripper_map import policy_to_robot_width, robot_to_policy_width
 
 # Name used for the single "joint" in the gripper trajectory chunk. Deliberately NOT a real joint
@@ -404,9 +404,11 @@ class PolicyClientNode(Node):
         img = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
         if msg.encoding == 'bgr8':
             img = img[:, :, ::-1].copy()  # BGR → RGB
-        # INTER_AREA (from the shared camera0_rgb contract) to match the DP exporter's
-        # anti-aliased downscale; any mismatch here is train/inference skew. See
-        # camera_preproc.resize_camera0_rgb and docs/data-format.md.
+        # Crop + INTER_AREA (the shared camera0_rgb contract) to match the DP exporter's
+        # anti-aliased downscale; any mismatch here is train/inference skew. The crop drops the
+        # GoPro HDMI pillarbox so this 16:9 capture squashes the same 4:3 field of view the 4:3
+        # gopro.mp4 does. See camera_preproc.crop_to_source_aspect and docs/data-format.md.
+        img = crop_to_source_aspect(img)
         resized = cv2.resize(img, (self._image_w, self._image_h), interpolation=CAMERA0_RGB_INTERPOLATION)
         float_img = resized.astype(np.float32) / 255.0
         with self._latest_image_lock:

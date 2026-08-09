@@ -44,22 +44,26 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
    frame was **removed on 2026-08-09** — checkpoints exported before that date are no longer
    supported and must be re-exported and retrained.
 
-2. **The camera the policy trains on is not the camera it runs on.** Training frames come from
-   the GoPro's own SD recording — `ingest/config/gopro_intrinsics.json` is calibrated at
-   **1352×1014, 4:3**. Inference frames come from the Elgato capture card, which
-   `stream_demo.launch.xml` configures as **1920×1080, 16:9**. Both are then squashed to 224×224
-   with **no crop** by the shared `camera_preproc` contract, so the *pixel transform* is in
-   lock-step but the thing being transformed is not: the same physical scene arrives horizontally
-   compressed at inference relative to training. If clean-HDMI-out crops rather than letterboxes,
-   the inference frame is also missing the top and bottom of the training field of view.
+2. **The camera aspect gap — RESOLVED 2026-08-09.** Training frames come from the GoPro's own SD
+   recording, **2704×2028 (4:3)**; inference frames come from the Elgato capture card at
+   **1920×1080 (16:9)**. Both were squashed to 224×224 with **no crop**, so the *pixel transform*
+   was in lock-step but the thing being transformed was not.
 
-   This is a train/inference domain gap on **every** policy output, and is independent of the
-   INTER_AREA/INTER_LINEAR resize skew tracked separately. Not yet quantified — what the GoPro
-   currently records at, and whether HDMI crops or letterboxes, both need checking.
+   Measured, rather than assumed: a live capture-card frame next to a `gopro.mp4` frame shows the
+   GoPro's clean-HDMI output **pillarboxes**. The image occupies columns 240..1679 — exactly
+   1440×1080 — with pure black bars either side, and the fisheye image circle sits at the same
+   fraction of frame width in both. **Same field of view, different framing.** Nothing was lost
+   off the top or bottom, which was the outcome that would have forced a dataset change.
 
-   The check: export one `camera0_rgb` frame from a dataset, grab one live `/gopro/image_raw`
-   frame, and compare field of view and stretch side by side. If they differ, the fix is upstream
-   of `camera_preproc` (match the capture aspect, or crop rather than squash) — not in the resize.
+   The cost while it stood: the inference 224² was **25.4% black pixels**, with the real content
+   squeezed into three-quarters of the width. The policy runs happily on that; it is just running
+   on pixels it never trained on.
+
+   Fixed in the shared contract by `camera_preproc.crop_to_source_aspect` — a centre-crop to 4:3
+   ahead of the squash, applied on both sides. It is a **no-op on 2704×2028**, so no dataset needs
+   re-exporting and existing buffers stay valid. See
+   [data-format.md](data-format.md) ("Why the crop exists"). What remains is only the source-
+   resolution difference (2704 px wide vs 1440 px), i.e. resampling detail at the same FOV.
 
 3. **Two placeholder constants sit on critical paths**, both currently claiming more rigour
    than they have:
@@ -314,7 +318,7 @@ print(json.dumps({
 **Subscribes:**
 | Topic | Type | Purpose |
 |---|---|---|
-| `/gopro/image_raw` | `sensor_msgs/Image` | wrist camera via HDMI capture card → `v4l2_camera_node` (1920×1080@60, resized to 224×224) |
+| `/gopro/image_raw` | `sensor_msgs/Image` | wrist camera via HDMI capture card → `v4l2_camera_node` (1920×1080@60; the node centre-crops the pillarbox to 1440×1080 then resizes to 224×224) |
 | TF `eef_frame` → `base_frame` | via `tf2_ros.Buffer` | absolute EEF pose (xyz + quat) |
 | `/fr3_gripper/joint_states` | `sensor_msgs/JointState` | gripper aperture = `position[0] + position[1]` (each finger reports half); interpolated to the frame's capture instant, offset into policy units, → `agent_pos[7]` |
 
