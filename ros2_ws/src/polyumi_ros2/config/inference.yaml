@@ -13,7 +13,7 @@
 
     # --- Per-component latencies, in seconds. ---
     # !!! NONE OF THESE HAVE BEEN MEASURED — they are plausible guesses. !!!
-    # There is no calibration script for them yet; writing one is tracked as blocking issue 2
+    # There is no calibration script for them yet; writing one is tracked under "What's left"
     # in docs/franka-inference-bringup.md. They are live on the inference critical path
     # regardless of whether they are right, so treat every value below as provisional.
     latency:
@@ -23,7 +23,8 @@
       # Unmeasured - guess (TODO measure)
       gopro: 0.13
       # Finger camera latency. Declared but never consumed — the policy has no tactile input
-      # yet (blocking issue 4). Left at 0 so it cannot skew anything until it is wired.
+      # yet (see "What's left" in docs/franka-inference-bringup.md). Left at 0 so it cannot skew
+      # anything until it is wired.
       finger_cam: 0.0
       # Piezo mic latency. Declared but never consumed, as above.
       piezo_mic: 0.0

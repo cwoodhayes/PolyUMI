@@ -188,7 +188,8 @@ Launched by `fr3-bringup` automatically — `franka.launch.py`'s `load_gripper` 
 wrapper limitation — libfranka's `franka::Gripper` (`~/franka_ws/src/libfranka/include/franka/gripper.h`)
 offers only `homing()`, `grasp()`, `move()`, `stop()`, `readOnce()`, all blocking and discrete.
 This is why PolyUMI's gripper commander is deadbanded and rate-limited rather than a streaming
-servo like UMI's — see [Phase 2.5](franka-inference-bringup.md#phase-25--gripper-control).
+servo like UMI's — see
+[franka-inference-bringup.md](franka-inference-bringup.md#gripper-hardware) ("Gripper hardware").
 
 | Interface | Type | Notes |
 |---|---|---|

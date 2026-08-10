@@ -19,7 +19,7 @@ At each control tick the node:
      gripper half as a JointTrajectory on /polyumi/target_gripper (fr3_gripper_bridge). The two
      ride separate channels because a PoseArray cannot carry a width and because the Franka Hand
      is action-only, so it needs a different execution cadence entirely — see
-     docs/crb-fr3-inference.md and docs/franka-inference-bringup.md ("Phase 2.5").
+     docs/crb-fr3-inference.md and docs/franka-inference-bringup.md ("Gripper hardware").
 
 Usage:
     ros2 run polyumi_ros2 policy_client_node
@@ -140,7 +140,7 @@ class PolicyClientNode(Node):
         self.declare_parameter('steps_per_inference', 6)
         # Per-component system latencies (seconds), loaded from config/inference.yaml via the
         # inference launch file. NONE of them have been measured yet — see that file and
-        # blocking issue 2 in docs/franka-inference-bringup.md. gopro and proprio are consumed
+        # "What's left" in docs/franka-inference-bringup.md. gopro and proprio are consumed
         # by _lookup_agent_pos, arm_exec by _n_stale_actions; finger_cam and piezo_mic are
         # declared but unused until the policy takes tactile input.
         self.declare_parameter('latency.gopro', 0.0)

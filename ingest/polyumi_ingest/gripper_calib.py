@@ -19,9 +19,10 @@ this ``raw_widths_m`` — the actual per-frame detections — and never ``width_
 resampled onto the GoPro grid with hold-at-edges extrapolation and would drag the extremes toward
 whatever the series happened to start and end on.
 
-What the closed width is *for* is written up in docs/franka-inference-bringup.md: it is the tag
-separation with the fingers touching, which the DP exporter subtracts so that exported widths are
-opening-from-closed (UMI's convention), and which the FR3 side pairs with its own closed aperture.
+What the closed width is *for*: it is the tag separation with the fingers touching, which the DP
+exporter subtracts so that exported widths are opening-from-closed (UMI's convention), and which
+the FR3 side pairs with its own closed aperture. The full procedure is in
+docs/calibration-instructions.md; the inference-side units are in polyumi_ros2/gripper_map.py.
 """
 
 from __future__ import annotations

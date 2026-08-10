@@ -32,9 +32,10 @@ REQUIRED_OBS_KEYS = {'image', 'agent_pos'}
 AGENT_POS_DIM = 8  # [x, y, z, qx, qy, qz, qw, gripper_width]
 OSCILLATION_AMPLITUDE_M = 0.05
 OSCILLATION_PERIOD_STEPS = 20  # full cycle over this many /predict calls
-# Gripper swing, in the same units as the training data (ArUco finger-tag separation, NOT the
-# robot's jaw aperture — policy_client_node applies the offset, see docs/franka-inference-bringup.md
-# "Phase 2.5"). Centred on the home width, so keep amplitude <= that to stay non-negative.
+# Gripper swing, in the same units as the training data: metres of opening from fully closed, so
+# 0 is shut. NOT the robot's jaw aperture — policy_client_node adds the FR3's closed aperture back
+# on and clamps (see polyumi_ros2/gripper_map.py). Centred on the home width, so keep the amplitude
+# <= that to stay non-negative.
 GRIPPER_OSCILLATION_AMPLITUDE_M = 0.04
 DEFAULT_HOME_POSE = '0.56 0.13 0.25 -1 0 0 0 0.05'  # xyz qxqyqzqw gripper
 # Sanity bound on the home gripper width. The Franka Hand tops out near 0.0817 m and the handheld
