@@ -188,6 +188,8 @@ The launch file accepts two arguments: `pi_host` (default `10.106.10.62`) and `v
 
 ### Running on a robot arm
 
+First, see the [system calibration instructions](/docs/calibration-instructions.md) and update the values relevant to your setup.
+
 `policy_client_node` drives a robot arm from a diffusion-policy inference server.
 The arm's control stack typically runs on its own machine and is reached over ROS2;
 how you bring that up, network the two machines, and configure DDS depends on your
