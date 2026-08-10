@@ -435,7 +435,7 @@ def test_gripper_width_sums_the_two_finger_joints(make_node):
     Reading position[0] alone (or the wrong joint) would halve every width the policy sees,
     which is exactly the kind of error that looks plausible in a log.
     """
-    node = make_node(gripper_offset_m=0.0, **{'latency.gopro': 0.0, 'latency.gripper': 0.0})
+    node = make_node(**{'latency.gopro': 0.0, 'latency.gripper': 0.0})
     _push_gripper(node, 1.0, 0.06)
 
     assert node._gripper_width_at(_t(1.0)) == pytest.approx(0.06)
@@ -444,7 +444,7 @@ def test_gripper_width_sums_the_two_finger_joints(make_node):
 def test_gripper_width_lands_in_agent_pos_index_7(make_node):
     """The measured aperture reaches agent_pos[7], converted into policy units."""
     node = make_node(
-        gripper_offset_m=0.005, **{'latency.gopro': 0.0, 'latency.proprio': 0.0, 'latency.gripper': 0.0}
+        gripper_min_width_m=0.005, **{'latency.gopro': 0.0, 'latency.proprio': 0.0, 'latency.gripper': 0.0}
     )
     _push_ramp_tf(node)
     _push_gripper(node, 1.0, 0.06)
@@ -452,7 +452,7 @@ def test_gripper_width_lands_in_agent_pos_index_7(make_node):
     agent_pos = node._lookup_agent_pos(image_stamp=_t(1.0))
 
     assert agent_pos is not None
-    assert agent_pos[7] == pytest.approx(0.065)  # 0.06 aperture + 0.005 offset
+    assert agent_pos[7] == pytest.approx(0.055)  # 0.06 aperture - 0.005 closed aperture
 
 
 def test_gripper_width_interpolates_to_the_capture_instant(make_node):
@@ -462,7 +462,7 @@ def test_gripper_width_interpolates_to_the_capture_instant(make_node):
     Encoding time into width (width == timestamp) makes the returned value a direct readout of
     which instant was queried, the same trick _push_ramp_tf uses for the pose.
     """
-    node = make_node(gripper_offset_m=0.0, **{'latency.gopro': 0.05, 'latency.gripper': 0.0})
+    node = make_node(**{'latency.gopro': 0.05, 'latency.gripper': 0.0})
     for t in (0.8, 0.9, 1.0):
         _push_gripper(node, t, t)
 
@@ -473,7 +473,7 @@ def test_gripper_width_interpolates_to_the_capture_instant(make_node):
 
 def test_gripper_latency_shifts_the_query_forward(make_node):
     """latency.gripper moves the query the same direction proprio does for the pose."""
-    node = make_node(gripper_offset_m=0.0, **{'latency.gopro': 0.05, 'latency.gripper': 0.01})
+    node = make_node(**{'latency.gopro': 0.05, 'latency.gripper': 0.01})
     for t in (0.8, 0.9, 1.0):
         _push_gripper(node, t, t)
 
@@ -483,7 +483,7 @@ def test_gripper_latency_shifts_the_query_forward(make_node):
 
 def test_gripper_width_holds_endpoints_rather_than_extrapolating(make_node):
     """Outside the cached span the nearest sample is held; extrapolation would invent motion."""
-    node = make_node(gripper_offset_m=0.0)
+    node = make_node()
     _push_gripper(node, 1.0, 0.04)
     _push_gripper(node, 1.1, 0.05)
 
@@ -498,13 +498,13 @@ def test_missing_gripper_state_falls_back_to_closed(make_node):
     This is what keeps arm-only bringup (motion_only, no hand attached) working rather than
     stalling the whole control loop on a device that isn't there.
     """
-    node = make_node(gripper_offset_m=0.005, **{'latency.gopro': 0.0, 'latency.proprio': 0.0})
+    node = make_node(gripper_min_width_m=0.005, **{'latency.gopro': 0.0, 'latency.proprio': 0.0})
     _push_ramp_tf(node)
 
     agent_pos = node._lookup_agent_pos(image_stamp=_t(1.0))
 
     assert agent_pos is not None
-    assert agent_pos[7] == pytest.approx(0.005)  # closed aperture (0.0) in policy units
+    assert agent_pos[7] == pytest.approx(0.0)  # fully closed is 0.0 in policy units, by definition
 
 
 def test_require_gripper_state_skips_the_tick_instead(make_node):
@@ -539,7 +539,7 @@ def test_tf_use_latest_takes_the_newest_gripper_sample(make_node):
     A dry run is exactly where someone would be watching whether the width tracks, so it has to
     be the fresh end.
     """
-    node = make_node(tf_use_latest=True, gripper_offset_m=0.0)
+    node = make_node(tf_use_latest=True)
     for stamp, width in ((1.0, 0.01), (1.1, 0.05), (1.2, 0.08)):
         _push_gripper(node, stamp, width)
 
@@ -556,7 +556,7 @@ def test_stale_gripper_state_holds_the_last_width_and_warns(make_node):
     in silence. Holding beats substituting closed: if the hand stopped reporting mid-grasp,
     "closed" is the bigger lie.
     """
-    node = make_node(gripper_offset_m=0.0, max_gripper_age_s=0.5, **{'latency.gopro': 0.0})
+    node = make_node(max_gripper_age_s=0.5, **{'latency.gopro': 0.0})
     _push_gripper(node, 1.0, 0.06)
 
     with patch.object(node, 'get_clock', return_value=_FakeClock(_t(3.0))), \
@@ -579,7 +579,7 @@ def test_stale_gripper_state_skips_the_tick_when_required(make_node):
 def test_fresh_gripper_state_is_not_treated_as_stale(make_node):
     """A width inside the age limit passes even under require_gripper_state."""
     node = make_node(
-        require_gripper_state=True, gripper_offset_m=0.0, max_gripper_age_s=0.5,
+        require_gripper_state=True, max_gripper_age_s=0.5,
         **{'latency.gopro': 0.0},
     )
     _push_gripper(node, 1.0, 0.06)
@@ -591,7 +591,7 @@ def test_fresh_gripper_state_is_not_treated_as_stale(make_node):
 def test_gripper_age_check_can_be_disabled(make_node):
     """max_gripper_age_s <= 0 turns the check off, for setups with an odd clock or rate."""
     node = make_node(
-        require_gripper_state=True, gripper_offset_m=0.0, max_gripper_age_s=0.0,
+        require_gripper_state=True, max_gripper_age_s=0.0,
         **{'latency.gopro': 0.0},
     )
     _push_gripper(node, 1.0, 0.06)
@@ -614,14 +614,14 @@ def test_gripper_trajectory_converts_to_robot_units(make_node):
     """
     Widths are converted to jaw aperture here, so the NUC bridge needs no calibration.
 
-    Keeping the conversion on this side means one place holds the offset, and the bridge can
+    Keeping the conversion on this side means one place holds the calibration, and the bridge can
     stay a dumb executor of the metres it is handed.
     """
-    node = make_node(control_hz=10.0, gripper_offset_m=0.005, gripper_max_width_m=0.08)
+    node = make_node(control_hz=10.0, gripper_min_width_m=0.005, gripper_max_width_m=0.08)
 
     msg = node._actions_to_gripper_trajectory(_actions_with_grip([0.005, 0.025, 0.5]))
 
-    assert [p.positions[0] for p in msg.points] == pytest.approx([0.0, 0.02, 0.08])
+    assert [p.positions[0] for p in msg.points] == pytest.approx([0.01, 0.03, 0.08])
 
 
 def test_gripper_trajectory_carries_chunk_timing(make_node):

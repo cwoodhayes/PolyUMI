@@ -5,8 +5,8 @@ Measure the FR3 hand's real reachable aperture range, with the PolyUMI fingers f
 Gives the two robot-side numbers the gripper width map needs, both of them jaw apertures read off
 ``/fr3_gripper/joint_states``:
 
-    the **closed aperture**  with the fingers touching  ->  ``gripper_min_width_m``, and pairs with
-                                                            the closed width to give the offset
+    the **closed aperture**  with the fingers touching  ->  ``gripper_min_width_m``, which doubles
+                                                            as the policy->robot offset
     the **open aperture**    at full open               ->  ``gripper_max_width_m``
 
 Neither can be assumed. The Franka Hand's nominal stroke is 0–0.0817 m, but the custom fingers can
@@ -28,15 +28,11 @@ so the FR3 at full open corresponds to 44.56 + 81.6 = 126.2 mm of tag separation
 policy's commanded range saturates at the top, which is expected and shows up as intent clipping
 rather than an error.
 
-The offset then comes from pairing this with the ArUco side. "Fingers touching fingers" is the same
-physical configuration on the handheld rig and on the arm, so with the closed width from
-``pingest calibrate-gripper``::
-
-    gripper_offset_m = closed_mm/1000 - closed_aperture   # checkpoints trained on raw tag separation
-    gripper_offset_m = -closed_aperture                   # checkpoints exported after the
-                                                          # exporter began subtracting closed_mm
-
-Both are plausibly negative. That is fine and expected — see docs/franka-inference-bringup.md.
+Both go straight into ``config/inference.yaml`` as ``gripper_min_width_m`` and
+``gripper_max_width_m``. There is no third constant to derive: the closed aperture *is* the
+policy->robot offset, since policy width 0 means fully closed and fully closed on the arm is that
+aperture. (A separate ``gripper_offset_m`` used to exist and was removed — it was always exactly
+the negated closed aperture, so it duplicated this measurement.) See polyumi_ros2.gripper_map.
 
 Why the spread matters as much as the mean: `Move` applies no force and stalls on contact, so the
 closed endpoint is wherever the fingers happened to stop for that speed. If the spread across reps
@@ -367,9 +363,9 @@ class GripperRangeProbe(Node):
             'Put in ros2_ws/src/polyumi_ros2/config/inference.yaml:\n'
             f'    gripper_max_width_m: {a_open:.4f}\n'
             f'    gripper_min_width_m: {a_closed:.4f}\n'
-            '  and combine the closed aperture with the closed width from `pingest '
-            'calibrate-gripper` for '
-            'gripper_offset_m (see the module docstring for which formula).'
+            '  No offset constant to set: gripper_min_width_m is the offset. Cross-check '
+            'against `pingest calibrate-gripper` (closed width + open aperture should land near '
+            'the handheld open_mm).'
         )
         return 0 if ok else 1
 

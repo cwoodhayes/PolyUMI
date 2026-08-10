@@ -168,15 +168,14 @@ class PolicyClientNode(Node):
         # the worst observed publish interval (the topic jitters 24-100ms) so ordinary jitter
         # cannot trip it, and well short of the ~2.3s the buffer can hold. <= 0 disables the check.
         self.declare_parameter('max_gripper_age_s', 0.5)
-        # Subtracted from the policy's width to get jaw aperture; equals -closed aperture, the hand's
-        # aperture with the fingers touching. Measured 2026-08-09 as 0.0 — the policy's width IS
-        # jaw aperture — but kept a parameter because fingers that met tip-to-tip before the
-        # mechanism bottomed out would make it non-zero. MAY BE NEGATIVE, and the validation
-        # deliberately permits that. See gripper_map.
-        self.declare_parameter('gripper_offset_m', 0.0)
         # Measured reachable aperture (`ros2 run polyumi_ros2 gripper_range_probe`), not the Franka
         # Hand's nominal range: max_width is published on no topic, so neither end is readable at
         # runtime. 0.0816 is the hand's own maximum here; the fingers limit neither end.
+        #
+        # gripper_min_width_m doubles as the policy->robot offset — policy width 0 is "fully
+        # closed", which on the arm is this aperture. There is deliberately no separate
+        # gripper_offset_m: it was always exactly -gripper_min_width_m, and two knobs for one
+        # measurement could be set inconsistently. See gripper_map.
         self.declare_parameter('gripper_max_width_m', 0.0816)
         self.declare_parameter('gripper_min_width_m', 0.0)
         # How far back (seconds) the EE-pose TF buffer retains history — must be >= the
@@ -201,7 +200,6 @@ class PolicyClientNode(Node):
         gripper_topic = self.get_parameter('gripper_state_topic').get_parameter_value().string_value
         self._require_gripper_state = self.get_parameter('require_gripper_state').get_parameter_value().bool_value
         self._max_gripper_age_s = self.get_parameter('max_gripper_age_s').get_parameter_value().double_value
-        self._gripper_offset_m = self.get_parameter('gripper_offset_m').get_parameter_value().double_value
         self._gripper_max_width_m = self.get_parameter('gripper_max_width_m').get_parameter_value().double_value
         self._gripper_min_width_m = self.get_parameter('gripper_min_width_m').get_parameter_value().double_value
         self._latency = {
@@ -336,8 +334,8 @@ class PolicyClientNode(Node):
         self.get_logger().info(
             f'gripper — state: {gripper_topic} (missing: {gripper_missing}; '
             f'stale > {max_age}: {gripper_stale}), '
-            f'offset={self._gripper_offset_m}m, '
-            f'aperture range [{self._gripper_min_width_m}, {self._gripper_max_width_m}]m'
+            f'aperture range [{self._gripper_min_width_m}, {self._gripper_max_width_m}]m '
+            f'(the low end doubles as the policy->robot offset)'
         )
 
     def _validate_params(self, control_hz: float) -> None:
@@ -376,9 +374,6 @@ class PolicyClientNode(Node):
         for name, seconds in self._latency.items():
             if seconds < 0:
                 errors.append(f'latency.{name} must be >= 0, got {seconds}')
-        # gripper_offset_m is deliberately unconstrained in sign: it is closed width - closed aperture (or
-        # -closed aperture), a difference of two independently measured quantities, and rejecting
-        # negatives would throw out a correct calibration. See polyumi_ros2.gripper_map.
         if self._gripper_max_width_m <= 0:
             errors.append(f'gripper_max_width_m must be > 0, got {self._gripper_max_width_m}')
         if self._gripper_min_width_m < 0:
@@ -682,7 +677,11 @@ class PolicyClientNode(Node):
                 'No gripper state received yet; substituting closed width for agent_pos[7]. '
                 'Set require_gripper_state:=true to skip these ticks instead.'
             )
-            return robot_to_policy_width(0.0, self._gripper_offset_m)
+            # Fully closed is 0.0 in policy units by definition — the exporter subtracted the
+            # closed width, so the scale starts at "shut". Converting a robot-side 0.0 here would
+            # be wrong for fingers whose closed aperture is non-zero: that aperture is not merely
+            # closed, it is narrower than the hand can physically go.
+            return 0.0
 
         # A topic that stops publishing is invisible to _gripper_width_at — it just keeps holding
         # its newest sample — so the age is checked explicitly, as the camera path does. Skipped
@@ -704,7 +703,7 @@ class PolicyClientNode(Node):
                 f'(limit {self._max_gripper_age_s * 1e3:.0f} ms) — has the gripper topic died? '
                 'Holding the last known width for agent_pos[7].'
             )
-        return robot_to_policy_width(width, self._gripper_offset_m)
+        return robot_to_policy_width(width, self._gripper_min_width_m)
 
     def _n_stale_actions(self, t_obs: rclpy.time.Time) -> int:
         """
@@ -802,10 +801,7 @@ class PolicyClientNode(Node):
         # Log the width in both spaces: policy units are what the model emitted, robot units are
         # what the hand will be commanded. A surprising gap between them is the offset being wrong.
         grip_robot = policy_to_robot_width(
-            float(first[7]),
-            self._gripper_offset_m,
-            self._gripper_max_width_m,
-            self._gripper_min_width_m,
+            float(first[7]), self._gripper_min_width_m, self._gripper_max_width_m
         )
         self.get_logger().info(
             f'action chunk n={len(actions)} (dropped {n_stale}/{n_received} stale, '
@@ -862,10 +858,7 @@ class PolicyClientNode(Node):
             point = JointTrajectoryPoint()
             point.positions = [
                 policy_to_robot_width(
-                    float(action[7]),
-                    self._gripper_offset_m,
-                    self._gripper_max_width_m,
-                    self._gripper_min_width_m,
+                    float(action[7]), self._gripper_min_width_m, self._gripper_max_width_m
                 )
             ]
             point.time_from_start = Duration(seconds=i * self._action_dt).to_msg()

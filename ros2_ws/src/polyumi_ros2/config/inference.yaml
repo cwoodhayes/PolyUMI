@@ -51,16 +51,15 @@
     #                                (ros2 run polyumi_ros2 gripper_range_probe, 3 reps, 0.00 mm
     #                                spread)
     #
-    # gripper_offset_m is -(closed aperture) = 0.0, so the conversion is now the IDENTITY plus
-    # clamping. That is not a coincidence or a placeholder: these fingers meet at the mechanism's
-    # true zero, so "opening from closed" and "jaw aperture" are the same quantity. UMI's WSG is in
-    # the same position, which is why their inference path converts nothing either.
+    # gripper_min_width_m doubles as the policy->robot offset: policy width 0 means fully closed,
+    # and fully closed on the arm is the closed aperture. There is no separate gripper_offset_m —
+    # it was always exactly -gripper_min_width_m, so two knobs held one measurement and could be
+    # set inconsistently. Since the closed aperture is 0.0 here the conversion is the IDENTITY plus
+    # clamping, which is not a placeholder: these fingers meet at the mechanism's true zero, so
+    # "opening from closed" and "jaw aperture" are the same quantity. UMI's WSG is in the same
+    # position, which is why their inference path converts nothing either. Re-derive with the two
+    # commands above after any change to the fingers or tags.
     #
-    # It stays a parameter because fingers whose tips collided before the mechanism bottomed out
-    # would make the closed aperture non-zero, and then this becomes -(closed aperture). A negative
-    # value is legitimate, and the validation permits it. Re-derive with the two commands above
-    # after any change to the fingers or tags.
-    gripper_offset_m: 0.0
     # Measured reachable aperture, not the Franka Hand's nominal 0-0.0817 m — neither end is
     # readable at runtime (franka_gripper publishes max_width on no topic). Here the fingers turn
     # out not to be the limit at either end: they close to true zero, and 0.0816 is the hand's own
