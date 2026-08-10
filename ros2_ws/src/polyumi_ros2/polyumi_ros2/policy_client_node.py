@@ -139,10 +139,11 @@ class PolicyClientNode(Node):
         # default lives in config/inference.yaml (loaded via <param from>); this is the fallback.
         self.declare_parameter('steps_per_inference', 6)
         # Per-component system latencies (seconds), loaded from config/inference.yaml via the
-        # inference launch file. NONE of them have been measured yet — see that file and
-        # "What's left" in docs/franka-inference-bringup.md. gopro and proprio are consumed
-        # by _lookup_agent_pos, arm_exec by _n_stale_actions; finger_cam and piezo_mic are
-        # declared but unused until the policy takes tactile input.
+        # inference launch file; that file documents each value's provenance. Measure them with
+        # `ros2 run polyumi_ros2 latency_probe` (one mode per value) — procedures in
+        # docs/calibration-instructions.md, "Latencies". gopro and proprio are consumed by
+        # _lookup_agent_pos, arm_exec by _n_stale_actions; finger_cam and piezo_mic are declared
+        # but unused until the policy takes tactile input.
         self.declare_parameter('latency.gopro', 0.0)
         self.declare_parameter('latency.finger_cam', 0.0)
         self.declare_parameter('latency.piezo_mic', 0.0)
@@ -151,7 +152,9 @@ class PolicyClientNode(Node):
         # Delay from the hand's true aperture to its measurement appearing on the joint-state
         # topic. Kept separate from latency.proprio because the gripper is a different device on a
         # different link — UMI does the same (gripper_action_latency vs robot_action_latency).
-        # Unmeasured, like the rest; the topic jitters 24-100 ms, so the true value is not 0.
+        # The topic jitters 24-100 ms, so the true value is not 0. Note this is the OBSERVATION
+        # half; latency_probe's gripper mode measures the action half, which fr3_gripper_bridge's
+        # gripper_lead_steps already compensates.
         self.declare_parameter('latency.gripper', 0.0)
         # --- Gripper ---
         # Source for agent_pos[7]. The FR3 publishes each finger at HALF the aperture, so the two

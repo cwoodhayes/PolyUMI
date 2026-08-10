@@ -1,6 +1,7 @@
 **/recordings/
 data/
 *.tmp
+*.npz
 
 # generated files
 pi/polyumi_pi/_version.py

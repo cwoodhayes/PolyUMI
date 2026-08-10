@@ -1,0 +1,403 @@
+"""
+Tests for the latency probe's parameter guards and signal handling.
+
+The estimator itself is covered in test_latency_util; what is left here is everything that decides
+whether the estimator gets fed something meaningful. Those are the quiet failures: a chirp that
+aliases against the command rate, an amplitude the gripper bridge's deadband swallows whole, or a
+QR dedup that biases every offset upward. Each produces a plausible-looking number that then goes
+into a robot config, so each gets a test.
+"""
+
+from unittest.mock import MagicMock
+
+import numpy as np
+import pytest
+import rclpy
+from rclpy.parameter import Parameter
+
+from polyumi_ros2.latency_probe import (
+    CHIRP_BAND_HZ,
+    COMMAND_HZ,
+    MAX_BUFFERED_FRAMES,
+    QR_QUIET_ZONE_MODULES,
+    QR_RENDER_PX,
+    LatencyProbe,
+    decode_qr,
+    first_stamp_per_code,
+    render_qr,
+)
+
+
+@pytest.fixture(scope='module', autouse=True)
+def ros_context():
+    """Init/shutdown rclpy once for the whole module."""
+    rclpy.init()
+    yield
+    rclpy.shutdown()
+
+
+def _probe(**overrides):
+    """Build a probe with logging silenced, so a rejected construction still raises cleanly."""
+    params = [Parameter(k, value=v) for k, v in overrides.items()]
+    node = LatencyProbe(parameter_overrides=params)
+    node.get_logger = MagicMock()
+    return node
+
+
+def test_unknown_mode_is_rejected():
+    """A typo in mode must fail at construction, not silently pick a default measurement."""
+    with pytest.raises(ValueError, match='mode must be one of'):
+        _probe(mode='grippr')
+
+
+def test_chirp_above_the_command_nyquist_is_rejected():
+    """
+    An aliased command sweep is the worst kind of failure: it correlates fine and means nothing.
+
+    We record what we published, so if the published sweep aliases we would be comparing the arm's
+    motion against a signal that was never really commanded.
+    """
+    with pytest.raises(ValueError, match='Nyquist'):
+        _probe(mode='arm', chirp_f1_hz=5.0, command_hz=4.0)
+
+
+def test_mode_defaults_stay_below_their_own_nyquist():
+    """The shipped defaults must satisfy the guard they are checked against."""
+    for mode, (f0, f1) in CHIRP_BAND_HZ.items():
+        assert 0 < f0 < f1 < COMMAND_HZ[mode] / 2, mode
+
+
+def test_gripper_step_must_clear_the_bridge_deadband():
+    """
+    Below fr3_gripper_bridge's 5 mm deadband the step is discarded and the hand never moves.
+
+    The run would then time out waiting for an onset, but only after the hardware slot is spent.
+    """
+    with pytest.raises(ValueError, match='deadband'):
+        _probe(mode='gripper', step_m=0.004)
+
+
+def test_gripper_step_cannot_be_centred_where_it_would_command_past_shut():
+    """Stepping past fully closed means the hand stops on its stop, not where it was told."""
+    with pytest.raises(ValueError, match='past shut'):
+        _probe(mode='gripper', step_m=0.05, center_width_m=0.02)
+
+
+def test_gripper_onset_threshold_must_sit_between_noise_and_the_step():
+    """A threshold at or above half the step fires late; at zero it fires on nothing."""
+    with pytest.raises(ValueError, match='onset_threshold_m'):
+        _probe(mode='gripper', step_m=0.03, onset_threshold_m=0.02)
+
+
+def test_chirp_sweeps_from_f0_to_f1_over_the_run():
+    """
+    The excitation must actually broaden, since bandwidth is what sharpens the correlation peak.
+
+    Checked via zero crossings per half: a linear sweep puts more of them in the second half.
+    """
+    probe = _probe(mode='arm', duration_s=20.0)
+    t = np.arange(0.0, 20.0, 0.001)
+    x = np.asarray(probe._chirp(t))
+    crossings = np.flatnonzero(np.diff(np.sign(x)))
+    first_half = np.count_nonzero(crossings < len(t) / 2)
+    assert first_half < (len(crossings) - first_half)
+    assert np.abs(x).max() == pytest.approx(1.0, abs=0.01)
+    probe.destroy_node()
+
+
+def test_chirp_is_clamped_outside_the_run_window():
+    """
+    Past duration_s the sweep must hold, not keep accelerating.
+
+    The publish loop is wall-clock driven, so the last iteration can land just past the end; an
+    unclamped chirp would extrapolate to a frequency the plant cannot follow and inject a
+    discontinuity right at the end of the record.
+    """
+    probe = _probe(mode='arm', duration_s=10.0)
+    assert probe._chirp(10.5) == pytest.approx(probe._chirp(10.0))
+    probe.destroy_node()
+
+
+def test_gripper_state_is_summed_across_both_fingers():
+    """Each FR3 finger reports half the aperture; the probe must record the full opening."""
+    from sensor_msgs.msg import JointState
+
+    probe = _probe(mode='gripper')
+    msg = JointState()
+    msg.header.stamp.sec = 7
+    msg.header.stamp.nanosec = 500_000_000
+    msg.position = [0.02, 0.021]
+    probe._on_gripper_state(msg)
+    assert probe._actual == [(pytest.approx(7.5), pytest.approx(0.041))]
+    probe.destroy_node()
+
+
+def test_short_gripper_state_messages_are_ignored():
+    """A malformed state message must not enter the series as a bogus aperture."""
+    from sensor_msgs.msg import JointState
+
+    probe = _probe(mode='gripper')
+    msg = JointState()
+    msg.position = [0.02]
+    probe._on_gripper_state(msg)
+    assert probe._actual == []
+    probe.destroy_node()
+
+
+def test_gripper_onset_is_keyed_on_the_sample_stamp_not_the_polling_loop():
+    """
+    The onset must be the moment the hand moved, not the moment this process noticed.
+
+    Polling is deliberately faster than the 23 Hz state topic, so binding the answer to poll time
+    would add a random fraction of a sample period to every rep.
+    """
+    probe = _probe(mode='gripper', onset_threshold_m=0.001)
+    probe._actual = [
+        (10.0, 0.040),  # before the command; must be ignored even though it is far from rest
+        (10.5, 0.0402),  # after the command but inside the threshold
+        (10.6, 0.0455),  # first real motion
+        (10.7, 0.050),
+    ]
+    assert probe._wait_for_onset(rest=0.040, t_command=10.2) == pytest.approx(10.6)
+    probe.destroy_node()
+
+
+def test_gripper_step_report_rejects_a_threshold_the_noise_reaches(tmp_path):
+    """
+    An onset threshold inside the encoder's own jitter triggers on nothing and reports ~0 ms.
+
+    That is the failure that would silently zero gripper_lead_steps, so it must refuse to print a
+    paste-able line rather than produce a confident small number.
+    """
+    probe = _probe(mode='gripper', onset_threshold_m=0.001, output_npz=str(tmp_path / 'g.npz'))
+    lags = [('open', 0.3), ('close', 0.32), ('open', 0.28)]
+    assert probe._report_gripper_steps(lags, worst_noise_m=0.0012) == 1
+    assert probe._report_gripper_steps(lags, worst_noise_m=0.0001) == 0
+    probe.destroy_node()
+
+
+def test_gripper_lead_steps_subtracts_the_arm_latency(tmp_path, capsys):
+    """
+    The knob supplies the DIFFERENCE between the two delays, not the hand's delay.
+
+    policy_client_node truncates the chunk with _n_stale_actions before publishing, and the gripper
+    half rides that same already-advanced list — so the chunk the bridge indexes into already leads
+    by latency.arm_exec. Converting the raw measurement straight into steps double-compensates. On
+    hardware that was the difference between 5 steps and 0: 514 ms measured against a 702 ms arm.
+    """
+    lags = [('open', 0.5), ('close', 0.54), ('open', 0.51)]  # median 0.51
+    probe = _probe(mode='gripper', action_dt=0.1, arm_exec_s=0.1, output_npz=str(tmp_path / 'a.npz'))
+    probe._report_gripper_steps(lags, 0.0001)
+    assert 'gripper_lead_steps: 4' in capsys.readouterr().out
+    probe.destroy_node()
+
+
+def test_gripper_lead_steps_floors_at_zero_and_says_so(tmp_path, capsys):
+    """
+    A hand faster than the arm needs negative lead, which the knob cannot express.
+
+    Reporting a bare 0 would hide that the hand still acts early; the residual has to be stated,
+    because the only way to close it is to shrink latency.arm_exec.
+    """
+    lags = [('open', 0.5), ('close', 0.54), ('open', 0.51)]
+    probe = _probe(mode='gripper', action_dt=0.1, arm_exec_s=0.7, output_npz=str(tmp_path / 'b.npz'))
+    probe._report_gripper_steps(lags, 0.0001)
+    out = capsys.readouterr().out
+    assert 'gripper_lead_steps: 0' in out
+    # The residual (702 - 514 on hardware; 700 - 510 here) must be quantified, not just implied.
+    assert '190 ms' in out
+    assert '1.9 action steps' in out
+    probe.destroy_node()
+
+
+def test_gripper_report_refuses_a_step_count_without_the_arm_latency(tmp_path, capsys):
+    """Left unset, the subtraction cannot be done, so no paste-able line may be printed."""
+    probe = _probe(mode='gripper', action_dt=0.1, output_npz=str(tmp_path / 'c.npz'))
+    probe._report_gripper_steps([('open', 0.5), ('close', 0.54), ('open', 0.51)], 0.0001)
+    out = capsys.readouterr().out
+    assert 'arm_exec_s NOT SET' in out
+    assert 'gripper_lead_steps:' not in out
+    probe.destroy_node()
+
+
+def _filmed(qr, blur=0, perspective=0, scale=1.0):
+    """Paste a rendered QR into a 1080p frame and degrade it the way filming a screen would."""
+    import cv2
+
+    size = int(qr.shape[0] * scale)
+    frame = np.full((1080, 1920), 240, np.uint8)
+    y, x = (1080 - size) // 2, (1920 - size) // 2
+    frame[y:y + size, x:x + size] = cv2.resize(qr, (size, size))
+    if perspective:
+        p = perspective
+        matrix = cv2.getPerspectiveTransform(
+            np.float32([[0, 0], [1920, 0], [1920, 1080], [0, 1080]]),
+            np.float32([[p, p * 0.5], [1920 - p, 0], [1920, 1080 - p], [p * 0.3, 1080]]),
+        )
+        frame = cv2.warpPerspective(frame, matrix, (1920, 1080), borderValue=240)
+    if blur:
+        frame = cv2.GaussianBlur(frame, (blur | 1, blur | 1), 0)
+    return frame
+
+
+@pytest.mark.parametrize(
+    'label,kwargs',
+    [
+        ('head on', {}),
+        ('soft focus', {'blur': 11}),
+        ('off axis', {'perspective': 60}),
+        ('off axis, soft focus', {'perspective': 40, 'blur': 5}),
+        ('screen fills less of the frame', {'scale': 0.45}),
+    ],
+)
+def test_qr_survives_being_filmed(label, kwargs):
+    """
+    Render and read a code back under the conditions a handheld GoPro actually produces.
+
+    This is the only part of mode:=camera testable without hardware, and it earns its place: the
+    decoder upstream UMI uses (``detectAndDecodeCurved``) reads *none* of these on OpenCV 4.6,
+    including the head-on case. Ported verbatim it would have returned zero codes on the rig and
+    looked like bad aim. Guard the substitution so nobody swaps it back.
+    """
+    import cv2
+
+    payload = '1754800000.123456'
+    frame = _filmed(render_qr(cv2.QRCodeEncoder.create(), payload), **kwargs)
+    assert decode_qr(cv2.QRCodeDetector(), frame) == payload, label
+
+
+def test_decode_returns_empty_for_a_frame_with_no_code():
+    """Most frames of a run show no code; that must be an empty string, not an exception."""
+    import cv2
+
+    blank = np.full((1080, 1920), 200, np.uint8)
+    assert decode_qr(cv2.QRCodeDetector(), blank) == ''
+
+
+def test_rendered_qr_carries_a_quiet_zone():
+    """
+    Without the 4-module border no decoder finds the finder patterns; cv2's encoder omits it.
+
+    Checked structurally rather than via a decode, so a failure says which of the two things broke.
+    """
+    import cv2
+
+    qr = render_qr(cv2.QRCodeEncoder.create(), '1.0')
+    border = max(1, round(QR_QUIET_ZONE_MODULES * QR_RENDER_PX / qr.shape[0]))
+    assert (qr[:border, :] == 255).all()
+    assert (qr[:, :border] == 255).all()
+
+
+def test_camera_pipeline_recovers_a_known_latency_end_to_end(tmp_path):
+    """
+    Feed the camera reporting path frames whose true lag is known, and check the number comes back.
+
+    This is the closest thing to a hardware test for the most load-bearing constant in the system:
+    QR render -> filmed degradation -> decode -> dedup -> render-overhead subtraction -> mean. Each
+    stage is individually plausible and wrong end-to-end is exactly the failure that would ship a
+    bad latency.gopro. Ground truth is free here, so there is no excuse not to check it.
+    """
+    import cv2
+
+    true_lag, render_overhead = 0.150, 0.010
+    encoder = cv2.QRCodeEncoder.create()
+    probe = _probe(mode='camera', output_npz=str(tmp_path / 'cam.npz'), plot=False)
+    # 20 Hz of codes, each filmed by three 60 fps frames; only the first of the three is a
+    # measurement, so a broken dedup shows up as a latency biased by ~half a QR period.
+    for i in range(15):
+        qr_time = 1_754_800_000.0 + i / 20.0
+        frame = _filmed(render_qr(encoder, f'{qr_time:.6f}'), blur=3, scale=0.8)
+        for repeat in range(3):
+            stamp = qr_time + true_lag + repeat / 60.0
+            probe._frames.append((stamp, stamp + 0.2, frame))
+
+    assert probe._report_camera(render_overhead) == 0
+    saved = np.load(tmp_path / 'cam.npz')
+    assert float(saved['latency_s']) == pytest.approx(true_lag - render_overhead, abs=0.002)
+    probe.destroy_node()
+
+
+def test_camera_reports_failure_when_too_few_codes_decode():
+    """A blurred or badly aimed run must refuse to produce a number rather than average three."""
+    probe = _probe(mode='camera', plot=False)
+    blank = np.full((480, 640), 200, np.uint8)
+    for i in range(10):
+        probe._frames.append((float(i), float(i) + 0.2, blank))
+    assert probe._report_camera(0.01) == 1
+    probe.destroy_node()
+
+
+def test_camera_buffer_stops_accepting_frames_once_full():
+    """
+    The cap bounds RAM, and the display loop reads it to stop rather than discard silently.
+
+    At 60 fps the cap is reached in a few seconds, well before the default duration_s — so without
+    the early stop the probe would keep showing codes that no frame in the record ever saw.
+    """
+    from sensor_msgs.msg import Image
+
+    probe = _probe(mode='camera')
+    msg = Image()
+    msg.height, msg.width, msg.encoding = 4, 4, 'rgb8'
+    msg.data = bytes(4 * 4 * 3)
+    assert not probe.frames_full()
+    for _ in range(MAX_BUFFERED_FRAMES + 10):
+        probe._on_image(msg)
+    assert probe.frames_full()
+    assert len(probe._frames) == MAX_BUFFERED_FRAMES
+    probe.destroy_node()
+
+
+def test_camera_rejects_encodings_it_cannot_index():
+    """Same contract as policy_client_node: reshaping a non-3-channel buffer as one would crash."""
+    from sensor_msgs.msg import Image
+
+    probe = _probe(mode='camera')
+    msg = Image()
+    msg.height, msg.width, msg.encoding = 4, 4, 'yuv422_yuy2'
+    msg.data = bytes(4 * 4 * 2)
+    probe._on_image(msg)
+    assert probe._frames == []
+    probe.destroy_node()
+
+
+def test_qr_dedup_keeps_the_earliest_frame_that_saw_each_code():
+    """
+    A code shown at 20 Hz is filmed by several 60 fps frames; only the first is a measurement.
+
+    Averaging all of them would bias every offset upward by roughly half a QR period — 25 ms at
+    20 Hz, the same order as the difference between UMI's 0.125 and 0.17.
+    """
+    decoded = [(1.000, '100.0'), (1.017, '100.0'), (1.033, '100.0'), (1.050, '100.05')]
+    assert first_stamp_per_code(decoded) == {100.0: 1.000, 100.05: 1.050}
+
+
+def test_qr_dedup_ignores_frames_that_decoded_to_nothing_or_to_junk():
+    """Most frames decode to an empty string; a garbled one must not become a float() crash."""
+    assert first_stamp_per_code([(1.0, ''), (1.1, 'not-a-time'), (1.2, '5.0')]) == {5.0: 1.2}
+
+
+def test_tf_sampler_drops_repeated_stamps():
+    """
+    TF is polled faster than the arm publishes, so most polls return the same transform again.
+
+    Letting duplicates through would pile many grid samples onto one instant and skew the
+    resampling toward whatever the arm was doing then.
+    """
+    probe = _probe(mode='arm')
+    tf = MagicMock()
+    tf.header.stamp.sec = 3
+    tf.header.stamp.nanosec = 0
+    tf.transform.translation.x = 0.1
+    tf.transform.translation.y = 0.2
+    tf.transform.translation.z = 0.3
+    probe._tf_buffer = MagicMock(lookup_transform=MagicMock(return_value=tf))
+
+    probe._sample_tcp(1)
+    probe._sample_tcp(1)
+    assert probe._actual == [(3.0, pytest.approx(0.2))]
+
+    tf.header.stamp.nanosec = 10_000_000
+    probe._sample_tcp(1)
+    assert len(probe._actual) == 2
+    probe.destroy_node()
