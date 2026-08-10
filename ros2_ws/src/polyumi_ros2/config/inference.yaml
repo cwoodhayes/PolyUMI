@@ -11,6 +11,21 @@
     # per-tick POST/publish storm. 1 = infer every tick. Should be <= n_action_steps.
     steps_per_inference: 6
 
+    # How many action steps to request per inference. The chunk has to span the WHOLE
+    # observation->motion budget or every action in it is already in the past by the time the arm
+    # can act, _n_stale_actions drops all of them, and nothing is published at all:
+    #
+    #   obs age at response ~0.59s (0.28 capture+convert, 0.30 inference) + arm_exec 0.70s = 1.3s
+    #
+    # against a span of n_action_steps * action_dt. At 8 that is 0.8s and the arm never moves —
+    # observed on hardware 2026-08-10, "Whole action chunk stale for both devices" every tick.
+    # 16 gives 1.6s, which clears it with ~3 waypoints to spare.
+    #
+    # 16 is also the model's own action_horizon (the fork's config/task/polyumi.yaml), and
+    # serve_policy returns min(requested, what the model has) — so this cannot over-read, and
+    # raising it further buys nothing. Lower it only for a checkpoint with a shorter horizon.
+    n_action_steps: 16
+
     # --- Per-component latencies, in seconds. ---
     # Measured with `ros2 run polyumi_ros2 latency_probe`, one mode per value. Procedures and what
     # each number does and does not cover: docs/calibration-instructions.md, "Latencies".
@@ -54,9 +69,9 @@
       proprio: 0.001
       # Delay from publishing a target pose to the arm actually starting to move.
       #
-      # Calibrated on 08-10-2026 with max_velocity_scaling = 0.8
+      # Calibrated on 08-10-2026 with max_velocity_scaling = 1.0
       # unacceptably slow; must migrate to streaming controller.
-      arm_exec: 0.702
+      arm_exec: 0.620
 
       # Delay from publishing a width to the fingers actually starting to move — the gripper's
       # counterpart to arm_exec. Each device's chunk is truncated by its OWN value, so the hand

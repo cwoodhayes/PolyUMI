@@ -126,7 +126,9 @@ class PolicyClientNode(Node):
         # multi-waypoint Cartesian path. UMI/DP-style receding-horizon control: 1 would mean
         # a discrete hop every control tick, which the arm can't track in real time — the
         # bridge's skip-while-busy would drop almost every tick. A full chunk lets move_group
-        # plan one smooth path instead. Must be <= the model's n_action_steps (dummy: 8).
+        # plan one smooth path instead. The real default lives in config/inference.yaml, which
+        # explains why the chunk has to span the whole observation->motion budget; this fallback
+        # matches dummy_server's horizon, since that is what runs without the config loaded.
         self.declare_parameter('n_action_steps', 8)
         # Receding-horizon stride: run inference once per this many control ticks, not every
         # tick. The obs window still updates every tick (so it stays dt-spaced), but a new
