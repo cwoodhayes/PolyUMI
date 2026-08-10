@@ -21,7 +21,7 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
 | Pose body frame (training ↔ inference) | **done, verified on hardware** — `polyumi_tcp` plumbed end to end, measured from CAD (`nuc/tcp_calib.py`), and confirmed by `tcp_pivot_test`: pivoting about the TCP holds the closed fingertips still |
 | Gripper — observation | **done** — Phase 2.5: `/fr3_gripper/joint_states` → `agent_pos[7]` |
 | Gripper — command | **done** — Phase 2.5: `action[7]` → `/polyumi/target_gripper` → NUC `fr3_gripper_bridge` |
-| Gripper width calibration | **done, measured on hardware 2026-08-09** — closed width 0.04456 m, closed aperture 0.0 m, open aperture 0.0816 m; offset is 0.0, i.e. policy width **is** jaw aperture |
+| Gripper width calibration | **done, measured on hardware 2026-08-09** — closed width 0.04456 m, closed aperture 0.0 m, open aperture 0.0816 m. The closed aperture doubles as the policy→robot offset, so with it at 0.0 the policy's width **is** jaw aperture |
 | DP export | **exists** for pose+image+gripper; no tactile; wrong schema for UMI; untested |
 | Real inference server | **in progress** — Phase 3: `serve_policy.py` verified standalone on sheep; client dry-run wiring done + unit-tested (image 224, viz preview, `/reset`); on-arm dry-run pending hardware |
 
@@ -81,8 +81,10 @@ structural: it's two unmeasured constants, three unwired signals, and the traini
    0.04456 m from `pingest calibrate-gripper`, a **closed aperture** of 0.0 and an **open
    aperture** of 0.0816 m from
    `ros2 run polyumi_ros2 gripper_range_probe`. Since the fingers close to the mechanism's true
-   zero, `gripper_offset_m` is **0.0** — the policy's width is jaw aperture directly, the same
-   place UMI's WSG ends up. What remains is only `latency.gripper`. See Phase 2.5.
+   zero the closed aperture is 0.0, and as it doubles as the policy→robot offset the policy's width
+   is jaw aperture directly — the same place UMI's WSG ends up. (There was briefly a separate
+   `gripper_offset_m`; it was removed once it became clear it was always exactly the negated closed
+   aperture.) What remains is only `latency.gripper`. See Phase 2.5.
 
 5. **The DP exporter needs a rework, and has no tests at all.** Deliberately deferred to one
    chunk of work rather than patched piecemeal, since the UMI migration rewrites this file
@@ -193,16 +195,19 @@ without remapping.
   - `agent_pos`: `[n_obs_steps, 8]` — `[x, y, z, qx, qy, qz, qw, gripper_width]` in robot base
     frame (absolute).
 
-> **`gripper_width` on this wire is raw ArUco tag separation, not jaw aperture.** Both
-> `agent_pos[7]` and `action[7]` are in the units the *training data* uses — the x-separation of
-> the two finger tags as measured by ingest step 4 (`annotations/gripper_width/width_m`), which
-> reads ~0.005 m with the handheld gripper fully closed, not 0. The conversion to real jaw width
-> is a constant subtraction (`gripper_offset_m`) applied **client-side** by `policy_client_node`,
-> so the server never sees robot units. This mirrors UMI's calibration
-> (`get_gripper_calibration_interpolator` = `aruco_actual_width - aruco_min_width`, slope 1) — the
-> difference being that UMI applies it at dataset-generation time, so its stored data is already
-> jaw width and its inference path does no conversion at all. Moving ours into ingest is deferred
-> to the exporter rework (blocker 4).
+> **`gripper_width` on this wire is metres of opening from fully closed, not raw tag separation.**
+> Both `agent_pos[7]` and `action[7]` are in the units the *training data* uses, and since 2026-08
+> that means opening-from-closed: the DP exporter subtracts `gripper_calib.yaml`'s `closed_mm` from
+> ingest step 4's ArUco tag separation, so a shut handheld gripper reads 0 rather than ~0.045 m.
+> This now matches UMI exactly — they apply the same subtraction at dataset-generation time
+> (`get_gripper_calibration_interpolator` = `aruco_actual_width - aruco_min_width`, slope 1), which
+> is why their inference path converts nothing.
+>
+> The arm-side conversion is correspondingly small: `policy_client_node` adds the FR3's **closed
+> aperture** (`gripper_min_width_m`) back on and clamps to the reachable range, so the server never
+> sees robot units. With the current fingers that aperture is 0.0, making the conversion the
+> identity plus clamping. Checkpoints exported before 2026-08 speak raw tag separation and are no
+> longer supported.
 
 **Coordinate convention (UMI):**
 - **Observations** (`agent_pos`) are sent as **absolute** EEF coordinates in robot base frame.
@@ -333,10 +338,12 @@ print(json.dumps({
    cached transforms; `buffers.ee_pose_s` sizes its `cache_time` so the lookup stays in range.
 3. Assemble `agent_pos = [x, y, z, qx, qy, qz, qw, gripper_width]`.
 4. Append `(image, agent_pos)` to `deque(maxlen=n_obs_steps)`; if not yet full, skip (warn at 1 Hz).
-5. Resize to `(image_height, image_width)` with `cv2.INTER_AREA`, normalize to [0, 1] float32,
-   base64 the raw bytes. The resize (RGB, 224×224, INTER_AREA, no crop) is the shared
-   **camera0_rgb preprocessing contract** — it must match the DP exporter exactly or the policy
-   sees skewed pixels. See `polyumi_ros2/camera_preproc.py` and data-format.md.
+5. Centre-crop the HDMI pillarbox to 4:3, resize to `(image_height, image_width)` with
+   `cv2.INTER_AREA`, normalize to [0, 1] float32, base64 the raw bytes. Crop-then-resize (RGB,
+   1920×1080 → 1440×1080 → 224×224, INTER_AREA) is the shared **camera0_rgb preprocessing
+   contract** — it must match the DP exporter exactly or the policy sees skewed pixels. Both
+   sides pin the same output digests; see `polyumi_ros2/camera_preproc.py`,
+   `ingest/test/camera0_rgb_golden.py`, and data-format.md.
 6. POST to `/predict_cartesian/` with `n_obs_steps` and `n_action_steps` (8).
 7. On success: drop leading actions already elapsed by execution time (`_n_stale_actions`
    measures `now() - t_obs` and adds `latency.arm_exec`), then log / publish the remainder.
@@ -365,14 +372,14 @@ pose with a stale image against a model trained on same-instant pairs.
 | `image_width` | `224` | Resize width (matches `shape_meta image: [3, 224, 224]`); INTER_AREA per the camera0_rgb contract |
 | `image_height` | `224` | Resize height |
 | `base_frame` | `fr3_link0` | TF base frame for the EEF lookup |
-| `eef_frame` | `polyumi_tcp` | TF EEF/tool frame — the policy's fingertip frame, defined in `nuc/tcp_calib.py` and published by the NUC's `fr3_bringup.launch.py`. Its translation is still provisional, see Status blocker 1 |
+| `eef_frame` | `polyumi_tcp` | TF EEF/tool frame — the policy's fingertip frame, defined in `nuc/tcp_calib.py` and published by the NUC's `fr3_bringup.launch.py`. Translation is a CAD read, verified on hardware by `tcp_pivot_test` (Status blocker 1) |
 | `execute_motion` | `false` | Off by default: the arm does not move until explicitly enabled |
 | `gripper_state_topic` | `/fr3_gripper/joint_states` | Gripper joint-state source for `agent_pos[7]` |
 | `require_gripper_state` | `false` | If true, skip the tick when no gripper state is available — never arrived, or gone stale. Default false so `motion_only` / no-hand setups still run: missing → closed width, stale → hold the last width, both with a throttled warning |
 | `max_gripper_age_s` | `0.5` | Age limit on the newest gripper sample. The gripper is the only observation channel that can freeze *silently* (a dead camera trips `max_image_age_s`, dead TF raises `ExtrapolationException`, but the width buffer just holds its last sample), so the age is checked explicitly. ~5x the worst observed publish interval; `<= 0` disables. Not applied under `tf_use_latest`, whose whole premise is skewed stamps |
-| `gripper_offset_m` | `0.005` | ArUco tag separation → jaw aperture offset. **Never measured** — see Phase 2.5 |
-| `gripper_max_width_m` | `0.08` | Commanded widths clamp here; the FR3 hand reads ~0.0817 open |
-| `latency.gopro` | `0.0` | Camera capture→stamp delay. **Placeholder**, see Status blocker 2 |
+| `gripper_min_width_m` | `0.0` | The FR3's **closed aperture**, measured by `gripper_range_probe`. Doubles as the policy→robot offset, since policy width 0 is "shut" and shut on the arm is this aperture; also the low clamp. There is deliberately no separate `gripper_offset_m` — it was always exactly the negation of this, so one measurement sat behind two knobs |
+| `gripper_max_width_m` | `0.0816` | The FR3's **open aperture**, measured. Commanded widths clamp here; the handheld opens ~6 mm wider, so the top of the policy's range saturates |
+| `latency.gopro` | `0.0` | Camera capture→stamp delay. **Placeholder**, see Status blocker 3 |
 | `latency.finger_cam` | `0.0` | Declared, **never consumed** |
 | `latency.piezo_mic` | `0.0` | Declared, **never consumed** |
 | `latency.proprio` | `0.0` | EEF-pose measurement delay |
@@ -466,7 +473,7 @@ What changed vs. the original plan, and why:
 
 ## Phase 2.5 — Gripper control
 
-Closes Status blocker 3 and open question 7. Width flows both directions; the arm path is
+Closes Status blocker 4 and open question 7. Width flows both directions; the arm path is
 untouched.
 
 ### The Franka Hand cannot be servoed — this is a hardware ceiling, not an API gap
@@ -507,8 +514,9 @@ Three measured quantities, named the same way everywhere in the codebase:
 | **closed aperture** | the *FR3's* jaw aperture in that same physical configuration | `config/inference.yaml` → `gripper_min_width_m` |
 | **open aperture** | the FR3's jaw aperture at full open | `config/inference.yaml` → `gripper_max_width_m` |
 
-`agent_pos[7]` / `action[7]` carry raw ArUco tag separation (see the API contract note). The
-conversion to jaw aperture is a constant subtraction, matching UMI. **The file names in the rest of
+`agent_pos[7]` / `action[7]` carry metres of opening from fully closed (see the API contract
+note). The conversion to jaw aperture is a constant addition of the closed aperture, matching
+UMI's zero-point alignment. **The file names in the rest of
 this paragraph are upstream `universal_manipulation_interface`'s, not ours:**
 `get_gripper_calibration_interpolator` (`umi/common/interpolation_util.py:36-51`) computes
 `aruco_actual_width - aruco_min_width`, and `scripts_slam_pipeline/06_generate_dataset_plan.py:136-139`
@@ -523,19 +531,24 @@ rather than going negative — the closed width is a percentile, so ~1% of detec
 construction. UMI clamps here too, invisibly: its `get_gripper_calibration_interpolator` builds an
 `interp1d` over `[min_width, max_width]` with `fill_value=(x[0], x[-1])`, so anything below the
 calibrated minimum saturates to 0. (We do not clamp the top end as UMI does; a demo opening wider
-than the calibration recording is information, not error.) `agent_pos[7]` therefore carries raw
-tag separation only for checkpoints exported before 2026-08.
+than the calibration recording is information, not error.) Only checkpoints exported before 2026-08
+carry raw tag separation, and those are no longer supported.
+
+That leaves the arm side needing exactly one number: the **closed aperture**, since policy width 0
+means "shut" and shut on the arm is that aperture. It is therefore both the offset and the low
+clamp, and `gripper_min_width_m` is the only place it is configured. A separate `gripper_offset_m`
+existed briefly and was removed: it was always precisely the negation of this value, so one
+measurement sat behind two knobs of opposite sign — and setting only one was wrong by that amount
+across the whole range while still reading correctly at the closed end, where the clamp hid it.
 
 Where we *could* differ from UMI, and happen not to: a WSG homes to a true zero aperture, and
 fingers that collided tip-to-tip before the mechanism bottomed out would leave the FR3 reporting a
 non-zero aperture when shut. "Fingers touching fingers" is the same physical configuration on both
-rigs, so the offset is `closed_width - closed_aperture` (or just `-closed_aperture` post-change)
-rather than simply the closed width, and it can come out **negative** — the parameter validation
-permits that deliberately.
+rigs, which is what makes the two independent measurements subtractable at all.
 **Measured 2026-08-09, the closed aperture is 0.0**: the current fingers meet exactly at the mechanism's
-zero, so the offset is 0 and we land in the same place as UMI after all. Re-measure with
-`pingest calibrate-gripper` and `ros2 run polyumi_ros2 gripper_range_probe` after any finger
-change.
+zero, so the conversion is the identity plus clamping and we land in the same place as UMI after
+all. Re-measure with `pingest calibrate-gripper` and
+`ros2 run polyumi_ros2 gripper_range_probe` after any finger change.
 
 Note this aligns the zero point, not the stroke: the handheld gripper may open wider than the
 hand's ~0.0817 m, and commands past `gripper_max_width_m` clamp — showing up as saturation rather
@@ -563,7 +576,7 @@ while an arm chunk executes, i.e. during manipulation.
 `Move` is the default action; `Grasp` (force-controlled, the only one that actually *holds* an
 object) is opt-in via `use_grasp_below_m`, shipped disabled so bringup is pure motion.
 
-- [x] `gripper_map.py` + tests (offset conversion, clamping)
+- [x] `gripper_map.py` + tests (closed-aperture conversion, clamping)
 - [x] `policy_client_node`: `/fr3_gripper/joint_states` → `agent_pos[7]`, time-interpolated
 - [x] `policy_client_node`: `action[7]` → `/polyumi/target_gripper` (+ `_preview`)
 - [x] `nuc/fr3_gripper_bridge.py`: deadbanded, rate-limited `Move`/`Grasp` commander
@@ -572,7 +585,7 @@ object) is opt-in via `use_grasp_below_m`, shipped disabled so bringup is pure m
       laptop, echoed on the NUC — all fields byte-for-byte; see crb-fr3-inference.md)
 - [ ] on-arm dry run (`fr3_gripper_bridge` with `execute:=false`)
 - [ ] on-arm execution (`execute:=true`, arm bridge plan-only)
-- [x] tooling to measure `gripper_offset_m` (PolyUMI equivalent of `calibrate_gripper_range.py`):
+- [x] tooling to measure the width constants (PolyUMI equivalent of `calibrate_gripper_range.py`):
       `pingest calibrate-gripper` for the closed width, `ros2 run polyumi_ros2 gripper_range_probe`
       for both apertures
 - [x] both run on hardware 2026-08-09; numbers in `inference.yaml` / `gripper_calib.yaml`
@@ -822,8 +835,8 @@ Franka package set present: `franka_bringup`, `franka_description`, `franka_fr3_
 | 4 | Gripper width topic on Franka? | **Resolved:** `/fr3_gripper/joint_states`; actions `/fr3_gripper/{grasp,move,gripper_action,homing}`. |
 | 5 | Subprocess vs direct import for Phase 3 | **Resolved — direct import (subprocess retired).** The original answer was subprocess, but the training work produced a single Docker image whose `umi` env has both `diffusion_policy`/torch and fastapi/uvicorn, so `serve_policy.py` direct-imports the policy and the container is the isolation boundary. See Phase 3. |
 | 6 | Which physical point is the canonical `hand` frame, and what publishes it on the FR3? | **Resolved (plumbing) / open (number).** The point is the closed-fingertip midpoint in optical axes, defined by `T_gopro_to_fingertip`. On the FR3 it is `polyumi_tcp`, a fixed child of `fr3_hand` whose transform lives in `nuc/tcp_calib.py` and reaches both consumers from there: TF via a `static_transform_publisher` in `fr3_bringup.launch.py` (for `eef_frame`) and move_group's RobotModel via `nuc/description/fr3_polyumi.urdf.xacro` (for the bridge's `link_name`). Note `franka_msgs/SetTCPFrame` → `robot.setEE()` is *not* the lever — it only changes libfranka's `O_T_EE` reporting, while TF and MoveIt are driven by the URDF. What remains is the CAD measurement of the translation. |
-| 7 | How do gripper width (obs) and gripper command (action) get wired? | **Resolved — Phase 2.5.** Obs: `policy_client_node` subscribes `/fr3_gripper/joint_states` (aperture = `position[0]+position[1]`), interpolates to the frame's capture instant, offsets into policy units → `agent_pos[7]`. Action: a **parallel** `trajectory_msgs/JointTrajectory` on `/polyumi/target_gripper` (chosen over changing `PoseArray`'s type because it carries per-point timing and crosses the rmw gap), consumed by a **separate** NUC node `fr3_gripper_bridge` that deadbands + rate-limits into `Move`/`Grasp` goals. What's left is calibrating `gripper_offset_m`, not wiring. |
+| 7 | How do gripper width (obs) and gripper command (action) get wired? | **Resolved — Phase 2.5.** Obs: `policy_client_node` subscribes `/fr3_gripper/joint_states` (aperture = `position[0]+position[1]`), interpolates to the frame's capture instant, offsets into policy units → `agent_pos[7]`. Action: a **parallel** `trajectory_msgs/JointTrajectory` on `/polyumi/target_gripper` (chosen over changing `PoseArray`'s type because it carries per-point timing and crosses the rmw gap), consumed by a **separate** NUC node `fr3_gripper_bridge` that deadbands + rate-limits into `Move`/`Grasp` goals. Calibration is done too, as of 2026-08-09 — see Phase 2.5. |
 | 8 | Do finger cam / piezo feed the policy, and at what latency? | **Open.** Params exist and are unconsumed. If they become obs, the capture instant becomes the *oldest* across streams (an observation is only as fresh as its slowest signal), and they must also be added to the DP export, which carries none of them today. (`latency.gripper` is now consumed — it is not in this category.) |
-| 9 | What is `latency.gopro` actually? | **Open — needs measurement, not a guess.** See Status blocker 2. |
+| 9 | What is `latency.gopro` actually? | **Open — needs measurement, not a guess.** See Status blocker 3. |
 | 10 | How is the arm driven for smooth latency-tolerant control? | **Decided (Phase 4), not built.** Plan-then-execute (`fr3_moveit_bridge`) is the wrong model. Move to a UMI-style 1 kHz streaming Cartesian-pose `ros2_control` controller around a `PoseTrajectoryInterpolator`, using `franka_hardware`'s native `cartesian_pose` command interface (confirmed present, 1 kHz). See Phase 4. |
 | 11 | Message type for the action chunk laptop→NUC? | **Proposed (Phase 4):** `trajectory_msgs/MultiDOFJointTrajectory` (per-point transform + `time_from_start`, header stamp = `t_obs`), replacing `PoseArray` so absolute per-waypoint timing crosses. **Encouraging evidence:** Phase 2.5's `trajectory_msgs/JointTrajectory` was verified crossing the rmw-major gap intact (joint names, per-point positions and `time_from_start` all byte-for-byte), so the `trajectory_msgs` family and per-point timing are not themselves a problem. `MultiDOFJointTrajectory` is nested deeper (each point holds arrays of `Transform`/`Twist`), so it still warrants its own check. |
