@@ -153,7 +153,7 @@ through the `is_new` filter instead.
 |---|---|
 | `latency.gopro` | **measure** — `latency_probe -p mode:=camera` |
 | `latency.arm_exec` | **measure** — `latency_probe -p mode:=arm` |
-| `gripper_lead_steps` (in `fr3_gripper_bridge`) | **measure** — `latency_probe -p mode:=gripper` |
+| `latency.gripper_exec` | **measure** — `latency_probe -p mode:=gripper` |
 | `latency.gripper` | printed by the gripper run; half the joint-state publish interval |
 | `latency.proprio` | adopted constant, ~0.001 — see below |
 | round trip | nothing to do; measured live |
@@ -226,32 +226,17 @@ went. **This moves the arm.**
 2. **Nothing between the fingers**, then — passing your configured `latency.arm_exec`, which the
    step-count conversion needs (see below):
    ```bash
-   ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper -p arm_exec_s:=<latency.arm_exec>
+   ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper
    ```
    This one is a **step response**, not a chirp: it commands a 30 mm step, times how long until the
    fingers start moving, and repeats 8 times alternating direction. See the gotcha below for why
    cross-correlation is the wrong tool for this particular plant.
 3. This prints **two** numbers, because they are two different quantities:
-   - `gripper_lead_steps` — the **action** side, command → the hand actually moving. It already has
-     a knob: `fr3_gripper_bridge`'s `gripper_lead_steps`, whose comment says "Tune on hardware".
-     This is that tuning. Set it in `nuc/launch/fr3_inference.launch.py`. Expect a few hundred ms
-     and a spread of roughly one `min_command_period_s`, most of which is the bridge's own command
-     timer — that quantisation is real delay in service too, so it belongs in the number.
-
-     **`gripper_lead_steps` is not the measured delay divided by `action_dt`.** It indexes into a
-     chunk `policy_client_node` has *already* truncated by `_n_stale_actions`, and that truncation
-     leads by `latency.arm_exec` — the **arm's** delay, since both bridges ride the same action
-     list. So the knob only supplies the difference:
-
-     ```
-     gripper_lead_steps = round((gripper_step_latency - latency.arm_exec) / action_dt)
-     ```
-
-     That is why the probe wants `arm_exec_s`, and why the answer is often **0**: measured
-     2026-08-10, the hand needed 514 ms against an arm at 702 ms, so it is already over-led by
-     ~190 ms and the knob cannot go negative to fix it. Note the correct value therefore *changes
-     whenever `latency.arm_exec` does* — re-derive it after the Phase 4 streaming controller lands,
-     when the arm gets much faster and the hand will start needing real lead.
+   - `latency.gripper_exec` — the **action** side, command → the hand actually moving. Goes into
+     `config/inference.yaml` exactly as measured; `policy_client_node` truncates the gripper chunk
+     by this value alone. Expect a few hundred ms and a spread of roughly one
+     `min_command_period_s`, most of which is the bridge's own command timer — that quantisation is
+     real delay in service too, so it belongs in the number.
    - `latency.gripper` — the **observation** side, half the `/fr3_gripper/joint_states` publish
      interval. Goes in `config/inference.yaml`.
 
@@ -301,6 +286,14 @@ went. **This moves the arm.**
   because clipping the search window also clips the reported peak width, so a clamped result looks
   deceptively sharp (138 ms reported; 538 ms once unclamped). The probe now rejects pinned results
   outright and the bound defaults to 2.0 s, but if you widen it by hand, keep the check.
+- **The arm and the hand are truncated independently, so neither number affects the other.**
+  `_n_stale_actions` runs once per device, each with its own `latency.*_exec`, and the two chunks
+  are published from separate slices of the same action list. This is UMI's split
+  (`robot_action_latency` vs `gripper_action_latency`), reached by slicing rather than by absolute
+  waypoint times, since a `PoseArray` carries no timing. It means you can re-measure one device
+  without touching the other, and a chunk too stale for the arm can still drive the hand. A
+  `gripper_lead_steps` parameter on `fr3_gripper_bridge` used to paper over the shared slice by
+  indexing further into the chunk; it is gone, and re-adding a lead there would double-compensate.
 - **`latency.proprio` is adopted, not measured, on purpose.** It means "true EE pose → the stamp on
   TF", and isolating it needs external ground truth of the true pose. libfranka stamps at read, so
   it is ~1 ms; UMI hit the identical wall and hardcodes `robot_obs_latency: 0.0001`. The `arm_exec`

@@ -142,19 +142,23 @@ class PolicyClientNode(Node):
         # inference launch file; that file documents each value's provenance. Measure them with
         # `ros2 run polyumi_ros2 latency_probe` (one mode per value) — procedures in
         # docs/calibration-instructions.md, "Latencies". gopro and proprio are consumed by
-        # _lookup_agent_pos, arm_exec by _n_stale_actions; finger_cam and piezo_mic are declared
-        # but unused until the policy takes tactile input.
+        # _lookup_agent_pos, arm_exec and gripper_exec by _n_stale_actions; finger_cam and
+        # piezo_mic are declared but unused until the policy takes tactile input.
         self.declare_parameter('latency.gopro', 0.0)
         self.declare_parameter('latency.finger_cam', 0.0)
         self.declare_parameter('latency.piezo_mic', 0.0)
         self.declare_parameter('latency.proprio', 0.0)
         self.declare_parameter('latency.arm_exec', 0.0)
+        # Delay from publishing a width to the fingers actually starting to move. The gripper's
+        # counterpart to arm_exec, and separate from it because the two devices are genuinely
+        # different speeds — the hand beat the arm by ~190 ms on first measurement. Each chunk is
+        # truncated by its own device's value (see _post_and_act), which is UMI's split of
+        # robot_action_latency vs gripper_action_latency.
+        self.declare_parameter('latency.gripper_exec', 0.0)
         # Delay from the hand's true aperture to its measurement appearing on the joint-state
         # topic. Kept separate from latency.proprio because the gripper is a different device on a
-        # different link — UMI does the same (gripper_action_latency vs robot_action_latency).
-        # The topic jitters 24-100 ms, so the true value is not 0. Note this is the OBSERVATION
-        # half; latency_probe's gripper mode measures the action half, which fr3_gripper_bridge's
-        # gripper_lead_steps already compensates.
+        # different link. The topic jitters 24-100 ms, so the true value is not 0. This is the
+        # OBSERVATION half, consumed by the width lookup; gripper_exec above is the action half.
         self.declare_parameter('latency.gripper', 0.0)
         # --- Gripper ---
         # Source for agent_pos[7]. The FR3 publishes each finger at HALF the aperture, so the two
@@ -211,6 +215,7 @@ class PolicyClientNode(Node):
             'piezo_mic': self.get_parameter('latency.piezo_mic').get_parameter_value().double_value,
             'proprio': self.get_parameter('latency.proprio').get_parameter_value().double_value,
             'arm_exec': self.get_parameter('latency.arm_exec').get_parameter_value().double_value,
+            'gripper_exec': self.get_parameter('latency.gripper_exec').get_parameter_value().double_value,
             'gripper': self.get_parameter('latency.gripper').get_parameter_value().double_value,
         }
         self._ee_pose_buffer_s = self.get_parameter('buffers.ee_pose_s').get_parameter_value().double_value
@@ -221,8 +226,10 @@ class PolicyClientNode(Node):
         # capture instant, and is the only delayed modality the policy consumes; once
         # finger_cam/piezo_mic feed it too, the capture instant becomes the oldest across them,
         # since an observation is only as fresh as its slowest stream.
-        # latency_act — delay between publishing a target and the arm actually moving.
+        # Per-device execution delay. The arm and the hand are truncated independently, each by
+        # its own value, so neither inherits the other's — see _post_and_act.
         self._latency_act = self._latency['arm_exec']
+        self._latency_act_gripper = self._latency['gripper_exec']
         # Spacing between consecutive actions within a chunk. Assumes the policy's action
         # horizon runs at the observation/control rate (standard for UMI/diffusion policy);
         # if a model is ever trained at a different action rate this needs its own parameter.
@@ -329,7 +336,8 @@ class PolicyClientNode(Node):
         )
         self.get_logger().info(
             f'latency budget — measured observation age (capture→response) + '
-            f'act={self._latency_act}s vs action_dt={self._action_dt}s'
+            f'act={self._latency_act}s arm / {self._latency_act_gripper}s gripper '
+            f'vs action_dt={self._action_dt}s (each chunk truncated by its own device)'
         )
         gripper_missing = 'skip tick' if self._require_gripper_state else 'warn + use closed width'
         gripper_stale = 'skip tick' if self._require_gripper_state else 'warn + hold last width'
@@ -708,33 +716,35 @@ class PolicyClientNode(Node):
             )
         return robot_to_policy_width(width, self._gripper_min_width_m)
 
-    def _n_stale_actions(self, t_obs: rclpy.time.Time) -> int:
+    def _n_stale_actions(self, t_obs: rclpy.time.Time, latency_act: float) -> int:
         """
         Count the leading actions in a chunk that are already in the past by execution time.
 
         Action i in a chunk is the policy's target for t_obs + i * action_dt, where t_obs is
-        the instant the observation was captured. Everything between that instant and the arm
+        the instant the observation was captured. Everything between that instant and the device
         actually moving makes the leading actions stale: the frame's transit through the
         capture pipeline, the tick's own serialization work, the server's round trip, and
-        latency_act before the arm starts moving. Actions whose target instant falls inside
-        that window have already elapsed — executing them would drag the arm backwards through
+        ``latency_act`` before the device starts moving. Actions whose target instant falls inside
+        that window have already elapsed — executing them would drag the device backwards through
         the trajectory — so skip to the first one still in the future.
 
         Called after the server responds, so ``now() - t_obs`` measures every delay up to this
         point directly (capture pipeline + tick + inference round trip) instead of summing
-        assumed constants for them; only latency_act is still in the future and must be added.
+        assumed constants for them; only ``latency_act`` is still in the future and must be added.
 
         Clamped at 0: if t_obs somehow lands in the future (clock skew between the camera
         driver's stamps and this node), a negative count would slice from the *end* of the
-        chunk — `actions[-3:]` keeps the last three, jumping the arm ahead to the far-future
+        chunk — `actions[-3:]` keeps the last three, jumping the device ahead to the far-future
         tail of the trajectory instead of dropping anything. No upper clamp is needed: a count
         at or past the chunk length yields an empty slice, which the caller already reports.
 
         :param t_obs: instant the observation was captured (image stamp - latency.gopro).
+        :param latency_act: this device's publish-to-motion delay, in seconds. Passed rather than
+            read from self because the arm and the hand get different values — see _post_and_act.
         :return: number of actions to drop from the front of the chunk, >= 0.
         """
         elapsed_since_obs = (self.get_clock().now() - t_obs).nanoseconds * 1e-9
-        total_latency = elapsed_since_obs + self._latency_act
+        total_latency = elapsed_since_obs + latency_act
         return max(0, math.ceil(total_latency / self._action_dt))
 
     def _http_post_json(self, url: str, payload: dict) -> dict | None:
@@ -785,29 +795,42 @@ class PolicyClientNode(Node):
         if self._gripper_preview_pub is not None:
             self._gripper_preview_pub.publish(self._actions_to_gripper_trajectory(actions))
 
-        # Drop the leading actions that refer to instants already elapsed by the time the arm
+        # Drop the leading actions that refer to instants already elapsed by the time each device
         # can act on them, so execution starts from the first still-future waypoint.
-        n_stale = self._n_stale_actions(t_obs)
+        #
+        # The two devices are truncated INDEPENDENTLY, because they are genuinely different
+        # speeds: the hand starts moving ~190 ms before the arm does. A single shared slice would
+        # force the faster device to inherit the slower one's lead and act that much too early,
+        # which is what fr3_gripper_bridge's (now removed) gripper_lead_steps existed to claw
+        # back. This is UMI's split — robot_action_latency vs gripper_action_latency, each
+        # subtracted per device — reached through slicing rather than absolute waypoint times,
+        # since a PoseArray carries no timing. Note _actions_to_gripper_trajectory recomputes
+        # time_from_start relative to whatever slice it is handed, so the two stay self-consistent.
         n_received = len(actions)
-        actions = actions[n_stale:]
-        if not actions:
+        n_stale_arm = self._n_stale_actions(t_obs, self._latency_act)
+        n_stale_grip = self._n_stale_actions(t_obs, self._latency_act_gripper)
+        arm_actions = actions[n_stale_arm:]
+        grip_actions = actions[n_stale_grip:]
+        if not arm_actions and not grip_actions:
             age_s = (self.get_clock().now() - t_obs).nanoseconds * 1e-9
             self._warn_throttled(
-                f'Whole action chunk stale: dropped all {n_received} actions '
+                f'Whole action chunk stale for both devices: dropped all {n_received} actions '
                 f'(observation is {age_s:.3f}s old, of which inference={latency_inference:.3f}s; '
-                f'plus act={self._latency_act:.3f}s exceeds chunk span '
-                f'{n_received * self._action_dt:.3f}s). Raise n_action_steps or reduce latency.'
+                f'plus act={self._latency_act:.3f}s arm / {self._latency_act_gripper:.3f}s gripper '
+                f'exceeds chunk span {n_received * self._action_dt:.3f}s). '
+                'Raise n_action_steps or reduce latency.'
             )
             return
 
-        first = actions[0]
+        # Log against whichever device still has waypoints; the faster one outlives the other.
+        first = (arm_actions or grip_actions)[0]
         # Log the width in both spaces: policy units are what the model emitted, robot units are
         # what the hand will be commanded. A surprising gap between them is the offset being wrong.
         grip_robot = policy_to_robot_width(
             float(first[7]), self._gripper_min_width_m, self._gripper_max_width_m
         )
         self.get_logger().info(
-            f'action chunk n={len(actions)} (dropped {n_stale}/{n_received} stale, '
+            f'action chunk n={n_received} (dropped {n_stale_arm} arm / {n_stale_grip} gripper, '
             f'inference={latency_inference * 1000:.0f}ms) first: x={first[0]:.4f} y={first[1]:.4f} '
             f'z={first[2]:.4f} grip={first[7]:.3f}→{grip_robot:.3f}m'
         )
@@ -815,12 +838,13 @@ class PolicyClientNode(Node):
         # Phase 2: publish the whole action chunk for the NUC bridge to plan+execute as one
         # Cartesian path (receding-horizon control). Non-blocking (unlike a direct MoveIt
         # call): the NUC bridge does its own skip-while-busy, so at worst it drops chunks
-        # that arrive mid-motion. The gripper half goes out on its own topic, from the same
-        # (already stale-dropped) action list so the two chunks stay index-aligned.
-        if self._target_pub is not None:
-            self._target_pub.publish(self._actions_to_pose_array(actions))
-        if self._gripper_pub is not None:
-            self._gripper_pub.publish(self._actions_to_gripper_trajectory(actions))
+        # that arrive mid-motion. The gripper half goes out on its own topic and its own slice.
+        # Each is published only if it still has waypoints, so a chunk too stale for the arm can
+        # still drive the hand rather than stalling both.
+        if self._target_pub is not None and arm_actions:
+            self._target_pub.publish(self._actions_to_pose_array(arm_actions))
+        if self._gripper_pub is not None and grip_actions:
+            self._gripper_pub.publish(self._actions_to_gripper_trajectory(grip_actions))
 
     def _actions_to_pose_array(self, actions) -> PoseArray:
         """Build a PoseArray in base_frame from a list of 8-vector actions [x,y,z,qx,qy,qz,qw,grip]."""

@@ -166,8 +166,8 @@ def test_gripper_step_report_rejects_a_threshold_the_noise_reaches(tmp_path):
     """
     An onset threshold inside the encoder's own jitter triggers on nothing and reports ~0 ms.
 
-    That is the failure that would silently zero gripper_lead_steps, so it must refuse to print a
-    paste-able line rather than produce a confident small number.
+    That is the failure that would silently zero latency.gripper_exec, so it must refuse to print
+    a paste-able line rather than produce a confident small number.
     """
     probe = _probe(mode='gripper', onset_threshold_m=0.001, output_npz=str(tmp_path / 'g.npz'))
     lags = [('open', 0.3), ('close', 0.32), ('open', 0.28)]
@@ -176,47 +176,21 @@ def test_gripper_step_report_rejects_a_threshold_the_noise_reaches(tmp_path):
     probe.destroy_node()
 
 
-def test_gripper_lead_steps_subtracts_the_arm_latency(tmp_path, capsys):
+def test_gripper_report_emits_the_measured_latency_unmodified(tmp_path, capsys):
     """
-    The knob supplies the DIFFERENCE between the two delays, not the hand's delay.
+    The gripper result goes into inference.yaml as measured, with no arithmetic against the arm.
 
-    policy_client_node truncates the chunk with _n_stale_actions before publishing, and the gripper
-    half rides that same already-advanced list — so the chunk the bridge indexes into already leads
-    by latency.arm_exec. Converting the raw measurement straight into steps double-compensates. On
-    hardware that was the difference between 5 steps and 0: 514 ms measured against a 702 ms arm.
+    policy_client_node truncates each device's chunk by its own latency, so gripper_exec is a
+    standalone number. It briefly was not: while the two devices shared one slice, the value had
+    to be reported as (gripper - arm) / action_dt for fr3_gripper_bridge's gripper_lead_steps,
+    which silently coupled it to a latency measured in a different run.
     """
     lags = [('open', 0.5), ('close', 0.54), ('open', 0.51)]  # median 0.51
-    probe = _probe(mode='gripper', action_dt=0.1, arm_exec_s=0.1, output_npz=str(tmp_path / 'a.npz'))
-    probe._report_gripper_steps(lags, 0.0001)
-    assert 'gripper_lead_steps: 4' in capsys.readouterr().out
-    probe.destroy_node()
-
-
-def test_gripper_lead_steps_floors_at_zero_and_says_so(tmp_path, capsys):
-    """
-    A hand faster than the arm needs negative lead, which the knob cannot express.
-
-    Reporting a bare 0 would hide that the hand still acts early; the residual has to be stated,
-    because the only way to close it is to shrink latency.arm_exec.
-    """
-    lags = [('open', 0.5), ('close', 0.54), ('open', 0.51)]
-    probe = _probe(mode='gripper', action_dt=0.1, arm_exec_s=0.7, output_npz=str(tmp_path / 'b.npz'))
+    probe = _probe(mode='gripper', output_npz=str(tmp_path / 'a.npz'))
     probe._report_gripper_steps(lags, 0.0001)
     out = capsys.readouterr().out
-    assert 'gripper_lead_steps: 0' in out
-    # The residual (702 - 514 on hardware; 700 - 510 here) must be quantified, not just implied.
-    assert '190 ms' in out
-    assert '1.9 action steps' in out
-    probe.destroy_node()
-
-
-def test_gripper_report_refuses_a_step_count_without_the_arm_latency(tmp_path, capsys):
-    """Left unset, the subtraction cannot be done, so no paste-able line may be printed."""
-    probe = _probe(mode='gripper', action_dt=0.1, output_npz=str(tmp_path / 'c.npz'))
-    probe._report_gripper_steps([('open', 0.5), ('close', 0.54), ('open', 0.51)], 0.0001)
-    out = capsys.readouterr().out
-    assert 'arm_exec_s NOT SET' in out
-    assert 'gripper_lead_steps:' not in out
+    assert 'gripper_exec: 0.5100' in out
+    assert 'gripper_lead_steps' not in out
     probe.destroy_node()
 
 

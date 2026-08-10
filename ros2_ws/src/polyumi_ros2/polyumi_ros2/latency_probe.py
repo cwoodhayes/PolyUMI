@@ -11,9 +11,13 @@ upstream UMI uses (``scripts/calibrate_uvc_camera_latency.py`` and
 Only one constant in the whole observation->action budget actually needs calibrating, which is why
 this is smaller than it looks::
 
-    photon --(latency.gopro)--> header.stamp --(measured live)--> response --(latency.arm_exec)--> motion
-            mode:=camera                       policy_client_node             mode:=arm
+    photon --(latency.gopro)--> header.stamp --(measured live)--> response --(*_exec)--> motion
+            mode:=camera                       policy_client_node          mode:=arm / :=gripper
                                                already measures this
+
+The trailing term is per device: the arm and the hand each have their own ``latency.*_exec`` and
+``policy_client_node`` truncates their chunks separately, so the two are measured and configured
+independently. Nothing here has to be reconciled against the other device.
 
 ``header.stamp`` is the earliest instant the laptop has any handle on, so ``mode:=camera`` measures
 photon->stamp and everything downstream of the stamp — the YUYV convert, tick phasing, the POST, the
@@ -34,8 +38,8 @@ Modes
     against the ``polyumi_tcp`` TF. **Moves the arm.**
 
 ``mode:=gripper``
-    The hand's command->motion delay, which feeds ``fr3_gripper_bridge``'s ``gripper_lead_steps``,
-    plus the ``/fr3_gripper/joint_states`` publish interval that sets ``latency.gripper``.
+    ``latency.gripper_exec``, the hand's command->motion delay, plus the
+    ``/fr3_gripper/joint_states`` publish interval that sets ``latency.gripper``.
     **Moves the fingers.**
 
 Usage (laptop, after ``source setup_franka_env.sh``)::
@@ -221,21 +225,14 @@ class LatencyProbe(Node):
         self.declare_parameter('duration_s', 20.0)
         self.declare_parameter('plot', True)
         self.declare_parameter('output_npz', '')
-        # action_dt only converts the gripper result into gripper_lead_steps; it must match
-        # policy_client_node's control period or the step count is meaningless.
+        # Only used to phrase the arm result against the control period; the gripper result is a
+        # latency in seconds and needs no conversion. Must match policy_client_node's control rate.
         self.declare_parameter('action_dt', 0.1)
-        # latency.arm_exec from config/inference.yaml. Needed because gripper_lead_steps is NOT
-        # "how much lead the hand needs" — it indexes into a chunk policy_client_node has already
-        # truncated by _n_stale_actions, which leads by the ARM's latency. So the knob only has to
-        # supply the difference. Left at 0 the printed step count silently assumes the chunk
-        # arrives unadvanced, which over-leads the hand by however large arm_exec is.
-        self.declare_parameter('arm_exec_s', 0.0)
 
         self._duration_s = self.get_parameter('duration_s').get_parameter_value().double_value
         self._plot = self.get_parameter('plot').get_parameter_value().bool_value
         self._output_npz = self.get_parameter('output_npz').get_parameter_value().string_value
         self._action_dt = self.get_parameter('action_dt').get_parameter_value().double_value
-        self._arm_exec_s = self.get_parameter('arm_exec_s').get_parameter_value().double_value
 
         errors = []
         if self._duration_s <= 1.0:
@@ -665,17 +662,13 @@ class LatencyProbe(Node):
     # ------------------------------------------------------------------
 
     def _report_gripper_steps(self, lags: list[tuple[str, float]], worst_noise_m: float) -> int:
-        """Turn the per-rep step onsets into gripper_lead_steps, and judge the spread."""
+        """Turn the per-rep step onsets into latency.gripper_exec, and judge the spread."""
         values = np.array([lag for _, lag in lags])
         opening = np.array([lag for d, lag in lags if d == 'open'])
         closing = np.array([lag for d, lag in lags if d == 'close'])
         median = float(np.median(values))
         with self._lock:
             samples = list(self._actual)
-        # The knob supplies only the DIFFERENCE between the hand's delay and the arm's, because
-        # policy_client_node already advanced the shared chunk by latency.arm_exec before either
-        # bridge sees it. Feeding it the raw measurement would double-compensate.
-        steps = round((median - self._arm_exec_s) / self._action_dt)
 
         lines = [
             '',
@@ -698,50 +691,15 @@ class LatencyProbe(Node):
                 '     rather than on motion. Raise onset_threshold_m and re-run.',
                 '',
             ]
-        elif self._arm_exec_s <= 0:
-            lines += [
-                '  ** arm_exec_s NOT SET — the step count below is almost certainly too large. **',
-                '',
-                '  gripper_lead_steps indexes a chunk policy_client_node has ALREADY advanced by',
-                '  latency.arm_exec (via _n_stale_actions), so the knob only supplies the difference',
-                '  between the two delays. Re-run passing your configured value:',
-                '',
-                '      -p arm_exec_s:=<latency.arm_exec from config/inference.yaml>',
-                '',
-            ]
         else:
             lines += [
-                f'  latency.arm_exec is {self._arm_exec_s * 1e3:.0f} ms, and policy_client_node has',
-                '  already advanced the shared chunk by that much before either bridge sees it. The',
-                '  knob supplies only the difference:',
+                '  Paste into ros2_ws/src/polyumi_ros2/config/inference.yaml:',
                 '',
-                f'      ({median * 1e3:.0f} - {self._arm_exec_s * 1e3:.0f}) ms / action_dt '
-                f'{self._action_dt}s = {steps} steps',
+                f'      gripper_exec: {median:.4f}',
                 '',
-            ]
-            if steps > 0:
-                lines += [
-                    '  Paste into nuc/launch/fr3_inference.launch.py (or -p on fr3_gripper_bridge):',
-                    '',
-                    f'      gripper_lead_steps: {steps}',
-                    '',
-                ]
-            else:
-                over_lead = self._arm_exec_s - median
-                lines += [
-                    '  The hand is FASTER than the arm, so it needs no extra lead at all:',
-                    '',
-                    '      gripper_lead_steps: 0',
-                    '',
-                    '  Note 0 is a floor, not a fit. The chunk leads by '
-                    f'{self._arm_exec_s * 1e3:.0f} ms and the hand',
-                    f'  needs only {median * 1e3:.0f}, so it still acts about {over_lead * 1e3:.0f} ms '
-                    f'({over_lead / self._action_dt:.1f} action steps) early, and',
-                    '  the knob cannot go negative to correct it. Shrinking latency.arm_exec is the',
-                    '  only thing that closes that gap.',
-                    '',
-                ]
-            lines += [
+                '  policy_client_node truncates the gripper chunk by this value alone, independently',
+                '  of latency.arm_exec, so it goes in as measured — no arithmetic against the arm.',
+                '',
                 "  Most of the spread is the bridge's own min_command_period_s (0.25 s default): a",
                 '  step published just after its timer fires waits nearly a full period. That',
                 "  quantisation is real delay in service too — the policy's commands go through the",

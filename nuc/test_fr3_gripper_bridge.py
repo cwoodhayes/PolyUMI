@@ -101,15 +101,18 @@ def test_state_sums_the_two_finger_joints(make_node):
     assert node._current_width == pytest.approx(0.06)
 
 
-def test_lead_steps_selects_a_later_point_and_clamps(make_node):
-    """gripper_lead_steps indexes into the chunk, saturating at the last point rather than raising."""
-    node = make_node(gripper_lead_steps=2)
-    node._on_target(_chunk([0.01, 0.02, 0.03, 0.04]))
-    assert node._desired_width == pytest.approx(0.03)
+def test_the_first_chunk_point_is_the_one_tracked(make_node):
+    """
+    No lead here: policy_client_node already truncated this chunk by latency.gripper_exec.
 
-    far = make_node(gripper_lead_steps=99)
-    far._on_target(_chunk([0.01, 0.02, 0.03]))
-    assert far._desired_width == pytest.approx(0.03)
+    A gripper_lead_steps parameter used to index further into the chunk, compensating for the
+    chunk having been truncated by the ARM's latency instead of the hand's. Each device now gets
+    its own slice, so point 0 is already the width intended for when the fingers start moving, and
+    any lead here would double-compensate.
+    """
+    node = make_node()
+    node._on_target(_chunk([0.01, 0.02, 0.03, 0.04]))
+    assert node._desired_width == pytest.approx(0.01)
 
 
 def test_target_width_is_clamped_to_the_robot_range(make_node):
@@ -373,7 +376,6 @@ def test_grasp_is_disabled_by_default(make_node):
         {'max_speed_mps': 0.01},  # inverted range: the clamp returns the wrong bound
         {'width_deadband_m': -0.001},
         {'max_width_m': 0.0},
-        {'gripper_lead_steps': -1},
         {'use_grasp_below_m': -0.01},
         {'use_grasp_below_m': 0.03, 'grasp_force_n': 0.0},
         {'grasp_epsilon_m': -0.01},

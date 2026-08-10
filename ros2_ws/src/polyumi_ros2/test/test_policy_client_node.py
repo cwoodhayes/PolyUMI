@@ -122,12 +122,14 @@ def test_tf_buffer_must_cover_the_compensated_lookup(make_node):
 # ----------------------------------------------------------------------
 
 
-def _n_stale_at(node, *, obs_age_s: float) -> int:
+def _n_stale_at(node, *, obs_age_s: float, latency_act: float | None = None) -> int:
     """Evaluate _n_stale_actions for an observation captured obs_age_s ago (may be negative)."""
     now = _t(100.0)
     t_obs = _t(100.0 - obs_age_s)
+    if latency_act is None:
+        latency_act = node._latency_act
     with patch.object(node, 'get_clock', return_value=_FakeClock(now)):
-        return node._n_stale_actions(t_obs)
+        return node._n_stale_actions(t_obs, latency_act)
 
 
 def test_n_stale_actions_typical(make_node):
@@ -166,6 +168,46 @@ def test_n_stale_actions_whole_chunk_stale(make_node):
 
     assert n_stale >= 8
     assert list(range(8))[n_stale:] == []  # caller's empty-slice guard fires
+
+
+def test_arm_and_gripper_are_truncated_by_their_own_latencies(make_node):
+    """
+    The whole point of the split: a faster device keeps actions the slower one has to drop.
+
+    Both bridges used to share one slice cut with the ARM's latency, so the hand inherited the
+    arm's lead and acted that much too early — fr3_gripper_bridge's gripper_lead_steps existed
+    only to index back out of it, and could add lead but never remove it. Measured on hardware the
+    hand beat the arm by 188 ms, i.e. about two action steps.
+    """
+    node = make_node(
+        control_hz=10.0, **{'latency.arm_exec': 0.702, 'latency.gripper_exec': 0.514}
+    )
+    n_arm = _n_stale_at(node, obs_age_s=0.1, latency_act=node._latency_act)
+    n_grip = _n_stale_at(node, obs_age_s=0.1, latency_act=node._latency_act_gripper)
+
+    assert n_arm == 9  # (0.100 + 0.702) / 0.1, rounded up
+    assert n_grip == 7  # (0.100 + 0.514) / 0.1, rounded up
+    # The gripper keeps two more waypoints, which is exactly the 188 ms it is faster.
+    assert n_arm - n_grip == 2
+
+
+def test_a_chunk_too_stale_for_the_arm_can_still_drive_the_gripper(make_node):
+    """
+    The faster device must not be stalled by the slower one running out of chunk.
+
+    With the shared slice, an empty arm chunk returned early and neither device was commanded.
+    Since the arm is currently 702 ms against an 8-step (0.8 s) chunk, that is not hypothetical.
+    """
+    node = make_node(
+        control_hz=10.0, **{'latency.arm_exec': 0.702, 'latency.gripper_exec': 0.514}
+    )
+    chunk = list(range(8))
+    # 0.150 + 0.702 = 0.852s spans past the whole 0.8s chunk; 0.150 + 0.514 = 0.664s does not.
+    n_arm = _n_stale_at(node, obs_age_s=0.15, latency_act=node._latency_act)
+    n_grip = _n_stale_at(node, obs_age_s=0.15, latency_act=node._latency_act_gripper)
+
+    assert chunk[n_arm:] == []  # arm has nothing left
+    assert chunk[n_grip:] == [7]  # gripper still has a waypoint to act on
 
 
 # ----------------------------------------------------------------------

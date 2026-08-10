@@ -71,10 +71,6 @@ class Fr3GripperBridge(Node):
         self.declare_parameter('execute', False)
         self.declare_parameter('target_topic', DEFAULT_TARGET_TOPIC)
         self.declare_parameter('state_topic', DEFAULT_STATE_TOPIC)
-        # Which point of the chunk to track. A chunk spans ~0.8 s while the hand needs 100s of ms
-        # to traverse, so 0 (track the first action) inherently lags; a small lead anticipates the
-        # policy's intent at the cost of closing early. Tune on hardware.
-        self.declare_parameter('gripper_lead_steps', 0)
         # Ignore commanded widths within this of the last one we actually sent. This is what keeps
         # a jittering policy output from turning into a goal storm.
         self.declare_parameter('width_deadband_m', 0.005)
@@ -97,7 +93,6 @@ class Fr3GripperBridge(Node):
         self._execute = self.get_parameter('execute').get_parameter_value().bool_value
         topic = self.get_parameter('target_topic').get_parameter_value().string_value
         state_topic = self.get_parameter('state_topic').get_parameter_value().string_value
-        self._lead_steps = self.get_parameter('gripper_lead_steps').get_parameter_value().integer_value
         self._deadband = self.get_parameter('width_deadband_m').get_parameter_value().double_value
         self._period = self.get_parameter('min_command_period_s').get_parameter_value().double_value
         self._max_width = self.get_parameter('max_width_m').get_parameter_value().double_value
@@ -143,7 +138,7 @@ class Fr3GripperBridge(Node):
         self.get_logger().info(f'fr3_gripper_bridge started — listening on {topic} — mode: {mode}')
         self.get_logger().info(
             f'rate limiting — deadband={self._deadband}m, min period={self._period}s, '
-            f'lead={self._lead_steps} steps, speed in [{self._min_speed}, {self._max_speed}] m/s'
+            f'speed in [{self._min_speed}, {self._max_speed}] m/s'
         )
         grasp_mode = (
             f'Grasp below {self._grasp_below}m ({self._grasp_force}N, eps={self._grasp_eps}m)'
@@ -171,8 +166,6 @@ class Fr3GripperBridge(Node):
             errors.append(f'width_deadband_m must be >= 0, got {self._deadband}')
         if self._max_width <= 0:
             errors.append(f'max_width_m must be > 0, got {self._max_width}')
-        if self._lead_steps < 0:
-            errors.append(f'gripper_lead_steps must be >= 0, got {self._lead_steps}')
         if self._min_speed <= 0:
             errors.append(f'min_speed_mps must be > 0, got {self._min_speed}')
         if self._max_speed < self._min_speed:
@@ -206,8 +199,13 @@ class Fr3GripperBridge(Node):
         if not msg.points:
             self.get_logger().warning('Received empty gripper chunk, ignoring.')
             return
-        idx = min(max(self._lead_steps, 0), len(msg.points) - 1)
-        point = msg.points[idx]
+        # Point 0, always. policy_client_node has already truncated this chunk by
+        # latency.gripper_exec — the hand's own publish-to-motion delay — so its first point is
+        # the width intended for the moment the fingers will actually start moving. A
+        # gripper_lead_steps knob used to live here, indexing further in to claw back the fact
+        # that the chunk was truncated by the ARM's latency; now that each device gets its own
+        # slice there is nothing left to claw back, and a lead here would double-compensate.
+        point = msg.points[0]
         if not point.positions:
             self.get_logger().warning('Gripper chunk point has no positions, ignoring.')
             return

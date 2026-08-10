@@ -58,14 +58,27 @@
       # unacceptably slow; must migrate to streaming controller.
       arm_exec: 0.702
 
+      # Delay from publishing a width to the fingers actually starting to move — the gripper's
+      # counterpart to arm_exec. Each device's chunk is truncated by its OWN value, so the hand
+      # never inherits the arm's lead; this is UMI's robot_action_latency / gripper_action_latency
+      # split. Most of it is fr3_gripper_bridge's own min_command_period_s (0.25 s) quantisation,
+      # which is real delay in service and belongs here.
+      #
+      # The hand is currently 188 ms FASTER than the arm. Before the split it was forced to inherit
+      # arm_exec and closed that much early, and fr3_gripper_bridge's gripper_lead_steps (now
+      # removed) was the knob that tried to claw it back — it could only add lead, never remove it.
+      #
+      # Calibrated on 08-10-2026: 8 steps, 514 ms median (376-710), open 514 / close 534.
+      gripper_exec: 0.514
+
       # Delay from the hand's true aperture to it appearing on /fr3_gripper/joint_states.
       # Kept separate from proprio because the gripper is a different device on its own link and
-      # its own (slower, jitterier) topic — UMI splits these too (gripper_action_latency vs
-      # robot_action_latency).
+      # its own (slower, jitterier) topic.
       #
-      # This is the OBSERVATION half. `latency_probe -p mode:=gripper` measures command->observed,
-      # i.e. the ACTION half, which has its own knob already: fr3_gripper_bridge's
-      # gripper_lead_steps. 
+      # This is the OBSERVATION half, consumed by the gripper-width lookup; gripper_exec above is
+      # the action half. Half the joint_states publish interval is the honest bound — isolating it
+      # properly needs ground truth of the true aperture, and franka_gripper publishes no measure
+      # timestamp (UMI reads the WSG's).
       #
       # Calibrated on 08-10-2026.
       gripper: 0.0214
