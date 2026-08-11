@@ -23,6 +23,14 @@
 #      DDS env and the fr3-* aliases are simply there.
 # The Pi is a plain ssh: it is stateless and cheap to restart, so the extra layer buys nothing.
 #
+# WHERE THE LOGS GO
+# The three launches that can crash — NUC bringup, NUC inference, laptop policy client — tee their
+# console output to ~/.local/state/polyumi/<name>_<date>.log on the machine that ran them
+# ($XDG_STATE_HOME if set). ROS's own ~/.ros/log does not capture this: franka_bringup launches
+# with output='screen', and a C++ crash message is raw stderr rather than rcl logging, so the line
+# naming the fault reaches the terminal and nowhere else. Files older than REMOTE_LOG_KEEP_DAYS
+# are pruned on each fresh start.
+#
 # WHAT AUTO-RUNS, AND WHAT ONLY GETS TYPED
 # Commands that are safe and order-independent are run for you. Commands that need a decision
 # (which checkpoint, whether the arm is allowed to move) are *typed into the prompt but not
@@ -165,6 +173,28 @@ fi
 # operator reads and confirms the line — this is how every robot-moving command gets in.
 pretype() { tmux send-keys -t "$1" "$2"; }
 
+# Wrap a launch so its console output also lands on disk. See "WHERE THE LOGS GO" above for why
+# ~/.ros/log is not enough. Written to $XDG_STATE_HOME (~/.local/state) — the spec's home for
+# state that persists across restarts but is not precious — so this stays out of $HOME and out of
+# ROS's tree. Left unexpanded so the REMOTE shell resolves it against its own $HOME.
+REMOTE_LOG_DIR='"${XDG_STATE_HOME:-$HOME/.local/state}"/polyumi'
+#: Logs older than this are pruned on each fresh start. Scoped by -maxdepth 1 and a name glob to
+#: the directory we create and the files we write, so it cannot reach anything else.
+REMOTE_LOG_KEEP_DAYS="${REMOTE_LOG_KEEP_DAYS:-14}"
+
+logged() {
+  # $1 = short name for the log file, $2 = the command to run.
+  #
+  # `trap '' INT` in the tee subshell is load-bearing, not tidiness. Ctrl-C goes to the whole
+  # foreground process group, so a bare `| tee` would kill tee first; ros2 launch then writes its
+  # teardown into a closed pipe. Ignoring INT there lets tee outlive the launch and read until
+  # stdout closes on its own — which also means the shutdown sequence, the part that says whether
+  # bringup released the FCI cleanly, is the part that actually gets recorded.
+  local dir="$REMOTE_LOG_DIR"
+  printf 'mkdir -p %s && find %s -maxdepth 1 -name "%s_*.log" -mtime +%s -delete 2>/dev/null; %s 2>&1 | { trap "" INT; tee -a %s/%s_$(date +%%F).log; }' \
+    "$dir" "$dir" "$1" "$REMOTE_LOG_KEEP_DAYS" "$2" "$dir" "$1"
+}
+
 # Build the command that opens a durable shell on a remote host.
 #
 # Prefers a tmux ON THE REMOTE, so the pane survives a laptop sleep or a dropped link — but
@@ -232,13 +262,15 @@ sleep "$SHELL_SETTLE_S"
 # --- NUC, left pane: RUN bringup. Safe (no motion) and everything else waits on it. If FCI is
 # --- not enabled on the Desk UI it fails loudly and you re-run it; that is cheap.
 if [ "$NUC_BRINGUP_FRESH" = 1 ]; then
-  tmux send-keys -t "$NUC_BRINGUP_PANE" "cd $NUC_REPO && ros2 launch nuc/launch/fr3_bringup.launch.py" C-m
+  tmux send-keys -t "$NUC_BRINGUP_PANE" \
+    "cd $NUC_REPO && $(logged fr3_bringup 'ros2 launch nuc/launch/fr3_bringup.launch.py')" C-m
 fi
 
 # --- NUC, right pane: PRETYPE. Carries the execute flags, so it is yours to press Enter on.
 if [ "$NUC_INFER_FRESH" = 1 ]; then
   tmux send-keys -t "$NUC_INFER_PANE" "cd $NUC_REPO" C-m
-  pretype "$NUC_INFER_PANE" "ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true execute_arm:=true max_velocity_scaling:=1.0"
+  pretype "$NUC_INFER_PANE" \
+    "$(logged fr3_inference 'ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true execute_arm:=true max_velocity_scaling:=1.0')"
 fi
 
 # --- Pi: RUN the stream. Stateless, moves nothing, and the laptop warns without it.
@@ -255,7 +287,8 @@ fi
 
 # --- Laptop: PRETYPE. Depends on every pane above being live, and there is no readiness gate
 # --- here, so this is the one you press Enter on last.
-pretype "$LAPTOP_PANE" "ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=$INFERENCE_URL execute_motion:=true max_image_age_s:=$MAX_IMAGE_AGE_S pi_host:=$PI_HOST"
+pretype "$LAPTOP_PANE" \
+  "$(logged policy_client "ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=$INFERENCE_URL execute_motion:=true max_image_age_s:=$MAX_IMAGE_AGE_S pi_host:=$PI_HOST")"
 
 tmux select-window -t "$NUC_WINDOW"
 cat <<EOF

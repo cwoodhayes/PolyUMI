@@ -622,7 +622,50 @@ ros2 bag record -o diag_$(date +%F_%H-%M-%S) /polyumi/diag/n_published_arm \
   /polyumi/diag/obs_age_s /polyumi/diag/inference_latency_s /polyumi/diag/image_age_s
 ```
 
+## Where the launch logs are
+
+`fr3_session.sh` tees the three crash-prone launches to disk, on whichever machine ran them:
+
+| launch | machine | file |
+|---|---|---|
+| `fr3_bringup.launch.py` | NUC | `~/.local/state/polyumi/fr3_bringup_<date>.log` |
+| `fr3_inference.launch.py` | NUC | `~/.local/state/polyumi/fr3_inference_<date>.log` |
+| `inference_demo.launch.xml` | laptop | `~/.local/state/polyumi/policy_client_<date>.log` |
+
+(`$XDG_STATE_HOME` if you set it. Files older than 14 days are pruned on each fresh start;
+`REMOTE_LOG_KEEP_DAYS=30 ./fr3_session.sh` to change that.)
+
+**`~/.ros/log/` will not have the thing you want after a crash.** `franka_bringup` launches with
+`output='screen'`, so process output goes to the console only — and a C++ crash message is raw
+stderr from the runtime hitting `std::terminate`, not rcl logging, so it would not be captured even
+if it were. On 2026-08-11 `launch.log` jumped straight from a routine gripper INFO line to
+`process has died ... exit code -6`, and the libfranka exception naming the fault existed solely in
+the tmux scrollback, where it scrolled off. Hence the tee.
+
 ## Troubleshooting
+
+### `ros2_control_node` dies with exit code -6 — the robot stopped itself
+A backtrace through `franka::Robot::Impl::throwOnMotionError()` → `__cxa_throw` → `std::terminate`
+→ `abort` means **libfranka detected a motion error and the robot refused to continue.** It is a
+robot-side safety stop, not a crash in PolyUMI code — `franka_hardware::Robot::readOnce()` simply
+does not catch the exception. `ros2_control_node` is a `required` process, so its death tears down
+the whole bringup launch.
+
+Expect a confusing cascade about 30 s later: the MoveIt bridge's in-flight execute goal runs out
+`EXECUTE_TIMEOUT_S` (30 s), cancels, and logs *"Cancel did not take effect — the arm may still be
+moving"*. That is a **downstream artifact** — the controller died half a minute earlier and the arm
+stopped with it. Read the timestamps before chasing it.
+
+To find the actual fault: the exact reflex name (`cartesian_reflex`, `joint_velocity_violation`, …)
+is in the **Franka Desk UI error log**, and in `fr3_bringup_<date>.log` above for anything after
+2026-08-11. You have to clear the error in Desk before bringup will come back regardless.
+
+Suspect the motion first. Short trajectories stitched end to end at speed produce velocity
+discontinuities at the seams, and the receding-horizon loop makes exactly that shape: a few
+waypoints per chunk, replanned from the arm's current state every ~0.6 s, with
+`max_velocity_scaling:=1.0`. Lower the scaling as the immediate mitigation. The durable fix is the
+Phase 4 streaming controller, which interpolates continuously instead of stitching plans — see
+[franka-inference-bringup.md](franka-inference-bringup.md).
 
 ### Nothing publishes / Foxglove shows nothing — a duplicate or leftover launch (most common)
 Symptoms: `foxglove_bridge` aborts at startup with
