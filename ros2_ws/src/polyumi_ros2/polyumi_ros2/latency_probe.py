@@ -107,6 +107,10 @@ GRIPPER_STILL_TOL_M = 0.0005
 #: silently.
 SUBSCRIBER_TIMEOUT_S = 10.0
 
+#: How long to wait for the spin thread to return before giving up on a clean exit. It comes back
+#: in milliseconds in practice; this is only here so a wedged executor cannot hang the process.
+SHUTDOWN_JOIN_S = 5.0
+
 #: How often to sample TF during the arm run. Faster than the ~30 Hz the arm state actually
 #: arrives at, so the sampler is never the limiting factor; duplicate stamps are dropped.
 TF_SAMPLE_HZ = 100.0
@@ -920,6 +924,14 @@ def main():
         code = 130
     finally:
         executor.shutdown()
+        # Join before destroying anything. executor.shutdown() asks spin() to return but does not
+        # wait for it, so without this the daemon thread is still inside the executor while
+        # destroy_node() frees what it is holding, and the interpreter tears its C++ thread object
+        # down while it is still joinable — `terminate called without an active exception`, abort,
+        # exit 134. The measurement is already printed and saved by then, but the abort replaces
+        # run()'s exit code, which is what tells a caller a peak was too weak to paste. Bounded so
+        # a wedged spin cannot hang the process instead.
+        spin.join(timeout=SHUTDOWN_JOIN_S)
         node.destroy_node()
         rclpy.shutdown()
     return code
