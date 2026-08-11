@@ -9,35 +9,97 @@
     # requested/published every steps_per_inference ticks, while the arm executes the previous
     # one. This is UMI's scheme (re-infer every ~steps_per_inference*dt) and it stops the
     # per-tick POST/publish storm. 1 = infer every tick. Should be <= n_action_steps.
-    steps_per_inference: 6
+    steps_per_inference: 3
+
+    # How many action steps to request per inference. The chunk has to span the WHOLE
+    # observation->motion budget or every action in it is already in the past by the time the arm
+    # can act, _n_stale_actions drops all of them, and nothing is published at all:
+    #
+    #   obs age at response ~0.62s (0.31 capture+convert, 0.30 inference) + arm_exec 0.62s = 1.24s
+    #
+    # against a span of n_action_steps * action_dt. At 8 that is 0.8s and the arm never moves —
+    # observed on hardware 2026-08-10, "Whole action chunk stale for both devices" every tick.
+    # 16 gives 1.6s, which clears it with 3 waypoints to spare.
+    #
+    # 16 is also the model's own action_horizon (the fork's config/task/polyumi.yaml), and
+    # serve_policy returns min(requested, what the model has) — so this cannot over-read, and
+    # raising it further buys nothing. Lower it only for a checkpoint with a shorter horizon.
+    n_action_steps: 16
 
     # --- Per-component latencies, in seconds. ---
-    # !!! NONE OF THESE HAVE BEEN MEASURED — they are plausible guesses. !!!
-    # There is no calibration script for them yet; writing one is tracked under "What's left"
-    # in docs/franka-inference-bringup.md. They are live on the inference critical path
-    # regardless of whether they are right, so treat every value below as provisional.
+    # Measured with `ros2 run polyumi_ros2 latency_probe`, one mode per value. Procedures and what
+    # each number does and does not cover: docs/calibration-instructions.md, "Latencies".
+    #
+    # Only ONE of these needs a rig. The budget is
+    #
+    #   photon --(gopro)--> header.stamp --(measured live)--> response --(arm_exec)--> motion
+    #
+    # and the middle span — YUYV convert, tick phasing, POST, network, the server's own inference
+    # time — is measured empirically every tick by _n_stale_actions (`now() - t_obs`, evaluated
+    # AFTER the response lands). That is why there is deliberately no round-trip constant here: a
+    # config value would be strictly worse than the live measurement. UMI reaches the same place
+    # from the other side, printing inference time and never subtracting it.
     latency:
       # Delay from a photon hitting the GoPro sensor to the frame's ROS header stamp:
       # GoPro encode + HDMI out + capture card + USB + v4l2 dequeue. Sets both the TF lookup
       # instant and t_obs for chunk truncation, so it is the most load-bearing value here.
-      # Unmeasured - guess (TODO measure)
-      gopro: 0.13
+      #
+      # NOT the ~200 ms YUYV->RGB convert: v4l2_camera stamps at dequeue and converts afterwards,
+      # so that cost lands after the stamp. It is what max_image_age_s has to tolerate, not this.
+      #
+      # calibrated 2026-08-11 on the crb's fr3 arm setup.
+      gopro: 0.1087
+
       # Finger camera latency. Declared but never consumed — the policy has no tactile input
       # yet (see "What's left" in docs/franka-inference-bringup.md). Left at 0 so it cannot skew
-      # anything until it is wired.
+      # anything until it is wired. Deferred, not merely unmeasured: the Pi sends camera frames
+      # stamped with a monotonic SensorTimestamp and audio stamped with epoch time, and
+      # pi_receiver_node republishes both as if they shared a clock. That has to be resolved
+      # before any number here could mean anything. See the doc.
       finger_cam: 0.0
-      # Piezo mic latency. Declared but never consumed, as above.
+      # Piezo mic latency. Declared but never consumed, and blocked on the same clock-domain
+      # issue as finger_cam.
       piezo_mic: 0.0
       # Delay from the arm's true EE pose to its measurement appearing on TF.
-      proprio: 0.03
+      #
+      # ADOPTED, not measured, and deliberately so: isolating it needs external ground truth of
+      # the true pose. libfranka stamps at read, so it is ~1 ms. UMI hit the identical wall and
+      # hardcodes robot_obs_latency: 0.0001. The arm_exec measurement below returns
+      # (arm_exec + proprio), which at this magnitude is well inside its own noise floor.
+      proprio: 0.001
       # Delay from publishing a target pose to the arm actually starting to move.
-      arm_exec: 0.03
+      #
+      # Calibrated on 08-10-2026 with max_velocity_scaling = 1.0
+      # unacceptably slow; must migrate to streaming controller.
+      arm_exec: 0.620
+
+      # Delay from publishing a width to the fingers actually starting to move — the gripper's
+      # counterpart to arm_exec. Each device's chunk is truncated by its OWN value, so the hand
+      # never inherits the arm's lead; this is UMI's robot_action_latency / gripper_action_latency
+      # split. Most of it is fr3_gripper_bridge's own min_command_period_s (0.25 s) quantisation,
+      # which is real delay in service and belongs here.
+      #
+      # The hand is currently 106 ms FASTER than the arm (0.620 - 0.514), i.e. one action step.
+      # Before the split it was forced to inherit arm_exec and closed that much early, and
+      # fr3_gripper_bridge's gripper_lead_steps (now removed) was the knob that tried to claw it
+      # back — it could only add lead, never remove it. The gap was 188 ms when the split landed,
+      # against an arm_exec of 0.702 that has since been re-measured; it moves with arm_exec, which
+      # is the point of measuring the two independently.
+      #
+      # Calibrated on 08-10-2026: 8 steps, 514 ms median (376-710), open 514 / close 534.
+      gripper_exec: 0.514
+
       # Delay from the hand's true aperture to it appearing on /fr3_gripper/joint_states.
       # Kept separate from proprio because the gripper is a different device on its own link and
-      # its own (slower, jitterier) topic — UMI splits these too (gripper_action_latency vs
-      # robot_action_latency).
-      # Unmeasured - placeholder guess.
-      gripper: 0.05
+      # its own (slower, jitterier) topic.
+      #
+      # This is the OBSERVATION half, consumed by the gripper-width lookup; gripper_exec above is
+      # the action half. Half the joint_states publish interval is the honest bound — isolating it
+      # properly needs ground truth of the true aperture, and franka_gripper publishes no measure
+      # timestamp (UMI reads the WSG's).
+      #
+      # Calibrated on 08-10-2026.
+      gripper: 0.0214
 
     # --- Gripper width conversion. CALIBRATED 2026-08-09. ---
     # The DP exporter subtracts the closed width, so the policy speaks metres of opening from

@@ -587,7 +587,86 @@ the top of the script: `NUC_REPO`, `SHEEP_REPO`, `INFERENCE_URL`, `MAX_IMAGE_AGE
 `SHELL_SETTLE_S` (raise the last one if pre-typed lines land mangled — typing races the
 remote shell's startup).
 
+## Live diagnostics (`/polyumi/diag/*`)
+
+`policy_client_node` publishes its health and latency scalars as `std_msgs/Float32`, one topic per
+metric, so they can be watched as **live timeseries in Foxglove's Plot panel** — drag in e.g.
+`/polyumi/diag/n_published_arm.data`. The bridge is already up on `:8765`, so there is nothing to
+start. Everything here was previously computed only for a log line, which is the wrong shape for a
+number that matters as a trend.
+
+| topic | what it tells you | healthy |
+|---|---|---|
+| `n_published_arm` | waypoints actually sent to the arm this chunk | **> 0** |
+| `n_published_gripper` | same, for the hand | **> 0** |
+| `n_stale_arm` / `n_stale_gripper` | leading actions discarded as already-elapsed | well under `n_action_steps` |
+| `obs_age_s` | capture → server response, the whole measured span | ~0.6 s today |
+| `inference_latency_s` | the POST round trip alone | ~0.3 s |
+| `image_age_s` | frame stamp → tick; the Elgato's YUYV convert | ~0.2 s, under `max_image_age_s` |
+| `gripper_state_age_s` | how stale the newest `/fr3_gripper/joint_states` sample is | ~0.04 s |
+
+**Watch `n_published_arm` first.** It is the difference between the arm moving and not, and it is
+published *before* the all-stale early return specifically so the zero shows up. It sat silently at
+0 for an entire session on 2026-08-10 while everything else looked fine — the chunk was shorter
+than the latency budget, so every action in it had already elapsed. See
+[calibration-instructions.md](calibration-instructions.md), "Latencies", for the budget arithmetic.
+
+The counters are per device: the arm and hand are truncated by their own `latency.*_exec`, so they
+legitimately differ (the hand is currently ~1 step ahead, at `arm_exec` 0.620 vs `gripper_exec`
+0.514 — the gap moves whenever either is re-measured).
+
+Foxglove plots live only — its buffer is not retention. For anything you want to compare across
+runs, record it:
+
+```bash
+ros2 bag record -o diag_$(date +%F_%H-%M-%S) /polyumi/diag/n_published_arm \
+  /polyumi/diag/obs_age_s /polyumi/diag/inference_latency_s /polyumi/diag/image_age_s
+```
+
+## Where the launch logs are
+
+`fr3_session.sh` tees the three crash-prone launches to disk, on whichever machine ran them:
+
+| launch | machine | file |
+|---|---|---|
+| `fr3_bringup.launch.py` | NUC | `~/.local/state/polyumi/fr3_bringup_<date>.log` |
+| `fr3_inference.launch.py` | NUC | `~/.local/state/polyumi/fr3_inference_<date>.log` |
+| `inference_demo.launch.xml` | laptop | `~/.local/state/polyumi/policy_client_<date>.log` |
+
+(`$XDG_STATE_HOME` if you set it. Files older than 14 days are pruned on each fresh start;
+`REMOTE_LOG_KEEP_DAYS=30 ./fr3_session.sh` to change that.)
+
+**`~/.ros/log/` will not have the thing you want after a crash.** `franka_bringup` launches with
+`output='screen'`, so process output goes to the console only — and a C++ crash message is raw
+stderr from the runtime hitting `std::terminate`, not rcl logging, so it would not be captured even
+if it were. On 2026-08-11 `launch.log` jumped straight from a routine gripper INFO line to
+`process has died ... exit code -6`, and the libfranka exception naming the fault existed solely in
+the tmux scrollback, where it scrolled off. Hence the tee.
+
 ## Troubleshooting
+
+### `ros2_control_node` dies with exit code -6 — the robot stopped itself
+A backtrace through `franka::Robot::Impl::throwOnMotionError()` → `__cxa_throw` → `std::terminate`
+→ `abort` means **libfranka detected a motion error and the robot refused to continue.** It is a
+robot-side safety stop, not a crash in PolyUMI code — `franka_hardware::Robot::readOnce()` simply
+does not catch the exception. `ros2_control_node` is a `required` process, so its death tears down
+the whole bringup launch.
+
+Expect a confusing cascade about 30 s later: the MoveIt bridge's in-flight execute goal runs out
+`EXECUTE_TIMEOUT_S` (30 s), cancels, and logs *"Cancel did not take effect — the arm may still be
+moving"*. That is a **downstream artifact** — the controller died half a minute earlier and the arm
+stopped with it. Read the timestamps before chasing it.
+
+To find the actual fault: the exact reflex name (`cartesian_reflex`, `joint_velocity_violation`, …)
+is in the **Franka Desk UI error log**, and in `fr3_bringup_<date>.log` above for anything after
+2026-08-11. You have to clear the error in Desk before bringup will come back regardless.
+
+Suspect the motion first. Short trajectories stitched end to end at speed produce velocity
+discontinuities at the seams, and the receding-horizon loop makes exactly that shape: a few
+waypoints per chunk, replanned from the arm's current state every ~0.6 s, with
+`max_velocity_scaling:=1.0`. Lower the scaling as the immediate mitigation. The durable fix is the
+Phase 4 streaming controller, which interpolates continuously instead of stitching plans — see
+[franka-inference-bringup.md](franka-inference-bringup.md).
 
 ### Nothing publishes / Foxglove shows nothing — a duplicate or leftover launch (most common)
 Symptoms: `foxglove_bridge` aborts at startup with
@@ -630,6 +709,25 @@ frame's capture stamp, so it's safe for the dry run. For **execution**, prefer a
 camera path (lower published resolution, or the compressed transport) so the policy isn't acting on
 200 ms-old vision.
 
+### `gripper_state_age_s` spikes to seconds while the topic itself looks fine
+Check the topic before blaming it: if `ros2 topic hz /fr3_gripper/joint_states` reports a healthy
+~20 Hz and `arrival - header.stamp` is sub-millisecond, the transport and the clocks are fine and
+the *subscriber* is starved.
+
+Found 2026-08-11: `policy_client_node`'s gripper subscription shared the node's default
+`MutuallyExclusiveCallbackGroup` with the image subscription, and 60 Hz of 6 MB `rgb8`
+deserialization monopolised it — gripper callbacks gapped up to **1.4 s** and ~20% of samples were
+dropped (14.6 Hz delivered against a 17.9 Hz topic). Giving the subscription its own callback group
+brought the worst gap to 122 ms, matching the topic's own worst interval.
+
+This is worth recognising because it does **not** announce itself as an error. `_gripper_width_at`
+holds its nearest endpoint outside the buffer span, so a starved buffer feeds the policy a stale
+`agent_pos[7]` that looks like a plausible width. The tells are `gripper_state_age_s` far above the
+topic's publish interval, and `max_gripper_age_s` warnings on most ticks.
+
+Any *new* high-rate subscription added to this node needs the same treatment — put it in its own
+callback group, or it will starve whatever shares one with it.
+
 ### Gripper: a stream of `Command aborted!` / "Gripper move failed"
 `franka_gripper` accepts every goal and never preempts; libfranka aborts whichever command a new
 one supersedes, so each superseded goal ends ABORTED. A steady stream of these means
@@ -647,16 +745,35 @@ a commanded width inside `width_deadband_m` of the current one is *intentionally
 (The `JointTrajectory` message itself is known to cross the laptop↔NUC rmw gap intact — that has
 been verified, so it is not the likely culprit.)
 
-### First inference times out, then recovers; many actions dropped as stale
+### First inference times out, then recovers
 The first `/predict_cartesian/` after the server starts includes GPU/model warmup and can exceed
 the POST timeout (`POST ... failed: timed out`). It self-recovers next tick; raise `post_timeout_s`
-if it persists. Real diffusion inference is ~200–500 ms/call, so the stale-drop logic discards most
-of each 8-step chunk (`dropped 5/8 …`, occasionally `dropped all 8`). Fine for a dry run; before
-execution, cut latency (fewer diffusion steps, compressed image transport, or a larger
-`n_action_steps`).
+if it persists.
+
+### "Whole action chunk stale for both devices" — nothing moves at all
+Not a warmup blip and not survivable: when this fires, **neither bridge is published to**, so the
+arm and the hand both sit still while everything else looks healthy. Watch
+`/polyumi/diag/n_published_arm` — it is pinned at 0.
+
+The cause is arithmetic, not a fault. The chunk has to span the entire observation→motion budget:
+
+```
+obs age at response  +  latency.<device>_exec   <   n_action_steps * action_dt
+```
+
+Measured 2026-08-10 that was `0.59 + 0.70 = 1.30 s` against a chunk of `8 × 0.1 = 0.8 s`, so every
+action had already elapsed and all 8 were dropped, every tick. `n_action_steps: 16` (the model's
+full `action_horizon`) gives 1.6 s and clears it. The warning prints all the terms, so read them off
+it rather than guessing which one grew.
+
+Note the counts are now per device (`dropped 13 arm / 12 gripper`) and each uses its own
+`latency.*_exec`, so a chunk too stale for the arm can still drive the hand. The budget arithmetic
+and how each latency was measured are in
+[calibration-instructions.md](calibration-instructions.md), "Latencies".
 
 Confirm the loop is live: `policy_client_node` logs one `episode /reset sent` line, then
-`action chunk n=… (dropped …/… stale, inference=…ms) first: x=… y=… z=… grip=…` each tick, and
+`action chunk n=… (dropped … arm / … gripper, inference=…ms) first: x=… y=… z=… grip=…` each tick
+(or watch `/polyumi/diag/*` as a plot instead — see [Live diagnostics](#live-diagnostics-polyumidiag)), and
 Foxglove (`ws://localhost:8765`, using the config in `ros2_ws/src/polyumi_ros2/foxglove/layouts/stream_demo.json`)
 shows the GoPro, the Pi camera/audio, FR3 TF, and the commanded chunk on
 `/polyumi/target_poses_preview`. If the client warns about TF lookups, re-check the

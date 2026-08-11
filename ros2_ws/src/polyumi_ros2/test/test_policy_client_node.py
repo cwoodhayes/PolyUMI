@@ -122,12 +122,14 @@ def test_tf_buffer_must_cover_the_compensated_lookup(make_node):
 # ----------------------------------------------------------------------
 
 
-def _n_stale_at(node, *, obs_age_s: float) -> int:
+def _n_stale_at(node, *, obs_age_s: float, latency_act: float | None = None) -> int:
     """Evaluate _n_stale_actions for an observation captured obs_age_s ago (may be negative)."""
     now = _t(100.0)
     t_obs = _t(100.0 - obs_age_s)
+    if latency_act is None:
+        latency_act = node._latency_act
     with patch.object(node, 'get_clock', return_value=_FakeClock(now)):
-        return node._n_stale_actions(t_obs)
+        return node._n_stale_actions(t_obs, latency_act)
 
 
 def test_n_stale_actions_typical(make_node):
@@ -166,6 +168,46 @@ def test_n_stale_actions_whole_chunk_stale(make_node):
 
     assert n_stale >= 8
     assert list(range(8))[n_stale:] == []  # caller's empty-slice guard fires
+
+
+def test_arm_and_gripper_are_truncated_by_their_own_latencies(make_node):
+    """
+    The whole point of the split: a faster device keeps actions the slower one has to drop.
+
+    Both bridges used to share one slice cut with the ARM's latency, so the hand inherited the
+    arm's lead and acted that much too early — fr3_gripper_bridge's gripper_lead_steps existed
+    only to index back out of it, and could add lead but never remove it. Measured on hardware the
+    hand beat the arm by 188 ms, i.e. about two action steps.
+    """
+    node = make_node(
+        control_hz=10.0, **{'latency.arm_exec': 0.702, 'latency.gripper_exec': 0.514}
+    )
+    n_arm = _n_stale_at(node, obs_age_s=0.1, latency_act=node._latency_act)
+    n_grip = _n_stale_at(node, obs_age_s=0.1, latency_act=node._latency_act_gripper)
+
+    assert n_arm == 9  # (0.100 + 0.702) / 0.1, rounded up
+    assert n_grip == 7  # (0.100 + 0.514) / 0.1, rounded up
+    # The gripper keeps two more waypoints, which is exactly the 188 ms it is faster.
+    assert n_arm - n_grip == 2
+
+
+def test_a_chunk_too_stale_for_the_arm_can_still_drive_the_gripper(make_node):
+    """
+    The faster device must not be stalled by the slower one running out of chunk.
+
+    With the shared slice, an empty arm chunk returned early and neither device was commanded.
+    Since the arm is currently 702 ms against an 8-step (0.8 s) chunk, that is not hypothetical.
+    """
+    node = make_node(
+        control_hz=10.0, **{'latency.arm_exec': 0.702, 'latency.gripper_exec': 0.514}
+    )
+    chunk = list(range(8))
+    # 0.150 + 0.702 = 0.852s spans past the whole 0.8s chunk; 0.150 + 0.514 = 0.664s does not.
+    n_arm = _n_stale_at(node, obs_age_s=0.15, latency_act=node._latency_act)
+    n_grip = _n_stale_at(node, obs_age_s=0.15, latency_act=node._latency_act_gripper)
+
+    assert chunk[n_arm:] == []  # arm has nothing left
+    assert chunk[n_grip:] == [7]  # gripper still has a waypoint to act on
 
 
 # ----------------------------------------------------------------------
@@ -662,6 +704,82 @@ def test_gripper_and_pose_chunks_stay_index_aligned(make_node):
     grip_msg = grip_pub.call_args[0][0]
     assert 0 < len(pose_msg.poses) < 8  # the drop actually happened
     assert len(grip_msg.points) == len(pose_msg.poses)
+
+
+def _diag_values(captured):
+    """Reduce captured diagnostics messages to {metric: last published value}."""
+    return {name: msgs[-1].data for name, msgs in captured.items() if msgs}
+
+
+def _capture_diag(node):
+    """Patch every diagnostics publisher to record instead of publish."""
+    captured = {name: [] for name in node._diag_pubs}
+    for name, pub in node._diag_pubs.items():
+        pub.publish = captured[name].append
+    return captured
+
+
+def test_gripper_subscription_is_not_starved_by_the_image_subscription(make_node):
+    """
+    The gripper must not share a callback group with the 60 Hz image subscription.
+
+    A MutuallyExclusiveCallbackGroup serialises everything in it, and 6 MB rgb8 frames at 60 Hz
+    monopolise it: measured on hardware the gripper callback gapped up to 1.4 s and lost ~20% of
+    samples. _gripper_width_at holds its nearest endpoint outside the buffer span, so that reaches
+    the policy as a silently stale agent_pos[7] rather than as an error. Structural, and exactly
+    the kind of thing a later edit re-adding the subscription would quietly undo.
+    """
+    node = make_node(control_hz=10.0)
+    by_topic = {sub.topic_name: sub for sub in node.subscriptions}
+    image_sub = by_topic['/gopro/image_raw']
+    gripper_sub = by_topic['/fr3_gripper/joint_states']
+
+    assert gripper_sub.callback_group is not image_sub.callback_group
+    assert gripper_sub.callback_group is not node.default_callback_group
+
+
+def test_diagnostics_report_zero_published_when_the_chunk_is_all_stale(make_node):
+    """
+    The zero has to reach the plot, and that is the path that returns early.
+
+    "Nothing was commanded" is the single most useful thing on the wall — it sat silently at 0 for
+    a whole session before anyone noticed the arm was not moving — so the counters are published
+    before the all-stale guard, not after it.
+    """
+    node = make_node(control_hz=10.0, execute_motion=True, publish_preview=False)
+    captured = _capture_diag(node)
+    actions = _actions_with_grip([0.02] * 8)
+
+    with patch.object(node, '_http_post_json', return_value={'actions': actions}), \
+            patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))):
+        node._post_and_act(payload={}, t_obs=_t(98.0))  # 2s old: stale for both devices
+
+    values = _diag_values(captured)
+    assert values['n_published_arm'] == 0
+    assert values['n_published_gripper'] == 0
+    assert values['n_stale_arm'] >= 8
+    assert values['obs_age_s'] == pytest.approx(2.0, abs=0.01)
+
+
+def test_diagnostics_report_what_each_device_actually_got(make_node):
+    """The two counters must track their own slice, not a shared one."""
+    node = make_node(
+        control_hz=10.0, execute_motion=True, publish_preview=False,
+        **{'latency.arm_exec': 0.3, 'latency.gripper_exec': 0.1},
+    )
+    captured = _capture_diag(node)
+    actions = _actions_with_grip([0.02] * 8)
+
+    with patch.object(node, '_http_post_json', return_value={'actions': actions}), \
+            patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))):
+        node._post_and_act(payload={}, t_obs=_t(99.9))
+
+    values = _diag_values(captured)
+    # 0.1s obs age: arm drops ceil(0.4/0.1)=4, gripper ceil(0.2/0.1)=2.
+    assert values['n_published_arm'] == 4
+    assert values['n_published_gripper'] == 6
+    assert values['n_stale_arm'] == 4
+    assert values['n_stale_gripper'] == 2
 
 
 def test_gripper_preview_publishes_full_chunk(make_node):
