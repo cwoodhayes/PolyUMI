@@ -612,7 +612,8 @@ than the latency budget, so every action in it had already elapsed. See
 [calibration-instructions.md](calibration-instructions.md), "Latencies", for the budget arithmetic.
 
 The counters are per device: the arm and hand are truncated by their own `latency.*_exec`, so they
-legitimately differ (the hand is currently ~2 steps ahead).
+legitimately differ (the hand is currently ~1 step ahead, at `arm_exec` 0.620 vs `gripper_exec`
+0.514 — the gap moves whenever either is re-measured).
 
 Foxglove plots live only — its buffer is not retention. For anything you want to compare across
 runs, record it:

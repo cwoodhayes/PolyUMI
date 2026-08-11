@@ -55,7 +55,8 @@ import numpy as np
 import scipy.interpolate as si
 import scipy.signal as ss
 
-#: Fraction of the peak defining the "top of the peak" whose width reports sharpness.
+#: How close to the peak still counts as "top of the peak" when measuring its width: within
+#: (1 - this) of the peak's own magnitude, i.e. 10%.
 _PEAK_WIDTH_FRACTION = 0.9
 
 
@@ -109,9 +110,10 @@ def get_latency(
             coefficient — near 1 means the shifted series really do coincide, near 0 means the
             argmax picked noise.
         ``peak_width_s``
-            width of the region within 10% of the peak. A sharp peak is narrow; a wide one means
-            the excitation was too slow or too small to localise the lag, and the run should be
-            repeated rather than believed.
+            how much of the searched lag range sits within 10% of the peak — an upper bound on the
+            peak's width, since it counts side lobes that clear the same threshold rather than only
+            the contiguous top. A sharp peak is narrow; a wide one means the excitation was too slow
+            or too small to localise the lag, and the run should be repeated rather than believed.
         ``pinned``
             True when the winning lag sits on the edge of the search window, i.e. the answer is
             the clamp rather than a peak. Always a rejection: the reported lag is meaningless and,
@@ -189,9 +191,21 @@ def get_latency(
 
     peak = correlation[peak_idx]
     peak_corr = float(peak)
-    # Width measured inside the search window only, so the neighbouring lobes of a periodic
-    # excitation do not count against an otherwise sharp peak.
-    peak_width_s = float(np.count_nonzero(correlation[mask] >= peak * _PEAK_WIDTH_FRACTION) * resample_dt)
+    # A COUNT of every sample within 10% of the peak, not the width of the contiguous run around
+    # it — so a side lobe that also clears the threshold is counted in. Deliberate: the metric only
+    # ever gates a rejection (peak_width_s > MAX_PEAK_WIDTH_S), so over-counting can only make the
+    # probe ask for a re-run, never wave a bad number through. It rarely fires anyway on the
+    # shipped excitation — the arm chirp's slowest component has a 20 s period and its fastest a
+    # 2.5 s one, so its side lobes fall outside the +/-2 s search window entirely. Only worth
+    # replacing with a contiguous run if a future excitation puts lobes inside the window and the
+    # re-run requests get annoying.
+    #
+    # Written against the peak's magnitude rather than as `peak * _PEAK_WIDTH_FRACTION`, which
+    # inverts the comparison for a negative peak (0.9x a negative number is LARGER than it) and
+    # would report a width of one sample for a correlation that never matched at all. Callers
+    # reject those on peak_corr first, so this is belt-and-braces.
+    threshold = peak - abs(peak) * (1 - _PEAK_WIDTH_FRACTION)
+    peak_width_s = float(np.count_nonzero(correlation[mask] >= threshold) * resample_dt)
     # A winner sitting on the edge of the search window is not a peak, it is the clamp: the true
     # maximum is at or beyond the bound and we cropped it. Callers must reject these rather than
     # report the bound as a measurement. Worth flagging explicitly because truncating the window

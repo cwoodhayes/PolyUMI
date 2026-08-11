@@ -223,8 +223,8 @@ went. **This moves the arm.**
    ```bash
    ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true
    ```
-2. **Nothing between the fingers**, then — passing your configured `latency.arm_exec`, which the
-   step-count conversion needs (see below):
+2. **Nothing between the fingers**, then run it. It needs no other measurement as input — the hand
+   is truncated by its own latency alone, so this run is independent of `latency.arm_exec`:
    ```bash
    ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper
    ```

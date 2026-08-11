@@ -291,6 +291,35 @@ def test_camera_pipeline_recovers_a_known_latency_end_to_end(tmp_path):
     probe.destroy_node()
 
 
+def test_camera_render_overhead_is_the_draw_only_not_the_qr_pacing(monkeypatch):
+    """
+    The subtracted overhead must be the draw, not the draw plus the wait between codes.
+
+    This shipped wrong: the sample was taken after the single ``waitKey(1/QR_HZ)`` that both
+    painted the window and paced the loop, so a whole QR period — 50 ms, a third of latency.gopro
+    itself — was subtracted from every offset. The resulting 0.0756 s sat well below UMI's
+    0.125-0.17 s band for the same capture chain, which is the only reason it was caught. Nothing
+    about the number looks wrong on its own, so the guard has to be here.
+    """
+    import time
+
+    from polyumi_ros2 import latency_probe as lp
+
+    probe = _probe(mode='camera', duration_s=1.05, plot=False)
+    for name in ('namedWindow', 'setWindowProperty', 'destroyAllWindows', 'imshow'):
+        monkeypatch.setattr(lp.cv2, name, lambda *a, **k: None)
+    # A waitKey that actually sleeps, which is what makes the difference observable at all.
+    monkeypatch.setattr(lp.cv2, 'waitKey', lambda ms: (time.sleep(ms / 1e3), -1)[1])
+    subtracted = []
+    monkeypatch.setattr(probe, '_report_camera', lambda o: (subtracted.append(o), 0)[1])
+
+    assert probe.run() == 0
+    # Generous: the draw is ~1 ms plus the QR encode, against a 50 ms period. The old code landed
+    # at ~50 ms and anything near that is the bug back.
+    assert subtracted[0] < 0.5 / lp.QR_HZ, f'{subtracted[0] * 1e3:.0f} ms looks like the QR period'
+    probe.destroy_node()
+
+
 def test_camera_reports_failure_when_too_few_codes_decode():
     """A blurred or badly aimed run must refuse to produce a number rather than average three."""
     probe = _probe(mode='camera', plot=False)

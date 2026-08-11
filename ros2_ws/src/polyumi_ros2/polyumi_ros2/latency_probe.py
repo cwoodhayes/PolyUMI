@@ -390,10 +390,18 @@ class LatencyProbe(Node):
 
     def _now(self) -> float:
         """
-        Seconds on the node clock.
+        Seconds on the node clock, i.e. the LAPTOP's clock.
 
-        Everything — QR payloads, publish times, message stamps — is timed against this one clock
-        so no comparison in the probe ever crosses clock domains.
+        ``mode:=camera`` is self-contained on this clock: the QR payload, the frame stamp
+        (``v4l2_camera`` runs here) and the arrival time all come from it, so nothing crosses a
+        clock domain and the answer is immune to any skew.
+
+        The arm and gripper modes are NOT. Their commands are stamped here while the responses —
+        ``/fr3_gripper/joint_states`` headers, TF from the arm — are stamped on the NUC, so the
+        laptop<->NUC offset lands in the result one-for-one. That is fine only because the two are
+        chrony-disciplined to sub-ms over the 10.0.0.x link (see CLAUDE.md, "Clock sync"); if that
+        has drifted, these modes silently measure the drift. ``ssh jailfranka chronyc sources``
+        before believing a surprising number.
         """
         return self.get_clock().now().nanoseconds * 1e-9
 
@@ -444,27 +452,36 @@ class LatencyProbe(Node):
         )
 
         render_overheads = []
+        period_ms = max(1, int(1000 / QR_HZ))
         end = self._now() + self._duration_s
-        while self._now() < end:
+        key = -1
+        while self._now() < end and key & 0xFF != ord('q'):
             t_sample = self._now()
             cv2.imshow(window, render_qr(encoder, f'{t_sample:.6f}'))
-            key = cv2.waitKey(max(1, int(1000 / QR_HZ)))
-            # Time spent building and blitting the code is ours, not the capture chain's, so it is
-            # subtracted out. What remains inside the number is the monitor's own scanout, which
-            # UMI does not correct for either. ponytail: ~5-20 ms floor; a photodiode would remove
-            # it and is not worth the rig.
+            # TWO waitKeys, and the split is the whole point. imshow only queues; waitKey is what
+            # pumps highgui's event loop and actually paints, so the code is on screen once
+            # waitKey(1) returns — that, and only that, is the delay we caused and must subtract.
+            # The rest of the QR period is paced by the SECOND waitKey, outside the measurement.
+            # Measuring across the pacing wait (as this did until 2026-08-11) folds a whole
+            # 1/QR_HZ — 50 ms, a third of latency.gopro itself — into the correction and
+            # under-reports the answer by that much.
+            key = cv2.waitKey(1)
             render_overheads.append(self._now() - t_sample)
-            if key & 0xFF == ord('q'):
-                break
             # Stop as soon as we have all the frames we can hold, rather than displaying to a
             # buffer that is silently discarding everything.
             if self.frames_full():
                 self.get_logger().info(f'Buffered {MAX_BUFFERED_FRAMES} frames; stopping early.')
                 break
+            remaining_ms = period_ms - int((self._now() - t_sample) * 1e3)
+            if remaining_ms > 0:
+                key = cv2.waitKey(remaining_ms)
         cv2.destroyAllWindows()
         if not render_overheads:
             self.get_logger().error('Display loop never ran; nothing to report.')
             return 1
+        # What remains inside the reported number after this subtraction is the monitor's own
+        # scanout, which UMI does not correct for either. ponytail: ~5-20 ms floor; a photodiode
+        # would remove it and is not worth the rig.
         return self._report_camera(float(np.mean(render_overheads)))
 
     def _run_arm(self) -> int:

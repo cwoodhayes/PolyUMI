@@ -15,11 +15,16 @@
     # observation->motion budget or every action in it is already in the past by the time the arm
     # can act, _n_stale_actions drops all of them, and nothing is published at all:
     #
-    #   obs age at response ~0.59s (0.28 capture+convert, 0.30 inference) + arm_exec 0.70s = 1.3s
+    #   obs age at response ~0.62s (0.31 capture+convert, 0.30 inference) + arm_exec 0.62s = 1.24s
     #
     # against a span of n_action_steps * action_dt. At 8 that is 0.8s and the arm never moves —
     # observed on hardware 2026-08-10, "Whole action chunk stale for both devices" every tick.
-    # 16 gives 1.6s, which clears it with ~3 waypoints to spare.
+    # 16 gives 1.6s, which clears it with 3 waypoints to spare.
+    #
+    # Those 3 waypoints span 0.3s, while steps_per_inference above puts 0.6s between chunks — so
+    # the arm currently runs out of trajectory halfway through each stride and holds. The startup
+    # guard does not catch this: it compares steps_per_inference against the raw n_action_steps
+    # (16), not against what survives truncation (3). Lower steps_per_inference or cut arm_exec.
     #
     # 16 is also the model's own action_horizon (the fork's config/task/polyumi.yaml), and
     # serve_policy returns min(requested, what the model has) — so this cannot over-read, and
@@ -46,9 +51,9 @@
       #
       # NOT the ~200 ms YUYV->RGB convert: v4l2_camera stamps at dequeue and converts afterwards,
       # so that cost lands after the stamp. It is what max_image_age_s has to tolerate, not this.
-      # 
-      # calibrated 2026-08-10 on the crb's fr3 arm setup.
-      gopro: 0.0756
+      #
+      # calibrated 2026-08-11 on the crb's fr3 arm setup.
+      gopro: 0.1087
 
       # Finger camera latency. Declared but never consumed — the policy has no tactile input
       # yet (see "What's left" in docs/franka-inference-bringup.md). Left at 0 so it cannot skew
@@ -79,9 +84,12 @@
       # split. Most of it is fr3_gripper_bridge's own min_command_period_s (0.25 s) quantisation,
       # which is real delay in service and belongs here.
       #
-      # The hand is currently 188 ms FASTER than the arm. Before the split it was forced to inherit
-      # arm_exec and closed that much early, and fr3_gripper_bridge's gripper_lead_steps (now
-      # removed) was the knob that tried to claw it back — it could only add lead, never remove it.
+      # The hand is currently 106 ms FASTER than the arm (0.620 - 0.514), i.e. one action step.
+      # Before the split it was forced to inherit arm_exec and closed that much early, and
+      # fr3_gripper_bridge's gripper_lead_steps (now removed) was the knob that tried to claw it
+      # back — it could only add lead, never remove it. The gap was 188 ms when the split landed,
+      # against an arm_exec of 0.702 that has since been re-measured; it moves with arm_exec, which
+      # is the point of measuring the two independently.
       #
       # Calibrated on 08-10-2026: 8 steps, 514 ms median (376-710), open 514 / close 534.
       gripper_exec: 0.514
