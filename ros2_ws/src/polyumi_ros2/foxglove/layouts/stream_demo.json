@@ -53,13 +53,13 @@
     "3D!2sy03nw": {
       "cameraState": {
         "perspective": true,
-        "distance": 2.4417309747328084,
-        "phi": 75.20319722652513,
+        "distance": 2.7055190855764817,
+        "phi": 75.20319722652508,
         "thetaOffset": 161.17969953776426,
         "targetOffset": [
-          0.24764460938257093,
-          -0.38571512577157546,
-          -1.2253186654752361e-17
+          0.38248857602111025,
+          -0.49276165970869423,
+          -1.541150377119248e-17
         ],
         "target": [
           0,
@@ -250,6 +250,71 @@
       "topic": "/pi/audio/raw",
       "muted": false,
       "foxglovePanelTitle": "Fingertip Mic"
+    },
+    "Plot!48aw8d6": {
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/polyumi/diag/inference_latency_s.data",
+          "enabled": true,
+          "color": "#4e98e2",
+          "id": "2aa9f5b1-4de8-4841-92aa-435ddf0d7296",
+          "label": "Inference Latency (s)"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/polyumi/diag/image_age_s.data",
+          "enabled": true,
+          "color": "#f5774d",
+          "id": "13020254-b3c6-4b96-aa37-cd8646de0504",
+          "label": "GoPro latency (s)"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/polyumi/diag/gripper_state_age_s.data",
+          "enabled": true,
+          "color": "#f7df71",
+          "id": "5426c2fc-bec8-489c-a6c9-dbea2ea98cac",
+          "label": "Gripper proprio latency (s)"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/polyumi/diag/obs_age_s.data",
+          "enabled": true,
+          "color": "#5cd6a9",
+          "id": "d8e84f3a-30a8-4c4d-a388-b2b2a6378c86",
+          "label": "GoPro capture -> inf. response time (s)"
+        }
+      ],
+      "foxglovePanelTitle": "System Latency",
+      "showPlotValuesInLegend": false,
+      "legendDisplay": "floating",
+      "showLegend": true,
+      "sidebarDimension": 85
+    },
+    "Plot!1qf52yo": {
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/polyumi/diag/n_published_arm.data",
+          "enabled": true,
+          "color": "#4e98e2",
+          "id": "88ce55a9-dc12-43a4-9b4d-21e8f4912d47",
+          "label": "N actions -> arm"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/polyumi/diag/n_published_gripper.data",
+          "enabled": true,
+          "color": "#f5774d",
+          "id": "915ec6be-2937-4ffc-aa47-cdfaacb551ed",
+          "label": "N actions -> gripper"
+        }
+      ],
+      "foxglovePanelTitle": "System Health",
+      "yAxisLabel": "actions",
+      "minYValue": 0,
+      "maxYValue": 16
     }
   },
   "layout": {
@@ -268,9 +333,18 @@
       "direction": "row",
       "splitPercentage": 43.78513429106808
     },
-    "second": "Audio!1ops55o",
+    "second": {
+      "first": "Audio!1ops55o",
+      "second": {
+        "first": "Plot!48aw8d6",
+        "second": "Plot!1qf52yo",
+        "direction": "row"
+      },
+      "direction": "row",
+      "splitPercentage": 31.799269763097566
+    },
     "direction": "column",
-    "splitPercentage": 75.54812208607034
+    "splitPercentage": 69.48113779193574
   },
   "globalVariables": {},
   "playbackConfig": {
