@@ -339,9 +339,25 @@ class PolicyClientNode(Node):
             for name in DIAG_METRICS
         }
 
-        # Subscribers
-        self.create_subscription(Image, image_topic, self._image_cb, 10)
-        self.create_subscription(JointState, gripper_topic, self._gripper_cb, 10)
+        # Subscribers.
+        #
+        # The gripper gets its OWN callback group. Left on the node's default group it shares one
+        # MutuallyExclusiveCallbackGroup with the image subscription, and 60 Hz of 6 MB rgb8
+        # deserialization starves it: measured on hardware, gripper callbacks gapped up to 1.4 s
+        # and ~20% of samples were dropped outright (14.6 Hz delivered against a 17.9 Hz topic).
+        # That is not merely a bad diagnostic — _gripper_width_at holds the nearest endpoint
+        # outside its buffer span, so the policy was being handed a silently stale agent_pos[7],
+        # and max_gripper_age_s tripped on most ticks. With its own group the callback tracks the
+        # topic exactly (worst gap 122 ms against the topic's own 124 ms worst interval).
+        #
+        # Depth 1 on the image, not 10: only the newest frame is ever used (_image_cb overwrites
+        # _latest_image), so a deeper queue just means working through stale frames after any
+        # hiccup — burning CPU to make image_age_s worse.
+        self.create_subscription(Image, image_topic, self._image_cb, 1)
+        self.create_subscription(
+            JointState, gripper_topic, self._gripper_cb, 10,
+            callback_group=MutuallyExclusiveCallbackGroup(),
+        )
 
         # Control timer — exclusive callback group ensures only one tick (and its
         # blocking POST) runs at a time; an in-flight tick causes the next one to

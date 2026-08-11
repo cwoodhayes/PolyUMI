@@ -719,6 +719,25 @@ def _capture_diag(node):
     return captured
 
 
+def test_gripper_subscription_is_not_starved_by_the_image_subscription(make_node):
+    """
+    The gripper must not share a callback group with the 60 Hz image subscription.
+
+    A MutuallyExclusiveCallbackGroup serialises everything in it, and 6 MB rgb8 frames at 60 Hz
+    monopolise it: measured on hardware the gripper callback gapped up to 1.4 s and lost ~20% of
+    samples. _gripper_width_at holds its nearest endpoint outside the buffer span, so that reaches
+    the policy as a silently stale agent_pos[7] rather than as an error. Structural, and exactly
+    the kind of thing a later edit re-adding the subscription would quietly undo.
+    """
+    node = make_node(control_hz=10.0)
+    by_topic = {sub.topic_name: sub for sub in node.subscriptions}
+    image_sub = by_topic['/gopro/image_raw']
+    gripper_sub = by_topic['/fr3_gripper/joint_states']
+
+    assert gripper_sub.callback_group is not image_sub.callback_group
+    assert gripper_sub.callback_group is not node.default_callback_group
+
+
 def test_diagnostics_report_zero_published_when_the_chunk_is_all_stale(make_node):
     """
     The zero has to reach the plot, and that is the path that returns early.

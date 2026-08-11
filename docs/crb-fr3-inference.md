@@ -665,6 +665,25 @@ frame's capture stamp, so it's safe for the dry run. For **execution**, prefer a
 camera path (lower published resolution, or the compressed transport) so the policy isn't acting on
 200 ms-old vision.
 
+### `gripper_state_age_s` spikes to seconds while the topic itself looks fine
+Check the topic before blaming it: if `ros2 topic hz /fr3_gripper/joint_states` reports a healthy
+~20 Hz and `arrival - header.stamp` is sub-millisecond, the transport and the clocks are fine and
+the *subscriber* is starved.
+
+Found 2026-08-11: `policy_client_node`'s gripper subscription shared the node's default
+`MutuallyExclusiveCallbackGroup` with the image subscription, and 60 Hz of 6 MB `rgb8`
+deserialization monopolised it — gripper callbacks gapped up to **1.4 s** and ~20% of samples were
+dropped (14.6 Hz delivered against a 17.9 Hz topic). Giving the subscription its own callback group
+brought the worst gap to 122 ms, matching the topic's own worst interval.
+
+This is worth recognising because it does **not** announce itself as an error. `_gripper_width_at`
+holds its nearest endpoint outside the buffer span, so a starved buffer feeds the policy a stale
+`agent_pos[7]` that looks like a plausible width. The tells are `gripper_state_age_s` far above the
+topic's publish interval, and `max_gripper_age_s` warnings on most ticks.
+
+Any *new* high-rate subscription added to this node needs the same treatment — put it in its own
+callback group, or it will starve whatever shares one with it.
+
 ### Gripper: a stream of `Command aborted!` / "Gripper move failed"
 `franka_gripper` accepts every goal and never preempts; libfranka aborts whichever command a new
 one supersedes, so each superseded goal ends ABORTED. A steady stream of these means
