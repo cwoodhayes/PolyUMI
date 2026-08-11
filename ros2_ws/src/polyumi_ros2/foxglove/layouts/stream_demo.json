@@ -53,9 +53,9 @@
     "3D!2sy03nw": {
       "cameraState": {
         "perspective": true,
-        "distance": 2.7055190855764817,
-        "phi": 75.20319722652508,
-        "thetaOffset": 161.17969953776426,
+        "distance": 2.705519085576189,
+        "phi": 85.48891151223991,
+        "thetaOffset": 166.02003567221863,
         "targetOffset": [
           0.38248857602111025,
           -0.49276165970869423,
@@ -267,7 +267,7 @@
           "enabled": true,
           "color": "#f5774d",
           "id": "13020254-b3c6-4b96-aa37-cd8646de0504",
-          "label": "GoPro latency (s)"
+          "label": "GoPro img proc latency (s)"
         },
         {
           "timestampMethod": "receiveTime",

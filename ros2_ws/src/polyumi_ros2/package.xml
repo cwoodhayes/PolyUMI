@@ -37,10 +37,15 @@
        own channel and its own cadence. Consumed by nuc/fr3_gripper_bridge.py — the franka_msgs
        gripper actions are called from the NUC, not here. -->
   <depend>trajectory_msgs</depend>
+  <!-- On the inference path: camera_preproc's resize/crop and policy_client_node's use of it, plus
+       the QR encode/decode in latency_probe's camera mode. Undeclared until 2026-08-11 — it worked
+       only because python3-opencv happens to be installed system-wide, so the `rosdep install`
+       in the README left a fresh machine importing a cv2 nothing had asked for. -->
+  <exec_depend>python3-opencv</exec_depend>
   <!-- latency_probe only: scipy carries the cross-correlation estimator in latency_util, and
        matplotlib draws the correlation curve you judge a marginal run by. Neither is on the
-       inference path. The QR clock mode/=camera films needs no extra package — cv2 encodes and
-       decodes it, and cv2 is already here for the camera preprocessing. -->
+       inference path. The QR clock that mode:=camera films needs no package beyond the cv2
+       above — it encodes and decodes the codes itself. -->
   <exec_depend>python3-scipy</exec_depend>
   <exec_depend>python3-matplotlib</exec_depend>
 
