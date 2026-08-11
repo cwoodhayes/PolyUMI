@@ -59,6 +59,12 @@ Unlike task rename (Phase 2), a description edit doesn't affect the Tasks column
 other selection on the page, so it doesn't need the full-page reload rename uses — it's
 scoped to the detail pane like every Phase 6 field, just with no on-disk manifest to write
 (tasks have none; see the mutations module docstring).
+Phase 8 adds a topbar "Fetch from Pi" button beside Rescan: ``pingest fetch``'s scene copy
+(``PiFetch``, minus the CLI's confirm prompt and its GoPro-SD-card follow-up, which needs a
+mounted card) on a background thread with progress in ``app.state.fetch``, polled by the
+topbar status span — the Phase 4 pattern, one run at a time rather than one per scene. The
+run ends with the same sync ``/rescan`` does, and the poll that observes completion carries
+an out-of-band Tasks refresh so the fetched scenes are browsable without a second click.
 """
 
 from __future__ import annotations
@@ -91,24 +97,31 @@ from polyumi_catalog.mutations import (
     set_task_description,
 )
 from polyumi_catalog.sync import sync_datasets, sync_recordings, sync_scene_quality
+from polyumi_ingest.pi_fetch import DEFAULT_HOST, PiFetch
 
 _PKG_DIR = pathlib.Path(__file__).resolve().parent
 _TEMPLATES_DIR = _PKG_DIR / 'templates'
 _STATIC_DIR = _PKG_DIR / 'static'
 
+# Pi-fetch progress shown in the topbar. 'total' stays None until the remote listing
+# comes back, which is what the template renders as the "listing…" phase.
+_IDLE_FETCH = {'status': 'idle', 'total': None, 'done': 0, 'current': None, 'error': None}
 
-def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> FastAPI:
+
+def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_host: str = DEFAULT_HOST) -> FastAPI:
     """
     Build the catalog browser app bound to ``engine``.
 
-    If ``recordings_dir`` is given, the ``/rescan`` endpoint re-runs the sync scan
-    against it; otherwise rescanning is disabled.
+    If ``recordings_dir`` is given, the ``/rescan`` and ``/fetch`` endpoints re-run the
+    sync scan / pull new scenes off ``pi_host`` into it; otherwise both are disabled.
     """
     app = FastAPI(title='PolyUMI Catalog')
     app.state.pending_dataset_scene_ids = []
     app.state.pending_dataset_lock = threading.Lock()
     app.state.pp_runs = {}  # scene_id -> {'status': 'running'|'done'|'error', 'error': str|None}
     app.state.pp_runs_lock = threading.Lock()
+    app.state.fetch = _IDLE_FETCH.copy()
+    app.state.fetch_lock = threading.Lock()
     app.mount('/static', StaticFiles(directory=_STATIC_DIR), name='static')
     templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
     # Commit shas are shown abbreviated in several places; the full value stays in the
@@ -170,6 +183,7 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
             all_tasks=all_tasks,
             can_rescan=recordings_dir is not None,
             can_build_dataset=recordings_dir is not None,
+            fetch=app.state.fetch,
         )
 
     @app.get('/select/task/{task_key}', response_class=HTMLResponse)
@@ -230,6 +244,65 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
         with DBSession(engine) as db:
             tasks = queries.list_tasks(db)
         return render(request, '_tasks.html', tasks=tasks, oob=False)
+
+    @app.post('/fetch', response_class=HTMLResponse)
+    def post_fetch(request: Request) -> HTMLResponse:
+        """
+        Start a background ``pingest fetch`` of every not-yet-local scene on the Pi.
+
+        Same background-thread + status-on-app.state + poll-the-fragment shape as the
+        pipeline runner (see the Phase 4 paragraph above); a fetch is minutes of ssh/tar,
+        so it can't run on the request thread either. Unlike the CLI's ``fetch`` this does
+        not chase the GoPro SD card afterwards — that needs a mounted card, so it stays a
+        ``pingest fetch-gopro`` on the terminal.
+        """
+        if recordings_dir is None:
+            return PlainTextResponse('Fetching requires a recordings directory.', status_code=400)
+
+        with app.state.fetch_lock:
+            already_running = app.state.fetch['status'] == 'running'
+            if not already_running:
+                app.state.fetch = _IDLE_FETCH | {'status': 'running'}
+
+        def _run() -> None:
+            # Broad except for the same reason as the pipeline thread: unattended, so an
+            # ssh/tar failure has to land in the status dict or the topbar spins forever.
+            try:
+                pi = PiFetch(pi_host)
+                todo = [name for name in pi.list_remote_scenes() if not (recordings_dir / name).exists()]
+                with app.state.fetch_lock:
+                    app.state.fetch |= {'total': len(todo)}
+                for i, name in enumerate(todo, 1):
+                    with app.state.fetch_lock:
+                        app.state.fetch |= {'current': name}
+                    pi.copy_scene(name, recordings_dir / name)
+                    with app.state.fetch_lock:
+                        app.state.fetch |= {'done': i, 'current': None}
+                sync_recordings(recordings_dir, engine)
+                sync_datasets(default_datasets_dir(recordings_dir), engine)
+                with app.state.fetch_lock:
+                    app.state.fetch |= {'status': 'done'}
+            except Exception as exc:
+                with app.state.fetch_lock:
+                    app.state.fetch |= {'status': 'error', 'error': str(exc)}
+
+        if not already_running:
+            # kept on app.state purely so tests can join it instead of sleeping
+            app.state.fetch_thread = threading.Thread(target=_run, daemon=True)
+            app.state.fetch_thread.start()
+        return render(request, '_fetch.html', fetch=app.state.fetch)
+
+    @app.get('/fetch-poll', response_class=HTMLResponse)
+    def get_fetch_poll(request: Request) -> HTMLResponse:
+        fetch = app.state.fetch
+        html = templates.env.get_template('_fetch.html').render(fetch=fetch)
+        if fetch['status'] == 'done' and fetch['total']:
+            # the run's closing sync already put the new scenes in the DB; refresh the Tasks
+            # column out-of-band so they show up without the user also hitting Rescan
+            with DBSession(engine) as db:
+                tasks = queries.list_tasks(db)
+            html += templates.env.get_template('_tasks.html').render(tasks=tasks, oob=True)
+        return HTMLResponse(html)
 
     @app.post('/tasks')
     def post_create_task(name: str = Form(...)):

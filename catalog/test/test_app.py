@@ -166,6 +166,70 @@ def test_rescan_disabled_without_recordings_dir(tmp_path: pathlib.Path):
     assert 'fold_towel' in resp.text
 
 
+def test_fetch_disabled_without_recordings_dir(tmp_path: pathlib.Path):
+    """POST /fetch is rejected when the app has no recordings_dir to fetch into."""
+    assert _client(tmp_path, with_recordings=False).post('/fetch').status_code == 400
+
+
+def _fake_pi(monkeypatch, *, scenes: list[str], on_copy=None):
+    """Patch app.PiFetch with a stub listing `scenes` and running `on_copy` per copy."""
+
+    class FakePi:
+        def __init__(self, host: str) -> None:
+            self.host = host
+
+        def list_remote_scenes(self) -> list[str]:
+            return scenes
+
+        def copy_scene(self, name: str, local_path: pathlib.Path, verbose: bool = False) -> None:
+            on_copy(name, local_path)
+
+    monkeypatch.setattr('polyumi_catalog.app.PiFetch', FakePi)
+
+
+def test_fetch_copies_only_new_scenes_then_syncs(tmp_path: pathlib.Path, monkeypatch):
+    """/fetch skips already-local scenes, copies the rest, and re-syncs so they appear in Tasks."""
+    rec, engine = _seed(tmp_path)
+    new_scene = 'scene_2026-07-27_11-00-00_beef'
+
+    def copy(name: str, local_path: pathlib.Path) -> None:
+        local_path.mkdir(parents=True)
+        SceneManifest(scene_id='scene-2', task='wipe_table').write_to_scene_dir(local_path)
+        _make_session(local_path, 'session_1', scene_id='scene-2', session_type=SessionType.EPISODE)
+
+    _fake_pi(monkeypatch, scenes=['scene_2026-07-26_10-00-00_abcd', new_scene], on_copy=copy)
+    app = create_app(engine, recordings_dir=rec, pi_host='fake')
+    client = TestClient(app)
+
+    assert client.post('/fetch').status_code == 200
+    app.state.fetch_thread.join(timeout=30)
+    assert app.state.fetch['status'] == 'done'
+    assert app.state.fetch['total'] == 1  # the already-local scene was skipped
+    assert (rec / new_scene).is_dir()
+
+    poll = client.get('/fetch-poll').text
+    assert 'fetched 1 scene' in poll
+    assert 'wipe_table' in poll  # OOB Tasks refresh, so the new scene is browsable
+    assert 'hx-get="/fetch-poll"' not in poll  # polling stops once done
+
+
+def test_fetch_failure_shows_in_status(tmp_path: pathlib.Path, monkeypatch):
+    """A transfer failure lands in the status line instead of leaving it spinning."""
+    rec, engine = _seed(tmp_path)
+
+    def boom(name: str, local_path: pathlib.Path) -> None:
+        raise RuntimeError('ssh/tar sender failed with code 255')
+
+    _fake_pi(monkeypatch, scenes=['scene_2026-07-27_11-00-00_beef'], on_copy=boom)
+    app = create_app(engine, recordings_dir=rec, pi_host='fake')
+    client = TestClient(app)
+
+    client.post('/fetch')
+    app.state.fetch_thread.join(timeout=30)
+    assert app.state.fetch['status'] == 'error'
+    assert 'code 255' in client.get('/fetch-poll').text
+
+
 def test_no_get_route_mutates_state(tmp_path: pathlib.Path):
     """Sanity check: hitting every read route twice yields byte-identical responses."""
     client = _client(tmp_path)

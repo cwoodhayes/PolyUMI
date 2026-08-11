@@ -12,6 +12,7 @@ import os
 import pathlib
 
 import typer
+from polyumi_ingest.pi_fetch import DEFAULT_HOST as DEFAULT_PI_HOST
 from polyumi_pi.files.session import DEFAULT_RECORDINGS_DIR
 from rich.console import Console
 from rich.logging import RichHandler
@@ -137,6 +138,9 @@ def serve(
         help='Catalog SQLite path. Defaults to <recordings>/.catalog/catalog.db.',
     ),
     host: str = typer.Option('127.0.0.1', '--host', help='Bind address.'),
+    pi_host: str = typer.Option(
+        DEFAULT_PI_HOST, '--pi-host', help='SSH hostname of the Pi for the Fetch button (env: POLYUMI_PI_HOST).'
+    ),
     port: int = typer.Option(8420, '--port', help='Bind port.'),
     sync_on_start: bool = typer.Option(
         True,
@@ -172,7 +176,7 @@ def serve(
     elif sync_on_start:
         log.warning(f'Recordings directory not found, skipping startup sync: {recordings}')
 
-    web_app = create_app(engine, recordings_dir=recordings if recordings.is_dir() else None)
+    web_app = create_app(engine, recordings_dir=recordings if recordings.is_dir() else None, pi_host=pi_host)
     log.info(f'DB: {db_path}')
     log.info(f'Serving on http://{host}:{port}')
     uvicorn.run(web_app, host=host, port=port)

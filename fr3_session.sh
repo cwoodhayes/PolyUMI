@@ -57,10 +57,12 @@ NUC_REPO="${NUC_REPO:-~/Documents/PolyUMI}"
 SHEEP_SSH_HOST="${SHEEP_SSH_HOST:-sheep}"
 SHEEP_REPO="${SHEEP_REPO:-~/repos/PolyUMI}"
 
-# ssh alias for the Pi. "polyumi-pi" is the name other users are expected to set up in their
-# own ssh config; override if yours is named differently (mine is "conorpi"):
-#   PI_SSH_HOST=conorpi ./fr3_session.sh
-PI_SSH_HOST="${PI_SSH_HOST:-polyumi-pi}"
+# ssh destination for the Pi — the same POLYUMI_PI_HOST that `pingest fetch` and the catalog's
+# Fetch button read, so one export in your shell rc covers all three. "polyumi-pi" is the alias
+# other users are expected to set up in their own ssh config; override if yours is named
+# differently (mine is "conorpi"):
+#   POLYUMI_PI_HOST=conorpi ./fr3_session.sh
+POLYUMI_PI_HOST="${POLYUMI_PI_HOST:-polyumi-pi}"
 
 INFERENCE_URL="${INFERENCE_URL:-http://sheep.mech.northwestern.edu:8002/predict_cartesian/}"
 # The Elgato's 1080p software convert runs ~200ms behind; the 50ms auto default drops every tick.
@@ -105,14 +107,14 @@ fi
 # launch line. Actually connecting is the only check that distinguishes the two, and it catches
 # a powered-off Pi at the same time. Non-fatal, matching how the deploy section below treats an
 # unreachable machine: one box being down should not block bringing the others up.
-PI_HOST="$(ssh -G "$PI_SSH_HOST" 2>/dev/null | awk '/^hostname /{print $2}')" || true
-if ssh -o ConnectTimeout=5 -o BatchMode=yes "$PI_SSH_HOST" true 2>/dev/null; then
-  echo "Pi resolved to $PI_HOST (ssh alias: $PI_SSH_HOST)"
+PI_HOST="$(ssh -G "$POLYUMI_PI_HOST" 2>/dev/null | awk '/^hostname /{print $2}')" || true
+if ssh -o ConnectTimeout=5 -o BatchMode=yes "$POLYUMI_PI_HOST" true 2>/dev/null; then
+  echo "Pi resolved to $PI_HOST (ssh alias: $POLYUMI_PI_HOST)"
 else
-  echo "WARNING: cannot reach the Pi at ssh alias '$PI_SSH_HOST' (resolved: '${PI_HOST:-nothing}')." >&2
+  echo "WARNING: cannot reach the Pi at ssh alias '$POLYUMI_PI_HOST' (resolved: '${PI_HOST:-nothing}')." >&2
   echo "         Either the Pi is off, or the alias is not in your ssh config — in which case" >&2
   echo "         ssh hands back the alias verbatim and pi_host:= below will be wrong." >&2
-  echo "         Set it with:  PI_SSH_HOST=conorpi ./fr3_session.sh" >&2
+  echo "         Set it with:  POLYUMI_PI_HOST=conorpi ./fr3_session.sh" >&2
   echo "         Continuing; the Pi panes will just fail to connect." >&2
 fi
 
@@ -146,8 +148,8 @@ else
     echo "WARNING: rsync to $NUC_SSH_HOST failed — it may be running stale nuc/ code." >&2
   fi
 
-  echo "==> Deploying pi/ to $PI_SSH_HOST via ./deploy.sh ..."
-  if ! (cd "$REPO_DIR" && ./deploy.sh "$PI_SSH_HOST"); then
+  echo "==> Deploying pi/ to $POLYUMI_PI_HOST via ./deploy.sh ..."
+  if ! (cd "$REPO_DIR" && ./deploy.sh "$POLYUMI_PI_HOST"); then
     echo "WARNING: deploy.sh failed (Pi unreachable?) — it may be running stale code." >&2
   fi
 fi
@@ -246,7 +248,7 @@ tmux send-keys -t "$NUC_INFER_PANE" "$(remote_shell "$NUC_SSH_HOST" fr3-inferenc
 # intermittently threw exactly that error once >= 2 windows existed.
 read -r PI_PANE PI_WINDOW < <(
   tmux new-window -a -t "$NUC_WINDOW" -n polyumi-pi -P -F '#{pane_id} #{window_id}' -c "$REPO_DIR")
-tmux send-keys -t "$PI_PANE" "ssh -t $PI_SSH_HOST" C-m
+tmux send-keys -t "$PI_PANE" "ssh -t $POLYUMI_PI_HOST" C-m
 SHEEP_PANE="$(tmux split-window -t "$PI_PANE" -h -P -F '#{pane_id}' -c "$REPO_DIR")"
 tmux send-keys -t "$SHEEP_PANE" "$(remote_shell "$SHEEP_SSH_HOST" polyumi)" C-m
 
