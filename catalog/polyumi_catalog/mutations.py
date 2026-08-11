@@ -10,11 +10,16 @@ metadata.json, which used to be a Pi-record-time-only, catalog-read-only file (s
 Session model docstring). Task rows themselves have no on-disk manifest of their own —
 the canonical task list is recoverable by re-syncing, since every scene.json.task string
 round-trips through _get_or_create_task.
+
+``delete_scene`` is the exception to all of that: it destroys the on-disk recording instead
+of editing it, so nothing is recoverable by re-syncing afterwards. See its own docstring for
+the guards that follow from that.
 """
 
 from __future__ import annotations
 
 import pathlib
+import shutil
 from contextlib import AbstractContextManager
 
 from polyumi_pi.files.metadata import SessionMetadata
@@ -22,7 +27,7 @@ from sqlmodel import Session as DBSession
 from sqlmodel import select
 
 from polyumi_catalog.manifests import SceneManifest, set_episode_unusable, update_scene_manifest
-from polyumi_catalog.models import Scene, Session, Task
+from polyumi_catalog.models import DatasetMember, Scene, Session, Task
 
 
 class MutationError(ValueError):
@@ -235,6 +240,46 @@ def set_session_notes(db: DBSession, session_id: str, notes: str | None) -> Sess
     db.commit()
     db.refresh(session)
     return session
+
+
+def delete_scene(db: DBSession, scene_id: str, recordings_dir: pathlib.Path) -> str:
+    """
+    Delete a scene's directory from disk and its rows from the catalog. Returns the deleted path.
+
+    The only mutation here that destroys the authoritative data rather than editing it, and it
+    is not undoable — recordings are the one thing in this project that cannot be regenerated.
+    Two guards, both deliberate:
+
+    * The directory must resolve to something strictly inside ``recordings_dir``. ``Scene.dir``
+      is a DB-held absolute path, so an out-of-tree or stale row must not be able to aim
+      ``rmtree`` at, say, a home directory.
+    * Disk first, rows second. If ``rmtree`` fails partway the rows survive, so the scene is
+      still visible and the delete can be retried; the reverse order would hide a scene that is
+      still on disk (until the next sync re-adds it).
+
+    Rows are removed explicitly rather than left to a re-sync: ``sync_recordings`` only upserts
+    what it finds, it never prunes what has vanished. ``DatasetMember`` rows go too — an
+    already-exported dataset keeps its own on-disk manifest, but its catalog member list can no
+    longer name a scene that doesn't exist.
+    """
+    scene = db.get(Scene, scene_id)
+    if scene is None:
+        raise MutationError(f'No such scene: {scene_id}')
+
+    scene_dir = pathlib.Path(scene.dir).resolve()
+    root = recordings_dir.resolve()
+    if scene_dir == root or not scene_dir.is_relative_to(root):
+        raise MutationError(f'Refusing to delete {scene_dir}: not inside {root}.')
+    if scene_dir.exists():
+        shutil.rmtree(scene_dir)
+
+    for session in db.exec(select(Session).where(Session.scene_id == scene_id)).all():
+        db.delete(session)
+    for member in db.exec(select(DatasetMember).where(DatasetMember.scene_id == scene_id)).all():
+        db.delete(member)
+    db.delete(scene)
+    db.commit()
+    return str(scene_dir)
 
 
 def assign_scene_task(db: DBSession, scene_id: str, task_id: int | None) -> Scene:

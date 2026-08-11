@@ -230,6 +230,31 @@ def test_fetch_failure_shows_in_status(tmp_path: pathlib.Path, monkeypatch):
     assert 'code 255' in client.get('/fetch-poll').text
 
 
+def test_delete_scene_removes_it_and_redirects(tmp_path: pathlib.Path):
+    """The scene detail pane's Delete removes the directory and drops it from the browser."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec), follow_redirects=False)
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+
+    assert 'Delete scene' in client.get('/select/scene/scene-1').text
+    resp = client.post('/scenes/scene-1/delete')
+    assert resp.status_code == 303
+    assert not scene_dir.exists()
+    with DBSession(engine) as db:
+        assert db.get(Scene, 'scene-1') is None
+
+
+def test_delete_scene_refused_while_pipeline_running(tmp_path: pathlib.Path):
+    """A scene with a pipeline thread writing into it can't be deleted out from under it."""
+    rec, engine = _seed(tmp_path)
+    app = create_app(engine, recordings_dir=rec)
+    app.state.pp_runs['scene-1'] = {'status': 'running', 'error': None}
+
+    resp = TestClient(app).post('/scenes/scene-1/delete')
+    assert resp.status_code == 400
+    assert (rec / 'scene_2026-07-26_10-00-00_abcd').exists()
+
+
 def test_no_get_route_mutates_state(tmp_path: pathlib.Path):
     """Sanity check: hitting every read route twice yields byte-identical responses."""
     client = _client(tmp_path)

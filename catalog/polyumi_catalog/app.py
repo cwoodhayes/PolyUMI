@@ -65,6 +65,10 @@ mounted card) on a background thread with progress in ``app.state.fetch``, polle
 topbar status span — the Phase 4 pattern, one run at a time rather than one per scene. The
 run ends with the same sync ``/rescan`` does, and the poll that observes completion carries
 an out-of-band Tasks refresh so the fetched scenes are browsable without a second click.
+Phase 9 adds scene deletion from the scene detail pane — the one destructive operation here,
+so it's a plain form POST + redirect (Phase 2 style, since three columns change) gated behind
+a native ``confirm()`` and refused outright while that scene's pipeline is running. The
+disk/DB guards live in ``mutations.delete_scene``.
 """
 
 from __future__ import annotations
@@ -89,6 +93,7 @@ from polyumi_catalog.mutations import (
     MutationError,
     assign_scene_task,
     create_task,
+    delete_scene,
     rename_task,
     set_scene_notes,
     set_session_notes,
@@ -337,6 +342,28 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
         with DBSession(engine) as db:
             try:
                 assign_scene_task(db, scene_id, int(task_id) if task_id else None)
+            except MutationError as err:
+                return PlainTextResponse(str(err), status_code=400)
+        return RedirectResponse('/', status_code=303)
+
+    @app.post('/scenes/{scene_id}/delete')
+    def post_delete_scene(scene_id: str):
+        """
+        Delete a scene from disk and from the catalog, then reload the page.
+
+        Full reload (the Phase 2 pattern) rather than an in-pane swap: the scene vanishes from
+        the Scenes column, its episodes from the Episodes column, and its task's count from the
+        Tasks column, so there is nothing left to swap in place. Refuses while this scene's
+        pipeline is running — that thread is writing into the very directory being removed.
+        """
+        if recordings_dir is None:
+            return PlainTextResponse('Deleting requires a recordings directory.', status_code=400)
+        run_state = app.state.pp_runs.get(scene_id)
+        if run_state is not None and run_state['status'] == 'running':
+            return PlainTextResponse('Pipeline is still running on this scene.', status_code=400)
+        with DBSession(engine) as db:
+            try:
+                delete_scene(db, scene_id, recordings_dir)
             except MutationError as err:
                 return PlainTextResponse(str(err), status_code=400)
         return RedirectResponse('/', status_code=303)

@@ -10,15 +10,17 @@ rebuilding the DB from a fresh engine and re-running sync.
 from __future__ import annotations
 
 import pathlib
+import shutil
 
 import pytest
 from polyumi_catalog.db import get_engine
 from polyumi_catalog.manifests import SceneManifest
-from polyumi_catalog.models import Scene, Session, Task
+from polyumi_catalog.models import DatasetMember, Scene, Session, Task
 from polyumi_catalog.mutations import (
     MutationError,
     assign_scene_task,
     create_task,
+    delete_scene,
     rename_task,
     set_scene_notes,
     set_session_notes,
@@ -419,3 +421,55 @@ def test_set_task_description_rejects_unknown_task(tmp_path: pathlib.Path):
     with DBSession(engine) as db:
         with pytest.raises(MutationError):
             set_task_description(db, 999, 'hello')
+
+
+def test_delete_scene_removes_directory_and_rows(tmp_path: pathlib.Path):
+    """Deleting a scene removes its directory, its own row, and its session rows."""
+    rec = tmp_path / 'recordings'
+    scene_dir = _make_scene(rec, 'scene_2026-07-26_10-00-00_abcd', scene_id='scene-1', task='fold_towel')
+    keep_dir = _make_scene(rec, 'scene_2026-07-27_10-00-00_beef', scene_id='scene-2', task='fold_towel')
+
+    engine = get_engine(tmp_path / 'catalog.db')
+    sync_recordings(rec, engine)
+    with DBSession(engine) as db:
+        db.add(DatasetMember(dataset_id=1, scene_id='scene-1'))
+        db.commit()
+        delete_scene(db, 'scene-1', rec)
+
+        assert not scene_dir.exists()
+        assert keep_dir.exists()  # the neighbouring scene is untouched
+        assert db.get(Scene, 'scene-1') is None
+        assert db.exec(select(Session).where(Session.scene_id == 'scene-1')).all() == []
+        assert db.exec(select(DatasetMember).where(DatasetMember.scene_id == 'scene-1')).all() == []
+        assert db.get(Scene, 'scene-2') is not None
+
+
+def test_delete_scene_refuses_directory_outside_recordings(tmp_path: pathlib.Path):
+    """A row pointing outside the recordings tree is refused, and nothing is removed."""
+    rec = tmp_path / 'recordings'
+    _make_scene(rec, 'scene_2026-07-26_10-00-00_abcd', scene_id='scene-1', task=None)
+    elsewhere = tmp_path / 'not_recordings'
+    elsewhere.mkdir()
+
+    engine = get_engine(tmp_path / 'catalog.db')
+    sync_recordings(rec, engine)
+    with DBSession(engine) as db:
+        db.get(Scene, 'scene-1').dir = str(elsewhere)
+        db.commit()
+        with pytest.raises(MutationError, match='not inside'):
+            delete_scene(db, 'scene-1', rec)
+        assert elsewhere.exists()
+        assert db.get(Scene, 'scene-1') is not None
+
+
+def test_delete_scene_with_directory_already_gone_still_clears_rows(tmp_path: pathlib.Path):
+    """A scene whose directory was removed outside the UI still deletes cleanly."""
+    rec = tmp_path / 'recordings'
+    scene_dir = _make_scene(rec, 'scene_2026-07-26_10-00-00_abcd', scene_id='scene-1', task=None)
+
+    engine = get_engine(tmp_path / 'catalog.db')
+    sync_recordings(rec, engine)
+    shutil.rmtree(scene_dir)
+    with DBSession(engine) as db:
+        delete_scene(db, 'scene-1', rec)
+        assert db.get(Scene, 'scene-1') is None
