@@ -21,7 +21,7 @@ FORK_DIR="${REPO_ROOT}/external/polyumi_diffusion_policy"
 
 IMAGE="${IMAGE:-polyumi-dp}"
 CKPT="${CKPT:?set CKPT=/abs/path/to/<name>.ckpt (a trained checkpoint from train_policy.sh)}"
-PORT="${PORT:-8000}"
+PORT="${PORT:-8002}"
 
 # GPU flag. --gpus all works on most setups; if it fails under rootless Docker, set
 #   GPU_FLAG="--device nvidia.com/gpu=all"   (the CDI form; see training-instructions.md).

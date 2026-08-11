@@ -9,7 +9,7 @@
     # requested/published every steps_per_inference ticks, while the arm executes the previous
     # one. This is UMI's scheme (re-infer every ~steps_per_inference*dt) and it stops the
     # per-tick POST/publish storm. 1 = infer every tick. Should be <= n_action_steps.
-    steps_per_inference: 6
+    steps_per_inference: 3
 
     # How many action steps to request per inference. The chunk has to span the WHOLE
     # observation->motion budget or every action in it is already in the past by the time the arm
@@ -20,11 +20,6 @@
     # against a span of n_action_steps * action_dt. At 8 that is 0.8s and the arm never moves —
     # observed on hardware 2026-08-10, "Whole action chunk stale for both devices" every tick.
     # 16 gives 1.6s, which clears it with 3 waypoints to spare.
-    #
-    # Those 3 waypoints span 0.3s, while steps_per_inference above puts 0.6s between chunks — so
-    # the arm currently runs out of trajectory halfway through each stride and holds. The startup
-    # guard does not catch this: it compares steps_per_inference against the raw n_action_steps
-    # (16), not against what survives truncation (3). Lower steps_per_inference or cut arm_exec.
     #
     # 16 is also the model's own action_horizon (the fork's config/task/polyumi.yaml), and
     # serve_policy returns min(requested, what the model has) — so this cannot over-read, and

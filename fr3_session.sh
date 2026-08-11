@@ -62,7 +62,7 @@ SHEEP_REPO="${SHEEP_REPO:-~/repos/PolyUMI}"
 #   PI_SSH_HOST=conorpi ./fr3_session.sh
 PI_SSH_HOST="${PI_SSH_HOST:-polyumi-pi}"
 
-INFERENCE_URL="${INFERENCE_URL:-http://sheep.mech.northwestern.edu:8000/predict_cartesian/}"
+INFERENCE_URL="${INFERENCE_URL:-http://sheep.mech.northwestern.edu:8002/predict_cartesian/}"
 # The Elgato's 1080p software convert runs ~200ms behind; the 50ms auto default drops every tick.
 MAX_IMAGE_AGE_S="${MAX_IMAGE_AGE_S:-0.3}"
 
