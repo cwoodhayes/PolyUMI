@@ -47,6 +47,7 @@ from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
+from std_msgs.msg import Float32
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException  # type: ignore[attr-defined]
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
@@ -62,6 +63,30 @@ from polyumi_ros2.gripper_map import policy_to_robot_width, robot_to_policy_widt
 # name (the FR3's fingers are fr3_finger_joint1/2, each reporting half the aperture): the value we
 # publish is the full aperture, so naming it after a finger joint would invite a 2x error.
 GRIPPER_JOINT_NAME = 'fr3_gripper_width'
+
+#: Health and latency scalars, published on /polyumi/diag/<name> as std_msgs/Float32 so they can be
+#: watched as live timeseries in Foxglove's Plot panel (and recorded with `ros2 bag record`).
+#:
+#: Every one of these was already being computed for a log line. Logs are the wrong shape for them:
+#: a number that matters as a *trend* scrolls past as a string, and the failure they describe is
+#: usually gradual. `n_published_arm` is the one to put on the wall — it is the difference between
+#: the arm moving and not, and it sat silently at 0 for a whole session before anyone noticed.
+#:
+#: One topic per scalar rather than a single custom message: this workspace has no rosidl package
+#: (polyumi_pi_msgs is ament_python/protobuf), so a custom .msg would mean standing up a whole
+#: ament_cmake interface package for a handful of floats. Foxglove's Plot panel takes one series
+#: per path anyway. diagnostic_msgs/DiagnosticArray was the other candidate and is the wrong shape:
+#: its values are strings, so it renders a status table rather than something plottable.
+DIAG_METRICS = (
+    'n_published_arm',
+    'n_published_gripper',
+    'n_stale_arm',
+    'n_stale_gripper',
+    'obs_age_s',
+    'inference_latency_s',
+    'image_age_s',
+    'gripper_state_age_s',
+)
 
 
 class PolicyClientNode(Node):
@@ -306,6 +331,14 @@ class PolicyClientNode(Node):
         self._reset_url = self._url.split('/predict_cartesian')[0] + '/reset'
         self._episode_reset_done = False
 
+        # Diagnostics. Always on: eight Float32s at the control rate is nothing next to the image
+        # traffic already on the wire, and the failures these catch are exactly the ones you only
+        # notice if the number was already being plotted.
+        self._diag_pubs = {
+            name: self.create_publisher(Float32, f'/polyumi/diag/{name}', 10)
+            for name in DIAG_METRICS
+        }
+
         # Subscribers
         self.create_subscription(Image, image_topic, self._image_cb, 10)
         self.create_subscription(JointState, gripper_topic, self._gripper_cb, 10)
@@ -520,6 +553,15 @@ class PolicyClientNode(Node):
         # the control loop — fall back to the freshest sample.
         return samples[-1][1]
 
+    def _diag(self, name: str, value: float) -> None:
+        """
+        Publish one diagnostic scalar on /polyumi/diag/<name>.
+
+        :param name: must be in DIAG_METRICS; a typo is a KeyError at the call site rather than a
+            topic nobody ever subscribes to and nobody notices is missing.
+        """
+        self._diag_pubs[name].publish(Float32(data=float(value)))
+
     def _newest_gripper_age_s(self) -> float | None:
         """
         Seconds between now and the freshest cached gripper sample, or None if there are none.
@@ -559,6 +601,9 @@ class PolicyClientNode(Node):
 
             # Guard against pairing a stale frame with a fresh pose (see _max_image_age_s).
             image_age_s = (self.get_clock().now() - image_stamp).nanoseconds * 1e-9
+            # Published before the guard, so a stalling capture pipeline shows up as a rising
+            # trend rather than only as the warning it eventually trips.
+            self._diag('image_age_s', image_age_s)
             if image_age_s > self._max_image_age_s:
                 self._warn_throttled(
                     f'Dropped control tick: newest camera frame is {image_age_s * 1e3:.0f} ms old '
@@ -701,6 +746,10 @@ class PolicyClientNode(Node):
         # under tf_use_latest, which exists precisely because the stamps are known to be skewed
         # against this clock and would false-trip it.
         age_s = self._newest_gripper_age_s()
+        if age_s is not None:
+            # Same reasoning as image_age_s: published whether or not it trips the limit, since a
+            # topic slowing down is the interesting part and it only ever trips once.
+            self._diag('gripper_state_age_s', age_s)
         if not self._tf_use_latest and self._max_gripper_age_s > 0 and age_s is not None \
                 and age_s > self._max_gripper_age_s:
             if self._require_gripper_state:
@@ -813,8 +862,18 @@ class PolicyClientNode(Node):
         n_stale_grip = self._n_stale_actions(t_obs, self._latency_act_gripper)
         arm_actions = actions[n_stale_arm:]
         grip_actions = actions[n_stale_grip:]
+
+        # Published before the all-stale check, so the zero is visible: "nothing was commanded" is
+        # the single most useful thing on the plot and it is exactly the case that returns early.
+        age_s = (self.get_clock().now() - t_obs).nanoseconds * 1e-9
+        self._diag('obs_age_s', age_s)
+        self._diag('inference_latency_s', latency_inference)
+        self._diag('n_stale_arm', n_stale_arm)
+        self._diag('n_stale_gripper', n_stale_grip)
+        self._diag('n_published_arm', len(arm_actions))
+        self._diag('n_published_gripper', len(grip_actions))
+
         if not arm_actions and not grip_actions:
-            age_s = (self.get_clock().now() - t_obs).nanoseconds * 1e-9
             self._warn_throttled(
                 f'Whole action chunk stale for both devices: dropped all {n_received} actions '
                 f'(observation is {age_s:.3f}s old, of which inference={latency_inference:.3f}s; '

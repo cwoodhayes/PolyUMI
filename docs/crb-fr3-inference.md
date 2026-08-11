@@ -587,6 +587,41 @@ the top of the script: `NUC_REPO`, `SHEEP_REPO`, `INFERENCE_URL`, `MAX_IMAGE_AGE
 `SHELL_SETTLE_S` (raise the last one if pre-typed lines land mangled — typing races the
 remote shell's startup).
 
+## Live diagnostics (`/polyumi/diag/*`)
+
+`policy_client_node` publishes its health and latency scalars as `std_msgs/Float32`, one topic per
+metric, so they can be watched as **live timeseries in Foxglove's Plot panel** — drag in e.g.
+`/polyumi/diag/n_published_arm.data`. The bridge is already up on `:8765`, so there is nothing to
+start. Everything here was previously computed only for a log line, which is the wrong shape for a
+number that matters as a trend.
+
+| topic | what it tells you | healthy |
+|---|---|---|
+| `n_published_arm` | waypoints actually sent to the arm this chunk | **> 0** |
+| `n_published_gripper` | same, for the hand | **> 0** |
+| `n_stale_arm` / `n_stale_gripper` | leading actions discarded as already-elapsed | well under `n_action_steps` |
+| `obs_age_s` | capture → server response, the whole measured span | ~0.6 s today |
+| `inference_latency_s` | the POST round trip alone | ~0.3 s |
+| `image_age_s` | frame stamp → tick; the Elgato's YUYV convert | ~0.2 s, under `max_image_age_s` |
+| `gripper_state_age_s` | how stale the newest `/fr3_gripper/joint_states` sample is | ~0.04 s |
+
+**Watch `n_published_arm` first.** It is the difference between the arm moving and not, and it is
+published *before* the all-stale early return specifically so the zero shows up. It sat silently at
+0 for an entire session on 2026-08-10 while everything else looked fine — the chunk was shorter
+than the latency budget, so every action in it had already elapsed. See
+[calibration-instructions.md](calibration-instructions.md), "Latencies", for the budget arithmetic.
+
+The counters are per device: the arm and hand are truncated by their own `latency.*_exec`, so they
+legitimately differ (the hand is currently ~2 steps ahead).
+
+Foxglove plots live only — its buffer is not retention. For anything you want to compare across
+runs, record it:
+
+```bash
+ros2 bag record -o diag_$(date +%F_%H-%M-%S) /polyumi/diag/n_published_arm \
+  /polyumi/diag/obs_age_s /polyumi/diag/inference_latency_s /polyumi/diag/image_age_s
+```
+
 ## Troubleshooting
 
 ### Nothing publishes / Foxglove shows nothing — a duplicate or leftover launch (most common)
@@ -647,16 +682,35 @@ a commanded width inside `width_deadband_m` of the current one is *intentionally
 (The `JointTrajectory` message itself is known to cross the laptop↔NUC rmw gap intact — that has
 been verified, so it is not the likely culprit.)
 
-### First inference times out, then recovers; many actions dropped as stale
+### First inference times out, then recovers
 The first `/predict_cartesian/` after the server starts includes GPU/model warmup and can exceed
 the POST timeout (`POST ... failed: timed out`). It self-recovers next tick; raise `post_timeout_s`
-if it persists. Real diffusion inference is ~200–500 ms/call, so the stale-drop logic discards most
-of each 8-step chunk (`dropped 5/8 …`, occasionally `dropped all 8`). Fine for a dry run; before
-execution, cut latency (fewer diffusion steps, compressed image transport, or a larger
-`n_action_steps`).
+if it persists.
+
+### "Whole action chunk stale for both devices" — nothing moves at all
+Not a warmup blip and not survivable: when this fires, **neither bridge is published to**, so the
+arm and the hand both sit still while everything else looks healthy. Watch
+`/polyumi/diag/n_published_arm` — it is pinned at 0.
+
+The cause is arithmetic, not a fault. The chunk has to span the entire observation→motion budget:
+
+```
+obs age at response  +  latency.<device>_exec   <   n_action_steps * action_dt
+```
+
+Measured 2026-08-10 that was `0.59 + 0.70 = 1.30 s` against a chunk of `8 × 0.1 = 0.8 s`, so every
+action had already elapsed and all 8 were dropped, every tick. `n_action_steps: 16` (the model's
+full `action_horizon`) gives 1.6 s and clears it. The warning prints all the terms, so read them off
+it rather than guessing which one grew.
+
+Note the counts are now per device (`dropped 13 arm / 12 gripper`) and each uses its own
+`latency.*_exec`, so a chunk too stale for the arm can still drive the hand. The budget arithmetic
+and how each latency was measured are in
+[calibration-instructions.md](calibration-instructions.md), "Latencies".
 
 Confirm the loop is live: `policy_client_node` logs one `episode /reset sent` line, then
-`action chunk n=… (dropped …/… stale, inference=…ms) first: x=… y=… z=… grip=…` each tick, and
+`action chunk n=… (dropped … arm / … gripper, inference=…ms) first: x=… y=… z=… grip=…` each tick
+(or watch `/polyumi/diag/*` as a plot instead — see [Live diagnostics](#live-diagnostics-polyumidiag)), and
 Foxglove (`ws://localhost:8765`, using the config in `ros2_ws/src/polyumi_ros2/foxglove/layouts/stream_demo.json`)
 shows the GoPro, the Pi camera/audio, FR3 TF, and the commanded chunk on
 `/polyumi/target_poses_preview`. If the client warns about TF lookups, re-check the

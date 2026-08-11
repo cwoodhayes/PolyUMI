@@ -706,6 +706,63 @@ def test_gripper_and_pose_chunks_stay_index_aligned(make_node):
     assert len(grip_msg.points) == len(pose_msg.poses)
 
 
+def _diag_values(captured):
+    """Reduce captured diagnostics messages to {metric: last published value}."""
+    return {name: msgs[-1].data for name, msgs in captured.items() if msgs}
+
+
+def _capture_diag(node):
+    """Patch every diagnostics publisher to record instead of publish."""
+    captured = {name: [] for name in node._diag_pubs}
+    for name, pub in node._diag_pubs.items():
+        pub.publish = captured[name].append
+    return captured
+
+
+def test_diagnostics_report_zero_published_when_the_chunk_is_all_stale(make_node):
+    """
+    The zero has to reach the plot, and that is the path that returns early.
+
+    "Nothing was commanded" is the single most useful thing on the wall — it sat silently at 0 for
+    a whole session before anyone noticed the arm was not moving — so the counters are published
+    before the all-stale guard, not after it.
+    """
+    node = make_node(control_hz=10.0, execute_motion=True, publish_preview=False)
+    captured = _capture_diag(node)
+    actions = _actions_with_grip([0.02] * 8)
+
+    with patch.object(node, '_http_post_json', return_value={'actions': actions}), \
+            patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))):
+        node._post_and_act(payload={}, t_obs=_t(98.0))  # 2s old: stale for both devices
+
+    values = _diag_values(captured)
+    assert values['n_published_arm'] == 0
+    assert values['n_published_gripper'] == 0
+    assert values['n_stale_arm'] >= 8
+    assert values['obs_age_s'] == pytest.approx(2.0, abs=0.01)
+
+
+def test_diagnostics_report_what_each_device_actually_got(make_node):
+    """The two counters must track their own slice, not a shared one."""
+    node = make_node(
+        control_hz=10.0, execute_motion=True, publish_preview=False,
+        **{'latency.arm_exec': 0.3, 'latency.gripper_exec': 0.1},
+    )
+    captured = _capture_diag(node)
+    actions = _actions_with_grip([0.02] * 8)
+
+    with patch.object(node, '_http_post_json', return_value={'actions': actions}), \
+            patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))):
+        node._post_and_act(payload={}, t_obs=_t(99.9))
+
+    values = _diag_values(captured)
+    # 0.1s obs age: arm drops ceil(0.4/0.1)=4, gripper ceil(0.2/0.1)=2.
+    assert values['n_published_arm'] == 4
+    assert values['n_published_gripper'] == 6
+    assert values['n_stale_arm'] == 4
+    assert values['n_stale_gripper'] == 2
+
+
 def test_gripper_preview_publishes_full_chunk(make_node):
     """The gripper preview mirrors the pose preview: full chunk, no execution publisher."""
     node = make_node(control_hz=10.0, publish_preview=True)  # execute_motion defaults False
