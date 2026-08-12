@@ -230,6 +230,17 @@ arecord -D hw:wm8960soundcard -r 48000 -f S16_LE -c 2 -d 5 test.wav
 ```
 
 ## Development
+
+### Linting
+
+Autofix everything fixable before you push — CI enforces it:
+
+```bash
+uv run ruff check --fix . && uv run ruff format .
+```
+
+Formatting is fully automatic; missing docstrings (`D1xx`) are not, and are left for you to write.
+
 ### Developing the polyumi-pi app
 
 To deploy the latest code to the Pi, run from the PC:
