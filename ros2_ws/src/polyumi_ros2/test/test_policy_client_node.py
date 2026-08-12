@@ -179,9 +179,7 @@ def test_arm_and_gripper_are_truncated_by_their_own_latencies(make_node):
     only to index back out of it, and could add lead but never remove it. Measured on hardware the
     hand beat the arm by 188 ms, i.e. about two action steps.
     """
-    node = make_node(
-        control_hz=10.0, **{'latency.arm_exec': 0.702, 'latency.gripper_exec': 0.514}
-    )
+    node = make_node(control_hz=10.0, **{'latency.arm_exec': 0.702, 'latency.gripper_exec': 0.514})
     n_arm = _n_stale_at(node, obs_age_s=0.1, latency_act=node._latency_act)
     n_grip = _n_stale_at(node, obs_age_s=0.1, latency_act=node._latency_act_gripper)
 
@@ -198,9 +196,7 @@ def test_a_chunk_too_stale_for_the_arm_can_still_drive_the_gripper(make_node):
     With the shared slice, an empty arm chunk returned early and neither device was commanded.
     Since the arm is currently 702 ms against an 8-step (0.8 s) chunk, that is not hypothetical.
     """
-    node = make_node(
-        control_hz=10.0, **{'latency.arm_exec': 0.702, 'latency.gripper_exec': 0.514}
-    )
+    node = make_node(control_hz=10.0, **{'latency.arm_exec': 0.702, 'latency.gripper_exec': 0.514})
     chunk = list(range(8))
     # 0.150 + 0.702 = 0.852s spans past the whole 0.8s chunk; 0.150 + 0.514 = 0.664s does not.
     n_arm = _n_stale_at(node, obs_age_s=0.15, latency_act=node._latency_act)
@@ -365,9 +361,11 @@ def test_preview_published_full_chunk_without_execution(make_node):
     actions = [[float(i), 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0] for i in range(8)]
     now = _t(100.0)
     t_obs = _t(98.0)  # 2s old -> every action is stale, so the chunk is dropped for execution
-    with patch.object(node, '_http_post_json', return_value={'actions': actions}), \
-            patch.object(node, 'get_clock', return_value=_FakeClock(now)), \
-            patch.object(node._preview_pub, 'publish') as preview_pub:
+    with (
+        patch.object(node, '_http_post_json', return_value={'actions': actions}),
+        patch.object(node, 'get_clock', return_value=_FakeClock(now)),
+        patch.object(node._preview_pub, 'publish') as preview_pub,
+    ):
         node._post_and_act(payload={}, t_obs=t_obs)
 
     preview_pub.assert_called_once()
@@ -418,9 +416,11 @@ def _drive_ticks(node, n_ticks: int) -> int:
     node._episode_reset_done = True
 
     infer_calls = []
-    with patch.object(node, 'get_clock', return_value=_FakeClock(now)), \
-            patch.object(node, '_lookup_agent_pos', return_value=fixed_pose), \
-            patch.object(node, '_post_and_act', side_effect=lambda *a, **k: infer_calls.append(1)):
+    with (
+        patch.object(node, 'get_clock', return_value=_FakeClock(now)),
+        patch.object(node, '_lookup_agent_pos', return_value=fixed_pose),
+        patch.object(node, '_post_and_act', side_effect=lambda *a, **k: infer_calls.append(1)),
+    ):
         for _ in range(n_ticks):
             node._control_tick()
     return len(infer_calls)
@@ -551,9 +551,7 @@ def test_missing_gripper_state_falls_back_to_closed(make_node):
 
 def test_require_gripper_state_skips_the_tick_instead(make_node):
     """With require_gripper_state, a missing width drops the tick like a failed TF lookup."""
-    node = make_node(
-        require_gripper_state=True, **{'latency.gopro': 0.0, 'latency.proprio': 0.0}
-    )
+    node = make_node(require_gripper_state=True, **{'latency.gopro': 0.0, 'latency.proprio': 0.0})
     _push_ramp_tf(node)  # pose is available; only the gripper is missing
 
     assert node._lookup_agent_pos(image_stamp=_t(1.0)) is None
@@ -601,8 +599,10 @@ def test_stale_gripper_state_holds_the_last_width_and_warns(make_node):
     node = make_node(max_gripper_age_s=0.5, **{'latency.gopro': 0.0})
     _push_gripper(node, 1.0, 0.06)
 
-    with patch.object(node, 'get_clock', return_value=_FakeClock(_t(3.0))), \
-            patch.object(node, '_warn_throttled') as warn:
+    with (
+        patch.object(node, 'get_clock', return_value=_FakeClock(_t(3.0))),
+        patch.object(node, '_warn_throttled') as warn,
+    ):
         width = node._gripper_width_policy_units(image_stamp=_t(3.0))
 
     assert width == pytest.approx(0.06)
@@ -621,7 +621,8 @@ def test_stale_gripper_state_skips_the_tick_when_required(make_node):
 def test_fresh_gripper_state_is_not_treated_as_stale(make_node):
     """A width inside the age limit passes even under require_gripper_state."""
     node = make_node(
-        require_gripper_state=True, max_gripper_age_s=0.5,
+        require_gripper_state=True,
+        max_gripper_age_s=0.5,
         **{'latency.gopro': 0.0},
     )
     _push_gripper(node, 1.0, 0.06)
@@ -633,7 +634,8 @@ def test_fresh_gripper_state_is_not_treated_as_stale(make_node):
 def test_gripper_age_check_can_be_disabled(make_node):
     """max_gripper_age_s <= 0 turns the check off, for setups with an odd clock or rate."""
     node = make_node(
-        require_gripper_state=True, max_gripper_age_s=0.0,
+        require_gripper_state=True,
+        max_gripper_age_s=0.0,
         **{'latency.gopro': 0.0},
     )
     _push_gripper(node, 1.0, 0.06)
@@ -694,10 +696,12 @@ def test_gripper_and_pose_chunks_stay_index_aligned(make_node):
     now = _t(100.0)
     t_obs = _t(99.75)  # partially stale: some leading actions get dropped
 
-    with patch.object(node, '_http_post_json', return_value={'actions': actions}), \
-            patch.object(node, 'get_clock', return_value=_FakeClock(now)), \
-            patch.object(node._target_pub, 'publish') as pose_pub, \
-            patch.object(node._gripper_pub, 'publish') as grip_pub:
+    with (
+        patch.object(node, '_http_post_json', return_value={'actions': actions}),
+        patch.object(node, 'get_clock', return_value=_FakeClock(now)),
+        patch.object(node._target_pub, 'publish') as pose_pub,
+        patch.object(node._gripper_pub, 'publish') as grip_pub,
+    ):
         node._post_and_act(payload={}, t_obs=t_obs)
 
     pose_msg = pose_pub.call_args[0][0]
@@ -750,8 +754,10 @@ def test_diagnostics_report_zero_published_when_the_chunk_is_all_stale(make_node
     captured = _capture_diag(node)
     actions = _actions_with_grip([0.02] * 8)
 
-    with patch.object(node, '_http_post_json', return_value={'actions': actions}), \
-            patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))):
+    with (
+        patch.object(node, '_http_post_json', return_value={'actions': actions}),
+        patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))),
+    ):
         node._post_and_act(payload={}, t_obs=_t(98.0))  # 2s old: stale for both devices
 
     values = _diag_values(captured)
@@ -764,14 +770,18 @@ def test_diagnostics_report_zero_published_when_the_chunk_is_all_stale(make_node
 def test_diagnostics_report_what_each_device_actually_got(make_node):
     """The two counters must track their own slice, not a shared one."""
     node = make_node(
-        control_hz=10.0, execute_motion=True, publish_preview=False,
+        control_hz=10.0,
+        execute_motion=True,
+        publish_preview=False,
         **{'latency.arm_exec': 0.3, 'latency.gripper_exec': 0.1},
     )
     captured = _capture_diag(node)
     actions = _actions_with_grip([0.02] * 8)
 
-    with patch.object(node, '_http_post_json', return_value={'actions': actions}), \
-            patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))):
+    with (
+        patch.object(node, '_http_post_json', return_value={'actions': actions}),
+        patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))),
+    ):
         node._post_and_act(payload={}, t_obs=_t(99.9))
 
     values = _diag_values(captured)
@@ -789,9 +799,11 @@ def test_gripper_preview_publishes_full_chunk(make_node):
 
     actions = _actions_with_grip([0.02] * 8)
     now = _t(100.0)
-    with patch.object(node, '_http_post_json', return_value={'actions': actions}), \
-            patch.object(node, 'get_clock', return_value=_FakeClock(now)), \
-            patch.object(node._gripper_preview_pub, 'publish') as grip_preview:
+    with (
+        patch.object(node, '_http_post_json', return_value={'actions': actions}),
+        patch.object(node, 'get_clock', return_value=_FakeClock(now)),
+        patch.object(node._gripper_preview_pub, 'publish') as grip_preview,
+    ):
         node._post_and_act(payload={}, t_obs=_t(98.0))  # fully stale
 
     grip_preview.assert_called_once()

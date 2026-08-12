@@ -59,7 +59,7 @@ TCP_CHILD = 'polyumi_tcp'
 # Along the approach axis, in two independently sourced halves so each stays checkable:
 # franka_description puts the finger carriage plane here (both finger_joint origins are
 # xyz="0 0 0.0584" in fr3_hand), and the PolyUMI fingers are measured from that plane out.
-FINGER_CARRIAGE_Z = 0.0584   # fr3_hand -> the plane the fingers translate in
+FINGER_CARRIAGE_Z = 0.0584  # fr3_hand -> the plane the fingers translate in
 CARRIAGE_TO_FINGERTIP_Z = 0.1985  # that plane -> the closed fingertips, PolyUMI CAD
 
 # Across the fingers: from the fr3_hand origin up to the fingers' upper surface, the plane the
@@ -90,9 +90,22 @@ def static_transform_publisher_args() -> list[str]:
     x, y, z = TCP_XYZ
     roll, pitch, yaw = TCP_RPY
     return [
-        '--x', str(x), '--y', str(y), '--z', str(z),
-        '--roll', str(roll), '--pitch', str(pitch), '--yaw', str(yaw),
-        '--frame-id', TCP_PARENT, '--child-frame-id', TCP_CHILD,
+        '--x',
+        str(x),
+        '--y',
+        str(y),
+        '--z',
+        str(z),
+        '--roll',
+        str(roll),
+        '--pitch',
+        str(pitch),
+        '--yaw',
+        str(yaw),
+        '--frame-id',
+        TCP_PARENT,
+        '--child-frame-id',
+        TCP_CHILD,
     ]
 
 

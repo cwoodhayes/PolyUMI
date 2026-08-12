@@ -86,9 +86,9 @@ def test_gripper_is_a_quarter_period_out_of_phase_with_x(client):
     relationship without depending on which sample lands where.
     """
     # One full period, so the assertion covers every phase rather than a lucky few.
-    actions = client.post(
-        '/predict_cartesian/', json=_request_body(n_action_steps=OSCILLATION_PERIOD_STEPS)
-    ).json()['actions']
+    actions = client.post('/predict_cartesian/', json=_request_body(n_action_steps=OSCILLATION_PERIOD_STEPS)).json()[
+        'actions'
+    ]
 
     for action in actions:
         sin_component = (action[0] - 0.56) / OSCILLATION_AMPLITUDE_M

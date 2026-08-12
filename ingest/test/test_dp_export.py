@@ -723,9 +723,7 @@ def test_gripper_width_is_exported_as_opening_from_closed(tmp_path: pathlib.Path
     assert float(g['meta'].attrs['gripper_closed_width_m']) == pytest.approx(0.0052)
 
 
-def test_exported_width_reaches_zero_when_the_gripper_was_fully_closed(
-    tmp_path: pathlib.Path, monkeypatch
-) -> None:
+def test_exported_width_reaches_zero_when_the_gripper_was_fully_closed(tmp_path: pathlib.Path, monkeypatch) -> None:
     """The point of the convention: a fully-closed gripper reads 0, not 'whatever the tags say'."""
     monkeypatch.setattr(buffer, 'load_closed_width_m', lambda: 0.02)
     scene = _build_scene(tmp_path)

@@ -33,11 +33,15 @@ def _probe(**overrides):
     params = [Parameter(k, value=v) for k, v in overrides.items()]
     node = GripperRangeProbe(parameter_overrides=params)
     sent: list = []
-    node._pub = type('P', (), {
-        'publish': lambda _s, msg: sent.append(msg),
-        'topic_name': '/polyumi/target_gripper',
-        'get_subscription_count': lambda _s: 1,
-    })()
+    node._pub = type(
+        'P',
+        (),
+        {
+            'publish': lambda _s, msg: sent.append(msg),
+            'topic_name': '/polyumi/target_gripper',
+            'get_subscription_count': lambda _s: 1,
+        },
+    )()
     node.get_logger = MagicMock()
     return node, sent
 
@@ -180,10 +184,13 @@ def test_an_unreachable_bridge_param_is_admitted_not_guessed():
     assert 'might be the' in warnings
 
 
-@pytest.mark.parametrize('bad', [
-    {'reps': 0},
-    {'open_width_m': 0.01, 'closed_width_m': 0.02},
-])
+@pytest.mark.parametrize(
+    'bad',
+    [
+        {'reps': 0},
+        {'open_width_m': 0.01, 'closed_width_m': 0.02},
+    ],
+)
 def test_invalid_parameters_fail_fast(bad):
     """An inverted range would drive the hand backwards through the whole probe and 'pass'."""
     params = [Parameter(k, value=v) for k, v in bad.items()]

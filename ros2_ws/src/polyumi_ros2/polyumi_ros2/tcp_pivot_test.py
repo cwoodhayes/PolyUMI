@@ -82,12 +82,14 @@ def quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Hamilton product of two xyzw quaternions (a then b, i.e. b applied in a's frame)."""
     ax, ay, az, aw = a
     bx, by, bz, bw = b
-    return np.array([
-        aw * bx + ax * bw + ay * bz - az * by,
-        aw * by - ax * bz + ay * bw + az * bx,
-        aw * bz + ax * by - ay * bx + az * bw,
-        aw * bw - ax * bx - ay * by - az * bz,
-    ])
+    return np.array(
+        [
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz,
+        ]
+    )
 
 
 def quat_angle(a: np.ndarray, b: np.ndarray) -> float:
@@ -109,9 +111,9 @@ def sweep_angles(angle_deg: float, step_deg: float) -> list[float]:
     # ceil, not round: rounding down would space the waypoints WIDER than asked (30deg at 7deg
     # spacing rounds to 4 steps of 7.5), and that spacing is the interpolation resolution.
     steps = max(math.ceil(abs(angle_deg) / max(step_deg, 1e-6)), 1)
-    out = [angle_deg * i / steps for i in range(1, steps + 1)]           # 0 -> +A
+    out = [angle_deg * i / steps for i in range(1, steps + 1)]  # 0 -> +A
     out += [angle_deg * (1 - 2 * i / (2 * steps)) for i in range(1, 2 * steps + 1)]  # +A -> -A
-    out += [-angle_deg * (1 - i / steps) for i in range(1, steps + 1)]   # -A -> 0
+    out += [-angle_deg * (1 - i / steps) for i in range(1, steps + 1)]  # -A -> 0
     return [math.radians(a) for a in out]
 
 
@@ -160,17 +162,13 @@ class TcpPivotTest(Node):
         self._axes = self.get_parameter('axes').get_parameter_value().string_value
         self._timeout_s = self.get_parameter('sweep_timeout_s').get_parameter_value().double_value
         self._settle_s = self.get_parameter('settle_s').get_parameter_value().double_value
-        self._motion_start_timeout_s = (
-            self.get_parameter('motion_start_timeout_s').get_parameter_value().double_value
-        )
+        self._motion_start_timeout_s = self.get_parameter('motion_start_timeout_s').get_parameter_value().double_value
         self._max_drift_m = self.get_parameter('max_drift_mm').get_parameter_value().double_value / 1000.0
         self._close_gripper = self.get_parameter('close_gripper').get_parameter_value().bool_value
         gripper_topic = self.get_parameter('gripper_topic').get_parameter_value().string_value
         gripper_state = self.get_parameter('gripper_state_topic').get_parameter_value().string_value
         self._gripper_width = self.get_parameter('gripper_width_m').get_parameter_value().double_value
-        self._gripper_timeout_s = (
-            self.get_parameter('gripper_close_timeout_s').get_parameter_value().double_value
-        )
+        self._gripper_timeout_s = self.get_parameter('gripper_close_timeout_s').get_parameter_value().double_value
 
         bad = [a for a in self._axes if a not in 'xyz']
         if bad or not self._axes:
@@ -281,9 +279,7 @@ class TcpPivotTest(Node):
             q = quat_mul(start_quat, axis_quat(axis, angle))
             pose = Pose()
             pose.position.x, pose.position.y, pose.position.z = (float(v) for v in position)
-            pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = (
-                float(v) for v in q
-            )
+            pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = (float(v) for v in q)
             msg.poses.append(pose)
         self._pub.publish(msg)
         return len(msg.poses)
@@ -380,8 +376,7 @@ class TcpPivotTest(Node):
         worst = max(drifts.values())
         self.get_logger().info(
             'Model-side result (does NOT validate the calibration — only that the robot did what '
-            'was asked): peak TCP drift '
-            + ', '.join(f'{a}={d * 1000:.1f}mm' for a, d in drifts.items())
+            'was asked): peak TCP drift ' + ', '.join(f'{a}={d * 1000:.1f}mm' for a, d in drifts.items())
         )
         if worst > self._max_drift_m:
             self.get_logger().error(
@@ -392,9 +387,7 @@ class TcpPivotTest(Node):
                 'polyumi_tcp.'
             )
             return 1
-        self.get_logger().info(
-            'The robot held the TCP still. Whether the FINGERTIPS held still is yours to judge.'
-        )
+        self.get_logger().info('The robot held the TCP still. Whether the FINGERTIPS held still is yours to judge.')
         return 0
 
 

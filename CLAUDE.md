@@ -9,10 +9,34 @@ PolyUMI is a multimodal data collection system for robot imitation learning. See
 ## Common Commands
 
 ### Linting
+
+Fix everything fixable, in one command:
 ```bash
-ruff check .
-ruff format .
+uv run ruff check --fix . && uv run ruff format .
 ```
+Fix first, format last, so the formatter always has the last word over any autofix.
+To check without writing (what CI runs): `uv run ruff check . && uv run ruff format --check .`
+
+**What that does and does not fix.** Formatting is fully automatic — whitespace, quotes, line
+length, trailing commas never need hands. Lint mostly is not: this repo selects `E`, `F`, `D`,
+`W`, and the findings are dominated by `D` (pydocstyle), which is unfixable by construction —
+ruff cannot invent a docstring. In the b6cfe76 cleanup `ruff format` fixed 20 of 20 files
+unaided, while `--fix` resolved 1 of 13 lint errors; the other 12 were missing docstrings and
+two hand edits. So expect the command to leave `D1xx` behind for you to write.
+
+Two traps worth knowing:
+- `D1xx` only fires on *public* modules — a file named `_foo.py` is private, so nothing in it
+  is ever reported missing a docstring.
+- `--unsafe-fixes` will clear things like `F841` (unused variable) by deleting the assignment.
+  That drops the right-hand side too, so it changes behaviour when the RHS has side effects.
+  It is correctly off by default; reach for it per-file, not repo-wide.
+
+ruff is pinned (`[dependency-groups] lint` in pyproject.toml) because its formatter output
+changes between minor releases — an unpinned ruff lets two developers reformat the same files
+back and forth. Use `uv run ruff`, not `uvx ruff`, so you get the pinned version.
+`.github/workflows/lint.yml` enforces this on every PR; it installs only the `lint`
+group, since the `dev` group's picamera2 is Pi-only and will not build on a runner.
+`external/` is excluded — those are third-party submodules carrying upstream style.
 
 ### Tests
 ```bash
@@ -192,7 +216,7 @@ pzarr stores) and the dataset manifests are the source of truth; every row is re
 ```
 ~/recordings/
 └── scene_YYYY-MM-DD_hh-mm-ss_XXXX/
-    └── session_YYYY-MM-DD_hh-mm-ss/
+    └── session_YYYY-MM-DD_hh-mm-ss_XXXX/
         ├── metadata.json
         ├── video/frame_000001.jpg ...
         └── audio.wav

@@ -47,9 +47,7 @@ def test_there_is_no_independent_offset_to_get_wrong():
         # The zero point always lands on the closed aperture; nothing else can be configured.
         assert policy_to_robot_width(0.0, closed_aperture, MAX_WIDTH) == pytest.approx(closed_aperture)
         # And an opening of d always lands d above it, for every d that stays in range.
-        assert policy_to_robot_width(0.01, closed_aperture, MAX_WIDTH) == pytest.approx(
-            closed_aperture + 0.01
-        )
+        assert policy_to_robot_width(0.01, closed_aperture, MAX_WIDTH) == pytest.approx(closed_aperture + 0.01)
 
 
 def test_slope_is_one():

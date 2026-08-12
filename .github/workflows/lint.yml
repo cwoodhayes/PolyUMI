@@ -1,0 +1,26 @@
+name: lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      # Submodules are deliberately not fetched: external/ is excluded from ruff
+      # (see pyproject.toml), so a plain checkout is both correct and much faster.
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.0.0
+
+      # Only the lint group — it holds the pinned ruff and nothing else. A full
+      # `uv sync` would pull the dev group's picamera2, which is Pi-only and does
+      # not build on a runner. --frozen so an unrelated lockfile drift can't fail
+      # the lint job.
+      - run: uv sync --only-group lint --frozen
+      - run: uv run --no-sync ruff check .
+      - run: uv run --no-sync ruff format --check .

@@ -12,12 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ament_xmllint.main import main
+"""
+Validate the package's XML against the ROS schema.
+
+The only ament linter this package keeps: ruff covers the Python style rules the others
+enforced, but nothing else checks package.xml. See package.xml for why the rest were dropped.
+"""
+
 import pytest
+from ament_xmllint.main import main
 
 
 @pytest.mark.linter
 @pytest.mark.xmllint
 def test_xmllint() -> None:
+    """package.xml must parse and validate against package_format3.xsd."""
     rc = main(argv=[])
     assert rc == 0, 'Found code style errors / warnings'

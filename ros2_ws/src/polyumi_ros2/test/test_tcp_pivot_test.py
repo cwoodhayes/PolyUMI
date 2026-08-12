@@ -35,11 +35,13 @@ def ros_context():
 def _matrix(q: np.ndarray) -> np.ndarray:
     """Rotation matrix from an xyzw quaternion."""
     x, y, z, w = q
-    return np.array([
-        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
-        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
-    ])
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ]
+    )
 
 
 @pytest.mark.parametrize('axis', ['x', 'y', 'z'])
@@ -52,9 +54,7 @@ def test_delta_rotates_about_the_tcps_own_axis(axis):
     """
     q0 = axis_quat('x', math.pi / 2)  # TCP is tilted 90 deg from the base frame
     r0 = _matrix(q0)
-    expected_axis = r0 @ {'x': np.array([1.0, 0, 0]),
-                          'y': np.array([0, 1.0, 0]),
-                          'z': np.array([0, 0, 1.0])}[axis]
+    expected_axis = r0 @ {'x': np.array([1.0, 0, 0]), 'y': np.array([0, 1.0, 0]), 'z': np.array([0, 0, 1.0])}[axis]
 
     composed = _matrix(quat_mul(q0, axis_quat(axis, math.radians(30))))
     # A rotation leaves its own axis unchanged; the composed frame's motion relative to the start
@@ -104,8 +104,9 @@ def test_published_sweep_holds_the_position_fixed():
         assert n == len(published[0].poses) > 1
         for pose in published[0].poses:
             assert (pose.position.x, pose.position.y, pose.position.z) == pytest.approx(position)
-        orientations = {(p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w)
-                        for p in published[0].poses}
+        orientations = {
+            (p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w) for p in published[0].poses
+        }
         assert len(orientations) > 1, 'the chunk must actually rotate'
     finally:
         node.destroy_node()

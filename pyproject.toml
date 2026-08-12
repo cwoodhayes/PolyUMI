@@ -1,5 +1,9 @@
 [tool.ruff]
 line-length = 120
+# external/ holds third-party git submodules (ORB-SLAM3, franka_ros2, and the UMI
+# diffusion-policy fork). They carry their own upstream style, and reformatting them
+# would make every rebase onto upstream a conflict. They were ~99% of ruff's findings.
+extend-exclude = ["external"]
 
 [tool.ruff.format]
 quote-style = "single"
@@ -16,6 +20,12 @@ ignore = [
     "D105",  # missing docstring in magic method
 ]
 
+[tool.uv]
+# lint is a default group so a plain `uv sync` gives developers the same pinned ruff
+# CI uses, and `uv run ruff check .` keeps working. CI installs it alone instead
+# (`--only-group lint`), which skips dev's Pi-only picamera2.
+default-groups = ["dev", "lint"]
+
 # inference_server is intentionally NOT a workspace member: it is meant to run
 # isolated on a standalone GPU/inference machine, so it keeps its own
 # inference_server/.venv with a minimal dep set (fastapi/uvicorn/numpy).
@@ -26,6 +36,11 @@ members = ["ingest", "catalog"]
 polyumi_pi = { path = "pi", editable = true }
 
 [dependency-groups]
+# Pinned exactly, and kept in its own group: ruff's formatter output changes between
+# minor releases, so an unpinned `uvx ruff` lets two developers reformat the same files
+# back and forth forever. CI installs only this group (`uv sync --only-group lint`) —
+# the dev group below pulls picamera2, which is Pi-only and unbuildable on a runner.
+lint = ["ruff==0.14.2"]
 dev = [
     "picamera2",
     "pytest>=9.0.2",

@@ -19,7 +19,10 @@ def _apply(R, t, pts):
 
 
 class TestSvdAlign:
+    """Cases for _svd_align, the Kabsch point-set alignment behind SlamToWorldAlignStep."""
+
     def test_identity(self):
+        """Aligning a cloud to itself gives identity."""
         rng = np.random.default_rng(0)
         src = rng.uniform(-1, 1, (20, 3))
         R_est, t_est = _svd_align(src, src.copy())
@@ -27,6 +30,7 @@ class TestSvdAlign:
         assert np.allclose(t_est, 0, atol=1e-10)
 
     def test_pure_translation(self):
+        """A shifted cloud recovers t with R still identity."""
         rng = np.random.default_rng(1)
         src = rng.uniform(-1, 1, (20, 3))
         t_true = np.array([5.0, -3.0, 1.5])
@@ -36,6 +40,7 @@ class TestSvdAlign:
         assert np.allclose(t_est, t_true, atol=1e-10)
 
     def test_known_rotation_and_translation(self):
+        """A known rigid transform is recovered to numerical precision."""
         rng = np.random.default_rng(42)
         R_true, t_true = _make_transform((30.0, -15.0, 90.0), (1.0, 2.0, 3.0))
         src = rng.uniform(-2, 2, (100, 3))
@@ -68,7 +73,7 @@ class TestSvdAlign:
 
         angle_err = np.degrees(np.arccos(np.clip((np.trace(R_true.T @ R_est) - 1) / 2, -1.0, 1.0)))
         assert angle_err < 0.5, f'Rotation error too large: {angle_err:.2f} deg'
-        assert np.linalg.norm(t_est - t_true) < 0.01, f'Translation error too large'
+        assert np.linalg.norm(t_est - t_true) < 0.01, 'Translation error too large'
 
     def test_minimum_points(self):
         """Should work with as few as 3 non-collinear points."""

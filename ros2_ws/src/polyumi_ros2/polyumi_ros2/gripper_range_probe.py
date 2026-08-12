@@ -132,9 +132,7 @@ class GripperRangeProbe(Node):
         self._open_width = self.get_parameter('open_width_m').get_parameter_value().double_value
         self._closed_width = self.get_parameter('closed_width_m').get_parameter_value().double_value
         self._reps = self.get_parameter('reps').get_parameter_value().integer_value
-        self._settle_timeout_s = (
-            self.get_parameter('settle_timeout_s').get_parameter_value().double_value
-        )
+        self._settle_timeout_s = self.get_parameter('settle_timeout_s').get_parameter_value().double_value
         topic = self.get_parameter('gripper_topic').get_parameter_value().string_value
         state_topic = self.get_parameter('gripper_state_topic').get_parameter_value().string_value
 
@@ -144,9 +142,7 @@ class GripperRangeProbe(Node):
         if self._reps < 1:
             errors.append(f'reps must be >= 1, got {self._reps}')
         if self._open_width <= self._closed_width:
-            errors.append(
-                f'open_width_m ({self._open_width}) must exceed closed_width_m ({self._closed_width})'
-            )
+            errors.append(f'open_width_m ({self._open_width}) must exceed closed_width_m ({self._closed_width})')
         if errors:
             self.destroy_node()
             raise ValueError('; '.join(errors))
@@ -282,9 +278,7 @@ class GripperRangeProbe(Node):
         if not self.wait_for_state() or not self.wait_for_subscriber():
             return 1
 
-        self.get_logger().warning(
-            'MOVING THE FINGERS through their full range — make sure nothing is between them.'
-        )
+        self.get_logger().warning('MOVING THE FINGERS through their full range — make sure nothing is between them.')
 
         opens: list[float] = []
         closeds: list[float] = []
