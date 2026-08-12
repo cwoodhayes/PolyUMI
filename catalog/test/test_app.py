@@ -213,21 +213,27 @@ def test_fetch_copies_only_new_scenes_then_syncs(tmp_path: pathlib.Path, monkeyp
     assert 'hx-get="/fetch-poll"' not in poll  # polling stops once done
 
 
-def test_fetch_failure_shows_in_status(tmp_path: pathlib.Path, monkeypatch):
-    """A transfer failure lands in the status line instead of leaving it spinning."""
+def test_fetch_failure_names_the_scene_and_clears_its_partial_dir(tmp_path: pathlib.Path, monkeypatch):
+    """A half-finished transfer lands in the status line and leaves no partial dir behind."""
     rec, engine = _seed(tmp_path)
+    failing = 'scene_2026-07-27_11-00-00_beef'
 
     def boom(name: str, local_path: pathlib.Path) -> None:
+        (local_path / 'video').mkdir(parents=True)  # what tar leaves when the stream dies
         raise RuntimeError('ssh/tar sender failed with code 255')
 
-    _fake_pi(monkeypatch, scenes=['scene_2026-07-27_11-00-00_beef'], on_copy=boom)
+    _fake_pi(monkeypatch, scenes=[failing], on_copy=boom)
     app = create_app(engine, recordings_dir=rec, pi_host='fake')
     client = TestClient(app)
 
     client.post('/fetch')
     app.state.fetch_thread.join(timeout=30)
     assert app.state.fetch['status'] == 'error'
-    assert 'code 255' in client.get('/fetch-poll').text
+    status = client.get('/fetch-poll').text
+    assert 'code 255' in status
+    assert failing in status  # which scene failed, not just that one did
+    # otherwise the .exists() filter would skip this scene on every future fetch
+    assert not (rec / failing).exists()
 
 
 def test_delete_scene_removes_it_and_redirects(tmp_path: pathlib.Path):
@@ -242,6 +248,13 @@ def test_delete_scene_removes_it_and_redirects(tmp_path: pathlib.Path):
     assert not scene_dir.exists()
     with DBSession(engine) as db:
         assert db.get(Scene, 'scene-1') is None
+
+
+def test_delete_scene_button_hidden_without_recordings_dir(tmp_path: pathlib.Path):
+    """No recordings dir means POST would 400, so the button isn't offered in the first place."""
+    client = _client(tmp_path, with_recordings=False)
+    assert 'Delete scene' not in client.get('/select/scene/scene-1').text
+    assert client.post('/scenes/scene-1/delete').status_code == 400
 
 
 def test_delete_scene_refused_while_pipeline_running(tmp_path: pathlib.Path):

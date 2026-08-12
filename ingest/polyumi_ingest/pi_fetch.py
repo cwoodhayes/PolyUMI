@@ -17,7 +17,12 @@ REMOTE_RECORDINGS_DIR = '~/recordings'
 # fr3_session.sh reads for its Pi pane and deploy. Read at import,
 # so a change needs a restart — these are all short-lived processes or long-lived servers
 # started from the shell that set it.
-DEFAULT_HOST = os.environ.get('POLYUMI_PI_HOST') or 'pi@polyumi-pi.local'
+#
+# The fallback is the bare ssh alias fr3_session.sh also defaults to, deliberately: with both
+# unset defaults identical, the three tools agree without anyone exporting anything. It has to
+# be an alias in your ssh config carrying a User (see docs/pi-provisioning.md), since there is
+# no 'pi@' here to supply one.
+DEFAULT_HOST = os.environ.get('POLYUMI_PI_HOST') or 'polyumi-pi'
 
 
 class PiFetch:

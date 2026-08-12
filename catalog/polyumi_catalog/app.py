@@ -74,6 +74,7 @@ disk/DB guards live in ``mutations.delete_scene``.
 from __future__ import annotations
 
 import pathlib
+import shutil
 import threading
 
 from fastapi import FastAPI, Form, Request, Response
@@ -132,6 +133,11 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
     # Commit shas are shown abbreviated in several places; the full value stays in the
     # element's title attribute, so the templates need both forms of the same string.
     templates.env.filters['short_sha'] = provenance.short_sha
+    # A global rather than per-render context: _detail.html is rendered from a dozen call sites
+    # (and from get_template().render() ones with no request), and all of them want the same
+    # answer — POST /scenes/{id}/delete rejects when there's no recordings dir, so the button
+    # must not be offered either.
+    templates.env.globals['can_delete'] = recordings_dir is not None
 
     def render(request: Request, template: str, **ctx) -> HTMLResponse:
         return templates.TemplateResponse(request, template, ctx)
@@ -188,7 +194,9 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
             all_tasks=all_tasks,
             can_rescan=recordings_dir is not None,
             can_build_dataset=recordings_dir is not None,
-            fetch=app.state.fetch,
+            # a finished run's ✓/✗ belongs to the page that was watching it, not to every
+            # page load until the server restarts, so a fresh render starts from idle
+            fetch=app.state.fetch if app.state.fetch['status'] == 'running' else _IDLE_FETCH,
         )
 
     @app.get('/select/task/{task_key}', response_class=HTMLResponse)
@@ -289,7 +297,13 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
                     app.state.fetch |= {'status': 'done'}
             except Exception as exc:
                 with app.state.fetch_lock:
-                    app.state.fetch |= {'status': 'error', 'error': str(exc)}
+                    failed = app.state.fetch['current']  # None unless a copy_scene raised
+                    app.state.fetch |= {'status': 'error', 'error': f'{failed}: {exc}' if failed else str(exc)}
+                if failed is not None:
+                    # tar extracts in place, so a transfer that died halfway leaves a partial
+                    # scene dir — and the .exists() filter above would then skip it on every
+                    # future fetch. Drop it so the retry is just pressing the button again.
+                    shutil.rmtree(recordings_dir / failed, ignore_errors=True)
 
         if not already_running:
             # kept on app.state purely so tests can join it instead of sleeping

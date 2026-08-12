@@ -19,7 +19,8 @@ def test_default_host_falls_back_without_env(monkeypatch):
     """Unset (or empty) POLYUMI_PI_HOST leaves the built-in default in place."""
     monkeypatch.setenv('POLYUMI_PI_HOST', '')
     try:
-        assert importlib.reload(pi_fetch).DEFAULT_HOST == 'pi@polyumi-pi.local'
+        # matches fr3_session.sh's own POLYUMI_PI_HOST default, so nothing has to be exported
+        assert importlib.reload(pi_fetch).DEFAULT_HOST == 'polyumi-pi'
     finally:
         monkeypatch.delenv('POLYUMI_PI_HOST')
         importlib.reload(pi_fetch)

@@ -27,7 +27,7 @@ from sqlmodel import Session as DBSession
 from sqlmodel import select
 
 from polyumi_catalog.manifests import SceneManifest, set_episode_unusable, update_scene_manifest
-from polyumi_catalog.models import DatasetMember, Scene, Session, Task
+from polyumi_catalog.models import Scene, Session, Task
 
 
 class MutationError(ValueError):
@@ -257,10 +257,13 @@ def delete_scene(db: DBSession, scene_id: str, recordings_dir: pathlib.Path) -> 
       still visible and the delete can be retried; the reverse order would hide a scene that is
       still on disk (until the next sync re-adds it).
 
-    Rows are removed explicitly rather than left to a re-sync: ``sync_recordings`` only upserts
-    what it finds, it never prunes what has vanished. ``DatasetMember`` rows go too — an
-    already-exported dataset keeps its own on-disk manifest, but its catalog member list can no
-    longer name a scene that doesn't exist.
+    Scene and Session rows are removed explicitly rather than left to a re-sync:
+    ``sync_recordings`` only upserts what it finds, it never prunes what has vanished.
+    ``DatasetMember`` rows are deliberately *not* touched — ``sync_datasets`` rebuilds every
+    dataset's member list from its ``*.dataset.json`` on every call, so deleting them here would
+    only last until the next sync (which this scene's own delete doesn't even trigger, but the
+    Fetch button and Rescan both do). A member row naming a gone scene is the honest state: the
+    manifest really does name it. ``dataset_detail`` renders such a member by its scene_id.
     """
     scene = db.get(Scene, scene_id)
     if scene is None:
@@ -275,8 +278,6 @@ def delete_scene(db: DBSession, scene_id: str, recordings_dir: pathlib.Path) -> 
 
     for session in db.exec(select(Session).where(Session.scene_id == scene_id)).all():
         db.delete(session)
-    for member in db.exec(select(DatasetMember).where(DatasetMember.scene_id == scene_id)).all():
-        db.delete(member)
     db.delete(scene)
     db.commit()
     return str(scene_dir)

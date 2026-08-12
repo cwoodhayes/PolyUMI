@@ -58,9 +58,9 @@ SHEEP_SSH_HOST="${SHEEP_SSH_HOST:-sheep}"
 SHEEP_REPO="${SHEEP_REPO:-~/repos/PolyUMI}"
 
 # ssh destination for the Pi — the same POLYUMI_PI_HOST that `pingest fetch` and the catalog's
-# Fetch button read, so one export in your shell rc covers all three. "polyumi-pi" is the alias
-# other users are expected to set up in their own ssh config; override if yours is named
-# differently (mine is "conorpi"):
+# Fetch button read, down to this same default, so all three agree with nothing exported and one
+# export in your shell rc covers all three. "polyumi-pi" is the alias other users are expected to
+# set up in their own ssh config; override if yours is named differently (mine is "conorpi"):
 #   POLYUMI_PI_HOST=conorpi ./fr3_session.sh
 POLYUMI_PI_HOST="${POLYUMI_PI_HOST:-polyumi-pi}"
 

@@ -424,7 +424,12 @@ def test_set_task_description_rejects_unknown_task(tmp_path: pathlib.Path):
 
 
 def test_delete_scene_removes_directory_and_rows(tmp_path: pathlib.Path):
-    """Deleting a scene removes its directory, its own row, and its session rows."""
+    """
+    Deleting a scene removes its directory, its own row, and its session rows.
+
+    DatasetMember rows deliberately survive: sync_datasets rebuilds them from each dataset
+    manifest on every call, so deleting them here would only last until the next sync.
+    """
     rec = tmp_path / 'recordings'
     scene_dir = _make_scene(rec, 'scene_2026-07-26_10-00-00_abcd', scene_id='scene-1', task='fold_towel')
     keep_dir = _make_scene(rec, 'scene_2026-07-27_10-00-00_beef', scene_id='scene-2', task='fold_towel')
@@ -440,7 +445,7 @@ def test_delete_scene_removes_directory_and_rows(tmp_path: pathlib.Path):
         assert keep_dir.exists()  # the neighbouring scene is untouched
         assert db.get(Scene, 'scene-1') is None
         assert db.exec(select(Session).where(Session.scene_id == 'scene-1')).all() == []
-        assert db.exec(select(DatasetMember).where(DatasetMember.scene_id == 'scene-1')).all() == []
+        assert db.exec(select(DatasetMember).where(DatasetMember.scene_id == 'scene-1')).all() != []
         assert db.get(Scene, 'scene-2') is not None
 
 
