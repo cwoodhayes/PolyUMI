@@ -21,4 +21,7 @@ uv run polyumi-catalog serve
 Both commands default to `~/recordings` and `~/recordings/.catalog/catalog.db`; pass
 `--recordings <dir>` / `--db <path>` to point elsewhere, and `--port` to change the
 serve port. Use the "Rescan" button in the UI (or `polyumi-catalog sync`) to refresh
-the cache after new sessions land on disk.
+the cache after new sessions land on disk. The "Fetch from Pi" button beside it pulls any
+not-yet-local scenes off the Pi (`pingest fetch`, without the GoPro SD-card step) and
+re-syncs when it's done; `--pi-host` (or `POLYUMI_PI_HOST` in your shell) sets which Pi,
+defaulting to the `polyumi-pi` ssh alias that `pingest` and `fr3_session.sh` also default to.

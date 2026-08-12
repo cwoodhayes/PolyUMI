@@ -1,0 +1,13 @@
+<span id="fetch-status" class="fetch-status"
+  {%- if fetch.status == 'running' %} hx-get="/fetch-poll" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+  {%- if fetch.status == 'running' %}
+    {%- if fetch.total is none %}listing scenes on Pi…
+    {%- elif fetch.total == 0 %}nothing new to fetch
+    {%- else %}fetching {{ fetch.done }}/{{ fetch.total }}{% if fetch.current %} — {{ fetch.current }}{% endif %}…
+    {%- endif %}
+  {%- elif fetch.status == 'done' %}
+    {%- if fetch.total %}✓ fetched {{ fetch.total }} scene(s){% else %}✓ nothing new to fetch{% endif %}
+  {%- elif fetch.status == 'error' %}
+    ✗ fetch failed: {{ fetch.error }}
+  {%- endif %}
+</span>

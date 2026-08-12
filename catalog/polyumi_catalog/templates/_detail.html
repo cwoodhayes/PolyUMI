@@ -93,6 +93,16 @@
         <dt>pzarr built</dt>
         <dd>{{ detail.provenance.pzarr_created_at or '—' }}</dd>
       </dl>
+      {% if can_delete %}
+      <form
+        class="delete-scene-form"
+        method="post"
+        action="/scenes/{{ detail.scene_id }}/delete"
+        onsubmit="return confirm('Permanently delete {{ detail.name }} — {{ detail.n_sessions }} session(s) — from local disk?{% if detail.n_datasets %} It is named by {{ detail.n_datasets }} dataset manifest(s); those exports keep their own copy of the data but can no longer be rebuilt from this scene.{% endif %} Recordings cannot be regenerated and this cannot be undone. If it is still on the Pi, Fetch from Pi will pull it down again.')"
+      >
+        <button type="submit" class="warn">Delete scene…</button>
+      </form>
+      {% endif %}
       {% if detail.conflicts %}
       <div class="conflict-box">
         <strong>⚠ Task conflicts</strong>

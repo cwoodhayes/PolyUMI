@@ -166,6 +166,108 @@ def test_rescan_disabled_without_recordings_dir(tmp_path: pathlib.Path):
     assert 'fold_towel' in resp.text
 
 
+def test_fetch_disabled_without_recordings_dir(tmp_path: pathlib.Path):
+    """POST /fetch is rejected when the app has no recordings_dir to fetch into."""
+    assert _client(tmp_path, with_recordings=False).post('/fetch').status_code == 400
+
+
+def _fake_pi(monkeypatch, *, scenes: list[str], on_copy=None):
+    """Patch app.PiFetch with a stub listing `scenes` and running `on_copy` per copy."""
+
+    class FakePi:
+        def __init__(self, host: str) -> None:
+            self.host = host
+
+        def list_remote_scenes(self) -> list[str]:
+            return scenes
+
+        def copy_scene(self, name: str, local_path: pathlib.Path, verbose: bool = False) -> None:
+            on_copy(name, local_path)
+
+    monkeypatch.setattr('polyumi_catalog.app.PiFetch', FakePi)
+
+
+def test_fetch_copies_only_new_scenes_then_syncs(tmp_path: pathlib.Path, monkeypatch):
+    """/fetch skips already-local scenes, copies the rest, and re-syncs so they appear in Tasks."""
+    rec, engine = _seed(tmp_path)
+    new_scene = 'scene_2026-07-27_11-00-00_beef'
+
+    def copy(name: str, local_path: pathlib.Path) -> None:
+        local_path.mkdir(parents=True)
+        SceneManifest(scene_id='scene-2', task='wipe_table').write_to_scene_dir(local_path)
+        _make_session(local_path, 'session_1', scene_id='scene-2', session_type=SessionType.EPISODE)
+
+    _fake_pi(monkeypatch, scenes=['scene_2026-07-26_10-00-00_abcd', new_scene], on_copy=copy)
+    app = create_app(engine, recordings_dir=rec, pi_host='fake')
+    client = TestClient(app)
+
+    assert client.post('/fetch').status_code == 200
+    app.state.fetch_thread.join(timeout=30)
+    assert app.state.fetch['status'] == 'done'
+    assert app.state.fetch['total'] == 1  # the already-local scene was skipped
+    assert (rec / new_scene).is_dir()
+
+    poll = client.get('/fetch-poll').text
+    assert 'fetched 1 scene' in poll
+    assert 'wipe_table' in poll  # OOB Tasks refresh, so the new scene is browsable
+    assert 'hx-get="/fetch-poll"' not in poll  # polling stops once done
+
+
+def test_fetch_failure_names_the_scene_and_clears_its_partial_dir(tmp_path: pathlib.Path, monkeypatch):
+    """A half-finished transfer lands in the status line and leaves no partial dir behind."""
+    rec, engine = _seed(tmp_path)
+    failing = 'scene_2026-07-27_11-00-00_beef'
+
+    def boom(name: str, local_path: pathlib.Path) -> None:
+        (local_path / 'video').mkdir(parents=True)  # what tar leaves when the stream dies
+        raise RuntimeError('ssh/tar sender failed with code 255')
+
+    _fake_pi(monkeypatch, scenes=[failing], on_copy=boom)
+    app = create_app(engine, recordings_dir=rec, pi_host='fake')
+    client = TestClient(app)
+
+    client.post('/fetch')
+    app.state.fetch_thread.join(timeout=30)
+    assert app.state.fetch['status'] == 'error'
+    status = client.get('/fetch-poll').text
+    assert 'code 255' in status
+    assert failing in status  # which scene failed, not just that one did
+    # otherwise the .exists() filter would skip this scene on every future fetch
+    assert not (rec / failing).exists()
+
+
+def test_delete_scene_removes_it_and_redirects(tmp_path: pathlib.Path):
+    """The scene detail pane's Delete removes the directory and drops it from the browser."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec), follow_redirects=False)
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+
+    assert 'Delete scene' in client.get('/select/scene/scene-1').text
+    resp = client.post('/scenes/scene-1/delete')
+    assert resp.status_code == 303
+    assert not scene_dir.exists()
+    with DBSession(engine) as db:
+        assert db.get(Scene, 'scene-1') is None
+
+
+def test_delete_scene_button_hidden_without_recordings_dir(tmp_path: pathlib.Path):
+    """No recordings dir means POST would 400, so the button isn't offered in the first place."""
+    client = _client(tmp_path, with_recordings=False)
+    assert 'Delete scene' not in client.get('/select/scene/scene-1').text
+    assert client.post('/scenes/scene-1/delete').status_code == 400
+
+
+def test_delete_scene_refused_while_pipeline_running(tmp_path: pathlib.Path):
+    """A scene with a pipeline thread writing into it can't be deleted out from under it."""
+    rec, engine = _seed(tmp_path)
+    app = create_app(engine, recordings_dir=rec)
+    app.state.pp_runs['scene-1'] = {'status': 'running', 'error': None}
+
+    resp = TestClient(app).post('/scenes/scene-1/delete')
+    assert resp.status_code == 400
+    assert (rec / 'scene_2026-07-26_10-00-00_abcd').exists()
+
+
 def test_no_get_route_mutates_state(tmp_path: pathlib.Path):
     """Sanity check: hitting every read route twice yields byte-identical responses."""
     client = _client(tmp_path)

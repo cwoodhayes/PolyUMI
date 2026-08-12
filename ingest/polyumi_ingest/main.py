@@ -18,7 +18,7 @@ from rich.prompt import Confirm
 
 from polyumi_ingest.export.dp import MIN_SEGMENT_STEPS
 from polyumi_ingest.gopro_fetch import DEFAULT_THRESHOLD_MS, find_gopro_video
-from polyumi_ingest.pi_fetch import PiFetch
+from polyumi_ingest.pi_fetch import DEFAULT_HOST, PiFetch
 from polyumi_ingest.preproc import (
     available_preprocessing_steps,
     run_preprocessing,
@@ -54,15 +54,13 @@ def _human_size(n_bytes: int) -> str:
     return f'{size:.1f} {unit}'
 
 
-DEFAULT_HOST = 'pi@polyumi-pi.local'
-
 # put this in the root of the repo
 DEFAULT_RECORDINGS_DIR = pathlib.Path(__file__).parent.parent.parent / 'recordings'
 
 
 @app.command()
 def fetch(
-    host: str = typer.Option(DEFAULT_HOST, help='SSH hostname of the Pi.'),
+    host: str = typer.Option(DEFAULT_HOST, help='SSH hostname of the Pi (env: POLYUMI_PI_HOST).'),
     output_dir: pathlib.Path = typer.Option(
         DEFAULT_RECORDINGS_DIR,
         help='Local directory to write scenes into.',
@@ -948,7 +946,7 @@ def _require_gopro_mp4s(scene_dir: pathlib.Path) -> None:
 
 @app.command(name='debug-latest')
 def debug_latest(
-    host: str = typer.Option(DEFAULT_HOST, help='SSH hostname of the Pi.'),
+    host: str = typer.Option(DEFAULT_HOST, help='SSH hostname of the Pi (env: POLYUMI_PI_HOST).'),
     recordings_dir: pathlib.Path = typer.Option(
         DEFAULT_RECORDINGS_DIR,
         help='Local directory containing scene_* folders.',

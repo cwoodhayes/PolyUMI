@@ -59,11 +59,22 @@ Unlike task rename (Phase 2), a description edit doesn't affect the Tasks column
 other selection on the page, so it doesn't need the full-page reload rename uses — it's
 scoped to the detail pane like every Phase 6 field, just with no on-disk manifest to write
 (tasks have none; see the mutations module docstring).
+Phase 8 adds a topbar "Fetch from Pi" button beside Rescan: ``pingest fetch``'s scene copy
+(``PiFetch``, minus the CLI's confirm prompt and its GoPro-SD-card follow-up, which needs a
+mounted card) on a background thread with progress in ``app.state.fetch``, polled by the
+topbar status span — the Phase 4 pattern, one run at a time rather than one per scene. The
+run ends with the same sync ``/rescan`` does, and the poll that observes completion carries
+an out-of-band Tasks refresh so the fetched scenes are browsable without a second click.
+Phase 9 adds scene deletion from the scene detail pane — the one destructive operation here,
+so it's a plain form POST + redirect (Phase 2 style, since three columns change) gated behind
+a native ``confirm()`` and refused outright while that scene's pipeline is running. The
+disk/DB guards live in ``mutations.delete_scene``.
 """
 
 from __future__ import annotations
 
 import pathlib
+import shutil
 import threading
 
 from fastapi import FastAPI, Form, Request, Response
@@ -83,6 +94,7 @@ from polyumi_catalog.mutations import (
     MutationError,
     assign_scene_task,
     create_task,
+    delete_scene,
     rename_task,
     set_scene_notes,
     set_session_notes,
@@ -91,29 +103,41 @@ from polyumi_catalog.mutations import (
     set_task_description,
 )
 from polyumi_catalog.sync import sync_datasets, sync_recordings, sync_scene_quality
+from polyumi_ingest.pi_fetch import DEFAULT_HOST, PiFetch
 
 _PKG_DIR = pathlib.Path(__file__).resolve().parent
 _TEMPLATES_DIR = _PKG_DIR / 'templates'
 _STATIC_DIR = _PKG_DIR / 'static'
 
+# Pi-fetch progress shown in the topbar. 'total' stays None until the remote listing
+# comes back, which is what the template renders as the "listing…" phase.
+_IDLE_FETCH = {'status': 'idle', 'total': None, 'done': 0, 'current': None, 'error': None}
 
-def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> FastAPI:
+
+def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_host: str = DEFAULT_HOST) -> FastAPI:
     """
     Build the catalog browser app bound to ``engine``.
 
-    If ``recordings_dir`` is given, the ``/rescan`` endpoint re-runs the sync scan
-    against it; otherwise rescanning is disabled.
+    If ``recordings_dir`` is given, the ``/rescan`` and ``/fetch`` endpoints re-run the
+    sync scan / pull new scenes off ``pi_host`` into it; otherwise both are disabled.
     """
     app = FastAPI(title='PolyUMI Catalog')
     app.state.pending_dataset_scene_ids = []
     app.state.pending_dataset_lock = threading.Lock()
     app.state.pp_runs = {}  # scene_id -> {'status': 'running'|'done'|'error', 'error': str|None}
     app.state.pp_runs_lock = threading.Lock()
+    app.state.fetch = _IDLE_FETCH.copy()
+    app.state.fetch_lock = threading.Lock()
     app.mount('/static', StaticFiles(directory=_STATIC_DIR), name='static')
     templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
     # Commit shas are shown abbreviated in several places; the full value stays in the
     # element's title attribute, so the templates need both forms of the same string.
     templates.env.filters['short_sha'] = provenance.short_sha
+    # A global rather than per-render context: _detail.html is rendered from a dozen call sites
+    # (and from get_template().render() ones with no request), and all of them want the same
+    # answer — POST /scenes/{id}/delete rejects when there's no recordings dir, so the button
+    # must not be offered either.
+    templates.env.globals['can_delete'] = recordings_dir is not None
 
     def render(request: Request, template: str, **ctx) -> HTMLResponse:
         return templates.TemplateResponse(request, template, ctx)
@@ -170,6 +194,9 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
             all_tasks=all_tasks,
             can_rescan=recordings_dir is not None,
             can_build_dataset=recordings_dir is not None,
+            # a finished run's ✓/✗ belongs to the page that was watching it, not to every
+            # page load until the server restarts, so a fresh render starts from idle
+            fetch=app.state.fetch if app.state.fetch['status'] == 'running' else _IDLE_FETCH,
         )
 
     @app.get('/select/task/{task_key}', response_class=HTMLResponse)
@@ -231,6 +258,71 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
             tasks = queries.list_tasks(db)
         return render(request, '_tasks.html', tasks=tasks, oob=False)
 
+    @app.post('/fetch', response_class=HTMLResponse)
+    def post_fetch(request: Request) -> HTMLResponse:
+        """
+        Start a background ``pingest fetch`` of every not-yet-local scene on the Pi.
+
+        Same background-thread + status-on-app.state + poll-the-fragment shape as the
+        pipeline runner (see the Phase 4 paragraph above); a fetch is minutes of ssh/tar,
+        so it can't run on the request thread either. Unlike the CLI's ``fetch`` this does
+        not chase the GoPro SD card afterwards — that needs a mounted card, so it stays a
+        ``pingest fetch-gopro`` on the terminal.
+        """
+        if recordings_dir is None:
+            return PlainTextResponse('Fetching requires a recordings directory.', status_code=400)
+
+        with app.state.fetch_lock:
+            already_running = app.state.fetch['status'] == 'running'
+            if not already_running:
+                app.state.fetch = _IDLE_FETCH | {'status': 'running'}
+
+        def _run() -> None:
+            # Broad except for the same reason as the pipeline thread: unattended, so an
+            # ssh/tar failure has to land in the status dict or the topbar spins forever.
+            try:
+                pi = PiFetch(pi_host)
+                todo = [name for name in pi.list_remote_scenes() if not (recordings_dir / name).exists()]
+                with app.state.fetch_lock:
+                    app.state.fetch |= {'total': len(todo)}
+                for i, name in enumerate(todo, 1):
+                    with app.state.fetch_lock:
+                        app.state.fetch |= {'current': name}
+                    pi.copy_scene(name, recordings_dir / name)
+                    with app.state.fetch_lock:
+                        app.state.fetch |= {'done': i, 'current': None}
+                sync_recordings(recordings_dir, engine)
+                sync_datasets(default_datasets_dir(recordings_dir), engine)
+                with app.state.fetch_lock:
+                    app.state.fetch |= {'status': 'done'}
+            except Exception as exc:
+                with app.state.fetch_lock:
+                    failed = app.state.fetch['current']  # None unless a copy_scene raised
+                    app.state.fetch |= {'status': 'error', 'error': f'{failed}: {exc}' if failed else str(exc)}
+                if failed is not None:
+                    # tar extracts in place, so a transfer that died halfway leaves a partial
+                    # scene dir — and the .exists() filter above would then skip it on every
+                    # future fetch. Drop it so the retry is just pressing the button again.
+                    shutil.rmtree(recordings_dir / failed, ignore_errors=True)
+
+        if not already_running:
+            # kept on app.state purely so tests can join it instead of sleeping
+            app.state.fetch_thread = threading.Thread(target=_run, daemon=True)
+            app.state.fetch_thread.start()
+        return render(request, '_fetch.html', fetch=app.state.fetch)
+
+    @app.get('/fetch-poll', response_class=HTMLResponse)
+    def get_fetch_poll(request: Request) -> HTMLResponse:
+        fetch = app.state.fetch
+        html = templates.env.get_template('_fetch.html').render(fetch=fetch)
+        if fetch['status'] == 'done' and fetch['total']:
+            # the run's closing sync already put the new scenes in the DB; refresh the Tasks
+            # column out-of-band so they show up without the user also hitting Rescan
+            with DBSession(engine) as db:
+                tasks = queries.list_tasks(db)
+            html += templates.env.get_template('_tasks.html').render(tasks=tasks, oob=True)
+        return HTMLResponse(html)
+
     @app.post('/tasks')
     def post_create_task(name: str = Form(...)):
         with DBSession(engine) as db:
@@ -264,6 +356,28 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None) -> Fa
         with DBSession(engine) as db:
             try:
                 assign_scene_task(db, scene_id, int(task_id) if task_id else None)
+            except MutationError as err:
+                return PlainTextResponse(str(err), status_code=400)
+        return RedirectResponse('/', status_code=303)
+
+    @app.post('/scenes/{scene_id}/delete')
+    def post_delete_scene(scene_id: str):
+        """
+        Delete a scene from disk and from the catalog, then reload the page.
+
+        Full reload (the Phase 2 pattern) rather than an in-pane swap: the scene vanishes from
+        the Scenes column, its episodes from the Episodes column, and its task's count from the
+        Tasks column, so there is nothing left to swap in place. Refuses while this scene's
+        pipeline is running — that thread is writing into the very directory being removed.
+        """
+        if recordings_dir is None:
+            return PlainTextResponse('Deleting requires a recordings directory.', status_code=400)
+        run_state = app.state.pp_runs.get(scene_id)
+        if run_state is not None and run_state['status'] == 'running':
+            return PlainTextResponse('Pipeline is still running on this scene.', status_code=400)
+        with DBSession(engine) as db:
+            try:
+                delete_scene(db, scene_id, recordings_dir)
             except MutationError as err:
                 return PlainTextResponse(str(err), status_code=400)
         return RedirectResponse('/', status_code=303)

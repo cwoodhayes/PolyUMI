@@ -5,12 +5,24 @@ Scenes are transferred as tar streams to avoid needing rsync on the Pi.
 """
 
 import logging
+import os
 import pathlib
 import subprocess
 
 log = logging.getLogger(__name__)
 
 REMOTE_RECORDINGS_DIR = '~/recordings'
+# Read here rather than per-CLI-option so every consumer (pingest fetch, pingest
+# debug-latest, the catalog's Fetch button) honours the same env var — the same one
+# fr3_session.sh reads for its Pi pane and deploy. Read at import,
+# so a change needs a restart — these are all short-lived processes or long-lived servers
+# started from the shell that set it.
+#
+# The fallback is the bare ssh alias fr3_session.sh also defaults to, deliberately: with both
+# unset defaults identical, the three tools agree without anyone exporting anything. It has to
+# be an alias in your ssh config carrying a User (see docs/pi-provisioning.md), since there is
+# no 'pi@' here to supply one.
+DEFAULT_HOST = os.environ.get('POLYUMI_PI_HOST') or 'polyumi-pi'
 
 
 class PiFetch:

@@ -12,6 +12,8 @@
     Rescan
   </button>
   <span id="rescan-spin" class="htmx-indicator">scanning…</span>
+  <button hx-post="/fetch" hx-target="#fetch-status" hx-swap="outerHTML">Fetch from Pi</button>
+  {% include "_fetch.html" %}
   {% endif %}
 </header>
 

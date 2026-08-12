@@ -320,6 +320,8 @@ def scene_detail(db: DBSession, scene_id: str) -> dict:
         # so the pane agrees with the scene's Scenes-column badge, which is usable/total
         'n_usable_episodes': sum(1 for s in episodes if _is_usable(s)),
         'conflicts': conflicts,
+        # only for the delete confirmation, which warns that those datasets lose a member
+        'n_datasets': len(db.exec(select(DatasetMember).where(DatasetMember.scene_id == scene_id)).all()),
         'quality': quality,
         'total_dropped_video_frames': sum(s.video_dropped_frames or 0 for s in sessions),
         'pp_status': pp_status.scene_pp_status(pathlib.Path(scene.dir)),

@@ -579,10 +579,10 @@ Consequences worth knowing:
   a warning rather than failing — one machine being down should not block the others. That
   pane just will not survive a disconnect.
 
-The Pi's address is resolved from your ssh config (`ssh -G $PI_SSH_HOST`) at launch rather than
-hardcoded, since it is on DHCP and does move. `PI_SSH_HOST` defaults to `polyumi-pi` — the alias
+The Pi's address is resolved from your ssh config (`ssh -G $POLYUMI_PI_HOST`) at launch rather than
+hardcoded, since it is on DHCP and does move. `POLYUMI_PI_HOST` defaults to `polyumi-pi` — the alias
 other users are expected to set up — so if yours is named differently, override it:
-`PI_SSH_HOST=conorpi ./fr3_session.sh`. Repo paths and URLs are further environment overrides at
+`POLYUMI_PI_HOST=conorpi ./fr3_session.sh`. Repo paths and URLs are further environment overrides at
 the top of the script: `NUC_REPO`, `SHEEP_REPO`, `INFERENCE_URL`, `MAX_IMAGE_AGE_S`,
 `SHELL_SETTLE_S` (raise the last one if pre-typed lines land mangled — typing races the
 remote shell's startup).
