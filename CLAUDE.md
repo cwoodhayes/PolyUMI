@@ -10,9 +10,16 @@ PolyUMI is a multimodal data collection system for robot imitation learning. See
 
 ### Linting
 ```bash
-ruff check .
-ruff format .
+uv run ruff check .
+uv run ruff format .
 ```
+
+ruff is pinned (`[dependency-groups] lint` in pyproject.toml) because its formatter output
+changes between minor releases — an unpinned ruff lets two developers reformat the same files
+back and forth. Use `uv run ruff`, not `uvx ruff`, so you get the pinned version.
+`.github/workflows/lint.yml` enforces both commands on every PR; it installs only the `lint`
+group, since the `dev` group's picamera2 is Pi-only and will not build on a runner.
+`external/` is excluded — those are third-party submodules carrying upstream style.
 
 ### Tests
 ```bash
