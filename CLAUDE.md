@@ -192,7 +192,7 @@ pzarr stores) and the dataset manifests are the source of truth; every row is re
 ```
 ~/recordings/
 └── scene_YYYY-MM-DD_hh-mm-ss_XXXX/
-    └── session_YYYY-MM-DD_hh-mm-ss/
+    └── session_YYYY-MM-DD_hh-mm-ss_XXXX/
         ├── metadata.json
         ├── video/frame_000001.jpg ...
         └── audio.wav

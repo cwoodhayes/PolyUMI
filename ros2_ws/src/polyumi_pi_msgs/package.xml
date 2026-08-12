@@ -11,9 +11,11 @@
   <buildtool_depend>python3-protobuf</buildtool_depend>
   <buildtool_depend>protobuf-compiler</buildtool_depend>
 
-  <test_depend>ament_copyright</test_depend>
-  <test_depend>ament_flake8</test_depend>
-  <test_depend>ament_pep257</test_depend>
+  <!-- ament_copyright / ament_flake8 / ament_pep257 were dropped, as in polyumi_ros2: this repo
+       lints Python with ruff (see pyproject.toml), and the ament defaults contradict it on line
+       length and import order. Worse here, ament_flake8 lints the generated *_pb2.py protoc
+       output, which can never be style-clean. ament_xmllint stays — it validates package.xml
+       against the ROS schema, which ruff does not do. -->
   <test_depend>ament_xmllint</test_depend>
   <test_depend>python3-pytest</test_depend>
 

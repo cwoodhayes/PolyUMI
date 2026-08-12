@@ -43,42 +43,67 @@ def generate_launch_description():
     max_velocity_scaling = LaunchConfiguration('max_velocity_scaling')
     gripper_max_width = LaunchConfiguration('gripper_max_width')
 
-    return LaunchDescription([
-        DeclareLaunchArgument('robot_ip', default_value='192.168.51.20',
-                              description='Hostname or IP of the FR3; forwarded to move_group.'),
-        # Two execute flags, not one. docs/crb-fr3-inference.md recommends running the arm
-        # plan-only while the gripper executes for a first hardware run, so a bad width moves
-        # fingers and nothing else — a single shared flag would take that away. Both default
-        # false: launching this file must never move the robot on its own.
-        DeclareLaunchArgument('execute_arm', default_value='false',
-                              description='Let fr3_moveit_bridge execute plans (MOVES THE ARM).'),
-        DeclareLaunchArgument('execute_gripper', default_value='false',
-                              description='Let fr3_gripper_bridge send goals (MOVES THE FINGERS).'),
-        DeclareLaunchArgument('max_velocity_scaling', default_value='0.1',
-                              description='Arm speed cap. Start low, raise once you trust it.'),
-        DeclareLaunchArgument('gripper_max_width', default_value='0.0817',
-                              description="Bridge-side aperture clamp (m). Defaults to the Franka "
-                                          "Hand's own maximum so nothing software-side narrows the "
-                                          'range: franka_gripper aborts wider goals anyway, and '
-                                          'gripper_range_probe needs the full stroke to measure '
-                                          'open aperture. policy_client_node clamps to its own (measured) '
-                                          'gripper_max_width_m first, so this is a backstop.'),
-
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(str(NUC_DIR / 'launch' / 'fr3_move_group.launch.py')),
-            launch_arguments={'robot_ip': robot_ip}.items(),
-        ),
-
-        ExecuteProcess(
-            cmd=['python3', str(NUC_DIR / 'fr3_moveit_bridge.py'), '--ros-args',
-                 '-p', ['execute:=', execute_arm],
-                 '-p', ['max_velocity_scaling:=', max_velocity_scaling]],
-            output='screen',
-        ),
-        ExecuteProcess(
-            cmd=['python3', str(NUC_DIR / 'fr3_gripper_bridge.py'), '--ros-args',
-                 '-p', ['execute:=', execute_gripper],
-                 '-p', ['max_width_m:=', gripper_max_width]],
-            output='screen',
-        ),
-    ])
+    return LaunchDescription(
+        [
+            DeclareLaunchArgument(
+                'robot_ip',
+                default_value='192.168.51.20',
+                description='Hostname or IP of the FR3; forwarded to move_group.',
+            ),
+            # Two execute flags, not one. docs/crb-fr3-inference.md recommends running the arm
+            # plan-only while the gripper executes for a first hardware run, so a bad width moves
+            # fingers and nothing else — a single shared flag would take that away. Both default
+            # false: launching this file must never move the robot on its own.
+            DeclareLaunchArgument(
+                'execute_arm', default_value='false', description='Let fr3_moveit_bridge execute plans (MOVES THE ARM).'
+            ),
+            DeclareLaunchArgument(
+                'execute_gripper',
+                default_value='false',
+                description='Let fr3_gripper_bridge send goals (MOVES THE FINGERS).',
+            ),
+            DeclareLaunchArgument(
+                'max_velocity_scaling',
+                default_value='0.1',
+                description='Arm speed cap. Start low, raise once you trust it.',
+            ),
+            DeclareLaunchArgument(
+                'gripper_max_width',
+                default_value='0.0817',
+                description='Bridge-side aperture clamp (m). Defaults to the Franka '
+                "Hand's own maximum so nothing software-side narrows the "
+                'range: franka_gripper aborts wider goals anyway, and '
+                'gripper_range_probe needs the full stroke to measure '
+                'open aperture. policy_client_node clamps to its own (measured) '
+                'gripper_max_width_m first, so this is a backstop.',
+            ),
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(str(NUC_DIR / 'launch' / 'fr3_move_group.launch.py')),
+                launch_arguments={'robot_ip': robot_ip}.items(),
+            ),
+            ExecuteProcess(
+                cmd=[
+                    'python3',
+                    str(NUC_DIR / 'fr3_moveit_bridge.py'),
+                    '--ros-args',
+                    '-p',
+                    ['execute:=', execute_arm],
+                    '-p',
+                    ['max_velocity_scaling:=', max_velocity_scaling],
+                ],
+                output='screen',
+            ),
+            ExecuteProcess(
+                cmd=[
+                    'python3',
+                    str(NUC_DIR / 'fr3_gripper_bridge.py'),
+                    '--ros-args',
+                    '-p',
+                    ['execute:=', execute_gripper],
+                    '-p',
+                    ['max_width_m:=', gripper_max_width],
+                ],
+                output='screen',
+            ),
+        ]
+    )

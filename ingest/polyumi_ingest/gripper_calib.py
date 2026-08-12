@@ -130,9 +130,7 @@ def closed_width_stats(widths_m: np.ndarray) -> ClosedWidthStats:
     if finite.size == 0:
         raise ValueError('no finite gripper-width samples; did step 4 detect any finger tags?')
 
-    percentiles = {
-        float(p): float(np.percentile(finite, p)) for p in REPORT_PERCENTILES
-    }
+    percentiles = {float(p): float(np.percentile(finite, p)) for p in REPORT_PERCENTILES}
     minimum = float(finite.min())
     closed_width = percentiles[DEFAULT_PERCENTILE]
     return ClosedWidthStats(
@@ -152,8 +150,7 @@ def format_report(stats: ClosedWidthStats) -> str:
         f'min              {stats.min_m * 1000:.2f} mm   (UMI takes this verbatim)',
     ]
     lines += [
-        f'p{p:<15g} {stats.percentiles_m[p] * 1000:.2f} mm'
-        + ('   <- closed width' if p == DEFAULT_PERCENTILE else '')
+        f'p{p:<15g} {stats.percentiles_m[p] * 1000:.2f} mm' + ('   <- closed width' if p == DEFAULT_PERCENTILE else '')
         for p in REPORT_PERCENTILES
     ]
     lines += [

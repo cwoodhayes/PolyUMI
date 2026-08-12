@@ -51,60 +51,71 @@ def generate_launch_description():
     arm_id = LaunchConfiguration('arm_id')
     load_gripper = LaunchConfiguration('load_gripper')
 
-    return LaunchDescription([
-        DeclareLaunchArgument('robot_ip', default_value='192.168.51.20',
-                              description='Hostname or IP of the FR3 (the NUC-side .51 link).'),
-        DeclareLaunchArgument('arm_id', default_value='fr3',
-                              description='Arm type; drives every fr3_* frame and topic name.'),
-        # franka.launch.py defaults this to true as well. Named here because turning it off is
-        # what makes the /fr3_gripper/* action servers vanish — the first thing to check when
-        # the gripper bridge reports "action server NOT found".
-        DeclareLaunchArgument('load_gripper', default_value='true',
-                              description='Load the Franka Hand (the /fr3_gripper/* servers).'),
-
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource([PathJoinSubstitution(
-                [FindPackageShare('franka_bringup'), 'launch', 'franka.launch.py'])]),
-            launch_arguments={
-                'robot_ip': robot_ip,
-                'arm_id': arm_id,
-                'load_gripper': load_gripper,
-            }.items(),
-        ),
-
-        # The joint-trajectory controller move_group executes through. franka.launch.py spawns
-        # only the two broadcasters, so without this /execute_trajectory has nothing to drive
-        # and the arm never moves. --param-file declares the controller and its gains; -t is
-        # redundant alongside it but is what the known-good `fr3-arm-controller` alias passed,
-        # and this file only ever runs on the Humble NUC, whose spawner still accepts it.
-        Node(
-            package='controller_manager',
-            executable='spawner',
-            name='fr3_arm_controller_spawner',
-            output='screen',
-            arguments=[
-                'fr3_arm_controller',
-                '-t', 'joint_trajectory_controller/JointTrajectoryController',
-                '--param-file', PathJoinSubstitution([
-                    FindPackageShare('franka_fr3_moveit_config'),
-                    'config', 'fr3_ros_controllers.yaml',
-                ]),
-                '--controller-manager-timeout', CONTROLLER_MANAGER_TIMEOUT_S,
-            ],
-        ),
-
-        # The frame the policy actually speaks in. It lives here rather than in the inference
-        # launch so it exists whenever the arm does — Foxglove and `tf2_echo fr3_hand
-        # polyumi_tcp` are how you check the calibration, and neither should need move_group.
-        # franka.launch.py owns robot_state_publisher and hardcodes its xacro mappings, so an
-        # extra URDF link cannot be threaded through it; a static publisher is the way in.
-        # move_group gets the same numbers as xacro args — see nuc/tcp_calib.py.
-        LogInfo(msg=f'[fr3_bringup] TCP {tcp_calib.describe()}'),
-        Node(
-            package='tf2_ros',
-            executable='static_transform_publisher',
-            name='polyumi_tcp_static_tf',
-            output='screen',
-            arguments=tcp_calib.static_transform_publisher_args(),
-        ),
-    ])
+    return LaunchDescription(
+        [
+            DeclareLaunchArgument(
+                'robot_ip',
+                default_value='192.168.51.20',
+                description='Hostname or IP of the FR3 (the NUC-side .51 link).',
+            ),
+            DeclareLaunchArgument(
+                'arm_id', default_value='fr3', description='Arm type; drives every fr3_* frame and topic name.'
+            ),
+            # franka.launch.py defaults this to true as well. Named here because turning it off is
+            # what makes the /fr3_gripper/* action servers vanish — the first thing to check when
+            # the gripper bridge reports "action server NOT found".
+            DeclareLaunchArgument(
+                'load_gripper', default_value='true', description='Load the Franka Hand (the /fr3_gripper/* servers).'
+            ),
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    [PathJoinSubstitution([FindPackageShare('franka_bringup'), 'launch', 'franka.launch.py'])]
+                ),
+                launch_arguments={
+                    'robot_ip': robot_ip,
+                    'arm_id': arm_id,
+                    'load_gripper': load_gripper,
+                }.items(),
+            ),
+            # The joint-trajectory controller move_group executes through. franka.launch.py spawns
+            # only the two broadcasters, so without this /execute_trajectory has nothing to drive
+            # and the arm never moves. --param-file declares the controller and its gains; -t is
+            # redundant alongside it but is what the known-good `fr3-arm-controller` alias passed,
+            # and this file only ever runs on the Humble NUC, whose spawner still accepts it.
+            Node(
+                package='controller_manager',
+                executable='spawner',
+                name='fr3_arm_controller_spawner',
+                output='screen',
+                arguments=[
+                    'fr3_arm_controller',
+                    '-t',
+                    'joint_trajectory_controller/JointTrajectoryController',
+                    '--param-file',
+                    PathJoinSubstitution(
+                        [
+                            FindPackageShare('franka_fr3_moveit_config'),
+                            'config',
+                            'fr3_ros_controllers.yaml',
+                        ]
+                    ),
+                    '--controller-manager-timeout',
+                    CONTROLLER_MANAGER_TIMEOUT_S,
+                ],
+            ),
+            # The frame the policy actually speaks in. It lives here rather than in the inference
+            # launch so it exists whenever the arm does — Foxglove and `tf2_echo fr3_hand
+            # polyumi_tcp` are how you check the calibration, and neither should need move_group.
+            # franka.launch.py owns robot_state_publisher and hardcodes its xacro mappings, so an
+            # extra URDF link cannot be threaded through it; a static publisher is the way in.
+            # move_group gets the same numbers as xacro args — see nuc/tcp_calib.py.
+            LogInfo(msg=f'[fr3_bringup] TCP {tcp_calib.describe()}'),
+            Node(
+                package='tf2_ros',
+                executable='static_transform_publisher',
+                name='polyumi_tcp_static_tf',
+                output='screen',
+                arguments=tcp_calib.static_transform_publisher_args(),
+            ),
+        ]
+    )

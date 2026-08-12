@@ -79,7 +79,7 @@ async def _lifespan(app: FastAPI):
         raise ValueError(
             f'HOME_POSE gripper width {gripper} m is out of range (0, {MAX_PLAUSIBLE_GRIPPER_M}]. '
             'The last HOME_POSE value is a width in METRES — a value like 0.4 is 400 mm, ~5x the '
-            'Franka Hand\'s stroke. Did you mean 0.04?'
+            "Franka Hand's stroke. Did you mean 0.04?"
         )
     _home_pose = np.array(vals)
     yield

@@ -1,5 +1,9 @@
 [tool.ruff]
 line-length = 120
+# external/ holds third-party git submodules (ORB-SLAM3, franka_ros2, and the UMI
+# diffusion-policy fork). They carry their own upstream style, and reformatting them
+# would make every rebase onto upstream a conflict. They were ~99% of ruff's findings.
+extend-exclude = ["external"]
 
 [tool.ruff.format]
 quote-style = "single"

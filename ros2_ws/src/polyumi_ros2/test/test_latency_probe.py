@@ -201,7 +201,7 @@ def _filmed(qr, blur=0, perspective=0, scale=1.0):
     size = int(qr.shape[0] * scale)
     frame = np.full((1080, 1920), 240, np.uint8)
     y, x = (1080 - size) // 2, (1920 - size) // 2
-    frame[y:y + size, x:x + size] = cv2.resize(qr, (size, size))
+    frame[y : y + size, x : x + size] = cv2.resize(qr, (size, size))
     if perspective:
         p = perspective
         matrix = cv2.getPerspectiveTransform(

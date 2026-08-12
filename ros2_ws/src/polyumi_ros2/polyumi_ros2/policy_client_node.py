@@ -286,9 +286,7 @@ class PolicyClientNode(Node):
         # capture pipeline stalled. The auto default (max_image_age_s <= 0) is two camera periods
         # at the 60 Hz v4l2 rate, floored at half a control period so a slow tick doesn't trip it;
         # override the param for slower camera paths (see the param declaration).
-        self._max_image_age_s = (
-            max_image_age_s if max_image_age_s > 0 else max(2.0 / 60.0, 0.5 / control_hz)
-        )
+        self._max_image_age_s = max_image_age_s if max_image_age_s > 0 else max(2.0 / 60.0, 0.5 / control_hz)
 
         # TF — cache_time sized from buffers.ee_pose_s so a pose from up to that far back can
         # still be looked up (needed to time-align with the delayed gopro frame; see
@@ -321,9 +319,7 @@ class PolicyClientNode(Node):
         self._gripper_preview_pub = None
         if self._publish_preview:
             self._preview_pub = self.create_publisher(PoseArray, '/polyumi/target_poses_preview', 10)
-            self._gripper_preview_pub = self.create_publisher(
-                JointTrajectory, '/polyumi/target_gripper_preview', 10
-            )
+            self._gripper_preview_pub = self.create_publisher(JointTrajectory, '/polyumi/target_gripper_preview', 10)
 
         # Episode-start /reset. The server needs the episode-start EEF pose for
         # robot0_eef_rot_axis_angle_wrt_start; sent once on the first full-buffer tick. The reset
@@ -334,10 +330,7 @@ class PolicyClientNode(Node):
         # Diagnostics. Always on: eight Float32s at the control rate is nothing next to the image
         # traffic already on the wire, and the failures these catch are exactly the ones you only
         # notice if the number was already being plotted.
-        self._diag_pubs = {
-            name: self.create_publisher(Float32, f'/polyumi/diag/{name}', 10)
-            for name in DIAG_METRICS
-        }
+        self._diag_pubs = {name: self.create_publisher(Float32, f'/polyumi/diag/{name}', 10) for name in DIAG_METRICS}
 
         # Subscribers.
         #
@@ -355,7 +348,10 @@ class PolicyClientNode(Node):
         # hiccup — burning CPU to make image_age_s worse.
         self.create_subscription(Image, image_topic, self._image_cb, 1)
         self.create_subscription(
-            JointState, gripper_topic, self._gripper_cb, 10,
+            JointState,
+            gripper_topic,
+            self._gripper_cb,
+            10,
             callback_group=MutuallyExclusiveCallbackGroup(),
         )
 
@@ -371,9 +367,7 @@ class PolicyClientNode(Node):
 
         mode = 'EXECUTE (arm will move)' if self._execute_motion else 'log-only (no motion)'
         preview = 'on (/polyumi/target_poses_preview)' if self._publish_preview else 'off'
-        self.get_logger().info(
-            f'policy_client_node started — server: {self._url} — mode: {mode} — preview: {preview}'
-        )
+        self.get_logger().info(f'policy_client_node started — server: {self._url} — mode: {mode} — preview: {preview}')
         stride_interval = self._steps_per_inference * self._action_dt
         self.get_logger().info(
             f'receding-horizon stride — inference every {self._steps_per_inference} ticks '
@@ -520,8 +514,7 @@ class PolicyClientNode(Node):
         """Cache the gripper aperture with its stamp, summing the two finger joints."""
         if len(msg.position) < 2:
             self._warn_throttled(
-                f'Ignoring gripper state with {len(msg.position)} position(s); expected 2 '
-                f'(names: {list(msg.name)})'
+                f'Ignoring gripper state with {len(msg.position)} position(s); expected 2 (names: {list(msg.name)})'
             )
             return
         # Each FR3 finger reports HALF the aperture, so the full opening is their sum. Summing
@@ -700,9 +693,10 @@ class PolicyClientNode(Node):
         :returns: the 8-vector agent_pos, or None if the tick should be skipped.
         """
         # tf2 time=0 means "latest available" — used for the dry-run clock-skew workaround.
-        target_time = rclpy.time.Time() if self._tf_use_latest else (
-            image_stamp - Duration(seconds=self._latency['gopro'])
-            + Duration(seconds=self._latency['proprio'])
+        target_time = (
+            rclpy.time.Time()
+            if self._tf_use_latest
+            else (image_stamp - Duration(seconds=self._latency['gopro']) + Duration(seconds=self._latency['proprio']))
         )
         try:
             tf = self._tf_buffer.lookup_transform(self._base_frame, self._eef_frame, target_time)
@@ -732,16 +726,16 @@ class PolicyClientNode(Node):
         """
         # None (not a zero Time()) is this buffer's "latest available" sentinel — tf2's zero-stamp
         # convention does not carry over, and passing it through would return the OLDEST sample.
-        target_time = None if self._tf_use_latest else (
-            image_stamp - Duration(seconds=self._latency['gopro'])
-            + Duration(seconds=self._latency['gripper'])
+        target_time = (
+            None
+            if self._tf_use_latest
+            else (image_stamp - Duration(seconds=self._latency['gopro']) + Duration(seconds=self._latency['gripper']))
         )
         width = self._gripper_width_at(target_time)
         if width is None:
             if self._require_gripper_state:
                 self._warn_throttled(
-                    'Dropped control tick: no gripper state received yet '
-                    '(require_gripper_state is set)'
+                    'Dropped control tick: no gripper state received yet (require_gripper_state is set)'
                 )
                 return None
             # Substituting the closed width is a lie to the policy, but a survivable one — it keeps
@@ -766,8 +760,12 @@ class PolicyClientNode(Node):
             # Same reasoning as image_age_s: published whether or not it trips the limit, since a
             # topic slowing down is the interesting part and it only ever trips once.
             self._diag('gripper_state_age_s', age_s)
-        if not self._tf_use_latest and self._max_gripper_age_s > 0 and age_s is not None \
-                and age_s > self._max_gripper_age_s:
+        if (
+            not self._tf_use_latest
+            and self._max_gripper_age_s > 0
+            and age_s is not None
+            and age_s > self._max_gripper_age_s
+        ):
             if self._require_gripper_state:
                 self._warn_throttled(
                     f'Dropped control tick: newest gripper state is {age_s * 1e3:.0f} ms old '
@@ -817,9 +815,7 @@ class PolicyClientNode(Node):
     def _http_post_json(self, url: str, payload: dict) -> dict | None:
         """POST payload as JSON to url and return the parsed response, or None on failure (logged)."""
         body = json.dumps(payload).encode()
-        req = urllib.request.Request(
-            url, data=body, headers={'Content-Type': 'application/json'}, method='POST'
-        )
+        req = urllib.request.Request(url, data=body, headers={'Content-Type': 'application/json'}, method='POST')
         try:
             with urllib.request.urlopen(req, timeout=self._post_timeout_s) as resp:
                 return json.loads(resp.read())
@@ -836,9 +832,7 @@ class PolicyClientNode(Node):
             self._episode_reset_done = True
             self.get_logger().info(f'episode /reset sent (start pose set): {self._reset_url}')
         else:
-            self._warn_throttled(
-                'episode /reset failed; server will approximate wrt_start with the current pose'
-            )
+            self._warn_throttled('episode /reset failed; server will approximate wrt_start with the current pose')
 
     def _post_and_act(self, payload: dict, t_obs: rclpy.time.Time) -> None:
         """
@@ -903,9 +897,7 @@ class PolicyClientNode(Node):
         first = (arm_actions or grip_actions)[0]
         # Log the width in both spaces: policy units are what the model emitted, robot units are
         # what the hand will be commanded. A surprising gap between them is the offset being wrong.
-        grip_robot = policy_to_robot_width(
-            float(first[7]), self._gripper_min_width_m, self._gripper_max_width_m
-        )
+        grip_robot = policy_to_robot_width(float(first[7]), self._gripper_min_width_m, self._gripper_max_width_m)
         self.get_logger().info(
             f'action chunk n={n_received} (dropped {n_stale_arm} arm / {n_stale_grip} gripper, '
             f'inference={latency_inference * 1000:.0f}ms) first: x={first[0]:.4f} y={first[1]:.4f} '
@@ -961,9 +953,7 @@ class PolicyClientNode(Node):
         for i, action in enumerate(actions):
             point = JointTrajectoryPoint()
             point.positions = [
-                policy_to_robot_width(
-                    float(action[7]), self._gripper_min_width_m, self._gripper_max_width_m
-                )
+                policy_to_robot_width(float(action[7]), self._gripper_min_width_m, self._gripper_max_width_m)
             ]
             point.time_from_start = Duration(seconds=i * self._action_dt).to_msg()
             msg.points.append(point)

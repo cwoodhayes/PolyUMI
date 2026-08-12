@@ -138,7 +138,6 @@ def _draw_axes(ax: plt.Axes, origin: np.ndarray, R: np.ndarray, scale: float, la
     colors = ['red', 'green', 'blue']
     labels = [f'{label} x', f'{label} y', f'{label} z']
     for i, (color, lbl) in enumerate(zip(colors, labels)):
-        end = origin + scale * R[:, i]
         ax.quiver(
             origin[0],
             origin[1],
@@ -272,11 +271,11 @@ def main() -> None:
     handles, labels = ax.get_legend_handles_labels()
     seen: dict[str, int] = {}
     dedup_h, dedup_l = [], []
-    for h, l in zip(handles, labels):
-        if l not in seen:
-            seen[l] = 1
+    for h, lbl in zip(handles, labels):
+        if lbl not in seen:
+            seen[lbl] = 1
             dedup_h.append(h)
-            dedup_l.append(l)
+            dedup_l.append(lbl)
     ax.legend(dedup_h, dedup_l, fontsize=8, loc='upper left')
 
     ax.set_aspect('equal')

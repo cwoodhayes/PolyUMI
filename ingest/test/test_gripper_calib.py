@@ -108,14 +108,18 @@ def test_report_shows_the_percentile_table_and_marks_the_chosen_value():
 
 def test_plateau_threshold_is_the_documented_one():
     """MIN_PLATEAU_SAMPLES is quoted in the operator-facing warning; keep them in step."""
-    just_enough = np.concatenate([
-        np.full(MIN_PLATEAU_SAMPLES, 0.005),
-        np.linspace(0.02, 0.09, 500),
-    ])
-    just_short = np.concatenate([
-        np.full(MIN_PLATEAU_SAMPLES - 1, 0.005),
-        np.linspace(0.02, 0.09, 500),
-    ])
+    just_enough = np.concatenate(
+        [
+            np.full(MIN_PLATEAU_SAMPLES, 0.005),
+            np.linspace(0.02, 0.09, 500),
+        ]
+    )
+    just_short = np.concatenate(
+        [
+            np.full(MIN_PLATEAU_SAMPLES - 1, 0.005),
+            np.linspace(0.02, 0.09, 500),
+        ]
+    )
 
     assert closed_width_stats(just_enough).plateau_is_convincing
     assert not closed_width_stats(just_short).plateau_is_convincing

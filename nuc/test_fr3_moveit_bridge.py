@@ -46,8 +46,10 @@ def make_node():
 
     def _make(**overrides):
         params = [Parameter(k, value=v) for k, v in overrides.items()]
-        with patch.object(mb.Fr3MoveItBridge, 'create_client', side_effect=lambda *a, **k: MagicMock()), \
-                patch.object(mb, 'ActionClient') as action_client:
+        with (
+            patch.object(mb.Fr3MoveItBridge, 'create_client', side_effect=lambda *a, **k: MagicMock()),
+            patch.object(mb, 'ActionClient') as action_client,
+        ):
             action_client.return_value.wait_for_server.return_value = True
             action_client.return_value.server_is_ready.return_value = True
             node = mb.Fr3MoveItBridge(parameter_overrides=params)

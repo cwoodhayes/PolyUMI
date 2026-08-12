@@ -178,8 +178,7 @@ class Fr3MoveItBridge(Node):
         """
         if len(self._home_joints) != len(HOME_JOINT_NAMES):
             response.success = False
-            response.message = (f'home_joints has {len(self._home_joints)} values, '
-                                f'expected {len(HOME_JOINT_NAMES)}')
+            response.message = f'home_joints has {len(self._home_joints)} values, expected {len(HOME_JOINT_NAMES)}'
             self.get_logger().error(response.message)
             return response
         if not self._busy.acquire(blocking=False):

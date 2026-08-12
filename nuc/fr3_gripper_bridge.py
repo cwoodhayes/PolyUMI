@@ -169,15 +169,11 @@ class Fr3GripperBridge(Node):
         if self._min_speed <= 0:
             errors.append(f'min_speed_mps must be > 0, got {self._min_speed}')
         if self._max_speed < self._min_speed:
-            errors.append(
-                f'max_speed_mps ({self._max_speed}) must be >= min_speed_mps ({self._min_speed})'
-            )
+            errors.append(f'max_speed_mps ({self._max_speed}) must be >= min_speed_mps ({self._min_speed})')
         if self._grasp_below < 0:
             errors.append(f'use_grasp_below_m must be >= 0 (0 disables Grasp), got {self._grasp_below}')
         if self._grasp_below > 0 and self._grasp_force <= 0:
-            errors.append(
-                f'grasp_force_n must be > 0 when use_grasp_below_m is set, got {self._grasp_force}'
-            )
+            errors.append(f'grasp_force_n must be > 0 when use_grasp_below_m is set, got {self._grasp_force}')
         if self._grasp_eps < 0:
             errors.append(f'grasp_epsilon_m must be >= 0, got {self._grasp_eps}')
         if errors:
@@ -275,16 +271,11 @@ class Fr3GripperBridge(Node):
 
         speed = self._desired_speed(desired, current, lead_s)
         use_grasp = (
-            self._grasp_below > 0.0
-            and desired < self._grasp_below
-            and current is not None
-            and desired < current
+            self._grasp_below > 0.0 and desired < self._grasp_below and current is not None and desired < current
         )
         action = 'Grasp' if use_grasp else 'Move'
         if not self._execute:
-            self.get_logger().info(
-                f'[log-only] would send {action}(width={desired:.4f}m, speed={speed:.3f}m/s)'
-            )
+            self.get_logger().info(f'[log-only] would send {action}(width={desired:.4f}m, speed={speed:.3f}m/s)')
             # Nothing can fail in log-only mode, so commit immediately — this is what keeps a
             # dry run's log deadbanded rather than one line per period.
             with self._state_lock:

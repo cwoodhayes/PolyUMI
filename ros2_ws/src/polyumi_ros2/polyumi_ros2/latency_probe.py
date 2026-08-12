@@ -330,12 +330,8 @@ class LatencyProbe(Node):
             self._step = self.get_parameter('step_m').get_parameter_value().double_value
             self._center = self.get_parameter('center_width_m').get_parameter_value().double_value
             self._reps = self.get_parameter('reps').get_parameter_value().integer_value
-            self._onset_threshold = (
-                self.get_parameter('onset_threshold_m').get_parameter_value().double_value
-            )
-            self._settle_timeout_s = (
-                self.get_parameter('settle_timeout_s').get_parameter_value().double_value
-            )
+            self._onset_threshold = self.get_parameter('onset_threshold_m').get_parameter_value().double_value
+            self._settle_timeout_s = self.get_parameter('settle_timeout_s').get_parameter_value().double_value
             if self._step <= 0.005:
                 errors.append(f"step_m must exceed the bridge's 0.005 m deadband, got {self._step}")
             if self._center - self._step / 2 < 0:
@@ -530,7 +526,9 @@ class LatencyProbe(Node):
         with self._lock:
             actual = [(t, x - base_offset) for t, x in self._actual]
         return self._report_xcorr(
-            'latency.arm_exec', commanded, actual,
+            'latency.arm_exec',
+            commanded,
+            actual,
             note=(
                 'This is plan+execute through MoveIt, not a transport delay: it is a distribution\n'
                 '  dominated by planning time and it shifts with max_velocity_scaling. Measure it at\n'
@@ -581,10 +579,7 @@ class LatencyProbe(Node):
         deadline = time.monotonic() + self._settle_timeout_s
         while time.monotonic() < deadline:
             with self._lock:
-                moved = [
-                    t for t, w in self._actual
-                    if t > t_command and abs(w - rest) > self._onset_threshold
-                ]
+                moved = [t for t, w in self._actual if t > t_command and abs(w - rest) > self._onset_threshold]
             if moved:
                 return min(moved)
             time.sleep(0.005)
@@ -640,8 +635,7 @@ class LatencyProbe(Node):
                 return 1
             lags.append(('open' if opening else 'close', onset - t_command))
             self.get_logger().info(
-                f'Rep {rep + 1}/{self._reps} ({"open" if opening else "close"}): '
-                f'{(onset - t_command) * 1e3:.0f} ms'
+                f'Rep {rep + 1}/{self._reps} ({"open" if opening else "close"}): {(onset - t_command) * 1e3:.0f} ms'
             )
         return self._report_gripper_steps(lags, float(np.max(noises)))
 
@@ -651,9 +645,7 @@ class LatencyProbe(Node):
         last = ''
         while time.monotonic() < deadline:
             try:
-                return self._tf_buffer.lookup_transform(
-                    self._base_frame, self._eef_frame, rclpy.time.Time()
-                )
+                return self._tf_buffer.lookup_transform(self._base_frame, self._eef_frame, rclpy.time.Time())
             except Exception as e:  # noqa: BLE001 — tf2 raises several unrelated types
                 last = str(e)
                 time.sleep(0.2)
@@ -742,8 +734,11 @@ class LatencyProbe(Node):
             ]
         print('\n'.join(lines))
         self._save_npz(
-            method='step', latency_s=median, lags_s=values,
-            directions=np.array([d for d, _ in lags]), worst_noise_m=worst_noise_m,
+            method='step',
+            latency_s=median,
+            lags_s=values,
+            directions=np.array([d for d, _ in lags]),
+            worst_noise_m=worst_noise_m,
         )
         return 1 if noisy else 0
 
@@ -811,9 +806,14 @@ class LatencyProbe(Node):
         print('\n'.join(lines))
 
         self._save_npz(
-            method='xcorr', latency_s=latency, t_target=t_target, x_target=x_target,
-            t_actual=t_actual, x_actual=x_actual,
-            peak_corr=info['peak_corr'], peak_width_s=info['peak_width_s'],
+            method='xcorr',
+            latency_s=latency,
+            t_target=t_target,
+            x_target=x_target,
+            t_actual=t_actual,
+            x_actual=x_actual,
+            peak_corr=info['peak_corr'],
+            peak_width_s=info['peak_width_s'],
         )
         if self._plot:
             self._plot_xcorr(latency, info)
@@ -845,33 +845,38 @@ class LatencyProbe(Node):
         offsets = np.array([stamp - qr for qr, stamp in first_stamp.items()]) - render_overhead_s
         latency = float(np.mean(offsets))
         arrival = np.array(arrival_deltas)
-        print('\n'.join([
-            '',
-            '=' * 78,
-            f'latency.gopro: {latency * 1e3:.1f} ms  (std {np.std(offsets) * 1e3:.1f} ms, '
-            f'n={len(offsets)})',
-            '=' * 78,
-            f'  screen render overhead subtracted: {render_overhead_s * 1e3:.1f} ms',
-            '',
-            '  Paste into ros2_ws/src/polyumi_ros2/config/inference.yaml:',
-            '',
-            f'      gopro: {latency:.4f}',
-            '',
-            '  UMI measures 0.125-0.17 s for the same GoPro->HDMI->Elgato chain. Far outside that',
-            '  means the rig, not the pipeline. Monitor scanout is still inside this number.',
-            '',
-            f'  Separately, stamp->arrival was {np.median(arrival) * 1e3:.0f} ms median / '
-            f'{np.max(arrival) * 1e3:.0f} ms max.',
-            '  That is the YUYV convert and transport, which happen AFTER v4l2 stamps the frame, so',
-            '  it is NOT part of latency.gopro. It is what max_image_age_s has to tolerate — keep',
-            '  that above the max above.',
-            '',
-        ]))
+        print(
+            '\n'.join(
+                [
+                    '',
+                    '=' * 78,
+                    f'latency.gopro: {latency * 1e3:.1f} ms  (std {np.std(offsets) * 1e3:.1f} ms, n={len(offsets)})',
+                    '=' * 78,
+                    f'  screen render overhead subtracted: {render_overhead_s * 1e3:.1f} ms',
+                    '',
+                    '  Paste into ros2_ws/src/polyumi_ros2/config/inference.yaml:',
+                    '',
+                    f'      gopro: {latency:.4f}',
+                    '',
+                    '  UMI measures 0.125-0.17 s for the same GoPro->HDMI->Elgato chain. Far outside that',
+                    '  means the rig, not the pipeline. Monitor scanout is still inside this number.',
+                    '',
+                    f'  Separately, stamp->arrival was {np.median(arrival) * 1e3:.0f} ms median / '
+                    f'{np.max(arrival) * 1e3:.0f} ms max.',
+                    '  That is the YUYV convert and transport, which happen AFTER v4l2 stamps the frame, so',
+                    '  it is NOT part of latency.gopro. It is what max_image_age_s has to tolerate — keep',
+                    '  that above the max above.',
+                    '',
+                ]
+            )
+        )
         self._save_npz(
-            method='qr', latency_s=latency,
+            method='qr',
+            latency_s=latency,
             qr_times=np.array(list(first_stamp.keys())),
             recv_stamps=np.array(list(first_stamp.values())),
-            arrival_deltas=arrival, render_overhead_s=render_overhead_s,
+            arrival_deltas=arrival,
+            render_overhead_s=render_overhead_s,
         )
         return 0
 
