@@ -606,15 +606,26 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
     @app.get('/scenes/{scene_id}/pp-poll', response_class=HTMLResponse)
     def get_pp_poll(scene_id: str) -> HTMLResponse:
         """
-        Re-render a running scene's pane. Deliberately a cheap read — no disk, no re-sync.
+        Re-render only the parts of a running scene's pane that a run changes.
 
-        This fires every 3s for the whole run, so anything it touches gets touched hundreds of
-        times. It reads the DB and renders; the fresh SLAM measurements it eventually shows are
-        put there once, by the run's own ``sync_scene_quality`` when the pipeline finishes, and
-        the next tick after that swaps them in. Resist re-syncing here to make the badges fill
-        in progressively — that walks every episode's zarr attrs on every tick.
+        Deliberately a cheap read — no disk, no re-sync. This fires every 3s for the whole run,
+        so anything it touches gets touched hundreds of times. It reads the DB and renders; the
+        fresh SLAM measurements it eventually shows are put there once, by the run's own
+        ``sync_scene_quality`` when the pipeline finishes, and the next tick after that swaps
+        them in. Resist re-syncing here to make the badges fill in progressively — that walks
+        every episode's zarr attrs on every tick.
+
+        Three fragments, not the whole pane: replacing ``#detail-body`` on a timer also
+        replaced the Notes textarea, throwing away anything typed into it during a run.
         """
         with DBSession(engine) as db:
-            return _with_episodes_oob(db, _scene_detail_with_run_state(db, scene_id), scene_id)
+            detail = _scene_detail_with_run_state(db, scene_id)
+            sessions = queries.list_sessions(db, scene_id)
+        env = templates.env
+        return HTMLResponse(
+            env.get_template('_pp_panel.html').render(detail=detail, oob=False)
+            + env.get_template('_scene_quality.html').render(detail=detail, oob=True)
+            + env.get_template('_episodes.html').render(sessions=sessions, oob=True)
+        )
 
     return app

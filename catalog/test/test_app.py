@@ -1234,6 +1234,29 @@ def test_pp_poll_reads_the_db_and_never_the_store(tmp_path: pathlib.Path):
     assert '10% tracked' in client.get('/scenes/scene-1/pp-poll').text
 
 
+def test_pp_poll_does_not_replace_the_notes_box(tmp_path: pathlib.Path):
+    """
+    The poll swaps the pipeline panel, not the whole pane, so mid-run typing survives.
+
+    It fires every 3s for the length of a run. Swapping #detail-body replaced the Notes
+    textarea along with everything else, so anything typed into it during a SLAM run was gone
+    within three seconds — with no error and nothing to suggest where it went.
+    """
+    rec, engine = _seed(tmp_path)
+    app = create_app(engine, recordings_dir=rec)
+    app.state.pp_runs['scene-1'] = {'status': 'running', 'error': None}
+
+    body = TestClient(app).get('/scenes/scene-1/pp-poll').text
+
+    # the pipeline panel is the swap target, and the poll re-arms itself from inside it
+    assert 'id="scene-pp-panel"' in body
+    assert 'hx-target="#scene-pp-panel"' in body
+    # nothing that carries user input comes back, so nothing of theirs is overwritten
+    assert 'scene-notes' not in body
+    assert 'assign-task-form' not in body
+    assert 'id="detail-body"' not in body
+
+
 def test_rescan_refreshes_the_open_scene_pane_with_new_slam_results(tmp_path: pathlib.Path):
     """
     Rescan is the only thing that pulls a finished run's results in, so it must leave no pane stale.
@@ -1261,6 +1284,9 @@ def test_rescan_refreshes_the_open_scene_pane_with_new_slam_results(tmp_path: pa
     # the scene pane and its Episodes column both came back as out-of-band swaps...
     assert 'id="detail-body" hx-swap-oob="true"' in resp.text
     assert 'id="col-episodes-body" class="col-body" hx-swap-oob="true"' in resp.text
+    # ...and only those two: the pane's own sub-fragments are rendered inline, since an
+    # out-of-band swap nested inside another one would be swapped twice, to two places.
+    assert resp.text.count('hx-swap-oob') == 2
     # ...the pane kept its task dropdown (jinja iterates an undefined all_tasks as empty)...
     assert '>fold_towel</option>' in resp.text
     # ...and the measurement the run wrote is now cached on the row it renders from
