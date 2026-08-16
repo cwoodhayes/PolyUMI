@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from polyumi_catalog.app import create_app
 from polyumi_catalog.db import get_engine
 from polyumi_catalog.manifests import SceneManifest
-from polyumi_catalog.sync import sync_recordings
+from polyumi_catalog.sync import sync_recordings, sync_scene_quality
 from polyumi_pi.files.metadata import SessionMetadata, SessionType
 from sqlmodel import Session as DBSession
 from sqlmodel import select
@@ -1196,13 +1196,13 @@ def test_run_pp_without_force_leaves_completed_steps_ticked(tmp_path: pathlib.Pa
     assert zarr.open_group(str(scene_dir / 'scene.zarr'), mode='r').attrs['preprocessing_steps'] == [1, 2]
 
 
-def test_pp_poll_picks_up_slam_results_written_mid_run(tmp_path: pathlib.Path):
+def test_pp_poll_reads_the_db_and_never_the_store(tmp_path: pathlib.Path):
     """
-    Per-episode SLAM attrs written while a run is in flight reach the UI on the next poll.
+    The poll must stay a cheap render: it fires every 3s for the whole run.
 
-    Step ticks only move when a whole step ends (tens of minutes for SLAM over a 40-episode
-    scene), so the poll also re-syncs the per-episode measurements and OOB-swaps the Episodes
-    column — otherwise finished episodes' quality badges sit blank until the run completes.
+    Measurements reach it via the run's own sync_scene_quality when the pipeline finishes,
+    which the next tick then swaps in — not by the poll re-reading every episode's zarr attrs
+    on every tick. Guards against putting that back.
     """
     rec, engine = _seed(tmp_path)
     scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
@@ -1218,12 +1218,61 @@ def test_pp_poll_picks_up_slam_results_written_mid_run(tmp_path: pathlib.Path):
 
     app = create_app(engine, recordings_dir=rec)
     app.state.pp_runs['scene-1'] = {'status': 'running', 'error': None}
-    resp = TestClient(app).get('/scenes/scene-1/pp-poll')
+    client = TestClient(app)
+
+    # Mid-run: the attrs are on disk but nothing has synced them, and the poll must not.
+    resp = client.get('/scenes/scene-1/pp-poll')
+    assert resp.status_code == 200
+    assert 'col-episodes-body' in resp.text and 'hx-swap-oob' in resp.text
+    assert '10% tracked' not in resp.text
+    with DBSession(engine) as db:
+        row = db.exec(select(SessionRow).where(SessionRow.dir.like('%session_1'))).one()
+        assert row.slam_attrs_json is None
+
+    # Run completion syncs once; the next tick is what puts the badge on screen.
+    sync_scene_quality('scene-1', engine)
+    assert '10% tracked' in client.get('/scenes/scene-1/pp-poll').text
+
+
+def test_rescan_refreshes_the_open_scene_pane_with_new_slam_results(tmp_path: pathlib.Path):
+    """
+    Rescan is the only thing that pulls a finished run's results in, so it must leave no pane stale.
+
+    Nothing polls any more. A pipeline writes its per-episode SLAM attrs to the store, and the
+    operator presses Rescan; if that only swapped the task list, the scene pane and Episodes
+    column they are looking at would still show pre-run numbers with nothing to say otherwise.
+    """
+    rec, engine = _seed(tmp_path)
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 1
+    ep = root.require_group('episode_0')
+    ep.attrs['session_dir'] = 'session_1'
+    slam = ep.require_group('annotations').require_group('slam')
+    slam.attrs['n_frames_total'] = 100
+    slam.attrs['n_frames_lost'] = 90
+    slam.attrs['tracking_ratio'] = 0.1
+    slam.attrs['n_relocalization_events'] = 0
+
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    resp = client.post('/rescan', data={'selected_scene_id': 'scene-1'})
 
     assert resp.status_code == 200
-    # the Episodes column came back as an out-of-band swap...
-    assert 'col-episodes-body' in resp.text and 'hx-swap-oob' in resp.text
-    # ...and the just-written measurement is cached on the row it renders from
+    # the scene pane and its Episodes column both came back as out-of-band swaps...
+    assert 'id="detail-body" hx-swap-oob="true"' in resp.text
+    assert 'id="col-episodes-body" class="col-body" hx-swap-oob="true"' in resp.text
+    # ...the pane kept its task dropdown (jinja iterates an undefined all_tasks as empty)...
+    assert '>fold_towel</option>' in resp.text
+    # ...and the measurement the run wrote is now cached on the row it renders from
     with DBSession(engine) as db:
         row = db.exec(select(SessionRow).where(SessionRow.dir.like('%session_1'))).one()
         assert row.slam_attrs_json is not None and '"tracking_ratio": 0.1' in row.slam_attrs_json
+
+
+def test_rescan_without_a_selected_scene_returns_only_the_task_list(tmp_path: pathlib.Path):
+    """No scene open (or a deleted one) means no pane to refresh — and no OOB swap to send."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+
+    assert 'hx-swap-oob' not in client.post('/rescan').text
+    assert 'hx-swap-oob' not in client.post('/rescan', data={'selected_scene_id': 'nope'}).text

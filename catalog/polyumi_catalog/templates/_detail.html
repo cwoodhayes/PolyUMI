@@ -26,6 +26,10 @@
   </dl>
 
   {% elif detail.kind == 'scene' %}
+  {# Lets the topbar's Rescan button say which scene is on screen (hx-include), so a rescan can
+     swap this pane and the Episodes column back in with what it just re-read from disk. The
+     server tracks no selection state; this is the whole mechanism. #}
+  <input type="hidden" id="selected-scene-id" name="selected_scene_id" value="{{ detail.scene_id }}" />
   <div class="scene-detail-layout">
     <div class="scene-detail-text">
       <h2>{{ detail.name }}</h2>

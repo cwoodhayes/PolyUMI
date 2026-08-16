@@ -154,9 +154,9 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
         Render a detail pane plus an out-of-band update of ``scene_id``'s Episodes column.
 
         Keeps a currently-visible episode list honest whenever something behind it changed —
-        a usable/unusable toggle's grey-out, a running pipeline's quality badges filling in
-        (same "update a currently-visible widget" pattern as the dataset-draft builder; see
-        the module docstring's Phase 3 paragraph).
+        a usable/unusable toggle's grey-out, a finished pipeline's quality badges (same
+        "update a currently-visible widget" pattern as the dataset-draft builder; see the
+        module docstring's Phase 3 paragraph).
         """
         detail_html = templates.env.get_template('_detail.html').render(detail=detail, oob=False)
         if not scene_id:
@@ -254,13 +254,37 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
         return render(request, '_detail.html', detail=detail, oob=False)
 
     @app.post('/rescan', response_class=HTMLResponse)
-    def rescan(request: Request) -> HTMLResponse:
+    def rescan(request: Request, selected_scene_id: str | None = Form(None)) -> HTMLResponse:
+        """
+        Re-read the recordings tree into the DB, and refresh whatever is on screen from it.
+
+        Rescan is how anything that changed on disk outside a pipeline run reaches the UI — a
+        scene fetched from the Pi, a store rebuilt from the CLI — so it should leave no stale
+        pane behind. (The pp-poll only covers a run started from *this* process, and only while
+        its pane is open.) ``selected_scene_id`` comes from the hidden input the scene detail
+        pane renders, via hx-include on the button; when a scene is open, its pane and its
+        Episodes column are swapped out of band alongside the task list. Absent means nothing,
+        or a session, is selected, and the task list alone is enough.
+        """
         if recordings_dir is not None:
             sync_recordings(recordings_dir, engine)
             sync_datasets(default_datasets_dir(recordings_dir), engine)
         with DBSession(engine) as db:
-            tasks = queries.list_tasks(db)
-        return render(request, '_tasks.html', tasks=tasks, oob=False)
+            tasks_html = templates.env.get_template('_tasks.html').render(tasks=queries.list_tasks(db), oob=False)
+            if not selected_scene_id:
+                return HTMLResponse(tasks_html)
+            detail = _scene_detail_with_run_state(db, selected_scene_id)
+            if detail.get('kind') != 'scene':  # deleted out from under the open pane
+                return HTMLResponse(tasks_html)
+            # all_tasks is not optional here: jinja iterates an undefined name as empty, so
+            # omitting it silently swaps in a scene pane whose Assign-task dropdown has lost
+            # every option.
+            detail_html = templates.env.get_template('_detail.html').render(
+                detail=detail, all_tasks=queries.list_task_options(db), oob=True
+            )
+            sessions = queries.list_sessions(db, selected_scene_id)
+            episodes_html = templates.env.get_template('_episodes.html').render(sessions=sessions, oob=True)
+        return HTMLResponse(tasks_html + detail_html + episodes_html)
 
     @app.post('/fetch', response_class=HTMLResponse)
     def post_fetch(request: Request) -> HTMLResponse:
@@ -581,11 +605,15 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
 
     @app.get('/scenes/{scene_id}/pp-poll', response_class=HTMLResponse)
     def get_pp_poll(scene_id: str) -> HTMLResponse:
-        # The step-tick list alone only moves when a whole step finishes, which for SLAM on a
-        # 40-episode scene is tens of minutes of apparently-nothing. The per-episode SLAM attrs
-        # land as each episode finishes, so re-sync them here (same call the run's completion
-        # makes) and OOB-swap the Episodes column so its quality badges fill in as the run goes.
-        sync_scene_quality(scene_id, engine)
+        """
+        Re-render a running scene's pane. Deliberately a cheap read — no disk, no re-sync.
+
+        This fires every 3s for the whole run, so anything it touches gets touched hundreds of
+        times. It reads the DB and renders; the fresh SLAM measurements it eventually shows are
+        put there once, by the run's own ``sync_scene_quality`` when the pipeline finishes, and
+        the next tick after that swaps them in. Resist re-syncing here to make the badges fill
+        in progressively — that walks every episode's zarr attrs on every tick.
+        """
         with DBSession(engine) as db:
             return _with_episodes_oob(db, _scene_detail_with_run_state(db, scene_id), scene_id)
 
