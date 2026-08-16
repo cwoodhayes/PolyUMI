@@ -42,6 +42,12 @@ _DEFAULT_ORB_SLAM3_DIR = _REPO_ROOT / 'external' / 'ORB_SLAM3_PolyUMI'
 
 _DEFAULT_SETTINGS_YAML = _DEFAULT_ORB_SLAM3_DIR / 'Examples' / 'Monocular-Inertial' / 'gopro_hero12_slam.yaml'
 
+# Gripper mask: the camera-rigid hardware blanked out before tracking. Unlike the settings
+# YAML this lives in the repo proper, not the submodule, because it is ours — it describes
+# the PolyUMI gripper, and a `git submodule update` must not be able to clobber it.
+# Hand-drawn against a temporal-median frame; white (non-zero) = discarded, black = kept.
+_SLAM_MASK_PNG = _REPO_ROOT / 'ingest' / 'config' / 'slam_mask.png'
+
 # How far (as a fraction of a frame period) a trajectory row's timestamp may sit from the
 # frame its index maps to. Rows are indexed directly, so this is a consistency assertion on
 # the decimation stride rather than a matching tolerance — not a tuning knob, hence not in
@@ -209,6 +215,7 @@ def _make_temp_settings_yaml(
     viewer: bool = False,
     res_div: int = 1,
     fps_div: int = 1,
+    mask_png: pathlib.Path | None = None,
 ) -> pathlib.Path:
     """
     Copy ``src`` settings YAML to ``tmp_dir`` with atlas paths appended.
@@ -217,6 +224,12 @@ def _make_temp_settings_yaml(
     (``System.SaveAtlasToFile`` / ``System.LoadAtlasFromFile``); the binary
     has no CLI flag for them. We inject the right key here so the canonical
     config file stays untouched.
+
+    ``mask_png`` rides along the same way, for the same reason: both PolyUMI binaries
+    already overload their positional argv, so a new CLI arg would be ambiguous. It is
+    the gripper mask — the camera-rigid hardware (fingers, ArUco tags, LEDs, mirrors)
+    that must be blanked before tracking or it destroys both two-view init and
+    relocalization. Belongs with the camera settings because it describes the rig.
 
     ``res_div`` / ``fps_div`` optionally downsample the camera settings first; see
     ``_downsample_settings``.
@@ -229,6 +242,8 @@ def _make_temp_settings_yaml(
         content += f'\nSystem.SaveAtlasToFile: "{save_atlas}"\n'
     if load_atlas is not None:
         content += f'\nSystem.LoadAtlasFromFile: "{load_atlas}"\n'
+    if mask_png is not None:
+        content += f'\nMask.Path: "{mask_png}"\n'
     dst = tmp_dir / 'settings.yaml'
     dst.write_text(content)
     return dst
@@ -547,6 +562,16 @@ class OrbSlam3Step(PreprocessingStep):
         return self.orb_slam3_dir / 'Vocabulary' / 'ORBvoc.txt'
 
     def _validate_settings_yaml(self) -> None:
+        if not _SLAM_MASK_PNG.exists():
+            # Hard failure rather than an unmasked fallback: an unmasked run does not crash,
+            # it quietly produces a map nothing can relocalize against, and you only find out
+            # after re-running 60 episodes.
+            raise FileNotFoundError(
+                f'Gripper mask not found: {_SLAM_MASK_PNG}. SLAM needs the camera-rigid '
+                f'hardware (fingers, ArUco tags, LEDs, mirrors) blanked out; without it both '
+                f'two-view init and relocalization degrade badly. Draw one against a '
+                f'temporal-median frame — white = discard, black = keep.'
+            )
         if not self.settings_yaml.exists():
             raise FileNotFoundError(f'ORB-SLAM3 settings YAML not found: {self.settings_yaml}')
         value_lines = [ln for ln in self.settings_yaml.read_text().splitlines() if not ln.lstrip().startswith('#')]
@@ -600,6 +625,7 @@ class OrbSlam3Step(PreprocessingStep):
                 tmp_dir,
                 save_atlas=atlas_path,
                 res_div=self.resolution_divisor,
+                mask_png=_SLAM_MASK_PNG,
             )
             traj_out = log_dir / 'mapping_trajectory.csv'
             cmd = [
@@ -655,6 +681,7 @@ class OrbSlam3Step(PreprocessingStep):
                 load_atlas=atlas_path,
                 res_div=self.resolution_divisor,
                 fps_div=self.localization_frame_stride,
+                mask_png=_SLAM_MASK_PNG,
             )
             traj_out = tmp_dir / 'trajectory.csv'
             # Forward pass only. The binary still accepts an optional 6th argument that makes
