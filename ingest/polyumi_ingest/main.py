@@ -24,7 +24,7 @@ from polyumi_ingest.preproc import (
     run_preprocessing,
     run_preprocessing_on_recordings,
 )
-from polyumi_ingest.pzarr import FINGER_MP4, GOPRO_MP4
+from polyumi_ingest.pzarr import FINGER_MP4, GOPRO_MP4, ensure_pzarr
 from polyumi_ingest.video_helpers import encode_session_video
 
 logging.basicConfig(
@@ -135,13 +135,15 @@ def fetch(
         for session in sessions:
             try:
                 pi.copy_sessions(scene_name, [session], output_dir, verbose=verbose_transfer)
-            except (RuntimeError, OSError) as exc:
-                # tar extracts in place, so an interrupted transfer leaves a half-written
-                # session directory behind — and the missing-session filter treats any
-                # directory that exists as already fetched, which would silently truncate
-                # this session forever. Drop it; everything already transferred stays put.
+            # KeyboardInterrupt included deliberately: Ctrl-C is the most likely way a transfer
+            # dies, and it is not an Exception. tar extracts in place, so what it leaves behind
+            # is a directory holding part of a session. Whether the missing-session filter
+            # notices depends on whether metadata.json had landed yet — which is tar member
+            # order, i.e. the Pi's readdir order, i.e. nothing we control. Delete the partial
+            # copy and the question never arises; everything already transferred stays put.
+            except (RuntimeError, OSError, KeyboardInterrupt) as exc:
                 shutil.rmtree(output_dir / scene_name / session, ignore_errors=True)
-                log.error(f'{scene_name}/{session}: transfer failed, removed the partial copy: {exc}')
+                log.error(f'{scene_name}/{session}: transfer failed, removed the partial copy: {exc!r}')
                 log.info(f'Fetched {fetched}/{n_sessions} session(s) before this. Re-run to resume.')
                 raise typer.Exit(1)
             fetched += 1
@@ -529,16 +531,7 @@ def preprocessing_pipeline(
     try:
         if scene is not None:
             if auto_build and scene.suffix != '.zarr':
-                needs_build = _pzarr_needs_build(scene)
-                new_sessions = [] if needs_build else _pzarr_new_sessions(scene)
-                if needs_build or new_sessions:
-                    if new_sessions:
-                        log.info(f'{scene.name}: {len(new_sessions)} new session(s) since the last build; adding...')
-                    else:
-                        log.info(f'No usable scene.zarr at {scene}; building pzarr first...')
-                    if not skip_gopro:
-                        _require_gopro_mp4s(scene)
-                    _build_pzarr(scene, skip_gopro, append=bool(new_sessions))
+                ensure_pzarr(scene, skip_gopro=skip_gopro)
             output = run_preprocessing(scene, step_number=step, copy=copy, force=force)
             log.info(f'Done. Output: {output}')
         else:
@@ -548,23 +541,11 @@ def preprocessing_pipeline(
                     for scene_dir in sorted(
                         p for p in recordings_dir_resolved.iterdir() if p.is_dir() and p.name.startswith('scene_')
                     ):
-                        needs_build = _pzarr_needs_build(scene_dir)
-                        new_sessions = [] if needs_build else _pzarr_new_sessions(scene_dir)
-                        if not needs_build and not new_sessions:
-                            continue
-                        if new_sessions:
-                            log.info(
-                                f'{scene_dir.name}: {len(new_sessions)} new session(s) since the last build; adding...'
-                            )
-                        else:
-                            log.info(f'No usable scene.zarr for {scene_dir.name}; building pzarr first...')
                         # One unbuildable scene (no gopro.mp4 yet, unreadable sessions) must not
                         # stop the batch — it just won't have a store for run_preprocessing to
                         # find below, which is already reported as "no scene.zarr found".
                         try:
-                            if not skip_gopro:
-                                _require_gopro_mp4s(scene_dir)
-                            _build_pzarr(scene_dir, skip_gopro, append=bool(new_sessions))
+                            ensure_pzarr(scene_dir, skip_gopro=skip_gopro)
                         except Exception as e:
                             log.error(f'{scene_dir.name}: cannot build pzarr, skipping: {e}')
             outputs = run_preprocessing_on_recordings(recordings_dir, step_number=step, copy=copy, force=force)
@@ -572,7 +553,9 @@ def preprocessing_pipeline(
                 log.info(f'Done. Processed {len(outputs)} scene(s).')
             else:
                 log.info('No scenes processed.')
-    except (FileNotFoundError, FileExistsError, KeyError) as e:
+    # RuntimeError/NotImplementedError are build_pzarr's failure modes, which used to be turned
+    # into an exit code by the _build_pzarr wrapper this now bypasses.
+    except (FileNotFoundError, FileExistsError, KeyError, RuntimeError, NotImplementedError) as e:
         log.exception(e)
         raise typer.Exit(1)
 
@@ -928,83 +911,15 @@ def _print_preprocessing_steps() -> None:
     console.print('Run all:  [bold]pingest pp --scene <scene>[/bold]\n')
 
 
-def _build_pzarr(scene_dir: pathlib.Path, skip_gopro: bool, append: bool = False) -> None:
-    """Build pzarr for scene_dir, raising typer.Exit(1) on failure."""
+def _build_pzarr(scene_dir: pathlib.Path, skip_gopro: bool) -> None:
+    """Rebuild pzarr for scene_dir from scratch, raising typer.Exit(1) on failure."""
     from polyumi_ingest.pzarr import build_pzarr
 
-    zarr_path = scene_dir / 'scene.zarr'
     try:
-        build_pzarr(scene_dir, skip_gopro=skip_gopro, append=append)
-        log.info(f'  -> {zarr_path}')
+        log.info(f'  -> {build_pzarr(scene_dir, skip_gopro=skip_gopro)}')
     except (RuntimeError, NotImplementedError) as e:
         log.error(str(e))
         raise typer.Exit(1)
-
-
-def _pzarr_needs_build(scene_dir: pathlib.Path) -> bool:
-    """
-    Report whether ``scene_dir`` still needs a scene.zarr built.
-
-    A store whose ``build_complete`` attr is explicitly False was interrupted part-way and is
-    missing episodes, so it gets rebuilt rather than preprocessed as if it were whole. Stores
-    written before that attr existed don't have it at all, and a *missing* attr means "unknown,
-    assume complete" — otherwise every pre-existing store would be rebuilt on sight.
-    """
-    import zarr
-
-    zarr_path = scene_dir / 'scene.zarr'
-    if not zarr_path.exists():
-        return True
-    try:
-        root = zarr.open_group(str(zarr_path), mode='r')
-    except Exception as e:
-        log.warning(f'{scene_dir.name}: scene.zarr present but unreadable ({e}); rebuilding.')
-        return True
-    if root.attrs.get('build_complete') is False:
-        log.warning(f'{scene_dir.name}: scene.zarr is from an interrupted build; rebuilding.')
-        return True
-    return False
-
-
-def _pzarr_new_sessions(scene_dir: pathlib.Path) -> list[str]:
-    """
-    Return session directories on disk that the scene's store has no episode for.
-
-    A scene grows while it is being recorded, so a store that was complete at its last build
-    can still be missing episodes. Compared by the ``session_dir`` attr each episode records,
-    not by counting: an episode flagged unusable still counts as present.
-    """
-    import zarr
-
-    zarr_path = scene_dir / 'scene.zarr'
-    if not zarr_path.exists():
-        return []
-    on_disk = {p.name for p in scene_dir.iterdir() if p.is_dir() and p.name.startswith('session_')}
-    try:
-        from polyumi_ingest.pzarr.store import _existing_episode_sessions
-
-        root = zarr.open_group(str(zarr_path), mode='r')
-        built = set(_existing_episode_sessions(root))
-    except Exception as e:
-        # Unreadable stores are _pzarr_needs_build's business; don't double-report here.
-        log.debug(f'{scene_dir.name}: could not read episodes from scene.zarr ({e})')
-        return []
-    return sorted(on_disk - built)
-
-
-def _require_gopro_mp4s(scene_dir: pathlib.Path) -> None:
-    """Raise FileNotFoundError if any session under scene_dir is missing gopro.mp4."""
-    from polyumi_ingest.pzarr.scene_files import GOPRO_MP4, SceneFiles
-
-    scene = SceneFiles.from_path(scene_dir)
-    missing = [s.path / GOPRO_MP4 for s in scene.sessions if not (s.path / GOPRO_MP4).exists()]
-    if missing:
-        joined = '\n  '.join(str(p) for p in missing)
-        raise FileNotFoundError(
-            f'Cannot auto-build pzarr for {scene_dir.name}: missing gopro.mp4 in '
-            f'{len(missing)} session(s):\n  {joined}\n'
-            f'Run `pingest fetch-gopro` first, or pass --skip-gopro to ingest without GoPro frames.'
-        )
 
 
 @app.command(name='debug-latest')

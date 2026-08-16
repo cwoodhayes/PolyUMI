@@ -7,7 +7,11 @@ from polyumi_ingest.pzarr.store import (
     PZarrInfo,
     StreamInfo,
     build_pzarr,
+    ensure_pzarr,
     inspect_pzarr,
+    missing_gopro_mp4s,
+    pzarr_needs_build,
+    pzarr_new_sessions,
     read_frame,
 )
 from polyumi_ingest.pzarr.version import PZARR_VERSION
@@ -22,6 +26,10 @@ __all__ = [
     'PZarrInfo',
     'StreamInfo',
     'build_pzarr',
+    'ensure_pzarr',
     'inspect_pzarr',
+    'missing_gopro_mp4s',
+    'pzarr_needs_build',
+    'pzarr_new_sessions',
     'read_frame',
 ]

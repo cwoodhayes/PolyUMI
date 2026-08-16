@@ -99,18 +99,6 @@ def test_scene_pp_status_does_not_call_inspect_pzarr(tmp_path: pathlib.Path, mon
     assert status['n_complete'] == 1
 
 
-def test_missing_gopro_mp4s_lists_only_sessions_without_it(tmp_path: pathlib.Path):
-    """missing_gopro_mp4s reports session dirs lacking gopro.mp4, and only those."""
-    scene_dir = tmp_path / 'scene_c'
-    scene_dir.mkdir()
-    _make_session(scene_dir, 'session_1', with_gopro=True)
-    _make_session(scene_dir, 'session_2', with_gopro=False)
-
-    missing = pp_status.missing_gopro_mp4s(scene_dir)
-
-    assert missing == ['session_2']
-
-
 def test_run_full_pipeline_raises_when_gopro_missing(tmp_path: pathlib.Path):
     """Without scene.zarr and a session missing gopro.mp4, it raises rather than building silently."""
     scene_dir = tmp_path / 'scene_d'
@@ -143,7 +131,7 @@ def test_run_full_pipeline_builds_pzarr_then_runs_preprocessing(tmp_path: pathli
         calls.append(('run_preprocessing', path))
         return path / 'scene.zarr'
 
-    monkeypatch.setattr('polyumi_ingest.pzarr.build_pzarr', fake_build_pzarr)
+    monkeypatch.setattr('polyumi_ingest.pzarr.store.build_pzarr', fake_build_pzarr)
     monkeypatch.setattr('polyumi_ingest.preproc.run_preprocessing', fake_run_preprocessing)
 
     pp_status.run_full_pipeline(scene_dir)
@@ -158,12 +146,39 @@ def test_run_full_pipeline_skips_build_when_pzarr_exists(tmp_path: pathlib.Path,
     zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
 
     calls = []
-    monkeypatch.setattr('polyumi_ingest.pzarr.build_pzarr', lambda *a, **k: calls.append('build_pzarr'))
+    monkeypatch.setattr('polyumi_ingest.pzarr.store.build_pzarr', lambda *a, **k: calls.append('build_pzarr'))
     monkeypatch.setattr('polyumi_ingest.preproc.run_preprocessing', lambda *a, **k: calls.append('run_preprocessing'))
 
     pp_status.run_full_pipeline(scene_dir)
 
     assert calls == ['run_preprocessing']
+
+
+def test_run_full_pipeline_appends_sessions_recorded_since_the_build(tmp_path: pathlib.Path, monkeypatch):
+    """
+    A scene that grew after its store was built gets extended, not silently left behind.
+
+    The Fetch button pulls new sessions per session, so the store is routinely behind the
+    directory by the time Run pp is pressed. Skipping the build whenever scene.zarr merely
+    *exists* would preprocess only the old episodes and never say so.
+    """
+    scene_dir = tmp_path / 'scene_grown'
+    scene_dir.mkdir()
+    _make_session(scene_dir, 'session_1', with_gopro=True)
+    _make_session(scene_dir, 'session_2', with_gopro=True)
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.require_group('episode_0').attrs['session_dir'] = 'session_1'  # session_2 is new
+
+    kwargs_seen = []
+    monkeypatch.setattr(
+        'polyumi_ingest.pzarr.store.build_pzarr',
+        lambda path, **kwargs: kwargs_seen.append(kwargs) or (path / 'scene.zarr'),
+    )
+    monkeypatch.setattr('polyumi_ingest.preproc.run_preprocessing', lambda *a, **k: None)
+
+    pp_status.run_full_pipeline(scene_dir)
+
+    assert kwargs_seen == [{'skip_gopro': False, 'append': True}]
 
 
 def test_run_full_pipeline_passes_force_through_to_run_preprocessing(tmp_path: pathlib.Path, monkeypatch):

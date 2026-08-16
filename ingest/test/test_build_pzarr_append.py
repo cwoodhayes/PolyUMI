@@ -10,11 +10,13 @@ throw away the SLAM poses, the per-step marks, and any curation already on the s
 from __future__ import annotations
 
 import pathlib
+from unittest import mock
 
 import numpy as np
+import pytest
 import zarr
 from polyumi_ingest.manifests import SceneManifest, set_episode_unusable
-from polyumi_ingest.pzarr.store import build_pzarr
+from polyumi_ingest.pzarr.store import build_pzarr, ensure_pzarr, pzarr_needs_build, pzarr_new_sessions
 from test_build_pzarr_faults import _write_session
 
 # Explicit timestamps: episode indices are positional over sessions sorted by created_at, and
@@ -119,6 +121,26 @@ def test_a_backdated_session_forces_a_full_rebuild(tmp_path: pathlib.Path) -> No
     assert 'preprocessing_steps' not in root.attrs
 
 
+def test_an_interrupted_append_is_detectable(tmp_path: pathlib.Path) -> None:
+    """
+    A killed append leaves build_complete False, same as a killed build.
+
+    Without it the half-written episode is undetectable: it already carries the session_dir
+    attr (written before its arrays), so pzarr_new_sessions counts it as built and
+    pzarr_needs_build sees a complete store — and it gets preprocessed as if whole, forever.
+    """
+    scene_dir = _scene_with_two_sessions(tmp_path)
+    _write_session(scene_dir, 'session_c', created_at=_T2)
+
+    # KeyboardInterrupt rather than a plain error: episode_guard deliberately lets it through,
+    # which is what "the operator killed it" looks like from inside the write loop.
+    with mock.patch('polyumi_ingest.pzarr.store._write_episode', side_effect=KeyboardInterrupt):
+        with pytest.raises(KeyboardInterrupt):
+            build_pzarr(scene_dir, skip_gopro=True, append=True)
+
+    assert pzarr_needs_build(scene_dir) is True
+
+
 def test_append_on_a_missing_store_builds_from_scratch(tmp_path: pathlib.Path) -> None:
     """append=True on a scene with no store yet is just a normal first build."""
     scene_dir = tmp_path / 'scene_2026-07-29_16-01-53_2bd6'
@@ -130,3 +152,29 @@ def test_append_on_a_missing_store_builds_from_scratch(tmp_path: pathlib.Path) -
     root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='r')
     assert root.attrs['n_episodes'] == 1
     assert root.attrs['build_complete'] is True
+
+
+def test_ensure_pzarr_requires_gopro_only_for_a_first_build(tmp_path: pathlib.Path) -> None:
+    """
+    A growing scene whose newest session has no gopro.mp4 yet still preprocesses.
+
+    Video comes off the SD card in a separate step, so the window where a session is fetched
+    but its gopro.mp4 isn't is the normal state of an in-progress scene. Refusing the whole
+    scene there would block preprocessing the episodes that *are* complete; a first build has
+    nothing to fall back on, so that still raises.
+    """
+    scene_dir = tmp_path / 'scene_2026-07-29_16-01-53_2bd6'
+    scene_dir.mkdir()
+    _write_session(scene_dir, 'session_a', created_at=_T0, session_type='MAPPING')
+
+    with pytest.raises(FileNotFoundError, match='gopro.mp4'):
+        ensure_pzarr(scene_dir)
+
+    build_pzarr(scene_dir, skip_gopro=True)
+    _write_session(scene_dir, 'session_b', created_at=_T1)
+
+    ensure_pzarr(scene_dir)  # warns, leaves session_b out, does not raise
+
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='r')
+    assert root.attrs['n_episodes'] == 1
+    assert pzarr_new_sessions(scene_dir) == ['session_b']

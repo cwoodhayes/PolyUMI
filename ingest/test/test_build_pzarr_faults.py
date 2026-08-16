@@ -229,15 +229,15 @@ def test_interrupted_build_is_detectable(tmp_path: pathlib.Path) -> None:
     scene_dir.mkdir()
     _write_session(scene_dir, 'session_a')
 
-    from polyumi_ingest.main import _pzarr_needs_build
+    from polyumi_ingest.pzarr import pzarr_needs_build
 
     build_pzarr(scene_dir, skip_gopro=True)
-    assert _pzarr_needs_build(scene_dir) is False
+    assert pzarr_needs_build(scene_dir) is False
 
     root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='a')
     root.attrs['build_complete'] = False
-    assert _pzarr_needs_build(scene_dir) is True
+    assert pzarr_needs_build(scene_dir) is True
 
     # A store predating the attribute has no value at all, and must not be rebuilt on sight.
     del root.attrs['build_complete']
-    assert _pzarr_needs_build(scene_dir) is False
+    assert pzarr_needs_build(scene_dir) is False

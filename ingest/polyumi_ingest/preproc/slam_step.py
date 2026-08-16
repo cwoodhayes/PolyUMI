@@ -730,8 +730,10 @@ class OrbSlam3Step(PreprocessingStep):
         Phase 1: build the ORB-SLAM3 atlas from the scene's MAPPING session.
 
         Expects one episode group with ``session_type`` set to ``'MAPPING'`` (written by
-        ``build_pzarr``). Falls back to treating the first episode as the mapping session for
-        zarr stores built before that attribute existed (see OQ-4).
+        ``build_pzarr``). A scene recorded without a mapping pass has none, and rather than
+        refuse it the step maps from its first episode — that scene's own walk is the only
+        thing on offer, and it is what the operator implicitly asked for by recording no
+        mapping session.
 
         A failure here is fatal to the step by design: without an atlas there is nothing for
         any episode to localize against, so this is not an episode-shaped failure.
@@ -746,11 +748,11 @@ class OrbSlam3Step(PreprocessingStep):
         episodes = scene.episodes
         mapping = next((ep for ep in episodes if ep.is_mapping), None)
 
-        # OQ-4 fallback: if no episode has session_type='MAPPING', treat first as mapping
         if mapping is None:
             log.warning(
-                'No episode with session_type=MAPPING found; treating first episode as mapping. '
-                'Rebuild the zarr store to get proper session_type attributes.'
+                'No episode with session_type=MAPPING in this scene; mapping from its first '
+                'episode instead. Expected for a scene recorded without a mapping walk; if you '
+                'did record one, that session did not make it into the store.'
             )
             mapping = episodes[0]
         self._mapping_key = mapping.key
