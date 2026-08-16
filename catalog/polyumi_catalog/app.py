@@ -280,15 +280,25 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
         def _run() -> None:
             # Broad except for the same reason as the pipeline thread: unattended, so an
             # ssh/tar failure has to land in the status dict or the topbar spins forever.
+            partial: pathlib.Path | None = None
             try:
                 pi = PiFetch(pi_host)
-                todo = [name for name in pi.list_remote_scenes() if not (recordings_dir / name).exists()]
+                # Per session, not per scene: a scene grows while it's being recorded, so its
+                # directory existing locally doesn't mean it's complete. Same helper the CLI
+                # `pingest fetch` uses, so the button and the terminal agree.
+                todo = [
+                    (name, session)
+                    for name in pi.list_remote_scenes()
+                    for session in pi.missing_sessions(name, recordings_dir / name)
+                ]
                 with app.state.fetch_lock:
                     app.state.fetch |= {'total': len(todo)}
-                for i, name in enumerate(todo, 1):
+                for i, (name, session) in enumerate(todo, 1):
                     with app.state.fetch_lock:
-                        app.state.fetch |= {'current': name}
-                    pi.copy_scene(name, recordings_dir / name)
+                        app.state.fetch |= {'current': f'{name}/{session}'}
+                    partial = recordings_dir / name / session
+                    pi.copy_sessions(name, [session], recordings_dir)
+                    partial = None
                     with app.state.fetch_lock:
                         app.state.fetch |= {'done': i, 'current': None}
                 sync_recordings(recordings_dir, engine)
@@ -297,13 +307,15 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
                     app.state.fetch |= {'status': 'done'}
             except Exception as exc:
                 with app.state.fetch_lock:
-                    failed = app.state.fetch['current']  # None unless a copy_scene raised
+                    failed = app.state.fetch['current']  # None unless a copy_sessions raised
                     app.state.fetch |= {'status': 'error', 'error': f'{failed}: {exc}' if failed else str(exc)}
-                if failed is not None:
+                if partial is not None:
                     # tar extracts in place, so a transfer that died halfway leaves a partial
-                    # scene dir — and the .exists() filter above would then skip it on every
-                    # future fetch. Drop it so the retry is just pressing the button again.
-                    shutil.rmtree(recordings_dir / failed, ignore_errors=True)
+                    # session dir — and the missing-session filter above would then treat it as
+                    # already fetched. Drop it so the retry is just pressing the button again.
+                    # Only that one session: the scene around it holds sessions already
+                    # transferred, plus scene.zarr, scene.json, and the SLAM atlas.
+                    shutil.rmtree(partial, ignore_errors=True)
 
         if not already_running:
             # kept on app.state purely so tests can join it instead of sleeping

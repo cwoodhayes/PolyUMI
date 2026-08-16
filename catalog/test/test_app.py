@@ -171,58 +171,116 @@ def test_fetch_disabled_without_recordings_dir(tmp_path: pathlib.Path):
     assert _client(tmp_path, with_recordings=False).post('/fetch').status_code == 400
 
 
-def _fake_pi(monkeypatch, *, scenes: list[str], on_copy=None):
-    """Patch app.PiFetch with a stub listing `scenes` and running `on_copy` per copy."""
+def _fake_pi(monkeypatch, *, sessions: dict[str, list[str]], on_copy=None):
+    """
+    Patch app.PiFetch with a stub whose remote is ``{scene: [session, ...]}``.
+
+    ``missing_sessions`` mirrors the real one — remote sessions minus what's already on disk —
+    because that subtraction is exactly what lets a scene grow between fetches.
+    """
 
     class FakePi:
         def __init__(self, host: str) -> None:
             self.host = host
 
         def list_remote_scenes(self) -> list[str]:
-            return scenes
+            return list(sessions)
 
-        def copy_scene(self, name: str, local_path: pathlib.Path, verbose: bool = False) -> None:
-            on_copy(name, local_path)
+        def missing_sessions(self, name: str, local_scene: pathlib.Path) -> list[str]:
+            # Mirrors the real one, metadata.json completeness check included: a directory a
+            # dropped transfer left behind is not a fetched session.
+            local = (
+                {
+                    p.name
+                    for p in local_scene.iterdir()
+                    if p.is_dir() and p.name.startswith('session_') and (p / 'metadata.json').exists()
+                }
+                if local_scene.is_dir()
+                else set()
+            )
+            return [s for s in sessions[name] if s not in local]
+
+        def copy_sessions(
+            self, name: str, session_names: list[str], local_parent: pathlib.Path, verbose: bool = False
+        ) -> None:
+            for session in session_names:
+                on_copy(name, local_parent / name, session)
 
     monkeypatch.setattr('polyumi_catalog.app.PiFetch', FakePi)
 
 
-def test_fetch_copies_only_new_scenes_then_syncs(tmp_path: pathlib.Path, monkeypatch):
-    """/fetch skips already-local scenes, copies the rest, and re-syncs so they appear in Tasks."""
+def test_fetch_copies_only_new_sessions_then_syncs(tmp_path: pathlib.Path, monkeypatch):
+    """/fetch skips sessions already local, copies the rest, and re-syncs so they appear in Tasks."""
     rec, engine = _seed(tmp_path)
     new_scene = 'scene_2026-07-27_11-00-00_beef'
 
-    def copy(name: str, local_path: pathlib.Path) -> None:
-        local_path.mkdir(parents=True)
+    def copy(name: str, local_path: pathlib.Path, session: str) -> None:
+        local_path.mkdir(parents=True, exist_ok=True)
         SceneManifest(scene_id='scene-2', task='wipe_table').write_to_scene_dir(local_path)
-        _make_session(local_path, 'session_1', scene_id='scene-2', session_type=SessionType.EPISODE)
+        _make_session(local_path, session, scene_id='scene-2', session_type=SessionType.EPISODE)
 
-    _fake_pi(monkeypatch, scenes=['scene_2026-07-26_10-00-00_abcd', new_scene], on_copy=copy)
+    _fake_pi(
+        monkeypatch,
+        sessions={'scene_2026-07-26_10-00-00_abcd': [], new_scene: ['session_1']},
+        on_copy=copy,
+    )
     app = create_app(engine, recordings_dir=rec, pi_host='fake')
     client = TestClient(app)
 
     assert client.post('/fetch').status_code == 200
     app.state.fetch_thread.join(timeout=30)
     assert app.state.fetch['status'] == 'done'
-    assert app.state.fetch['total'] == 1  # the already-local scene was skipped
+    assert app.state.fetch['total'] == 1  # the already-local scene contributed nothing
     assert (rec / new_scene).is_dir()
 
     poll = client.get('/fetch-poll').text
-    assert 'fetched 1 scene' in poll
+    assert 'fetched 1 session' in poll
     assert 'wipe_table' in poll  # OOB Tasks refresh, so the new scene is browsable
     assert 'hx-get="/fetch-poll"' not in poll  # polling stops once done
 
 
-def test_fetch_failure_names_the_scene_and_clears_its_partial_dir(tmp_path: pathlib.Path, monkeypatch):
-    """A half-finished transfer lands in the status line and leaves no partial dir behind."""
-    rec, engine = _seed(tmp_path)
-    failing = 'scene_2026-07-27_11-00-00_beef'
+def test_fetch_picks_up_sessions_added_to_an_existing_scene(tmp_path: pathlib.Path, monkeypatch):
+    """
+    A scene already on disk is re-visited for the sessions it doesn't have yet.
 
-    def boom(name: str, local_path: pathlib.Path) -> None:
-        (local_path / 'video').mkdir(parents=True)  # what tar leaves when the stream dies
+    This is the mapping-then-episodes loop: the scene arrives with only its mapping walk, gets
+    preprocessed, then grows as episodes are recorded into it on the Pi.
+    """
+    rec, engine = _seed(tmp_path)
+    existing = 'scene_2026-07-26_10-00-00_abcd'
+    copied: list[str] = []
+
+    def copy(name: str, local_path: pathlib.Path, session: str) -> None:
+        copied.append(session)
+        _make_session(local_path, session, scene_id='scene-1', session_type=SessionType.EPISODE)
+
+    local_sessions = [p.name for p in (rec / existing).iterdir() if p.name.startswith('session_')]
+    _fake_pi(monkeypatch, sessions={existing: [*local_sessions, 'session_new']}, on_copy=copy)
+    app = create_app(engine, recordings_dir=rec, pi_host='fake')
+    client = TestClient(app)
+
+    client.post('/fetch')
+    app.state.fetch_thread.join(timeout=30)
+    assert app.state.fetch['status'] == 'done'
+    assert copied == ['session_new']  # only the new one, not the whole scene again
+
+
+def test_fetch_failure_names_the_session_and_clears_only_its_dir(tmp_path: pathlib.Path, monkeypatch):
+    """
+    A half-finished transfer is reported, and only that session's directory is dropped.
+
+    Removing the whole scene would take previously-fetched sessions, scene.zarr, scene.json and
+    the SLAM atlas with it.
+    """
+    rec, engine = _seed(tmp_path)
+    existing = 'scene_2026-07-26_10-00-00_abcd'
+    kept = sorted(p.name for p in (rec / existing).iterdir() if p.name.startswith('session_'))
+
+    def boom(name: str, local_path: pathlib.Path, session: str) -> None:
+        (local_path / session / 'video').mkdir(parents=True)  # what tar leaves when the stream dies
         raise RuntimeError('ssh/tar sender failed with code 255')
 
-    _fake_pi(monkeypatch, scenes=[failing], on_copy=boom)
+    _fake_pi(monkeypatch, sessions={existing: [*kept, 'session_broken']}, on_copy=boom)
     app = create_app(engine, recordings_dir=rec, pi_host='fake')
     client = TestClient(app)
 
@@ -231,9 +289,12 @@ def test_fetch_failure_names_the_scene_and_clears_its_partial_dir(tmp_path: path
     assert app.state.fetch['status'] == 'error'
     status = client.get('/fetch-poll').text
     assert 'code 255' in status
-    assert failing in status  # which scene failed, not just that one did
-    # otherwise the .exists() filter would skip this scene on every future fetch
-    assert not (rec / failing).exists()
+    assert 'session_broken' in status  # which session failed, not just that one did
+    # otherwise the missing-session filter would treat the stub as already fetched
+    assert not (rec / existing / 'session_broken').exists()
+    # and the rest of the scene is untouched
+    assert (rec / existing).is_dir()
+    assert sorted(p.name for p in (rec / existing).iterdir() if p.name.startswith('session_')) == kept
 
 
 def test_delete_scene_removes_it_and_redirects(tmp_path: pathlib.Path):

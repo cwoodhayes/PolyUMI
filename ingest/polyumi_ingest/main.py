@@ -93,37 +93,61 @@ def fetch(
         log.info('No scenes to fetch.')
         raise typer.Exit()
 
-    # filter out already-fetched scenes
-    to_fetch = []
-    skipped = []
+    # Plan per session, not per scene: a scene stays open on the Pi while episodes are recorded
+    # into it, so "the directory exists locally" says nothing about whether it is complete.
+    plan: dict[str, list[str]] = {}
+    n_grown = 0
     for name in scenes_to_fetch:
-        local_path = output_dir / name
-        if local_path.exists():
-            skipped.append(name)
-        else:
-            to_fetch.append(name)
+        missing = pi.missing_sessions(name, output_dir / name)
+        if not missing:
+            continue
+        plan[name] = missing
+        if (output_dir / name).exists():
+            n_grown += 1
 
-    if skipped:
-        log.info(f'Skipping {len(skipped)} already-fetched scene(s).')
+    n_skipped = len(scenes_to_fetch) - len(plan)
+    if n_skipped:
+        log.info(f'Skipping {n_skipped} scene(s) already fully fetched.')
 
-    if not to_fetch:
+    if not plan:
         log.info('Nothing new to fetch.')
         raise typer.Exit()
 
-    log.info(f'{len(to_fetch)} scene(s) to fetch into {output_dir}.')
+    n_sessions = sum(len(v) for v in plan.values())
+    n_new = len(plan) - n_grown
+    log.info(
+        f'{n_sessions} session(s) to fetch into {output_dir} '
+        f'({n_new} new scene(s), {n_grown} that grew since the last fetch).'
+    )
     if not Confirm.ask('Proceed?', default=True):
         log.info('Aborted.')
         raise typer.Exit()
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for i, scene_name in enumerate(to_fetch, 1):
-        local_path = output_dir / scene_name
-        log.info(f'[{i}/{len(to_fetch)}] Fetching {scene_name}...')
-        pi.copy_scene(scene_name, local_path, verbose=verbose_transfer)
-        log.info(f'  -> {local_path}')
+    # One session per transfer rather than one stream for the lot: a dropped connection then
+    # costs the session in flight instead of every session after it, and a re-run resumes from
+    # where it stopped. Sessions are tens of MB, so the extra ssh handshakes are noise next to
+    # the payload.
+    fetched = 0
+    for scene_name, sessions in plan.items():
+        log.info(f'Fetching {len(sessions)} session(s) from {scene_name}...')
+        for session in sessions:
+            try:
+                pi.copy_sessions(scene_name, [session], output_dir, verbose=verbose_transfer)
+            except (RuntimeError, OSError) as exc:
+                # tar extracts in place, so an interrupted transfer leaves a half-written
+                # session directory behind — and the missing-session filter treats any
+                # directory that exists as already fetched, which would silently truncate
+                # this session forever. Drop it; everything already transferred stays put.
+                shutil.rmtree(output_dir / scene_name / session, ignore_errors=True)
+                log.error(f'{scene_name}/{session}: transfer failed, removed the partial copy: {exc}')
+                log.info(f'Fetched {fetched}/{n_sessions} session(s) before this. Re-run to resume.')
+                raise typer.Exit(1)
+            fetched += 1
+            log.info(f'  [{fetched}/{n_sessions}] {session}')
 
-    log.info(f'Done. Fetched {len(to_fetch)} scene(s) to {output_dir}.')
+    log.info(f'Done. Fetched {fetched} session(s) across {len(plan)} scene(s) to {output_dir}.')
 
     log.info('Checking for GoPro SD card...')
     try:

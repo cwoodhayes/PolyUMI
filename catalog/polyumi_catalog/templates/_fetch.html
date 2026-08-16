@@ -6,7 +6,7 @@
     {%- else %}fetching {{ fetch.done }}/{{ fetch.total }}{% if fetch.current %} — {{ fetch.current }}{% endif %}…
     {%- endif %}
   {%- elif fetch.status == 'done' %}
-    {%- if fetch.total %}✓ fetched {{ fetch.total }} scene(s){% else %}✓ nothing new to fetch{% endif %}
+    {%- if fetch.total %}✓ fetched {{ fetch.total }} session(s){% else %}✓ nothing new to fetch{% endif %}
   {%- elif fetch.status == 'error' %}
     ✗ fetch failed: {{ fetch.error }}
   {%- endif %}
