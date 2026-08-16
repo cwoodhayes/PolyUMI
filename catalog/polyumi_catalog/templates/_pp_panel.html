@@ -4,8 +4,11 @@
    Swapping #detail-body every tick replaced the Notes textarea along with it, discarding
    whatever had been typed into it mid-run. Nothing here holds user input, so it is safe to
    replace on a timer; the two things outside it that a run also changes (the quality figures
-   and the Episodes column) come back from the same response as out-of-band swaps. #}
-<div id="scene-pp-panel" class="scene-detail-side"{% if oob %} hx-swap-oob="true"{% endif %}>
+   and the Episodes column) come back from the same response as out-of-band swaps.
+
+   No oob flag, unlike the sibling partials: this is always rendered in place — inline in the
+   pane, or as the poll's primary target — never as an out-of-band swap. #}
+<div id="scene-pp-panel" class="scene-detail-side">
   <h3>Preprocessing pipeline</h3>
   {% if not detail.pp_status.pzarr_exists %}
   <p class="muted">No pzarr built yet — running the pipeline will build it first.</p>

@@ -57,8 +57,10 @@
         <textarea id="scene-notes" name="notes" rows="3" placeholder="Add notes…">{{ detail.notes or '' }}</textarea>
         <button type="submit">Save notes</button>
       </form>
-      {# oob is forced false: these are nested inside the pane, so when the pane itself is the
-         out-of-band swap (rescan) they must not each become one as well. #}
+      {# oob is forced false, and {% include %} inheriting this pane's context is exactly why:
+         on the rescan path the pane itself is rendered oob=True, and a nested out-of-band swap
+         would be swapped twice, to two places. Only this partial needs the dance — it is the
+         one that is *sometimes* an out-of-band swap (from the pp poll). #}
       {% with oob = False %}{% include "_scene_quality.html" %}{% endwith %}
       <h3>Provenance</h3>
       <dl>
@@ -106,7 +108,7 @@
       </div>
       {% endif %}
     </div>
-    {% with oob = False %}{% include "_pp_panel.html" %}{% endwith %}
+    {% include "_pp_panel.html" %}
   </div>
 
   {% elif detail.kind == 'session' %}

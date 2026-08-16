@@ -623,7 +623,7 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
             sessions = queries.list_sessions(db, scene_id)
         env = templates.env
         return HTMLResponse(
-            env.get_template('_pp_panel.html').render(detail=detail, oob=False)
+            env.get_template('_pp_panel.html').render(detail=detail)
             + env.get_template('_scene_quality.html').render(detail=detail, oob=True)
             + env.get_template('_episodes.html').render(sessions=sessions, oob=True)
         )
