@@ -13,7 +13,7 @@ import zarr
 
 _PS = TypeVar('_PS', bound='PreprocessingStep')
 
-from polyumi_ingest.episode_status import Episode, SceneContext, episode_guard
+from polyumi_ingest.episode_status import FAILURE_ATTR, Episode, SceneContext, episode_guard, episode_keys
 from polyumi_ingest.gitinfo import git_sha
 from polyumi_ingest.pzarr.scene_files import SceneFiles
 from polyumi_ingest.pzarr.version import PZARR_VERSION
@@ -91,6 +91,73 @@ def _mark_preprocessing_step(root: zarr.Group, step_number: int) -> None:
         'completed_at': dt.datetime.now(dt.timezone.utc).isoformat(),
     }
     root.attrs['preprocessing_step_versions'] = versions
+
+
+def episode_steps_done(ep_grp: zarr.Group) -> list[int] | None:
+    """
+    Return the steps recorded on one episode group, or None if it has never been marked.
+
+    None and ``[]`` mean different things and callers depend on it: None is a store written
+    before per-episode marks existed, whose completion is only known at scene level, while
+    ``[]`` is an episode that genuinely has no step done yet.
+    """
+    raw = ep_grp.attrs.get('preprocessing_steps')
+    if not isinstance(raw, list):
+        return None
+    try:
+        return [int(step) for step in raw if isinstance(step, (int, float, str))]
+    except (ValueError, TypeError):
+        log.warning(f'Invalid per-episode preprocessing_steps attribute: {raw}')
+        return []
+
+
+def _mark_episode_step(ep_grp: zarr.Group, step_number: int) -> None:
+    """Record that a step has been completed for one episode."""
+    steps = episode_steps_done(ep_grp) or []
+    if step_number not in steps:
+        steps.append(step_number)
+        steps.sort()
+    ep_grp.attrs['preprocessing_steps'] = steps
+
+
+def _backfill_episode_steps(root: zarr.Group) -> None:
+    """
+    Seed per-episode marks from the scene-level ones on stores that predate them.
+
+    Without this every pre-existing scene would look like it had no episode finished, and the
+    gate below would re-run the whole pipeline — a full re-SLAM of everything already
+    processed.
+
+    It only fires when *no* episode carries a mark, which is what makes it safe. Once any
+    episode has one the store is keeping per-episode records, so an episode without one is a
+    newly appended session rather than an unmigrated old one — and build_pzarr writes an
+    explicit empty list on every episode it creates precisely so that stays distinguishable.
+    """
+    completed = preprocessing_steps_done(root)
+    if not completed:
+        return
+    keys = episode_keys(root)
+    if any(episode_steps_done(root[key]) is not None for key in keys):
+        return
+    for key in keys:
+        root[key].attrs['preprocessing_steps'] = sorted(completed)
+
+
+def _episodes_missing_step(root: zarr.Group, step_number: int) -> list[str]:
+    """
+    Return episodes that still need ``step_number``, ignoring ones flagged unusable.
+
+    Failed episodes are excluded because the harness skips them anyway without ``--force``;
+    counting them would leave every step permanently "incomplete" for the whole scene.
+    """
+    missing = []
+    for key in episode_keys(root):
+        ep_grp = root[key]
+        if isinstance(ep_grp.attrs.get(FAILURE_ATTR), dict):
+            continue
+        if step_number not in (episode_steps_done(ep_grp) or []):
+            missing.append(key)
+    return missing
 
 
 def _write_scalar(group: zarr.Group, name: str, value: float | int) -> None:
@@ -209,9 +276,17 @@ class PreprocessingStep(ABC):
             self.prepare_scene(scene)
         except StepComplete as done:
             log.info(f'{self.step_name}: {done}')
+            # The step settled the whole scene at once (so-align's single T_ws, an output
+            # already present). Mark every episode so it doesn't read as outstanding work and
+            # get re-attempted on every later run.
+            for episode in episodes:
+                _mark_episode_step(episode.group, self.step_number)
             return
 
         for episode in episodes:
+            if not force and self.step_number in (episode_steps_done(episode.group) or []):
+                log.info(f'{episode.key}: skipping — step {self.step_number} already done for this episode')
+                continue
             failure = episode.failure
             if failure is not None and not force:
                 log.warning(
@@ -222,6 +297,10 @@ class PreprocessingStep(ABC):
                 log.info(f'{episode.key}: retrying (was flagged in {failure.step})')
             with episode_guard(episode, scene.scene_dir, step=self.step_name):
                 self.process_episode(scene, episode)
+            # Only a clean pass counts. A failed episode keeps its `failure` attr instead, so
+            # --force retries it rather than the next run treating it as finished.
+            if episode.failure is None:
+                _mark_episode_step(episode.group, self.step_number)
 
         self.finish_scene(scene)
 
@@ -259,6 +338,7 @@ def run_preprocessing(
 
     root = zarr.open_group(str(scene_zarr), mode='a')
     _warn_if_outdated_pzarr(root, scene_zarr.parent.name)
+    _backfill_episode_steps(root)
     completed_steps = set(preprocessing_steps_done(root))
     step_numbers = [step_number] if step_number is not None else sorted(PREPROCESSING_STEPS)
 
@@ -269,9 +349,15 @@ def run_preprocessing(
             step_cls = PREPROCESSING_STEPS[number]
         except KeyError:
             raise KeyError(f'Unknown preprocessing step: {number}')
-        if number in completed_steps and not force:
+        # The scene-level mark alone is not enough: a scene that gained episodes after it was
+        # processed is "complete" at scene level while the new episodes have had nothing run
+        # on them. The step still runs, but its episode loop skips everything already done.
+        outstanding = _episodes_missing_step(root, number)
+        if number in completed_steps and not force and not outstanding:
             log.info(f'Skipping {scene_zarr.name}: step {number} already complete')
             continue
+        if number in completed_steps and outstanding:
+            log.info(f'Step {number} complete for {scene_zarr.name} except {len(outstanding)} new episode(s)')
         log.info(f'Running step {number} ({step_cls.step_name}) on {scene_zarr.name}')
         step = step_cls()
         current_path = step.run(current_path, copy=copy, force=force)

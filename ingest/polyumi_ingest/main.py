@@ -528,11 +528,17 @@ def preprocessing_pipeline(
     auto_build = step is None
     try:
         if scene is not None:
-            if auto_build and scene.suffix != '.zarr' and _pzarr_needs_build(scene):
-                log.info(f'No usable scene.zarr at {scene}; building pzarr first...')
-                if not skip_gopro:
-                    _require_gopro_mp4s(scene)
-                _build_pzarr(scene, skip_gopro)
+            if auto_build and scene.suffix != '.zarr':
+                needs_build = _pzarr_needs_build(scene)
+                new_sessions = [] if needs_build else _pzarr_new_sessions(scene)
+                if needs_build or new_sessions:
+                    if new_sessions:
+                        log.info(f'{scene.name}: {len(new_sessions)} new session(s) since the last build; adding...')
+                    else:
+                        log.info(f'No usable scene.zarr at {scene}; building pzarr first...')
+                    if not skip_gopro:
+                        _require_gopro_mp4s(scene)
+                    _build_pzarr(scene, skip_gopro, append=bool(new_sessions))
             output = run_preprocessing(scene, step_number=step, copy=copy, force=force)
             log.info(f'Done. Output: {output}')
         else:
@@ -542,16 +548,23 @@ def preprocessing_pipeline(
                     for scene_dir in sorted(
                         p for p in recordings_dir_resolved.iterdir() if p.is_dir() and p.name.startswith('scene_')
                     ):
-                        if not _pzarr_needs_build(scene_dir):
+                        needs_build = _pzarr_needs_build(scene_dir)
+                        new_sessions = [] if needs_build else _pzarr_new_sessions(scene_dir)
+                        if not needs_build and not new_sessions:
                             continue
-                        log.info(f'No usable scene.zarr for {scene_dir.name}; building pzarr first...')
+                        if new_sessions:
+                            log.info(
+                                f'{scene_dir.name}: {len(new_sessions)} new session(s) since the last build; adding...'
+                            )
+                        else:
+                            log.info(f'No usable scene.zarr for {scene_dir.name}; building pzarr first...')
                         # One unbuildable scene (no gopro.mp4 yet, unreadable sessions) must not
                         # stop the batch — it just won't have a store for run_preprocessing to
                         # find below, which is already reported as "no scene.zarr found".
                         try:
                             if not skip_gopro:
                                 _require_gopro_mp4s(scene_dir)
-                            _build_pzarr(scene_dir, skip_gopro)
+                            _build_pzarr(scene_dir, skip_gopro, append=bool(new_sessions))
                         except Exception as e:
                             log.error(f'{scene_dir.name}: cannot build pzarr, skipping: {e}')
             outputs = run_preprocessing_on_recordings(recordings_dir, step_number=step, copy=copy, force=force)
@@ -915,13 +928,13 @@ def _print_preprocessing_steps() -> None:
     console.print('Run all:  [bold]pingest pp --scene <scene>[/bold]\n')
 
 
-def _build_pzarr(scene_dir: pathlib.Path, skip_gopro: bool) -> None:
+def _build_pzarr(scene_dir: pathlib.Path, skip_gopro: bool, append: bool = False) -> None:
     """Build pzarr for scene_dir, raising typer.Exit(1) on failure."""
     from polyumi_ingest.pzarr import build_pzarr
 
     zarr_path = scene_dir / 'scene.zarr'
     try:
-        build_pzarr(scene_dir, skip_gopro=skip_gopro)
+        build_pzarr(scene_dir, skip_gopro=skip_gopro, append=append)
         log.info(f'  -> {zarr_path}')
     except (RuntimeError, NotImplementedError) as e:
         log.error(str(e))
@@ -951,6 +964,32 @@ def _pzarr_needs_build(scene_dir: pathlib.Path) -> bool:
         log.warning(f'{scene_dir.name}: scene.zarr is from an interrupted build; rebuilding.')
         return True
     return False
+
+
+def _pzarr_new_sessions(scene_dir: pathlib.Path) -> list[str]:
+    """
+    Return session directories on disk that the scene's store has no episode for.
+
+    A scene grows while it is being recorded, so a store that was complete at its last build
+    can still be missing episodes. Compared by the ``session_dir`` attr each episode records,
+    not by counting: an episode flagged unusable still counts as present.
+    """
+    import zarr
+
+    zarr_path = scene_dir / 'scene.zarr'
+    if not zarr_path.exists():
+        return []
+    on_disk = {p.name for p in scene_dir.iterdir() if p.is_dir() and p.name.startswith('session_')}
+    try:
+        from polyumi_ingest.pzarr.store import _existing_episode_sessions
+
+        root = zarr.open_group(str(zarr_path), mode='r')
+        built = set(_existing_episode_sessions(root))
+    except Exception as e:
+        # Unreadable stores are _pzarr_needs_build's business; don't double-report here.
+        log.debug(f'{scene_dir.name}: could not read episodes from scene.zarr ({e})')
+        return []
+    return sorted(on_disk - built)
 
 
 def _require_gopro_mp4s(scene_dir: pathlib.Path) -> None:

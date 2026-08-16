@@ -728,6 +728,17 @@ class OrbSlam3Step(PreprocessingStep):
             mapping = episodes[0]
         self._mapping_key = mapping.key
 
+        # The map is built from this one episode, so a mapping session that failed to build
+        # has no video or timestamps to feed the binary. Say so plainly — without this the
+        # step dies further down on a bare `KeyError: 'timestamps/gopro'`.
+        mapping_failure = mapping.failure
+        if mapping_failure is not None:
+            raise RuntimeError(
+                f'{mapping.key} ({mapping.session_dir or "unknown session"}) is the mapping session but was '
+                f'flagged unusable in {mapping_failure.step}: {mapping_failure.error}. '
+                f'Fix or re-fetch that session and re-run; there is nothing to build a map from.'
+            )
+
         if len(episodes) == 1:
             log.warning(
                 f'No EPISODE groups found in {scene.zarr_path} — only {mapping.key} '

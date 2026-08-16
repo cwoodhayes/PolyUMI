@@ -32,6 +32,8 @@ def _write_session(
     empty_frames: set[int] = frozenset(),
     empty_audio: bool = False,
     audio_channels: int = 2,
+    created_at: str | None = None,
+    session_type: str = 'EPISODE',
 ) -> pathlib.Path:
     """Write a minimal but genuine session directory: metadata, JPEGs + timestamps, stereo WAV."""
     session_dir = scene_dir / name
@@ -64,7 +66,7 @@ def _write_session(
             {
                 'session_id': f'{name}-id',
                 'scene_id': _SCENE_ID,
-                'created_at': f'2026-07-29T20:{30 + len(name) % 20:02d}:19.488374+00:00',
+                'created_at': created_at or f'2026-07-29T20:{30 + len(name) % 20:02d}:19.488374+00:00',
                 'duration_s': 1.0,
                 'pi_hostname': 'testpi',
                 'camera_fps': 10,
@@ -85,7 +87,7 @@ def _write_session(
                 'notes': None,
                 'task': 'red trapezoid in black mug',
                 'robot': 'polyumi_gripper',
-                'session_type': 'EPISODE',
+                'session_type': session_type,
                 'polyumi_version': 'test',
                 'file_version': 1,
             }

@@ -200,16 +200,42 @@ def test_harness_isolates_a_failing_episode(tmp_path: pathlib.Path) -> None:
     assert _unusable(tmp_path) == ['session_1']
 
 
+class _LaterDemoStep(_DemoStep):
+    """A different step number, so the per-episode marks left by _DemoStep don't apply."""
+
+    step_number = -2
+    step_name = 'later-demo-step'
+
+
 def test_harness_skips_an_already_flagged_episode(tmp_path: pathlib.Path) -> None:
     """A later step doesn't retry what an earlier one already gave up on."""
     scene_zarr = _make_scene(tmp_path)
     _DemoStep(fail_on={'episode_1'}).run_step(scene_zarr)
 
-    later = _DemoStep()
+    later = _LaterDemoStep()
     later.run_step(scene_zarr)
 
     assert later.processed == ['episode_0', 'episode_2']
     assert _unusable(tmp_path) == ['session_1']
+
+
+def test_harness_skips_episodes_this_step_already_finished(tmp_path: pathlib.Path) -> None:
+    """
+    Re-running a step only touches episodes it hasn't already done.
+
+    That is what makes a scene which gained sessions cheap to re-process: the expensive steps
+    skip the old episodes instead of redoing them.
+    """
+    scene_zarr = _make_scene(tmp_path)
+    _DemoStep().run_step(scene_zarr)
+
+    again = _DemoStep()
+    again.run_step(scene_zarr)
+    assert again.processed == []
+
+    forced = _DemoStep()
+    forced.run_step(scene_zarr, force=True)
+    assert forced.processed == ['episode_0', 'episode_1', 'episode_2']
 
 
 def test_harness_force_retries_a_flagged_episode(tmp_path: pathlib.Path) -> None:
