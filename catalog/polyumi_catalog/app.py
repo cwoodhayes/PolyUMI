@@ -149,22 +149,26 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
         all_tasks = queries.list_task_options(db)
         return render(request, '_dataset_builder.html', pending_scenes=pending_scenes, all_tasks=all_tasks, oob=oob)
 
-    def _detail_with_episodes_oob(db: DBSession, session_id: str) -> HTMLResponse:
+    def _with_episodes_oob(db: DBSession, detail: dict, scene_id: str | None) -> HTMLResponse:
         """
-        Re-render the session detail pane plus an out-of-band update of its scene's Episodes column.
+        Render a detail pane plus an out-of-band update of ``scene_id``'s Episodes column.
 
-        This keeps a usable/unusable toggle's grey-out reflected immediately if that scene's
-        episode list happens to be open (same "update a currently-visible widget" pattern as
-        the dataset-draft builder — see the module docstring's Phase 3 paragraph).
+        Keeps a currently-visible episode list honest whenever something behind it changed —
+        a usable/unusable toggle's grey-out, a running pipeline's quality badges filling in
+        (same "update a currently-visible widget" pattern as the dataset-draft builder; see
+        the module docstring's Phase 3 paragraph).
         """
-        detail = queries.session_detail(db, session_id)
         detail_html = templates.env.get_template('_detail.html').render(detail=detail, oob=False)
-        if detail.get('scene_id'):
-            sessions = queries.list_sessions(db, detail['scene_id'])
-            episodes_html = templates.env.get_template('_episodes.html').render(sessions=sessions, oob=True)
-        else:
-            episodes_html = ''
+        if not scene_id:
+            return HTMLResponse(detail_html)
+        sessions = queries.list_sessions(db, scene_id)
+        episodes_html = templates.env.get_template('_episodes.html').render(sessions=sessions, oob=True)
         return HTMLResponse(detail_html + episodes_html)
+
+    def _detail_with_episodes_oob(db: DBSession, session_id: str) -> HTMLResponse:
+        """Session detail, with its scene's Episodes column refreshed out of band."""
+        detail = queries.session_detail(db, session_id)
+        return _with_episodes_oob(db, detail, detail.get('scene_id'))
 
     def _scene_detail_with_run_state(db: DBSession, scene_id: str) -> dict:
         """scene_detail plus this process's live pipeline-run status, if any."""
@@ -576,9 +580,13 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
         return render(request, '_detail.html', detail=detail, oob=False)
 
     @app.get('/scenes/{scene_id}/pp-poll', response_class=HTMLResponse)
-    def get_pp_poll(request: Request, scene_id: str) -> HTMLResponse:
+    def get_pp_poll(scene_id: str) -> HTMLResponse:
+        # The step-tick list alone only moves when a whole step finishes, which for SLAM on a
+        # 40-episode scene is tens of minutes of apparently-nothing. The per-episode SLAM attrs
+        # land as each episode finishes, so re-sync them here (same call the run's completion
+        # makes) and OOB-swap the Episodes column so its quality badges fill in as the run goes.
+        sync_scene_quality(scene_id, engine)
         with DBSession(engine) as db:
-            detail = _scene_detail_with_run_state(db, scene_id)
-        return render(request, '_detail.html', detail=detail, oob=False)
+            return _with_episodes_oob(db, _scene_detail_with_run_state(db, scene_id), scene_id)
 
     return app
