@@ -14,6 +14,18 @@
 # Usage:
 #   CKPT=/abs/path/to/epoch=0070-....ckpt ./serve_policy.sh
 #   CKPT=... PORT=8001 ./serve_policy.sh
+#   CKPT=... CUDA_VISIBLE_DEVICES=1 ./serve_policy.sh    # pin to the second GPU
+#
+# ON PICKING A GPU. serve_policy.py loads the policy on plain 'cuda' — GPU 0, always, and only
+# GPU 0. There is no multi-GPU path here and there is no point adding one: this is single-sample
+# inference, so a second card cannot make one forward pass faster, it can only give it a card to
+# itself. On a shared box that is the whole game. sheep is shared, and GPU 0 is where everyone
+# lands by default, so an unpinned server queues behind whatever else is training — measured
+# 2026-08-17, ~0.9-1.3 s per request against GPU 0 at 94% util while GPU 1 sat at 15%. Check
+# `nvidia-smi` before a run and export CUDA_VISIBLE_DEVICES to whichever card is quiet.
+#
+# Deliberately not defaulted to 1: which card is busy changes hour to hour and machine to machine,
+# so a hardcoded default would just be wrong in a different way. It is passed through below.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,6 +74,7 @@ exec docker run --rm -i ${TTY_FLAG} \
     ${USER_FLAG} \
     -p "${PORT}:8000" \
     -e HOME=/tmp \
+    -e CUDA_VISIBLE_DEVICES \
     -e MPLCONFIGDIR=/tmp/mpl \
     -e NUMBA_CACHE_DIR=/tmp/numba \
     -e HF_HOME=/hf_cache \
