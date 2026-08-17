@@ -289,8 +289,17 @@ fi
 
 # --- Laptop: PRETYPE. Depends on every pane above being live, and there is no readiness gate
 # --- here, so this is the one you press Enter on last.
+#
+# The line re-sources setup_franka_env.sh even though the pane already did so above, and that
+# redundancy is the point: this is the command that lands in shell history, so every later
+# recall of it — in this pane, a pane opened by hand, tomorrow's terminal — carries its own DDS
+# env instead of inheriting whatever the shell happened to have. Without it, an interactive rc
+# that exports its own ROS_DOMAIN_ID (mine sets 63) silently overrides tmux's inherited
+# environment and the whole laptop stack comes up on a private domain: camera, Pi stream and
+# Foxglove all work, the NUC is simply absent, and the only symptom is policy_client_node
+# repeating `TF lookup failed: "fr3_link0" ... does not exist`. Cost an hour on 2026-08-17.
 pretype "$LAPTOP_PANE" \
-  "$(logged policy_client "ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=$INFERENCE_URL execute_motion:=true max_image_age_s:=$MAX_IMAGE_AGE_S pi_host:=$PI_HOST")"
+  "source setup_franka_env.sh >/dev/null && $(logged policy_client "ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=$INFERENCE_URL execute_motion:=true max_image_age_s:=$MAX_IMAGE_AGE_S pi_host:=$PI_HOST")"
 
 tmux select-window -t "$NUC_WINDOW"
 cat <<EOF

@@ -695,10 +695,39 @@ skew.) Two fixes:
   the latency-aligned instant. Valid only while the arm is **stationary** (`execute_motion:=false`);
   do NOT use it for execution — a moving arm needs the time-aligned pose.
 
-### TF lookup fails: "fr3_link0 ... does not exist" / no TF at all — fr3-bringup crashed
-If `ros2 topic info /tf_static` shows `Publisher count: 0` and `tf2_echo fr3_link0 polyumi_tcp`
-reports the frame doesn't exist, the NUC's `fr3-bringup` has died (it can crash mid-session).
-Restart `fr3-bringup` (and `fr3-arm-controller`) on the NUC; TF returns within a second or two.
+### TF lookup fails: "fr3_link0 ... does not exist" / no TF at all
+Two causes, and they need opposite fixes. Tell them apart from **another** terminal, one that has
+freshly sourced `setup_franka_env.sh`:
+
+```bash
+source setup_franka_env.sh
+ros2 run tf2_ros tf2_echo fr3_link0 polyumi_tcp
+```
+
+**If that second terminal DOES see the transform,** the NUC is fine and the problem is the
+*launching shell's DDS env* — the node is on a different ROS domain (or RMW) and never reached the
+NUC at all. Confirm on the running process:
+
+```bash
+tr '\0' '\n' < /proc/$(pgrep -f policy_client_node)/environ | grep -E 'ROS_DOMAIN_ID|RMW_|CYCLONEDDS'
+```
+
+Anything other than `ROS_DOMAIN_ID=0` is the bug. This bites because **an interactive shell rc that
+exports its own `ROS_DOMAIN_ID` silently overrides the environment tmux hands a new pane** — mine
+sets 63 in `~/.oh-my-zsh/custom/hosts/conorbot.zsh`. `fr3_session.sh` sources
+`setup_franka_env.sh` into the laptop pane it creates, so the pane it made is correct; a pane you
+open *by hand* (or one you open after the original died) is not, and it inherits
+`RMW_IMPLEMENTATION` and `CYCLONEDDS_URI` from tmux while the rc resets the domain — a
+half-configured state that looks right in every way except the one that matters. The fix is just
+`source setup_franka_env.sh` before launching, which is why the pre-typed launch line carries it
+inline. Everything laptop-local — camera, Pi stream, Foxglove — works throughout, which is what
+makes this slow to spot; the arm is the only thing coming over the wire, so it is the only thing
+missing. Since 2026-08-17 `policy_client_node` logs an ERROR naming this on the first tick when no
+`fr3_link0` transform has *ever* arrived, so check the log before doing any of the above.
+
+**If the second terminal does NOT see it either,** the NUC's `fr3-bringup` has died (it can crash
+mid-session) — `ros2 topic info /tf_static` will show `Publisher count: 0`. Restart `fr3-bringup`
+on the NUC; TF returns within a second or two.
 
 ### Every tick dropped: "capture pipeline stalled" — camera latency, not a stall
 The Elgato HD60 X presents the GoPro feed as **1080p YUYV**, and `v4l2_camera` does a *software*

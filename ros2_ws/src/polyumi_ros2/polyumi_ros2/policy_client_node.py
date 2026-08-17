@@ -30,6 +30,7 @@ Usage:
 import base64
 import json
 import math
+import os
 import threading
 import time
 import urllib.error
@@ -295,6 +296,11 @@ class PolicyClientNode(Node):
         # no need for a separate hand-rolled pose buffer.
         self._tf_buffer = tf2_ros.Buffer(cache_time=Duration(seconds=self._ee_pose_buffer_s))
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+        # A lookup that has NEVER succeeded is a different fault from one that stopped working,
+        # and the tf2 message for it ("frame does not exist") names the frame rather than the
+        # cause. See _warn_no_tf_ever.
+        self._tf_ever_ok = False
+        self._no_tf_reported = False
 
         # Motion execution (Phase 2). The MoveIt calls run in a bridge node ON THE NUC
         # (fr3_moveit_bridge), not here: the laptop (rmw_cyclonedds 4.x, Kilted) and NUC
@@ -702,7 +708,9 @@ class PolicyClientNode(Node):
             tf = self._tf_buffer.lookup_transform(self._base_frame, self._eef_frame, target_time)
         except (LookupException, ConnectivityException, ExtrapolationException) as e:
             self._warn_throttled(f'TF lookup failed: {e}')
+            self._warn_no_tf_ever()
             return None
+        self._tf_ever_ok = True
 
         gripper_width = self._gripper_width_policy_units(image_stamp)
         if gripper_width is None:
@@ -711,6 +719,37 @@ class PolicyClientNode(Node):
         t = tf.transform.translation
         r = tf.transform.rotation
         return np.array([t.x, t.y, t.z, r.x, r.y, r.z, r.w, gripper_width], dtype=np.float64)
+
+    def _warn_no_tf_ever(self) -> None:
+        """
+        Report, once, that no arm TF has EVER arrived — which is an env fault, not a TF fault.
+
+        The arm's frames come from the NUC, so "frame does not exist" from the very first tick
+        means this process is not talking to the NUC at all. tf2 cannot say that; it only knows
+        the frame is absent, and its message reads like the arm dropped out mid-run. Printing the
+        DDS env alongside turns the usual hour of tf2 archaeology into one glance, because the
+        cause is nearly always one of these three lines being wrong.
+
+        The specific trap this exists for: an interactive shell rc that exports its own
+        ROS_DOMAIN_ID (mine sets 63) silently wins over tmux's inherited environment, so a laptop
+        pane opened by hand — rather than by fr3_session.sh, which sources setup_franka_env.sh —
+        comes up on a private domain. Everything laptop-local still works, which is what makes it
+        so slow to spot: the camera, the Pi stream and Foxglove are all fine, and only the arm
+        (the one thing coming over the wire) is missing.
+        """
+        if self._tf_ever_ok or self._no_tf_reported:
+            return
+        self._no_tf_reported = True
+        self.get_logger().error(
+            f'No transform for {self._base_frame} has EVER arrived — this process is probably not '
+            f'reaching the NUC at all, rather than having lost the arm mid-run. Check, in order: '
+            f'(1) this shell sourced setup_franka_env.sh (an rc that exports its own '
+            f'ROS_DOMAIN_ID overrides tmux and puts you on a private domain), '
+            f'(2) NUC bringup is up (ros2 launch nuc/launch/fr3_bringup.launch.py). '
+            f'This process: ROS_DOMAIN_ID={os.environ.get("ROS_DOMAIN_ID", "unset (0)")} '
+            f'RMW_IMPLEMENTATION={os.environ.get("RMW_IMPLEMENTATION", "unset (default)")} '
+            f'CYCLONEDDS_URI={os.environ.get("CYCLONEDDS_URI", "unset")}'
+        )
 
     def _gripper_width_policy_units(self, image_stamp: rclpy.time.Time) -> float | None:
         """
