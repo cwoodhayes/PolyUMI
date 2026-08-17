@@ -276,7 +276,19 @@ if [ "$NUC_INFER_FRESH" = 1 ]; then
 fi
 
 # --- Pi: RUN the stream. Stateless, moves nothing, and the laptop warns without it.
-tmux send-keys -t "$PI_PANE" "polyumi-pi stream" C-m
+#
+# Stop polyumi-pi.service first. It runs `start-scene` on boot, and start-scene and stream both
+# construct an LEDManager — which means both drive the same hardware PWM channel. Whoever
+# constructs one last wins, because HardwarePWM.start(0) zeroes the duty cycle, and the loser goes
+# on believing its LED is lit. The service is Restart=on-failure, and it fails repeatedly while
+# stream holds the camera, so each retry silently darkens the finger LED mid-run (seen 2026-08-17
+# with NRestarts=18). Nothing in the stream path can defend against this; the other process owns
+# the pin just as legitimately.
+#
+# `;` not `&&`: a Pi without this unit — anyone who did not install it — would otherwise get
+# "Unit not loaded", a non-zero exit, and no stream at all. The error still prints in the pane, so
+# a real permission failure is visible rather than swallowed.
+tmux send-keys -t "$PI_PANE" "sudo systemctl stop polyumi-pi; polyumi-pi stream" C-m
 
 # --- Sheep: PRETYPE. The checkpoint changes every training run, so the path is yours to pick.
 # --- The five most recent are listed above the prompt to save a hunt through dp_outputs/.

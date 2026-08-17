@@ -729,6 +729,67 @@ missing. Since 2026-08-17 `policy_client_node` logs an ERROR naming this on the 
 mid-session) — `ros2 topic info /tf_static` will show `Publisher count: 0`. Restart `fr3-bringup`
 on the NUC; TF returns within a second or two.
 
+### The finger LED goes dark mid-run (streaming keeps working)
+Two processes are driving the same PWM pin. `polyumi-pi.service` runs `start-scene` on boot, and
+both `start-scene` and `stream` construct an `LEDManager`; whichever constructs one *last* wins,
+because `HardwarePWM.start(0)` sets the duty cycle to 0. The loser keeps running and goes on
+believing its LED is lit — it holds no lock and gets no error.
+
+What makes it intermittent is `Restart=on-failure`: the service keeps failing while `stream` holds
+the camera, and every retry re-runs the constructor and re-darkens the LED. Observed 2026-08-17
+with `NRestarts=18` against a `stream` that had been up 46 minutes.
+
+Confirm it from the hardware rather than guessing — the two failure modes look identical from the
+outside but leave different sysfs state:
+
+```bash
+ssh <pi> 'cat /sys/class/pwm/pwmchip0/pwm0/{enable,duty_cycle}'
+```
+
+`enable=1, duty_cycle=0` is this bug — something re-zeroed the duty cycle. `enable=0` instead means
+a `close()`/`stop()` ran, i.e. an `LEDManager` was garbage-collected or a command exited.
+
+`fr3_session.sh` now runs `sudo systemctl stop polyumi-pi` before `polyumi-pi stream`, so a session
+brought up through it is immune. If you start `stream` by hand, stop the service yourself first —
+and note that stopping it *after* the LED has gone dark is not enough, since nothing re-sets the
+brightness; restart `stream` too.
+
+### Inference latency: the observation payload costs more than the policy
+`policy_client_node` reports its own round trip as `inference=NNNms`, and the server logs
+`-> 200 in NNN ms, model NNms` per request (the `model` figure is GPU time, measured through the
+`.cpu()` copy so async kernel launches can't hide in it). Read them together before tuning
+anything.
+
+Measured 2026-08-17, checkpoint `2026.08.16/04.56.45`, laptop on WiFi:
+
+| | |
+|---|---|
+| model (GPU) | 92-95 ms, and it does not vary |
+| server total | 190-380 ms |
+| client round trip | 180-330 ms |
+| network | 4 ms ping, ~40-70 ms for the body |
+
+So `total - model` — base64 decode plus JSON parse of the request — is **100-285 ms, more than the
+diffusion pass it feeds**. The client sends `n_obs_steps x 224 x 224 x 3` as **float32**, which
+base64s to **1.61 MB** per request at the default `n_obs_steps: 2`.
+
+The obvious lever is sending `uint8` instead: 4x smaller, and the client already holds the frame
+as uint8 before it converts. It is deliberately **not** done yet — it changes the wire contract on
+both sides at once, and float32→uint8 is a real fidelity question next to the resize
+interpolation skew already known to exist between training and inference. Measure before assuming
+it is free.
+
+What is *not* the problem, despite looking like it: GPU contention. sheep is shared and GPU 0 is
+where everyone lands, but the `model` figure holds at 93 ms regardless. Pin the server to a quiet
+card with `CUDA_VISIBLE_DEVICES=1 ./serve_policy.sh` if you like — it is one env var — but do not
+expect it to buy the second back. There is no multi-GPU path and no point adding one: single-sample
+inference cannot be split across cards.
+
+> Beware of measuring during a restart. Uvicorn holds the port while `lifespan` loads the
+> checkpoint, so every request that arrives during the load blocks for the whole load and the
+> client reports seconds. That backlog is what produced a bogus "1.4-1.8 s" reading on 2026-08-17.
+> Let it settle before trusting a number.
+
 ### Every tick dropped: "capture pipeline stalled" — camera latency, not a stall
 The Elgato HD60 X presents the GoPro feed as **1080p YUYV**, and `v4l2_camera` does a *software*
 YUYV→RGB conversion (it logs "possibly slow conversion") into a ~6 MB `rgb8` message — adding
