@@ -29,6 +29,12 @@
 #      hardware/RViz/controller nodes that fr3-bringup already provides).
 #   3. Build robot_description from nuc/description/fr3_polyumi.urdf.xacro instead of
 #      franka_description's fr3.urdf.xacro, so the model carries `polyumi_tcp`.
+#   4. Supply joint ACCELERATION limits. Neither upstream nor franka_description declares any,
+#      so move_group's time parameterization fell back to a default of 1 rad/s^2 and logged
+#      "Joint acceleration limits are not defined. Using the default 1 rad/s^2." Every Cartesian
+#      chunk then came back slower than the policy asked for — measured 3.4 s against a
+#      commanded 2.75 s on 2026-08-18 — so the bridge could never hit the commanded timeline
+#      and dropped ~6 of every 7 chunks as still-busy.
 # See docs/crb-fr3-inference.md for how to run this and the gotchas around it.
 
 """Launch a standalone MoveIt move_group for the FR3, alongside a running fr3-bringup."""
@@ -52,6 +58,9 @@ NUC_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(NUC_DIR))
 
 import tcp_calib  # noqa: E402
+
+#: The fr3_arm planning group's joints — the ones whose timing the Cartesian chunks depend on.
+ARM_JOINT_NAMES = [f'fr3_joint{i}' for i in range(1, 8)]
 
 
 def load_yaml(package_name, file_path):
@@ -104,6 +113,20 @@ def generate_launch_description():
     )
 
     db_arg = DeclareLaunchArgument('db', default_value='False', description='Database flag')
+
+    # See header change 4. This is the knob that sets how fast a planned chunk actually runs:
+    # with no acceleration limit declared anywhere, MoveIt time-parameterizes at a default
+    # 1 rad/s^2, which is slower than the policy's own timeline and cannot be sped back up
+    # (Humble's GetCartesianPath has no velocity_scaling field). Deliberately NOT the FR3's
+    # datasheet maximum — the arm fired a reflex on 2026-08-18 and the honest state of this
+    # number is "conservative, raise it while watching". fr3_moveit_bridge stretches the result
+    # back to the span the incoming Path asks for, so a faster plan does not mean a faster arm;
+    # it means the commanded timeline becomes reachable instead of being the slower of the two.
+    max_acceleration_arg = DeclareLaunchArgument(
+        'max_acceleration',
+        default_value='1.5',
+        description='Joint acceleration limit (rad/s^2) for trajectory time parameterization.',
+    )
 
     # PolyUMI change 3 (see header): the stock fr3.urdf.xacro, wrapped so move_group's
     # RobotModel also carries `polyumi_tcp` — the frame the bridge names as GetCartesianPath's
@@ -184,6 +207,22 @@ def generate_launch_description():
         'publish_transforms_updates': True,
     }
 
+    # value_type=float matters: a launch argument arrives as a string, and MoveIt would reject
+    # (or silently ignore) a string where it wants a double.
+    max_acceleration = ParameterValue(LaunchConfiguration('max_acceleration'), value_type=float)
+    joint_limits = {
+        'robot_description_planning': {
+            'joint_limits': {
+                # Acceleration only. Velocity limits already reach the RobotModel from the URDF
+                # (franka_description/robots/fr3/joint_limits.yaml, 2.62-5.26 rad/s) and were
+                # never the binding constraint; restating them here would be a second copy to
+                # drift.
+                name: {'has_acceleration_limits': True, 'max_acceleration': max_acceleration}
+                for name in ARM_JOINT_NAMES
+            }
+        }
+    }
+
     run_move_group_node = Node(
         package='moveit_ros_move_group',
         executable='move_group',
@@ -196,6 +235,7 @@ def generate_launch_description():
             trajectory_execution,
             moveit_controllers,
             planning_scene_monitor_parameters,
+            joint_limits,
         ],
     )
 
@@ -205,6 +245,7 @@ def generate_launch_description():
             use_fake_hardware_arg,
             fake_sensor_commands_arg,
             db_arg,
+            max_acceleration_arg,
             run_move_group_node,
         ]
     )
