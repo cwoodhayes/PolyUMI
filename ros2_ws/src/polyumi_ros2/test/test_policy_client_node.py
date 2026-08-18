@@ -374,6 +374,59 @@ def test_preview_published_full_chunk_without_execution(make_node):
     assert msg.header.frame_id == node._base_frame
 
 
+def test_single_step_commands_one_action_and_ignores_latency(make_node):
+    """
+    single_step publishes exactly actions[0] to both devices, however stale the observation is.
+
+    The validation mode for proving a static-scene task: the arm is at rest at every observation
+    instant, so an uncompensated observation is still correct. This t_obs is 2 s old, which
+    normally drops the whole 8-step chunk for both devices (see the preview test above) — here it
+    must still command the first action.
+    """
+    node = make_node(
+        single_step=True,
+        execute_motion=True,
+        control_hz=10.0,
+        **{'latency.arm_exec': 0.702, 'latency.gripper_exec': 0.514},
+    )
+    actions = [[float(i), 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0] for i in range(8)]
+    with (
+        patch.object(node, '_http_post_json', return_value={'actions': actions}),
+        patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))),
+        patch.object(node._target_pub, 'publish') as target_pub,
+        patch.object(node._gripper_pub, 'publish') as gripper_pub,
+    ):
+        node._post_and_act(payload={}, t_obs=_t(98.0))
+
+    target_pub.assert_called_once()
+    arm_msg = target_pub.call_args[0][0]
+    assert len(arm_msg.poses) == 1
+    assert arm_msg.poses[0].position.x == pytest.approx(0.0)  # actions[0], not a later waypoint
+
+    gripper_pub.assert_called_once()
+    assert len(gripper_pub.call_args[0][0].points) == 1
+
+
+def test_single_step_off_still_compensates_latency(make_node):
+    """The default is unchanged: a 2 s-old observation drops the whole chunk for both devices."""
+    node = make_node(
+        execute_motion=True,
+        control_hz=10.0,
+        **{'latency.arm_exec': 0.702, 'latency.gripper_exec': 0.514},
+    )
+    actions = [[float(i), 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0] for i in range(8)]
+    with (
+        patch.object(node, '_http_post_json', return_value={'actions': actions}),
+        patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))),
+        patch.object(node._target_pub, 'publish') as target_pub,
+        patch.object(node._gripper_pub, 'publish') as gripper_pub,
+    ):
+        node._post_and_act(payload={}, t_obs=_t(98.0))
+
+    target_pub.assert_not_called()
+    gripper_pub.assert_not_called()
+
+
 def test_preview_disabled_creates_no_publisher(make_node):
     """publish_preview=false suppresses the preview publisher entirely."""
     node = make_node(publish_preview=False)

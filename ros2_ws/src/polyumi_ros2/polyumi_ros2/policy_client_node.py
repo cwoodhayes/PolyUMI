@@ -166,6 +166,28 @@ class PolicyClientNode(Node):
         # means the arm runs out of fresh waypoints before the next chunk lands. The launch
         # default lives in config/inference.yaml (loaded via <param from>); this is the fallback.
         self.declare_parameter('steps_per_inference', 6)
+        # Validation mode: command exactly ONE action per inference and turn latency
+        # compensation off. The arm creeps along the policy's trajectory a step at a time,
+        # stopping between steps, which is ugly but traces the path the model actually wants.
+        #
+        # Ignoring latency is legitimate here rather than sloppy: with one action per inference
+        # the arm is at REST at every observation instant, and latency only corrupts an
+        # observation if the world changed during it. A static scene plus a stationary arm means
+        # a second-old observation is still a correct observation. It also makes the loop
+        # maximally closed-loop — receding horizon with horizon 1, i.e. plain MPC — so a success
+        # is strong evidence about the visuomotor mapping and a failure has few variables behind
+        # it.
+        #
+        # The cost, and what to watch for: robot0_eef_pos deltas across the n_obs_steps window
+        # collapse to ~zero, because both observations land while the arm is idle. That is out of
+        # distribution relative to the continuous human demos. If the arm stutters or stalls in
+        # place rather than mis-reaching, suspect this — the fix is the streaming Cartesian
+        # controller (docs/franka-inference-bringup.md, Gap 1), not more MoveIt tuning.
+        #
+        # Pacing needs nothing here: fr3_moveit_bridge already drops targets that arrive while it
+        # is mid-motion, so the node just keeps offering a fresh single waypoint and the bridge
+        # takes the first one after it frees.
+        self.declare_parameter('single_step', False)
         # Per-component system latencies (seconds), loaded from config/inference.yaml via the
         # inference launch file; that file documents each value's provenance. Measure them with
         # `ros2 run polyumi_ros2 latency_probe` (one mode per value) — procedures in
@@ -246,6 +268,7 @@ class PolicyClientNode(Node):
             'gripper_exec': self.get_parameter('latency.gripper_exec').get_parameter_value().double_value,
             'gripper': self.get_parameter('latency.gripper').get_parameter_value().double_value,
         }
+        self._single_step = self.get_parameter('single_step').get_parameter_value().bool_value
         self._ee_pose_buffer_s = self.get_parameter('buffers.ee_pose_s').get_parameter_value().double_value
         self._validate_params(control_hz)
 
@@ -399,6 +422,14 @@ class PolicyClientNode(Node):
             f'aperture range [{self._gripper_min_width_m}, {self._gripper_max_width_m}]m '
             f'(the low end doubles as the policy->robot offset)'
         )
+        if self._single_step:
+            # A warning, not info: this is a validation mode that silently disables latency
+            # compensation, and a run left in it by accident should be impossible to miss.
+            self.get_logger().warn(
+                'single_step=true — VALIDATION MODE: latency compensation OFF, one action per '
+                'inference. The arm creeps and stops between steps; that is expected. Set '
+                'single_step:=false for normal receding-horizon execution.'
+            )
 
     def _validate_params(self, control_hz: float) -> None:
         """
@@ -906,11 +937,18 @@ class PolicyClientNode(Node):
         # subtracted per device — reached through slicing rather than absolute waypoint times,
         # since a PoseArray carries no timing. Note _actions_to_gripper_trajectory recomputes
         # time_from_start relative to whatever slice it is handed, so the two stay self-consistent.
+        #
+        # single_step suspends all of that: no latency compensation, one action per device. See
+        # the parameter declaration for why an uncompensated observation is still correct there.
+        # The gripper truncation is cosmetic — fr3_gripper_bridge already reads only points[0] —
+        # but it keeps the two devices index-aligned and n_published_gripper honest.
         n_received = len(actions)
-        n_stale_arm = self._n_stale_actions(t_obs, self._latency_act)
-        n_stale_grip = self._n_stale_actions(t_obs, self._latency_act_gripper)
+        n_stale_arm = 0 if self._single_step else self._n_stale_actions(t_obs, self._latency_act)
+        n_stale_grip = 0 if self._single_step else self._n_stale_actions(t_obs, self._latency_act_gripper)
         arm_actions = actions[n_stale_arm:]
         grip_actions = actions[n_stale_grip:]
+        if self._single_step:
+            arm_actions, grip_actions = arm_actions[:1], grip_actions[:1]
 
         # Published before the all-stale check, so the zero is visible: "nothing was commanded" is
         # the single most useful thing on the plot and it is exactly the case that returns early.
