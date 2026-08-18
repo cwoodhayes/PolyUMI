@@ -75,6 +75,51 @@ def preprocessing_step_versions(root: zarr.Group) -> dict[str, dict]:
     return {str(k): v for k, v in raw.items() if isinstance(v, dict)}
 
 
+def _invalidate_downstream_steps(root: zarr.Group, step_number: int) -> list[int]:
+    """
+    Drop the completion marks for every step after ``step_number``. Returns what was cleared.
+
+    Steps form a chain — each reads what the ones before it wrote — so re-running step N makes
+    the output of every later step describe inputs that no longer exist. Nothing in the store
+    said so: the marks are a flat set of "done" numbers with no dependency order, so a re-run
+    of one step left its successors looking complete forever.
+
+    That is not hypothetical. Scene 31d6 had step 2 re-run under the gripper-mask fix 90
+    minutes *after* step 5 last ran, so ``eef/pose_slam`` — the array DP export reads — was
+    still the retarget of the previous SLAM pass. It exported 18 episodes (17% of the dataset)
+    of poses belonging to a superseded trajectory, and every frame count and tracking ratio
+    alongside them described the new one.
+
+    Only marks are cleared, never data: the later steps' arrays stay until those steps re-run
+    and overwrite them. Per-episode marks go too, otherwise ``run_step``'s own
+    already-done check would skip every episode of the steps this just re-opened.
+
+    Note this cascades honestly rather than cheaply — re-running step 1 invalidates step 2,
+    which means a full re-SLAM. That is the true cost of changing the time sync every later
+    step is aligned to, and it is rare; the common case (re-running SLAM) only invalidates the
+    cheap steps after it.
+    """
+    done = preprocessing_steps_done(root)
+    later = sorted(step for step in done if step > step_number)
+    if not later:
+        return []
+
+    root.attrs['preprocessing_steps'] = [step for step in done if step <= step_number]
+    versions = preprocessing_step_versions(root)
+    for step in later:
+        versions.pop(str(step), None)
+    root.attrs['preprocessing_step_versions'] = versions
+
+    for key in episode_keys(root):
+        ep_steps = episode_steps_done(root[key])
+        if ep_steps is None:
+            continue
+        kept = [step for step in ep_steps if step <= step_number]
+        if len(kept) != len(ep_steps):
+            root[key].attrs['preprocessing_steps'] = kept
+    return later
+
+
 def _mark_preprocessing_step(root: zarr.Group, step_number: int) -> None:
     steps = preprocessing_steps_done(root)
     if step_number not in steps:
@@ -91,6 +136,13 @@ def _mark_preprocessing_step(root: zarr.Group, step_number: int) -> None:
         'completed_at': dt.datetime.now(dt.timezone.utc).isoformat(),
     }
     root.attrs['preprocessing_step_versions'] = versions
+
+    invalidated = _invalidate_downstream_steps(root, step_number)
+    if invalidated:
+        log.warning(
+            f'step {step_number} re-ran, so step(s) {invalidated} now describe inputs that no '
+            f'longer exist and have been marked incomplete — run `pingest pp` to rebuild them.'
+        )
 
 
 def episode_steps_done(ep_grp: zarr.Group) -> list[int] | None:
@@ -208,6 +260,43 @@ def _warn_if_outdated_pzarr(root: zarr.Group, scene_label: str) -> None:
             f'{scene_label}: written by pzarr v{stored}, but this code only knows v{PZARR_VERSION} — '
             f'it may read fields that have since changed meaning. Update your checkout.'
         )
+
+
+def _completion_times(root: zarr.Group) -> dict[int, dt.datetime]:
+    """Return the parsed ``completed_at`` per completed step, omitting unusable stamps."""
+    versions = preprocessing_step_versions(root)
+    times: dict[int, dt.datetime] = {}
+    for step in preprocessing_steps_done(root):
+        raw = versions.get(str(step), {}).get('completed_at')
+        if not isinstance(raw, str):
+            continue
+        try:
+            stamp = dt.datetime.fromisoformat(raw)
+        except ValueError:
+            continue
+        # Naive stamps can't be compared against aware ones; everything is written in UTC.
+        times[step] = stamp if stamp.tzinfo else stamp.replace(tzinfo=dt.timezone.utc)
+    return times
+
+
+def _stale_steps(root: zarr.Group) -> list[int]:
+    """
+    Completed steps that finished *before* a step they depend on. Empty on a healthy store.
+
+    Retroactive detection for stores written before :func:`_invalidate_downstream_steps`
+    existed, which is the only reason a scene can be in this state going forward. Steps
+    without a ``completed_at`` are invisible here — a missing stamp is "unknown", not
+    "stale" — so pre-provenance stores are left alone rather than needlessly reprocessed.
+    """
+    times = _completion_times(root)
+    stale: list[int] = []
+    latest_upstream: dt.datetime | None = None
+    for step in sorted(times):
+        if latest_upstream is not None and times[step] < latest_upstream:
+            stale.append(step)
+        elif latest_upstream is None or times[step] > latest_upstream:
+            latest_upstream = times[step]
+    return stale
 
 
 class StepComplete(Exception):  # noqa: N818 — control flow, not an error
@@ -339,6 +428,17 @@ def run_preprocessing(
     root = zarr.open_group(str(scene_zarr), mode='a')
     _warn_if_outdated_pzarr(root, scene_zarr.parent.name)
     _backfill_episode_steps(root)
+    # Heal a store whose steps were run out of order before the invalidation above existed.
+    # Clearing from the *earliest* stale step keeps the chain intact — reprocessing step 5
+    # while step 3 is still stale would just rebuild it from stale inputs.
+    stale = _stale_steps(root)
+    if stale:
+        log.warning(
+            f'{scene_zarr.parent.name}: step(s) {stale} completed before a step they depend on '
+            f'— their output describes superseded inputs. Marking them incomplete so this run '
+            f'rebuilds them.'
+        )
+        _invalidate_downstream_steps(root, min(stale) - 1)
     completed_steps = set(preprocessing_steps_done(root))
     step_numbers = [step_number] if step_number is not None else sorted(PREPROCESSING_STEPS)
 
