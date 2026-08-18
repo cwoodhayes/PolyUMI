@@ -10,6 +10,7 @@ from numcodecs import Blosc
 
 from polyumi_ingest.config import load_gripper_calib
 from polyumi_ingest.episode_status import Episode, SceneContext
+from polyumi_ingest.preproc.slam_step import post_chirp_start
 from polyumi_ingest.preproc.step_base import PreprocessingStep, register_preprocessing_step
 from polyumi_ingest.pzarr.store import arr, grp
 from polyumi_ingest.timebase import nearest_idx
@@ -26,6 +27,41 @@ _BLOSC = Blosc(cname='zstd', clevel=5, shuffle=Blosc.SHUFFLE)
 #: Preference order when a scene carries more than one pose source. OptiTrack is mocap ground
 #: truth and beats SLAM wherever the volume covers the demo.
 _SOURCE_PREFERENCE = ('optitrack', 'slam')
+
+
+def _max_pose_jump_m(ep: zarr.Group, pose: np.ndarray) -> float | None:
+    """
+    Largest position step between adjacent tracked frames, or None if unmeasurable.
+
+    The usability gate's blind spot: an episode can track every frame it was fed, report a
+    tracking_ratio of 1.000, and still teleport a metre between two of them when SLAM
+    relocalizes against the wrong part of the map. Nothing in the frame counts can see that,
+    because no frame was lost — see ``polyumi_ingest.quality``.
+
+    Measured here rather than on ``gopro/slam_poses`` because this is the frame the policy
+    consumes and the lever arm amplifies what step 2 cannot see: with
+    ``p_hand = p_cam + R_cam · t`` and ``|t|`` = 0.2685 m on the current gripper, an
+    orientation-only glitch moves the hand up to 54 cm while the camera position never moves.
+
+    Restricted to the post-chirp fed grid, the same window the frame-count checks use: the
+    idle prefix is where the localizer is still relocalizing and never reaches the dataset,
+    and the skipped frames have no pose by construction. Pairs spanning a tracking gap are
+    excluded — a longer gap legitimately covers more distance, and the lost-frame threshold
+    already judges those.
+    """
+    stride = 1
+    if 'annotations/slam' in ep:
+        stride = max(1, int(grp(ep, 'annotations/slam').attrs.get('frame_stride', 1)))
+    start, _ = post_chirp_start(ep, len(pose))
+
+    fed = np.arange(0, len(pose), stride)
+    fed = fed[fed >= start]
+    tracked = fed[~np.isnan(pose[fed]).any(axis=1)]
+    adjacent = np.diff(tracked) == stride
+    if not adjacent.any():
+        return None
+    steps = np.linalg.norm(np.diff(pose[tracked, :3], axis=0), axis=1)
+    return float(steps[adjacent].max())
 
 
 def _gopro_ts_in_finger_clock(ep: zarr.Group) -> np.ndarray:
@@ -172,10 +208,16 @@ class EefPoseStep(PreprocessingStep):
             pose_arr.attrs['body_frame'] = 'hand'
             pose_arr.attrs['grid'] = 'gopro'
             pose_arr.attrs['n_nan'] = n_nan
+            # Measurement only; the usable/unusable verdict is policy and lives in
+            # polyumi_ingest.quality, derived at read time from this number.
+            max_jump = _max_pose_jump_m(ep, pose)
+            if max_jump is not None:
+                pose_arr.attrs['max_pose_jump_m'] = max_jump
 
+            jump_str = f', max jump {max_jump * 100:.1f} cm' if max_jump is not None else ''
             log.info(
                 f'  {episode_key}: eef/pose_{source} {pose.shape} '
-                f'(world={world_frame}, body=hand, {n_nan}/{len(pose)} NaN)'
+                f'(world={world_frame}, body=hand, {n_nan}/{len(pose)} NaN{jump_str})'
             )
 
         out_grp.attrs['available_sources'] = sources

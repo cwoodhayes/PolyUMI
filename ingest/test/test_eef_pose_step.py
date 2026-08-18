@@ -9,6 +9,7 @@ from scipy.spatial.transform import RigidTransform, Rotation
 
 from polyumi_ingest.config import load_gripper_calib
 from polyumi_ingest.preproc import EefPoseStep
+from polyumi_ingest.preproc.eef_pose_step import _max_pose_jump_m
 from polyumi_ingest.transforms import gopro_to_hand_transform, retarget_body_frame
 
 # A body offset with both a translation and a rotation, in the same ballpark as the real
@@ -242,3 +243,111 @@ def test_eef_pose_step_force_adds_newly_available_source(tmp_path: pathlib.Path)
     ep = zarr.open_group(str(scene_zarr / 'episode_0'), mode='r')
     assert set(ep['eef'].attrs['available_sources']) == {'optitrack', 'slam'}
     assert 'eef/pose_optitrack' in ep
+
+
+# ---------------------------------------------------------------------------
+# max_pose_jump_m — the measurement behind quality.py's pose-jump check
+# ---------------------------------------------------------------------------
+
+
+def _jump_episode(
+    tmp_path: pathlib.Path,
+    positions: np.ndarray,
+    *,
+    stride: int = 1,
+    chirp_end_s: float | None = None,
+) -> zarr.Group:
+    """Build an episode group carrying ``positions`` as a hand-frame trajectory at 60 Hz."""
+    n = len(positions)
+    ep = zarr.open_group(str(tmp_path / 'ep.zarr'), mode='w', zarr_format=2)
+    ep.create_group('timestamps').create_array('gopro', data=np.arange(n, dtype=np.float64) / 60.0)
+    ep.require_group('annotations').require_group('slam').attrs['frame_stride'] = stride
+    if chirp_end_s is not None:
+        ep['annotations'].require_group('time_sync').attrs['gopro_chirp_end_s'] = chirp_end_s
+    return ep
+
+
+def _poses(positions: np.ndarray) -> np.ndarray:
+    """(N,7) poses at ``positions`` with identity rotation; NaN rows stay NaN."""
+    out = np.full((len(positions), 7), np.nan)
+    valid = ~np.isnan(positions).any(axis=1)
+    out[valid, :3] = positions[valid]
+    out[valid, 3:] = [0.0, 0.0, 0.0, 1.0]
+    return out
+
+
+def test_max_pose_jump_measures_the_largest_adjacent_step(tmp_path: pathlib.Path) -> None:
+    """Smooth motion reports its own step size; one teleport reports the teleport."""
+    pos = np.zeros((10, 3))
+    pos[:, 0] = np.arange(10) * 0.01  # a steady 1 cm per frame
+    ep = _jump_episode(tmp_path, pos)
+    assert _max_pose_jump_m(ep, _poses(pos)) == pytest.approx(0.01)
+
+    pos[5:, 0] += 1.14  # the relocalization teleport
+    assert _max_pose_jump_m(ep, _poses(pos)) == pytest.approx(1.15, abs=1e-6)
+
+
+def test_max_pose_jump_ignores_pairs_spanning_a_gap(tmp_path: pathlib.Path) -> None:
+    """
+    A pair straddling lost frames covers more ground legitimately and must not count.
+
+    How far the hand moved while tracking was down says nothing about a bad pose; the
+    lost-frame threshold is what judges gaps.
+    """
+    pos = np.zeros((10, 3))
+    pos[:, 0] = np.arange(10) * 0.01
+    pos[4:7] = np.nan  # tracking lost, then resumes 3 cm further along
+    ep = _jump_episode(tmp_path, pos)
+
+    assert _max_pose_jump_m(ep, _poses(pos)) == pytest.approx(0.01)
+
+
+def test_max_pose_jump_walks_the_fed_grid_under_decimation(tmp_path: pathlib.Path) -> None:
+    """
+    At stride 2 the odd frames have no pose, so consecutive *fed* frames are 2 apart.
+
+    Treating every row as adjacent would compare a real pose against a NaN one and find
+    nothing at all to measure.
+    """
+    pos = np.full((10, 3), np.nan)
+    pos[::2] = 0.0
+    pos[::2, 0] = np.arange(5) * 0.02  # 2 cm between fed frames
+    ep = _jump_episode(tmp_path, pos, stride=2)
+
+    assert _max_pose_jump_m(ep, _poses(pos)) == pytest.approx(0.02)
+
+
+def test_max_pose_jump_skips_the_pre_chirp_prefix(tmp_path: pathlib.Path) -> None:
+    """
+    The idle prefix is where the localizer is still settling and never reaches the dataset.
+
+    Judged over the whole recording a jump there would condemn an episode whose exported
+    span is clean — the same reasoning that puts the frame counts on the post-chirp window.
+    """
+    pos = np.zeros((10, 3))
+    pos[:, 0] = np.arange(10) * 0.01
+    pos[:3, 0] += 2.0  # a wild prefix, settled by the time the chirp ends
+    ep = _jump_episode(tmp_path, pos, chirp_end_s=4.0 / 60.0)
+
+    assert _max_pose_jump_m(ep, _poses(pos)) == pytest.approx(0.01)
+
+
+def test_max_pose_jump_is_none_without_two_adjacent_tracked_frames(tmp_path: pathlib.Path) -> None:
+    """Nothing measurable is None, not zero — zero would read as a perfectly smooth episode."""
+    pos = np.full((10, 3), np.nan)
+    pos[0] = [0.0, 0.0, 0.0]
+    ep = _jump_episode(tmp_path, pos)
+
+    assert _max_pose_jump_m(ep, _poses(pos)) is None
+
+
+def test_eef_pose_step_records_the_jump_on_each_pose_array(tmp_path: pathlib.Path) -> None:
+    """The step stores the measurement; quality.py turns it into a verdict at read time."""
+    scene_zarr = _build_scene(tmp_path, with_optitrack=False, with_slam=True)
+
+    EefPoseStep().run_step(scene_zarr)
+
+    ep = zarr.open_group(str(scene_zarr / 'episode_0'), mode='r')
+    # The fixture slides 0->1 m over 10 frames, and a pure translation carries the hand
+    # frame with it unchanged, so each step is 1/9 m.
+    assert ep['eef/pose_slam'].attrs['max_pose_jump_m'] == pytest.approx(1 / 9)

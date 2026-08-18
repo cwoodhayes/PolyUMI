@@ -313,7 +313,7 @@ def _parse_trajectory_csv(traj_path: pathlib.Path, frame_ts: np.ndarray, frame_s
     return poses
 
 
-def _post_chirp_start(ep_grp: zarr.Group, n_total: int) -> tuple[int, bool]:
+def post_chirp_start(ep_grp: zarr.Group, n_total: int) -> tuple[int, bool]:
     """
     First frame index at/after the sync chirp ends, and whether the marker was found.
 
@@ -374,7 +374,7 @@ def _write_slam_results(
     # out ≈ n_fed_tracked (95-305 for episodes that never lost the map once).
     transitions = int(np.count_nonzero(np.diff(is_lost[fed_idx].astype(np.int8)) == -1))
 
-    i0, chirp_gated = _post_chirp_start(ep_grp, n_total)
+    i0, chirp_gated = post_chirp_start(ep_grp, n_total)
     fed_post = fed_idx[fed_idx >= i0]
     n_fed_post = int(len(fed_post))
     n_fed_post_lost = int(is_lost[fed_post].sum()) if n_fed_post else 0

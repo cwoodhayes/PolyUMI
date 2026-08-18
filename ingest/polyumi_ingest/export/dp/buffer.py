@@ -207,10 +207,11 @@ def _auto_unusable_reasons_for_episode(ep: zarr.Group) -> list[str]:
     """
     Threshold-derived reasons to exclude ``ep``; empty list means keep it.
 
-    Thin adapter over ``polyumi_ingest.quality.auto_unusable_reasons`` that pulls the
-    two inputs off the episode group: the SLAM metrics written by step 2, and whether
-    OptiTrack is among step 5's ``available_sources`` (in which case the episode's
-    poses don't come from SLAM and the SLAM-derived checks don't apply).
+    Thin adapter over ``polyumi_ingest.quality.auto_unusable_reasons`` that pulls its
+    inputs off the episode group: the SLAM metrics written by step 2, the hand-frame
+    pose jump written by step 5, and whether OptiTrack is among step 5's
+    ``available_sources`` (in which case the episode's poses don't come from SLAM and
+    the SLAM-derived checks don't apply).
 
     Missing groups mean "nothing to judge" — an episode whose preprocessing hasn't run
     isn't excluded here; ``resolve_pose_source`` raises on that separately.
@@ -220,7 +221,14 @@ def _auto_unusable_reasons_for_episode(ep: zarr.Group) -> list[str]:
     slam_attrs = dict(grp(grp(ep, 'annotations'), 'slam').attrs)
     has_optitrack = False
     if 'eef' in ep:
-        has_optitrack = 'optitrack' in list(grp(ep, 'eef').attrs.get('available_sources', []))
+        eef = grp(ep, 'eef')
+        has_optitrack = 'optitrack' in list(eef.attrs.get('available_sources', []))
+        # Measured on the SLAM trajectory specifically; an OptiTrack episode is exempt from
+        # the SLAM checks anyway, so there is no second source to reconcile here.
+        if 'pose_slam' in eef:
+            jump = eef['pose_slam'].attrs.get('max_pose_jump_m')
+            if jump is not None:
+                slam_attrs['max_pose_jump_m'] = jump
     return quality.auto_unusable_reasons(slam_attrs, has_optitrack=has_optitrack)
 
 

@@ -72,7 +72,15 @@ def scene_slam_records(scene_dir: pathlib.Path) -> dict[str, SlamRecord]:
         # exempt from the SLAM-derived checks. 'available_sources' is written by
         # step 5 (EefPoseStep); absent means step 5 hasn't run, i.e. not exempt.
         has_optitrack = 'optitrack' in list(ep['eef'].attrs.get('available_sources', [])) if 'eef' in ep else False
-        out[session_dir] = SlamRecord(attrs=dict(ep['annotations']['slam'].attrs), has_optitrack=has_optitrack)
+        attrs = dict(ep['annotations']['slam'].attrs)
+        # Step 5 measures the hand-frame pose jump, so it lives on eef/pose_slam rather than
+        # in the SLAM annotations. Merged in here so it rides the existing cached column and
+        # reaches the same verdict function DP export calls — see polyumi_ingest.quality.
+        if 'eef' in ep and 'pose_slam' in ep['eef']:
+            jump = ep['eef']['pose_slam'].attrs.get('max_pose_jump_m')
+            if jump is not None:
+                attrs['max_pose_jump_m'] = jump
+        out[session_dir] = SlamRecord(attrs=attrs, has_optitrack=has_optitrack)
     return out
 
 
@@ -114,6 +122,7 @@ def quality_view(record: SlamRecord | None) -> dict | None:
         'n_frames_lost': record.attrs.get('n_frames_lost'),
         'tracking_ratio': record.attrs.get('tracking_ratio'),
         'n_relocalization_events': record.attrs.get('n_relocalization_events'),
+        'max_pose_jump_m': record.attrs.get('max_pose_jump_m'),
         'has_optitrack': record.has_optitrack,
         'low_quality': iquality.is_low_quality(record.attrs, thresholds=thresholds),
         #: Derived from the thresholds, not stored. An episode can also be unusable
