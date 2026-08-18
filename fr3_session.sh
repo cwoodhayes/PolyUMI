@@ -71,6 +71,12 @@ MAX_IMAGE_AGE_S="${MAX_IMAGE_AGE_S:-0.3}"
 # ./fr3_session.sh makes the arm creep along the policy's trajectory a step at a time — the way
 # to prove a static-scene task works without fighting latency. See inference_demo.launch.xml.
 SINGLE_STEP="${SINGLE_STEP:-false}"
+# Whether the laptop publishes chunks to the NUC bridges at all. Defaults true because the
+# line is only PRE-TYPED, never run — nothing moves until you press Enter on it, and the NUC
+# side has its own execute_arm/execute_gripper flags (both default false) in front of the arm.
+# EXECUTE_MOTION=false ./fr3_session.sh for a dry run: the preview topics still show every
+# commanded chunk in Foxglove, but /polyumi/target_poses is never published.
+EXECUTE_MOTION="${EXECUTE_MOTION:-true}"
 
 if [ "${1:-}" = "--kill-local" ] || [ "${1:-}" = "--kill" ]; then
   tmux kill-session -t "$SESSION" 2>/dev/null && echo "Killed local session '$SESSION'."
@@ -315,7 +321,7 @@ fi
 # Foxglove all work, the NUC is simply absent, and the only symptom is policy_client_node
 # repeating `TF lookup failed: "fr3_link0" ... does not exist`. Cost an hour on 2026-08-17.
 pretype "$LAPTOP_PANE" \
-  "source setup_franka_env.sh >/dev/null && $(logged policy_client "ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=$INFERENCE_URL execute_motion:=true max_image_age_s:=$MAX_IMAGE_AGE_S pi_host:=$PI_HOST single_step:=$SINGLE_STEP")"
+  "source setup_franka_env.sh >/dev/null && $(logged policy_client "ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=$INFERENCE_URL execute_motion:=$EXECUTE_MOTION max_image_age_s:=$MAX_IMAGE_AGE_S pi_host:=$PI_HOST single_step:=$SINGLE_STEP")"
 
 tmux select-window -t "$NUC_WINDOW"
 cat <<EOF
