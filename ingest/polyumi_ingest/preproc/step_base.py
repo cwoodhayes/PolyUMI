@@ -75,6 +75,40 @@ def preprocessing_step_versions(root: zarr.Group) -> dict[str, dict]:
     return {str(k): v for k, v in raw.items() if isinstance(v, dict)}
 
 
+#: Steps whose marks were cleared by :func:`_invalidate_downstream_steps` and which must
+#: therefore *recompute*, not merely re-run.
+#:
+#: Clearing the marks is not enough on its own. Several steps carry their own
+#: "output already present; use --force to recompute" guard (so_align's ``StepComplete``,
+#: eef-pose's per-episode check), so an invalidated step would be re-entered by the harness
+#: and then decline to do anything — which is exactly what happened on the first attempt to
+#: rebuild scene 31d6: all 63 episodes logged "eef/pose_* already present" and the stale
+#: poses survived a run that looked, from the outside, like a successful rebuild.
+#:
+#: Persisted on the store rather than held in memory because the invalidation and the rebuild
+#: are routinely different processes: `pingest pp 2 --force` today, `pingest pp` tomorrow.
+STALE_STEPS_ATTR = 'preprocessing_steps_needing_rebuild'
+
+
+def steps_needing_rebuild(root: zarr.Group) -> set[int]:
+    """Return step numbers invalidated by an earlier run and not yet rebuilt."""
+    raw = root.attrs.get(STALE_STEPS_ATTR, [])
+    if not isinstance(raw, list):
+        return set()
+    out = set()
+    for step in raw:
+        try:
+            out.add(int(step))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _set_steps_needing_rebuild(root: zarr.Group, steps: set[int]) -> None:
+    """Persist the set of steps still awaiting a rebuild."""
+    root.attrs[STALE_STEPS_ATTR] = sorted(steps)
+
+
 def _invalidate_downstream_steps(root: zarr.Group, step_number: int) -> list[int]:
     """
     Drop the completion marks for every step after ``step_number``. Returns what was cleared.
@@ -117,6 +151,8 @@ def _invalidate_downstream_steps(root: zarr.Group, step_number: int) -> list[int
         kept = [step for step in ep_steps if step <= step_number]
         if len(kept) != len(ep_steps):
             root[key].attrs['preprocessing_steps'] = kept
+
+    _set_steps_needing_rebuild(root, steps_needing_rebuild(root) | set(later))
     return later
 
 
@@ -453,17 +489,27 @@ def run_preprocessing(
         # processed is "complete" at scene level while the new episodes have had nothing run
         # on them. The step still runs, but its episode loop skips everything already done.
         outstanding = _episodes_missing_step(root, number)
-        if number in completed_steps and not force and not outstanding:
+        # A step whose marks were invalidated must *recompute*, not merely be re-entered:
+        # its own "output already present" guard would otherwise decline the work and leave
+        # the stale output in place. See STALE_STEPS_ATTR. Checked independently of the marks
+        # rather than inferred from them, so the two can't disagree — invalidation normally
+        # clears the marks too, but a restored or hand-edited mark must not bury the debt.
+        needs_rebuild = number in steps_needing_rebuild(root)
+        if number in completed_steps and not force and not outstanding and not needs_rebuild:
             log.info(f'Skipping {scene_zarr.name}: step {number} already complete')
             continue
         if number in completed_steps and outstanding:
             log.info(f'Step {number} complete for {scene_zarr.name} except {len(outstanding)} new episode(s)')
+        if needs_rebuild:
+            log.info(f'Step {number} was invalidated by an upstream re-run; recomputing it.')
         log.info(f'Running step {number} ({step_cls.step_name}) on {scene_zarr.name}')
         step = step_cls()
-        current_path = step.run(current_path, copy=copy, force=force)
+        current_path = step.run(current_path, copy=copy, force=force or needs_rebuild)
         scene_zarr = SceneFiles.resolve_zarr_path(current_path)
         root = zarr.open_group(str(scene_zarr), mode='a')
         _mark_preprocessing_step(root, number)
+        # Marking invalidates the steps *after* this one, so clear this one's debt afterwards.
+        _set_steps_needing_rebuild(root, steps_needing_rebuild(root) - {number})
         ran.add(number)
         completed_steps = set(preprocessing_steps_done(root))
         if step_number is None:

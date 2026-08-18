@@ -1,10 +1,14 @@
 """Tests for downstream-step invalidation when an earlier step is re-run."""
 
 import pathlib
+import unittest.mock as mock
 
 import zarr
 
 from polyumi_ingest.preproc.step_base import (
+    _set_steps_needing_rebuild,
+    run_preprocessing,
+    steps_needing_rebuild,
     _invalidate_downstream_steps,
     _mark_preprocessing_step,
     _stale_steps,
@@ -103,3 +107,73 @@ def test_stale_steps_ignores_steps_with_no_recorded_time(tmp_path: pathlib.Path)
     root.attrs['preprocessing_step_versions'] = {}
 
     assert _stale_steps(root) == []
+
+
+def test_invalidated_steps_are_recorded_for_rebuild(tmp_path: pathlib.Path) -> None:
+    """
+    Clearing marks is not enough — the debt has to persist for the run that rebuilds them.
+
+    Invalidation and rebuild are routinely different processes: `pingest pp 2 --force`
+    today, `pingest pp` tomorrow.
+    """
+    root = _scene(tmp_path, [1, 2, 3, 4, 5])
+
+    _mark_preprocessing_step(root, 2)
+
+    assert steps_needing_rebuild(root) == {3, 4, 5}
+
+
+def test_rebuild_debt_survives_reopening_the_store(tmp_path: pathlib.Path) -> None:
+    """It lives on the store, not in memory, so a later invocation still honours it."""
+    root = _scene(tmp_path, [1, 2, 3, 4, 5])
+    _mark_preprocessing_step(root, 2)
+
+    reopened = zarr.open_group(str(tmp_path / 'scene.zarr'), mode='a')
+
+    assert steps_needing_rebuild(reopened) == {3, 4, 5}
+
+
+def test_a_clean_run_records_no_rebuild_debt(tmp_path: pathlib.Path) -> None:
+    """Finishing the pipeline in order must not leave anything marked for recompute."""
+    root = _scene(tmp_path, [1, 2, 3, 4])
+
+    _mark_preprocessing_step(root, 5)
+
+    assert steps_needing_rebuild(root) == set()
+
+
+def test_run_preprocessing_forces_an_invalidated_step(tmp_path: pathlib.Path) -> None:
+    """
+    The bug behind the bug: an invalidated step was re-entered but declined to recompute.
+
+    so_align and eef-pose both carry an "output already present; use --force to recompute"
+    guard, so rebuilding scene 31d6 logged "eef/pose_* already present" for all 63 episodes
+    and kept the stale poses through a run that looked successful from the outside.
+    """
+    scene_zarr = tmp_path / 'scene.zarr'
+    root = zarr.open_group(str(scene_zarr), mode='w', zarr_format=2)
+    root.attrs['preprocessing_steps'] = [1, 2]
+    root.attrs['n_episodes'] = 1
+    root.require_group('episode_0').attrs['preprocessing_steps'] = [1, 2]
+    _set_steps_needing_rebuild(root, {2})
+
+    seen: dict[int, bool] = {}
+
+    class _FakeStep:
+        step_name = 'fake'
+        step_number = 2
+
+        def run(self, path, copy=False, force=False):
+            seen[self.step_number] = force
+            return path
+
+    with mock.patch.dict(
+        'polyumi_ingest.preproc.step_base.PREPROCESSING_STEPS',
+        {2: _FakeStep},
+        clear=True,
+    ):
+        run_preprocessing(scene_zarr, step_number=2)
+
+    assert seen[2] is True, 'an invalidated step must run as if forced'
+    # and the debt is cleared once it has actually been rebuilt
+    assert steps_needing_rebuild(zarr.open_group(str(scene_zarr), mode='r')) == set()
