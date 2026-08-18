@@ -25,6 +25,22 @@ _MOUNT_ROOTS = [
     pathlib.Path('/mnt'),
 ]
 
+#: Memoized recording start times, keyed by (path, mtime_ns, size).
+#:
+#: ``find_gopro_video`` probes every MP4 on the card to find the closest match, and it is
+#: called once per session, so a fetch of N sessions against a card of M clips ran N*M
+#: ffprobes for M distinct answers — 20 x 451 = 9020 on the fetch that prompted this. A clip's
+#: creation_time never changes, so all but the first pass were recomputing what they already
+#: knew. Measured at ~100 ms per probe that is 15 minutes instead of 45 seconds.
+#:
+#: The ~100 ms is ffprobe *process startup*, not I/O: probing a local SSD file costs the same
+#: as one on the card, and `ffprobe -version`, which opens no file at all, costs the same
+#: again. So the only lever that matters is calling it fewer times.
+#:
+#: Keyed on stat rather than path alone so swapping cards mid-run cannot serve a stale answer
+#: for a filename the new card happens to reuse — GoPro numbering restarts per card.
+_START_TIME_CACHE: dict[tuple[str, int, int], datetime.datetime] = {}
+
 
 def _mount_unmounted_sd_cards() -> None:
     """Attempt to mount unmounted removable FAT/exFAT partitions via udisksctl."""
@@ -74,7 +90,7 @@ def _mount_unmounted_sd_cards() -> None:
             log.debug(f'Could not mount {dev_path}: {exc}')
 
 
-def _find_gopro_mount(auto_mount: bool = True) -> pathlib.Path | None:
+def find_gopro_mount(auto_mount: bool = True) -> pathlib.Path | None:
     """Scan common Linux auto-mount roots for a volume containing DCIM/100GOPRO."""
     if auto_mount:
         _mount_unmounted_sd_cards()
@@ -102,7 +118,22 @@ def _find_gopro_mount(auto_mount: bool = True) -> pathlib.Path | None:
 
 def _recording_start_time(video_path: pathlib.Path) -> datetime.datetime:
     """
-    Return the UTC recording start time for a GoPro MP4.
+    Return the UTC recording start time for a GoPro MP4, memoized per file.
+
+    See ``_START_TIME_CACHE`` for why the memo matters. Failures are deliberately not
+    cached: they are rare, re-probing one unreadable clip is cheap next to the whole scan,
+    and caching an exception would need the raise site to reconstruct it.
+    """
+    stat = video_path.stat()
+    key = (str(video_path), stat.st_mtime_ns, stat.st_size)
+    if key not in _START_TIME_CACHE:
+        _START_TIME_CACHE[key] = _probe_start_time(video_path)
+    return _START_TIME_CACHE[key]
+
+
+def _probe_start_time(video_path: pathlib.Path) -> datetime.datetime:
+    """
+    Read the UTC recording start time for a GoPro MP4 by shelling out to ffprobe.
 
     Prefers the creation_time tag embedded in the MP4 container (written by the GoPro
     at the moment of shutter press, in UTC). Falls back to filesystem mtime minus
@@ -157,7 +188,7 @@ def find_gopro_video(
 
     """
     if mount_point is None:
-        mount_point = _find_gopro_mount(auto_mount=auto_mount)
+        mount_point = find_gopro_mount(auto_mount=auto_mount)
         if mount_point is None:
             raise FileNotFoundError(
                 'No GoPro SD card found under /media, /run/media, or /mnt.\n'
