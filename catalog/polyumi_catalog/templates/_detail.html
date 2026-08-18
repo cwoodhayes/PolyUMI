@@ -192,6 +192,8 @@
         </dd>
         <dt>Frames lost</dt><dd>{{ detail.slam.n_frames_lost }} / {{ detail.slam.n_frames_total }}</dd>
         <dt>Relocalizations</dt><dd>{{ detail.slam.n_relocalization_events }}</dd>
+        <dt>Max pose jump</dt>
+        <dd>{{ '%.1f cm' % (detail.slam.max_pose_jump_m * 100) if detail.slam.max_pose_jump_m is not none else '—' }}</dd>
         {% if detail.slam.has_optitrack %}
         <dt>OptiTrack</dt><dd>available — exempt from SLAM-based exclusion</dd>
         {% endif %}
