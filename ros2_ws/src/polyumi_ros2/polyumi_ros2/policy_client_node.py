@@ -166,9 +166,10 @@ class PolicyClientNode(Node):
         # means the arm runs out of fresh waypoints before the next chunk lands. The launch
         # default lives in config/inference.yaml (loaded via <param from>); this is the fallback.
         self.declare_parameter('steps_per_inference', 6)
-        # Validation mode: command exactly ONE action per inference and turn latency
-        # compensation off. The arm creeps along the policy's trajectory a step at a time,
-        # stopping between steps, which is ugly but traces the path the model actually wants.
+        # Validation mode: -1 disables it; >= 0 commands exactly ONE action per inference — the
+        # one at THIS INDEX in the chunk — and turns latency compensation off. The arm creeps
+        # along the policy's trajectory a step at a time, stopping between steps, which is ugly
+        # but traces the path the model actually wants.
         #
         # Ignoring latency is legitimate here rather than sloppy: with one action per inference
         # the arm is at REST at every observation instant, and latency only corrupts an
@@ -177,6 +178,16 @@ class PolicyClientNode(Node):
         # maximally closed-loop — receding horizon with horizon 1, i.e. plain MPC — so a success
         # is strong evidence about the visuomotor mapping and a failure has few variables behind
         # it.
+        #
+        # Why an INDEX rather than a bool: the index is the manual replacement for the
+        # stale-action count this mode switches off. 0 is the true zero-latency reading — the
+        # action targeting the observation instant, i.e. roughly where the arm already is — and
+        # it makes each step the smallest possible. Larger n commands further ahead in the
+        # prediction, so the arm covers ground faster per inference at the cost of a bigger jump
+        # per step; it is also how to hand-tune past a residual delay without re-deriving
+        # latency.arm_exec. Both devices take the same index here, unlike the latency path which
+        # splits them, because a hand-picked index is a single experiment dial rather than a
+        # per-device measurement.
         #
         # The cost, and what to watch for: robot0_eef_pos deltas across the n_obs_steps window
         # collapse to ~zero, because both observations land while the arm is idle. That is out of
@@ -187,7 +198,7 @@ class PolicyClientNode(Node):
         # Pacing needs nothing here: fr3_moveit_bridge already drops targets that arrive while it
         # is mid-motion, so the node just keeps offering a fresh single waypoint and the bridge
         # takes the first one after it frees.
-        self.declare_parameter('single_step', False)
+        self.declare_parameter('n_single_step', -1)
         # Per-component system latencies (seconds), loaded from config/inference.yaml via the
         # inference launch file; that file documents each value's provenance. Measure them with
         # `ros2 run polyumi_ros2 latency_probe` (one mode per value) — procedures in
@@ -268,7 +279,7 @@ class PolicyClientNode(Node):
             'gripper_exec': self.get_parameter('latency.gripper_exec').get_parameter_value().double_value,
             'gripper': self.get_parameter('latency.gripper').get_parameter_value().double_value,
         }
-        self._single_step = self.get_parameter('single_step').get_parameter_value().bool_value
+        self._n_single_step = self.get_parameter('n_single_step').get_parameter_value().integer_value
         self._ee_pose_buffer_s = self.get_parameter('buffers.ee_pose_s').get_parameter_value().double_value
         self._validate_params(control_hz)
 
@@ -422,13 +433,14 @@ class PolicyClientNode(Node):
             f'aperture range [{self._gripper_min_width_m}, {self._gripper_max_width_m}]m '
             f'(the low end doubles as the policy->robot offset)'
         )
-        if self._single_step:
+        if self._n_single_step >= 0:
             # A warning, not info: this is a validation mode that silently disables latency
             # compensation, and a run left in it by accident should be impossible to miss.
             self.get_logger().warn(
-                'single_step=true — VALIDATION MODE: latency compensation OFF, one action per '
-                'inference. The arm creeps and stops between steps; that is expected. Set '
-                'single_step:=false for normal receding-horizon execution.'
+                f'n_single_step={self._n_single_step} — VALIDATION MODE: latency compensation '
+                f'OFF, one action per inference (chunk index {self._n_single_step} of '
+                f'{self._n_action_steps}). The arm creeps and stops between steps; that is '
+                'expected. Set n_single_step:=-1 for normal receding-horizon execution.'
             )
 
     def _validate_params(self, control_hz: float) -> None:
@@ -461,6 +473,14 @@ class PolicyClientNode(Node):
                 f'steps_per_inference ({self._steps_per_inference}) > n_action_steps '
                 f'({self._n_action_steps}): each chunk is shorter than the re-inference stride, '
                 'so the arm will stall between chunks. Lower steps_per_inference or raise n_action_steps.'
+            )
+        if self._n_single_step >= self._n_action_steps:
+            # Checked rather than clamped: the slice would silently come back empty and surface as
+            # the "whole chunk stale" warning, which names latency — the one thing this mode
+            # already switched off — and would send you re-measuring it for nothing.
+            errors.append(
+                f'n_single_step ({self._n_single_step}) must be < n_action_steps '
+                f'({self._n_action_steps}), or the chunk has no action at that index'
             )
         if self._post_timeout_s <= 0:
             errors.append(f'post_timeout_s must be > 0, got {self._post_timeout_s}')
@@ -938,16 +958,19 @@ class PolicyClientNode(Node):
         # since a PoseArray carries no timing. Note _actions_to_gripper_trajectory recomputes
         # time_from_start relative to whatever slice it is handed, so the two stay self-consistent.
         #
-        # single_step suspends all of that: no latency compensation, one action per device. See
-        # the parameter declaration for why an uncompensated observation is still correct there.
-        # The gripper truncation is cosmetic — fr3_gripper_bridge already reads only points[0] —
-        # but it keeps the two devices index-aligned and n_published_gripper honest.
+        # n_single_step suspends all of that: no latency compensation, and both devices take the
+        # single action at that hand-picked index. See the parameter declaration for why an
+        # uncompensated observation is still correct there. The index doubles as each device's
+        # "stale" count, so the diagnostics keep reporting what was actually skipped. The gripper
+        # slice is cosmetic — fr3_gripper_bridge already reads only points[0] — but it keeps the
+        # two devices index-aligned and n_published_gripper honest.
         n_received = len(actions)
-        n_stale_arm = 0 if self._single_step else self._n_stale_actions(t_obs, self._latency_act)
-        n_stale_grip = 0 if self._single_step else self._n_stale_actions(t_obs, self._latency_act_gripper)
+        single = self._n_single_step >= 0
+        n_stale_arm = self._n_single_step if single else self._n_stale_actions(t_obs, self._latency_act)
+        n_stale_grip = self._n_single_step if single else self._n_stale_actions(t_obs, self._latency_act_gripper)
         arm_actions = actions[n_stale_arm:]
         grip_actions = actions[n_stale_grip:]
-        if self._single_step:
+        if single:
             arm_actions, grip_actions = arm_actions[:1], grip_actions[:1]
 
         # Published before the all-stale check, so the zero is visible: "nothing was commanded" is

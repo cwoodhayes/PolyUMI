@@ -67,10 +67,12 @@ POLYUMI_PI_HOST="${POLYUMI_PI_HOST:-polyumi-pi}"
 INFERENCE_URL="${INFERENCE_URL:-http://sheep.mech.northwestern.edu:8002/predict_cartesian/}"
 # The Elgato's 1080p software convert runs ~200ms behind; the 50ms auto default drops every tick.
 MAX_IMAGE_AGE_S="${MAX_IMAGE_AGE_S:-0.3}"
-# Validation mode: one action per inference, latency compensation off. SINGLE_STEP=true
-# ./fr3_session.sh makes the arm creep along the policy's trajectory a step at a time — the way
-# to prove a static-scene task works without fighting latency. See inference_demo.launch.xml.
-SINGLE_STEP="${SINGLE_STEP:-false}"
+# Validation mode: -1 off. N_SINGLE_STEP=0 ./fr3_session.sh commands one action per inference —
+# the one at that index in the chunk — with latency compensation off, making the arm creep along
+# the policy's trajectory a step at a time. The way to prove a static-scene task works without
+# fighting latency. 0 is the smallest step; raise it to cover more ground per inference, up to
+# n_action_steps - 1. See inference_demo.launch.xml.
+N_SINGLE_STEP="${N_SINGLE_STEP:--1}"
 # Whether the laptop publishes chunks to the NUC bridges at all. Defaults true because the
 # line is only PRE-TYPED, never run — nothing moves until you press Enter on it, and the NUC
 # side has its own execute_arm/execute_gripper flags (both default false) in front of the arm.
@@ -321,7 +323,7 @@ fi
 # Foxglove all work, the NUC is simply absent, and the only symptom is policy_client_node
 # repeating `TF lookup failed: "fr3_link0" ... does not exist`. Cost an hour on 2026-08-17.
 pretype "$LAPTOP_PANE" \
-  "source setup_franka_env.sh >/dev/null && $(logged policy_client "ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=$INFERENCE_URL execute_motion:=$EXECUTE_MOTION max_image_age_s:=$MAX_IMAGE_AGE_S pi_host:=$PI_HOST single_step:=$SINGLE_STEP")"
+  "source setup_franka_env.sh >/dev/null && $(logged policy_client "ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=$INFERENCE_URL execute_motion:=$EXECUTE_MOTION max_image_age_s:=$MAX_IMAGE_AGE_S pi_host:=$PI_HOST n_single_step:=$N_SINGLE_STEP")"
 
 tmux select-window -t "$NUC_WINDOW"
 cat <<EOF
