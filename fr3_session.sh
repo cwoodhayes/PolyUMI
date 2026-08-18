@@ -8,6 +8,10 @@
 #     ./fr3_session.sh --kill-local   # tear down the LOCAL session only (remote ones survive)
 #     ./fr3_session.sh --kill         # --kill-local, plus stop the remote sessions too
 #
+# Both --kill forms interrupt what is running and wait KILL_GRACE_S (default 5) before killing
+# any pane, because SIGHUP — what a pane getting killed actually delivers — leaves the Pi's LED
+# lit and sheep's inference container running. See the block by the flags for the details.
+#
 # Every fresh start (not a re-attach) also makes each machine run this working copy — builds
 # polyumi_ros2 here, rsyncs nuc/ to the NUC, and calls ./deploy.sh for the Pi — so nothing runs
 # code you no longer have checked out. See the "Deploy" section below.
@@ -75,6 +79,65 @@ MAX_IMAGE_AGE_S="${MAX_IMAGE_AGE_S:-0.3}"
 EXECUTE_MOTION="${EXECUTE_MOTION:-true}"
 
 if [ "${1:-}" = "--kill-local" ] || [ "${1:-}" = "--kill" ]; then
+  # Seconds between "stop what you're doing" and killing the pane out from under it. Every
+  # process below needs SIGINT specifically, and needs to still be alive when it arrives —
+  # killing the pane first delivers SIGHUP instead, which none of them clean up on:
+  #
+  #   Pi      `polyumi-pi stream` turns the finger LED off in a `finally:` reached through
+  #           KeyboardInterrupt. Python does not unwind `finally` on SIGHUP, so on a hard kill
+  #           the LED stays lit until someone notices it (pi/polyumi_pi/main.py, stream()).
+  #   sheep   serve_policy.sh ends in `exec docker run --rm -i -t`. Under -t the ^C reaches the
+  #           container through the pty, but a SIGHUP to the docker CLI is not forwarded: the CLI
+  #           dies, the container keeps running, --rm never fires, and the port stays held. That
+  #           is the "old inference server is still up when I get back on sheep".
+  #   NUC     ros2 launch needs SIGINT to run its shutdown sequence — which is the part that says
+  #           whether bringup released the FCI cleanly (see "WHERE THE LOGS GO" above).
+  #
+  # One grace window covers all of them: every interrupt goes out first, then a single sleep,
+  # then the kills. Raise it if a teardown is still mid-flight when the pane disappears.
+  KILL_GRACE_S="${KILL_GRACE_S:-5}"
+  NEEDS_GRACE=0
+
+  # The Pi first, and on BOTH paths — including --kill-local, which is not the exception it looks
+  # like. The Pi pane is a plain `ssh -t`, not a remote tmux, so it has nothing to survive into:
+  # dropping the local session closes the connection and the Pi's sshd SIGHUPs the stream either
+  # way. This only decides whether it dies cleanly, so it is not "killing a remote".
+  #
+  # Scoped to `stream`, the one thing this script starts on the Pi. A `record-episode` or the
+  # polyumi-pi.service `start-scene` is someone else's process and is left alone. pkill exits 1
+  # when nothing matched, which is a normal "nothing to stop", not an error.
+  if ssh -o ConnectTimeout=5 -o BatchMode=yes "$POLYUMI_PI_HOST" \
+      "pkill -INT -f 'polyumi-pi stream'" 2>/dev/null; then
+    echo "Interrupted 'polyumi-pi stream' on $POLYUMI_PI_HOST (so the LED goes out)."
+    NEEDS_GRACE=1
+  fi
+
+  # send-keys C-c rather than `pkill -INT` over ssh: the remote pane may be holding a pre-typed
+  # line or running something the operator started by hand, and ^C into the pty does the right
+  # thing for all of it without this script needing to know what is in there. Every pane of the
+  # session, not just the active one, in case it was split by hand. has-session gates it so the
+  # exit status distinguishes "interrupted something" from "nothing there" — xargs would report
+  # success either way.
+  interrupt_remote_session() {
+    local host="$1" sess="$2"
+    ssh -o ConnectTimeout=5 -o BatchMode=yes "$host" \
+      "tmux has-session -t $sess 2>/dev/null && tmux list-panes -s -t $sess -F '#{pane_id}' | xargs -r -I{} tmux send-keys -t {} C-c" \
+      2>/dev/null
+  }
+
+  if [ "${1:-}" = "--kill" ]; then
+    for sess in fr3-bringup fr3-inference; do
+      interrupt_remote_session "$NUC_SSH_HOST" "$sess" && NEEDS_GRACE=1
+    done
+    interrupt_remote_session "$SHEEP_SSH_HOST" polyumi && NEEDS_GRACE=1
+    [ "$NEEDS_GRACE" = 1 ] && echo "Sent C-c to the remote sessions."
+  fi
+
+  if [ "$NEEDS_GRACE" = 1 ]; then
+    echo "Waiting ${KILL_GRACE_S}s for shutdown (KILL_GRACE_S to change) ..."
+    sleep "$KILL_GRACE_S"
+  fi
+
   tmux kill-session -t "$SESSION" 2>/dev/null && echo "Killed local session '$SESSION'."
   if [ "${1:-}" = "--kill-local" ]; then
     echo "NOTE: the remote tmux sessions on $NUC_SSH_HOST/$SHEEP_SSH_HOST are still running by design."
