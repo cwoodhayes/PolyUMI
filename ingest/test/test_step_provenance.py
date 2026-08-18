@@ -1,6 +1,7 @@
 """Tests for the per-step commit provenance recorded alongside preprocessing_steps."""
 
 import pathlib
+import unittest.mock as mock
 
 import zarr
 
@@ -78,11 +79,27 @@ def test_git_sha_resolves_against_the_repo_not_the_cwd(tmp_path: pathlib.Path, m
     """
     The sha must not depend on where the process was launched from.
 
-    The catalog server and ingest CLI are routinely run from other directories; a
+    The catalog server and ingest CLI are routinely run from elsewhere; a
     cwd-relative lookup would stamp whatever unrelated repo the shell happened to be in.
     """
-    expected = gitinfo.git_sha()
+    expected = gitinfo._resolve_git_sha()
     monkeypatch.chdir(tmp_path)
-    gitinfo.git_sha.cache_clear()
 
-    assert gitinfo.git_sha() == expected
+    assert gitinfo._resolve_git_sha() == expected
+
+
+def test_git_sha_is_fixed_at_import_not_re_read_per_call() -> None:
+    """
+    The stamp must describe the code that is running, not HEAD at the moment it is asked.
+
+    A process that outlives a commit would otherwise stamp a commit it never executed.
+    That is not hypothetical: a catalog server up since before a batch of commits ran the
+    old eef-pose step while reporting the new HEAD, and scene 30ed was stamped with a
+    commit whose code had never touched it.
+    """
+    before = gitinfo.git_sha()
+
+    with mock.patch.object(gitinfo, '_resolve_git_sha', return_value='f' * 40) as resolve:
+        assert gitinfo.git_sha() == before
+
+    resolve.assert_not_called()
