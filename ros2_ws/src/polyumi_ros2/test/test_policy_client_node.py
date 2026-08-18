@@ -374,68 +374,6 @@ def test_preview_published_full_chunk_without_execution(make_node):
     assert msg.header.frame_id == node._base_frame
 
 
-def _single_step_publish(make_node, n_single_step: int):
-    """
-    Run one _post_and_act at the given n_single_step and return the (arm, gripper) publish mocks.
-
-    The observation is deliberately 2 s old, which normally drops the whole 8-step chunk for both
-    devices (see the preview test above) — so anything published came from the index, not from
-    surviving the latency math.
-    """
-    params = {'execute_motion': True, 'control_hz': 10.0}
-    if n_single_step is not None:
-        params['n_single_step'] = n_single_step
-    node = make_node(**params, **{'latency.arm_exec': 0.702, 'latency.gripper_exec': 0.514})
-    actions = [[float(i), 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0] for i in range(8)]
-    with (
-        patch.object(node, '_http_post_json', return_value={'actions': actions}),
-        patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))),
-        patch.object(node._target_pub, 'publish') as target_pub,
-        patch.object(node._gripper_pub, 'publish') as gripper_pub,
-    ):
-        node._post_and_act(payload={}, t_obs=_t(98.0))
-    return target_pub, gripper_pub
-
-
-@pytest.mark.parametrize('n', [0, 3, 7])
-def test_n_single_step_commands_that_index_and_ignores_latency(make_node, n):
-    """
-    n_single_step publishes exactly actions[n] to both devices, however stale the observation is.
-
-    The validation mode for proving a static-scene task: the arm is at rest at every observation
-    instant, so an uncompensated observation is still correct. The index is a hand-picked stand-in
-    for the stale count the mode switches off, so it must be honoured verbatim — including 0, the
-    true zero-latency reading, and the last index of the chunk.
-    """
-    target_pub, gripper_pub = _single_step_publish(make_node, n)
-
-    target_pub.assert_called_once()
-    arm_msg = target_pub.call_args[0][0]
-    assert len(arm_msg.poses) == 1
-    assert arm_msg.poses[0].position.x == pytest.approx(float(n))  # actions[n], not [0] or [-1]
-
-    gripper_pub.assert_called_once()
-    assert len(gripper_pub.call_args[0][0].points) == 1
-
-
-def test_n_single_step_off_still_compensates_latency(make_node):
-    """The default (-1) is unchanged: a 2 s-old observation drops the whole chunk for both."""
-    target_pub, gripper_pub = _single_step_publish(make_node, None)
-    target_pub.assert_not_called()
-    gripper_pub.assert_not_called()
-
-
-def test_n_single_step_past_the_chunk_is_rejected_at_startup(make_node):
-    """
-    An index with no action behind it fails fast rather than publishing nothing.
-
-    Left unchecked the slice comes back empty and surfaces as the "whole chunk stale" warning,
-    which blames latency — the one thing this mode already switched off.
-    """
-    with pytest.raises(ValueError, match=r'n_single_step \(8\) must be < n_action_steps'):
-        make_node(n_single_step=8, n_action_steps=8)
-
-
 def test_preview_disabled_creates_no_publisher(make_node):
     """publish_preview=false suppresses the preview publisher entirely."""
     node = make_node(publish_preview=False)

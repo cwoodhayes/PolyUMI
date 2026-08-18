@@ -48,13 +48,6 @@
   <!-- Skip pi_receiver_node (no ZMQ connection to the Pi) for FR3-motion-only testing when
        the Pi isn't running / isn't needed — e.g. iterating on chunk execution at the arm. -->
   <arg name="motion_only" default="false"/>
-  <!-- Validation mode: -1 off; >= 0 commands one action per inference, the one at that index in
-       the chunk, with latency compensation off. The arm creeps along the policy's trajectory a
-       step at a time, stopping between steps — ugly, but it traces the path the model wants
-       without any latency guesswork, because the arm is at rest at every observation instant.
-       For proving a static-scene task works at all. 0 is the smallest step; raise it to cover
-       more ground per inference. Must be < n_action_steps. -->
-  <arg name="n_single_step" default="-1"/>
   <!-- Inference-loop config: receding-horizon stride + per-component system latencies. -->
   <arg name="inference_config" default="$(find-pkg-share polyumi_ros2)/config/inference.yaml"/>
 
@@ -74,9 +67,5 @@
     <param name="post_timeout_s" value="$(var post_timeout_s)"/>
     <param name="tf_use_latest" value="$(var tf_use_latest)"/>
     <param from="$(var inference_config)"/>
-    <!-- AFTER the <param from> above, deliberately: later params win in ROS 2 XML launch, and
-         n_single_step is a per-run experiment dial, not config. It is not in inference.yaml for
-         the same reason — a value there would silently clobber this arg. -->
-    <param name="n_single_step" value="$(var n_single_step)"/>
   </node>
 </launch>
