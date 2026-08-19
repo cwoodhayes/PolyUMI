@@ -300,7 +300,6 @@ class PolicyClientNode(Node):
         # and the tf2 message for it ("frame does not exist") names the frame rather than the
         # cause. See _warn_no_tf_ever.
         self._tf_ever_ok = False
-        self._no_tf_reported = False
 
         # Motion execution (Phase 2). The MoveIt calls run in a bridge node ON THE NUC
         # (fr3_moveit_bridge), not here: the laptop (rmw_cyclonedds 4.x, Kilted) and NUC
@@ -737,9 +736,8 @@ class PolicyClientNode(Node):
         so slow to spot: the camera, the Pi stream and Foxglove are all fine, and only the arm
         (the one thing coming over the wire) is missing.
         """
-        if self._tf_ever_ok or self._no_tf_reported:
+        if self._tf_ever_ok:
             return
-        self._no_tf_reported = True
         self.get_logger().error(
             f'No transform for {self._base_frame} has EVER arrived — this process is probably not '
             f'reaching the NUC at all, rather than having lost the arm mid-run. Check, in order: '
@@ -748,7 +746,8 @@ class PolicyClientNode(Node):
             f'(2) NUC bringup is up (ros2 launch nuc/launch/fr3_bringup.launch.py). '
             f'This process: ROS_DOMAIN_ID={os.environ.get("ROS_DOMAIN_ID", "unset (0)")} '
             f'RMW_IMPLEMENTATION={os.environ.get("RMW_IMPLEMENTATION", "unset (default)")} '
-            f'CYCLONEDDS_URI={os.environ.get("CYCLONEDDS_URI", "unset")}'
+            f'CYCLONEDDS_URI={os.environ.get("CYCLONEDDS_URI", "unset")}',
+            once=True,
         )
 
     def _gripper_width_policy_units(self, image_stamp: rclpy.time.Time) -> float | None:
