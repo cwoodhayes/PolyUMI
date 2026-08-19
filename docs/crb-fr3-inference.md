@@ -648,8 +648,10 @@ than the latency budget, so every action in it had already elapsed. See
 [calibration-instructions.md](calibration-instructions.md), "Latencies", for the budget arithmetic.
 
 The counters are per device: the arm and hand are truncated by their own `latency.*_exec`, so they
-legitimately differ (the hand is currently ~1 step ahead, at `arm_exec` 0.620 vs `gripper_exec`
-0.514 — the gap moves whenever either is re-measured).
+legitimately differ, and the servoed arm is much the cheaper of the two — the hand's discrete,
+rate-limited Move/Grasp goals dominate. The gap moves whenever either is re-measured; read the
+current values from [inference.yaml](../ros2_ws/src/polyumi_ros2/config/inference.yaml) rather than
+from here.
 
 Foxglove plots live only — its buffer is not retention. For anything you want to compare across
 runs, record it:
@@ -921,11 +923,11 @@ The controller warns `Whole chunk of N waypoints was already in the past; arm is
 the MoveIt path, it does not stall or error; the interpolator clamps at its last waypoint, so the
 arm holds its position indefinitely and everything else keeps running.
 
-Two causes, and they are distinguishable: if `latency.arm_exec` is stale (still the ~0.62 s MoveIt
-planning figure after the servo landed), the anchor is pushed so far back that the whole chunk
-lands behind `now`. Re-measure it. If the laptop and NUC clocks have drifted, the absolute
-timestamps are meaningless on arrival — check `ssh jailfranka chronyc sources` for `^* 10.0.0.1`,
-same as the TF-extrapolation failure above.
+Two causes, and they are distinguishable: if `latency.arm_exec` is stale (still a MoveIt planning
+figure, which is an order of magnitude larger than the servo's), the anchor is pushed so far back
+that the whole chunk lands behind `now`. Re-measure it. If the laptop and NUC clocks have drifted,
+the absolute timestamps are meaningless on arrival — check `ssh jailfranka chronyc sources` for
+`^* 10.0.0.1`, same as the TF-extrapolation failure above.
 
 Confirm the loop is live: `policy_client_node` logs one `episode /reset sent` line, then
 `action chunk n=… (dropped … arm / … gripper, inference=…ms) first: x=… y=… z=… grip=…` each tick

@@ -276,8 +276,8 @@ went. **This moves the arm.**
 - **It now does two jobs, so it is worth more care than it used to be.** Besides feeding
   `_n_stale_actions`, it sets every chunk's anchor. Those two cancel in *timing* — the first
   published waypoint lands at ~now regardless — but not in *phase*: overstating it skips
-  `arm_exec / action_dt` steps ahead in the policy's intended trajectory. The pre-servo 0.620 would
-  now be six steps of skip.
+  `arm_exec / action_dt` steps ahead in the policy's intended trajectory. Carrying the old MoveIt
+  planning figure over to the servo would be several steps of skip.
 - **`-p wire:=pose_array` measures a different quantity**, not the same one less well: it drives
   `fr3_moveit_bridge`, and returns a planning time dominated by `max_velocity_scaling`. Only use it
   while the MoveIt executor still exists.
