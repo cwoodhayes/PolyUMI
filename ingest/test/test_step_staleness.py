@@ -3,6 +3,7 @@
 import pathlib
 import unittest.mock as mock
 
+import pytest
 import zarr
 
 from polyumi_ingest.preproc.step_base import (
@@ -11,7 +12,6 @@ from polyumi_ingest.preproc.step_base import (
     steps_needing_rebuild,
     _invalidate_downstream_steps,
     _mark_preprocessing_step,
-    _stale_steps,
     episode_steps_done,
     preprocessing_step_versions,
     preprocessing_steps_done,
@@ -79,34 +79,6 @@ def test_invalidation_leaves_the_arrays_alone(tmp_path: pathlib.Path) -> None:
     _invalidate_downstream_steps(root, 2)
 
     assert 'eef/pose_slam' in root['episode_0']
-
-
-def test_stale_steps_flags_a_step_that_predates_its_input(tmp_path: pathlib.Path) -> None:
-    """Scene 31d6's exact shape: step 2 re-run after steps 3-5 had already finished."""
-    root = _scene(tmp_path, [1, 2, 3, 4, 5])
-    versions = preprocessing_step_versions(root)
-    versions['2']['completed_at'] = '2026-01-09T00:00:00+00:00'  # re-run after everything else
-    root.attrs['preprocessing_step_versions'] = versions
-
-    assert _stale_steps(root) == [3, 4, 5]
-
-
-def test_stale_steps_is_empty_when_steps_ran_in_order(tmp_path: pathlib.Path) -> None:
-    """Ascending completion times are the healthy case and must not trigger reprocessing."""
-    assert _stale_steps(_scene(tmp_path, [1, 2, 3, 4, 5])) == []
-
-
-def test_stale_steps_ignores_steps_with_no_recorded_time(tmp_path: pathlib.Path) -> None:
-    """
-    A missing stamp is 'unknown', not 'stale'.
-
-    Stores predating per-step provenance have no times at all; treating that as staleness
-    would re-run the whole pipeline on every scene processed before it existed.
-    """
-    root = _scene(tmp_path, [1, 2, 3])
-    root.attrs['preprocessing_step_versions'] = {}
-
-    assert _stale_steps(root) == []
 
 
 def test_invalidated_steps_are_recorded_for_rebuild(tmp_path: pathlib.Path) -> None:
@@ -213,33 +185,34 @@ def test_a_forced_step_still_invalidates_the_ones_after_it(tmp_path: pathlib.Pat
     assert episode_steps_done(root['episode_0']) == [1]
 
 
-def test_healing_still_reports_before_a_forced_run_clears_the_stamps(tmp_path: pathlib.Path, caplog) -> None:
+def test_a_targeted_step_refuses_to_build_on_unrebuilt_debt(tmp_path: pathlib.Path) -> None:
     """
-    Out-of-order steps are detected off ``completed_at``, which the force-clear then discards.
+    `pingest pp 5` must not quietly rebuild step 5 from step 3/4 output known to be stale.
 
-    So the staleness check has to run first, or `pingest pp --force` would heal the store in
-    silence and never say which steps had been running against superseded inputs.
+    The debt list is the only record left of it — invalidation pops those steps' ``completed_at``
+    stamps, so ``_stale_steps`` cannot see them either.
     """
-    root = _scene(tmp_path, steps=[1, 2, 3])
-    # step 3 finished before step 2 did: it describes inputs step 2 has since replaced
-    versions = dict(root.attrs['preprocessing_step_versions'])
-    versions['3'] = {'git_sha': 'sha3', 'completed_at': '2026-01-01T12:00:00+00:00'}
-    root.attrs['preprocessing_step_versions'] = versions
+    root = _scene(tmp_path, steps=[1, 2])
+    _set_steps_needing_rebuild(root, {3, 4, 5})
     scene_zarr = tmp_path / 'scene.zarr'
+
+    ran: list[int] = []
 
     class _FakeStep:
         step_name = 'fake'
-        step_number = 1
+        step_number = 0
 
         def run(self, path, copy=False, force=False):
+            ran.append(self.step_number)
             return path
 
-    with mock.patch.dict(
-        'polyumi_ingest.preproc.step_base.PREPROCESSING_STEPS',
-        {1: _FakeStep},
-        clear=True,
-    ):
-        with caplog.at_level('WARNING'):
-            run_preprocessing(scene_zarr, step_number=1, force=True)
+    steps = {n: type(f'_Fake{n}', (_FakeStep,), {'step_number': n}) for n in (3, 4, 5)}
+    with mock.patch.dict('polyumi_ingest.preproc.step_base.PREPROCESSING_STEPS', steps, clear=True):
+        with pytest.raises(RuntimeError, match=r'built from step\(s\) \[3, 4\]'):
+            run_preprocessing(scene_zarr, step_number=5)
+        assert ran == []
 
-    assert 'completed before a step they depend on' in caplog.text
+        # The full run is legal: 3 and 4 are rebuilt by the same loop, before 5 needs them.
+        run_preprocessing(scene_zarr, step_number=None)
+
+    assert ran == [3, 4, 5]

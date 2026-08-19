@@ -330,43 +330,6 @@ def _warn_if_outdated_pzarr(root: zarr.Group, scene_label: str) -> None:
         )
 
 
-def _completion_times(root: zarr.Group) -> dict[int, dt.datetime]:
-    """Return the parsed ``completed_at`` per completed step, omitting unusable stamps."""
-    versions = preprocessing_step_versions(root)
-    times: dict[int, dt.datetime] = {}
-    for step in preprocessing_steps_done(root):
-        raw = versions.get(str(step), {}).get('completed_at')
-        if not isinstance(raw, str):
-            continue
-        try:
-            stamp = dt.datetime.fromisoformat(raw)
-        except ValueError:
-            continue
-        # Naive stamps can't be compared against aware ones; everything is written in UTC.
-        times[step] = stamp if stamp.tzinfo else stamp.replace(tzinfo=dt.timezone.utc)
-    return times
-
-
-def _stale_steps(root: zarr.Group) -> list[int]:
-    """
-    Completed steps that finished *before* a step they depend on. Empty on a healthy store.
-
-    Retroactive detection for stores written before :func:`_invalidate_downstream_steps`
-    existed, which is the only reason a scene can be in this state going forward. Steps
-    without a ``completed_at`` are invisible here — a missing stamp is "unknown", not
-    "stale" — so pre-provenance stores are left alone rather than needlessly reprocessed.
-    """
-    times = _completion_times(root)
-    stale: list[int] = []
-    latest_upstream: dt.datetime | None = None
-    for step in sorted(times):
-        if latest_upstream is not None and times[step] < latest_upstream:
-            stale.append(step)
-        elif latest_upstream is None or times[step] > latest_upstream:
-            latest_upstream = times[step]
-    return stale
-
-
 class StepComplete(Exception):  # noqa: N818 — control flow, not an error
     """
     Raised by ``prepare_scene`` to end a step early with nothing left to do.
@@ -502,21 +465,6 @@ def run_preprocessing(
     root = zarr.open_group(str(scene_zarr), mode='a')
     _warn_if_outdated_pzarr(root, scene_zarr.parent.name)
     _backfill_episode_steps(root)
-    # Heal a store whose steps were run out of order before the invalidation above existed.
-    # Clearing from the *earliest* stale step keeps the chain intact — reprocessing step 5
-    # while step 3 is still stale would just rebuild it from stale inputs.
-    #
-    # Before the force-clear below, not after: this reads `completed_at` stamps, and clearing
-    # the marks takes those stamps with them. A forced run would otherwise heal silently and
-    # never say which steps were out of order.
-    stale = _stale_steps(root)
-    if stale:
-        log.warning(
-            f'{scene_zarr.parent.name}: step(s) {stale} completed before a step they depend on '
-            f'— their output describes superseded inputs. Marking them incomplete so this run '
-            f'rebuilds them.'
-        )
-        _invalidate_downstream_steps(root, min(stale) - 1)
     step_numbers = [step_number] if step_number is not None else sorted(PREPROCESSING_STEPS)
     if force:
         # Exactly the steps about to re-run, and at both levels. Without this a forced run
@@ -546,6 +494,15 @@ def run_preprocessing(
         if number in completed_steps and not force and not outstanding and not needs_rebuild:
             log.info(f'Skipping {scene_zarr.name}: step {number} already complete')
             continue
+        # Refuse to build on inputs the store itself records as stale. `s not in step_numbers`
+        # is what makes a full run legal: there the earlier debt is rebuilt by this same loop,
+        # a few iterations from now. A targeted `pingest pp 5` has no such loop behind it.
+        blocking = sorted(s for s in steps_needing_rebuild(root) if s < number and s not in step_numbers)
+        if blocking:
+            raise RuntimeError(
+                f'step {number} would be built from step(s) {blocking}, which an upstream re-run '
+                f'invalidated and nothing has rebuilt yet — run `pingest pp` (no step number) first.'
+            )
         if number in completed_steps and outstanding:
             log.info(f'Step {number} complete for {scene_zarr.name} except {len(outstanding)} new episode(s)')
         if needs_rebuild:
