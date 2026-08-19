@@ -8,6 +8,10 @@
 #     ./fr3_session.sh --kill-local   # tear down the LOCAL session only (remote ones survive)
 #     ./fr3_session.sh --kill         # --kill-local, plus stop the remote sessions too
 #
+# Both --kill forms interrupt what is running and wait KILL_GRACE_S (default 8) before killing
+# any pane: SIGHUP, what killing a pane delivers, leaves the Pi's LED lit and sheep's inference
+# container running.
+#
 # Every fresh start (not a re-attach) also makes each machine run this working copy — builds
 # polyumi_ros2 here, rsyncs nuc/ to the NUC, and calls ./deploy.sh for the Pi — so nothing runs
 # code you no longer have checked out. See the "Deploy" section below.
@@ -67,8 +71,58 @@ POLYUMI_PI_HOST="${POLYUMI_PI_HOST:-polyumi-pi}"
 INFERENCE_URL="${INFERENCE_URL:-http://sheep.mech.northwestern.edu:8002/predict_cartesian/}"
 # The Elgato's 1080p software convert runs ~200ms behind; the 50ms auto default drops every tick.
 MAX_IMAGE_AGE_S="${MAX_IMAGE_AGE_S:-0.3}"
+# Whether the laptop publishes chunks to the NUC bridges at all. Defaults true because the
+# line is only PRE-TYPED, never run — nothing moves until you press Enter on it, and the NUC
+# side has its own execute_arm/execute_gripper flags (both default false) in front of the arm.
+# EXECUTE_MOTION=false ./fr3_session.sh for a dry run: the preview topics still show every
+# commanded chunk in Foxglove, but /polyumi/target_poses is never published.
+EXECUTE_MOTION="${EXECUTE_MOTION:-true}"
 
 if [ "${1:-}" = "--kill-local" ] || [ "${1:-}" = "--kill" ]; then
+  # Interrupt everything, wait once, then kill. Killing a pane delivers SIGHUP, which none of
+  # these clean up on: the Pi leaves the finger LED lit (its `finally:` only runs via
+  # KeyboardInterrupt), sheep's `docker run` CLI dies without forwarding it so the container and
+  # its port survive, and ros2 launch skips the shutdown that reports whether the FCI was
+  # released. 8s covers the Pi's worst case: stream() stops both child streamers (2s SIGTERM +
+  # 2s SIGKILL join each) before it touches the LED.
+  KILL_GRACE_S="${KILL_GRACE_S:-8}"
+  NEEDS_GRACE=0
+
+  # The Pi on BOTH paths, --kill-local included: that pane is a plain `ssh -t` with no remote
+  # tmux to survive into, so it dies either way — this only decides whether it dies cleanly.
+  # ^C into the pane rather than `pkill` over ssh: `polyumi-pi` is a zsh alias, so no remote
+  # cmdline contains the pattern. Addressed by window name because the kill path is a different
+  # invocation from the one that captured the pane IDs.
+  PI_PANE="$(tmux list-panes -t "$SESSION:polyumi-pi" -F '#{pane_id}' 2>/dev/null | head -1 || true)"
+  if [ -n "$PI_PANE" ]; then
+    tmux send-keys -t "$PI_PANE" C-c
+    echo "Sent C-c to the Pi pane (so 'polyumi-pi stream' turns the LED off on its way out)."
+    NEEDS_GRACE=1
+  fi
+
+  # Same ^C, and it also spares a pre-typed line or anything started by hand. Every pane, in case
+  # one was split. has-session gates it so the exit status means "interrupted something" — xargs
+  # reports success either way.
+  interrupt_remote_session() {
+    local host="$1" sess="$2"
+    ssh -o ConnectTimeout=5 -o BatchMode=yes "$host" \
+      "tmux has-session -t $sess 2>/dev/null && tmux list-panes -s -t $sess -F '#{pane_id}' | xargs -r -I{} tmux send-keys -t {} C-c" \
+      2>/dev/null
+  }
+
+  if [ "${1:-}" = "--kill" ]; then
+    for sess in fr3-bringup fr3-inference; do
+      interrupt_remote_session "$NUC_SSH_HOST" "$sess" && NEEDS_GRACE=1
+    done
+    interrupt_remote_session "$SHEEP_SSH_HOST" polyumi && NEEDS_GRACE=1
+    [ "$NEEDS_GRACE" = 1 ] && echo "Sent C-c to the remote sessions."
+  fi
+
+  if [ "$NEEDS_GRACE" = 1 ]; then
+    echo "Waiting ${KILL_GRACE_S}s for shutdown (KILL_GRACE_S to change) ..."
+    sleep "$KILL_GRACE_S"
+  fi
+
   tmux kill-session -t "$SESSION" 2>/dev/null && echo "Killed local session '$SESSION'."
   if [ "${1:-}" = "--kill-local" ]; then
     echo "NOTE: the remote tmux sessions on $NUC_SSH_HOST/$SHEEP_SSH_HOST are still running by design."
@@ -276,7 +330,17 @@ if [ "$NUC_INFER_FRESH" = 1 ]; then
 fi
 
 # --- Pi: RUN the stream. Stateless, moves nothing, and the laptop warns without it.
-tmux send-keys -t "$PI_PANE" "polyumi-pi stream" C-m
+#
+# Stop polyumi-pi.service first. It runs `start-scene` on boot, and start-scene and stream both
+# construct an LEDManager on the same hardware PWM channel; whoever constructs one last wins,
+# because HardwarePWM.start(0) zeroes the duty cycle, and the loser goes on believing its LED is
+# lit. Restart=on-failure means the service retries all through a stream that holds the camera,
+# darkening the finger LED each time. Nothing in the stream path can defend against this — the
+# other process owns the pin just as legitimately. See docs/crb-fr3-inference.md.
+#
+# `;` not `&&`: a Pi without this unit would otherwise get "Unit not loaded", a non-zero exit,
+# and no stream at all. The error still prints in the pane, so a real failure stays visible.
+tmux send-keys -t "$PI_PANE" "sudo systemctl stop polyumi-pi; polyumi-pi stream" C-m
 
 # --- Sheep: PRETYPE. The checkpoint changes every training run, so the path is yours to pick.
 # --- The five most recent are listed above the prompt to save a hunt through dp_outputs/.
@@ -289,8 +353,14 @@ fi
 
 # --- Laptop: PRETYPE. Depends on every pane above being live, and there is no readiness gate
 # --- here, so this is the one you press Enter on last.
+#
+# The line re-sources setup_franka_env.sh even though the pane already did so above, and that
+# redundancy is the point: this is the command that lands in shell history, so every later
+# recall of it carries its own DDS env instead of inheriting whatever the shell happened to
+# have. An interactive rc exporting its own ROS_DOMAIN_ID silently beats tmux's inherited
+# environment, and the only symptom is policy_client_node never seeing fr3_link0.
 pretype "$LAPTOP_PANE" \
-  "$(logged policy_client "ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=$INFERENCE_URL execute_motion:=true max_image_age_s:=$MAX_IMAGE_AGE_S pi_host:=$PI_HOST")"
+  "source setup_franka_env.sh >/dev/null && $(logged policy_client "ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=$INFERENCE_URL execute_motion:=$EXECUTE_MOTION max_image_age_s:=$MAX_IMAGE_AGE_S pi_host:=$PI_HOST")"
 
 tmux select-window -t "$NUC_WINDOW"
 cat <<EOF

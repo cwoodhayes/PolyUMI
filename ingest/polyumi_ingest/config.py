@@ -47,6 +47,22 @@ def load_closed_width_m() -> float:
     return float(load_gripper_calib()['gripper_fingers']['closed_mm']) / 1000.0
 
 
+def load_open_width_m() -> float:
+    """
+    Load the open width: the ArUco finger-tag separation with the gripper fully open, in metres.
+
+    Paired with :func:`load_closed_width_m` to bound exported widths. The handheld gripper is a
+    rigid mechanism with a hard stop, so a tag separation above this is a detection failure
+    rather than a wider demonstration — the export clamps to it and says how often it had to.
+
+    Required, not defaulted, for the same reason as the closed width: a wrong default silently
+    reshapes every exported width. Derive it with ``pingest calibrate-gripper``.
+
+    :raises KeyError: if ``gripper_fingers.open_mm`` is missing from the config.
+    """
+    return float(load_gripper_calib()['gripper_fingers']['open_mm']) / 1000.0
+
+
 def load_slam_config() -> dict:
     """
     Load SLAM step tunables from config/slam.yaml.

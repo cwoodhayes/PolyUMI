@@ -30,6 +30,7 @@ Usage:
 import base64
 import json
 import math
+import os
 import threading
 import time
 import urllib.error
@@ -295,6 +296,10 @@ class PolicyClientNode(Node):
         # no need for a separate hand-rolled pose buffer.
         self._tf_buffer = tf2_ros.Buffer(cache_time=Duration(seconds=self._ee_pose_buffer_s))
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+        # A lookup that has NEVER succeeded is a different fault from one that stopped working,
+        # and the tf2 message for it ("frame does not exist") names the frame rather than the
+        # cause. See _warn_no_tf_ever.
+        self._tf_ever_ok = False
 
         # Motion execution (Phase 2). The MoveIt calls run in a bridge node ON THE NUC
         # (fr3_moveit_bridge), not here: the laptop (rmw_cyclonedds 4.x, Kilted) and NUC
@@ -702,7 +707,9 @@ class PolicyClientNode(Node):
             tf = self._tf_buffer.lookup_transform(self._base_frame, self._eef_frame, target_time)
         except (LookupException, ConnectivityException, ExtrapolationException) as e:
             self._warn_throttled(f'TF lookup failed: {e}')
+            self._warn_no_tf_ever()
             return None
+        self._tf_ever_ok = True
 
         gripper_width = self._gripper_width_policy_units(image_stamp)
         if gripper_width is None:
@@ -711,6 +718,30 @@ class PolicyClientNode(Node):
         t = tf.transform.translation
         r = tf.transform.rotation
         return np.array([t.x, t.y, t.z, r.x, r.y, r.z, r.w, gripper_width], dtype=np.float64)
+
+    def _warn_no_tf_ever(self) -> None:
+        """
+        Report, once, that no arm TF has EVER arrived — which is an env fault, not a TF fault.
+
+        The arm's frames come from the NUC, so "frame does not exist" from the very first tick
+        means this process is not reaching the NUC at all. tf2 cannot say that; its message reads
+        like the arm dropped out mid-run. The usual cause is a shell rc exporting its own
+        ROS_DOMAIN_ID over the one tmux inherited, so the DDS env goes in the message.
+        See docs/crb-fr3-inference.md.
+        """
+        if self._tf_ever_ok:
+            return
+        self.get_logger().error(
+            f'No transform for {self._base_frame} has EVER arrived — this process is probably not '
+            f'reaching the NUC at all, rather than having lost the arm mid-run. Check, in order: '
+            f'(1) this shell sourced setup_franka_env.sh (an rc that exports its own '
+            f'ROS_DOMAIN_ID overrides tmux and puts you on a private domain), '
+            f'(2) NUC bringup is up (ros2 launch nuc/launch/fr3_bringup.launch.py). '
+            f'This process: ROS_DOMAIN_ID={os.environ.get("ROS_DOMAIN_ID", "unset (0)")} '
+            f'RMW_IMPLEMENTATION={os.environ.get("RMW_IMPLEMENTATION", "unset (default)")} '
+            f'CYCLONEDDS_URI={os.environ.get("CYCLONEDDS_URI", "unset")}',
+            once=True,
+        )
 
     def _gripper_width_policy_units(self, image_stamp: rclpy.time.Time) -> float | None:
         """

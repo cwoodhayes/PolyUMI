@@ -41,6 +41,7 @@ def generate_launch_description():
     execute_arm = LaunchConfiguration('execute_arm')
     execute_gripper = LaunchConfiguration('execute_gripper')
     max_velocity_scaling = LaunchConfiguration('max_velocity_scaling')
+    max_acceleration = LaunchConfiguration('max_acceleration')
     gripper_max_width = LaunchConfiguration('gripper_max_width')
 
     return LaunchDescription(
@@ -68,6 +69,14 @@ def generate_launch_description():
                 description='Arm speed cap. Start low, raise once you trust it.',
             ),
             DeclareLaunchArgument(
+                'max_acceleration',
+                default_value='1.5',
+                description='Joint acceleration limit (rad/s^2) move_group time-parameterizes '
+                'against. Forwarded to fr3_move_group.launch.py; without it MoveIt '
+                'defaults to 1 rad/s^2 and plans chunks slower than the policy asked '
+                'for. Distinct from max_velocity_scaling, which caps the RESULT.',
+            ),
+            DeclareLaunchArgument(
                 'gripper_max_width',
                 default_value='0.0817',
                 description='Bridge-side aperture clamp (m). Defaults to the Franka '
@@ -79,7 +88,7 @@ def generate_launch_description():
             ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(str(NUC_DIR / 'launch' / 'fr3_move_group.launch.py')),
-                launch_arguments={'robot_ip': robot_ip}.items(),
+                launch_arguments={'robot_ip': robot_ip, 'max_acceleration': max_acceleration}.items(),
             ),
             ExecuteProcess(
                 cmd=[

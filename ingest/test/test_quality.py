@@ -16,6 +16,7 @@ _TH = QualityThresholds(
     min_tracked_frames=60,
     optitrack_always_usable=True,
     low_tracking_ratio=0.90,
+    max_pose_jump_m=0.08,
 )
 
 
@@ -118,6 +119,57 @@ def test_pre_v4_fallback_recovers_exact_counts() -> None:
     # 210/220 tracked = 10 lost, exactly at the inclusive bound.
     assert auto_unusable_reasons({'n_frames_fed': 220, 'tracking_ratio': 210 / 220}, thresholds=_TH) == []
     assert auto_unusable_reasons({'n_frames_fed': 220, 'tracking_ratio': 209 / 220}, thresholds=_TH) != []
+
+
+def test_a_pose_jump_condemns_an_otherwise_perfect_episode() -> None:
+    """
+    The blind spot the jump check exists for.
+
+    Real case from red_trapezoid_mug_v3: an episode that was fed 205 frames, lost none of
+    them, reported tracking_ratio 1.000 — and teleported 1.14 m between two adjacent frames.
+    Every frame-count threshold calls this healthy, because no frame was lost.
+    """
+    attrs = _attrs(n_fed=205, n_lost=0)
+    assert auto_unusable_reasons(attrs, thresholds=_TH) == []
+
+    attrs['max_pose_jump_m'] = 1.142
+    reasons = auto_unusable_reasons(attrs, thresholds=_TH)
+    assert len(reasons) == 1
+    assert '114 cm pose jump' in reasons[0]
+
+
+def test_normal_hand_motion_is_not_a_jump() -> None:
+    """The clean corpus peaks at 6.2 cm; the threshold must sit above that, not in it."""
+    attrs = _attrs(n_fed=205, n_lost=0)
+    attrs['max_pose_jump_m'] = 0.062
+    assert auto_unusable_reasons(attrs, thresholds=_TH) == []
+    # Inclusive bound, matching max_lost_frames.
+    attrs['max_pose_jump_m'] = 0.08
+    assert auto_unusable_reasons(attrs, thresholds=_TH) == []
+
+
+def test_pose_jump_is_judged_even_without_usable_frame_counts() -> None:
+    """
+    A store too old to derive fed-frame counts from still gets its jump judged.
+
+    The check sits ahead of the counts precisely so it doesn't inherit their bail-out — a
+    metre-long teleport is worth reporting on its own.
+    """
+    reasons = auto_unusable_reasons({'n_frames_total': 400, 'max_pose_jump_m': 3.06}, thresholds=_TH)
+    assert len(reasons) == 1
+    assert '306 cm pose jump' in reasons[0]
+
+
+def test_optitrack_episodes_skip_the_jump_check_too() -> None:
+    """The metric is measured on the SLAM trajectory, which such episodes don't export."""
+    attrs = _attrs(n_fed=205, n_lost=0)
+    attrs['max_pose_jump_m'] = 3.06
+    assert auto_unusable_reasons(attrs, has_optitrack=True, thresholds=_TH) == []
+
+
+def test_missing_jump_metric_condemns_nothing() -> None:
+    """Episodes preprocessed before step 5 wrote the metric stay judged on frame counts alone."""
+    assert auto_unusable_reasons(_attrs(n_fed=205, n_lost=0), thresholds=_TH) == []
 
 
 def test_is_low_quality_is_looser_than_unusable() -> None:

@@ -8,6 +8,7 @@ two easy-to-break transforms — quaternion→rotvec and the broadcast ``demo_st
 so a regression fails here rather than deep inside a training run.
 """
 
+import logging
 import pathlib
 import zipfile
 
@@ -755,4 +756,59 @@ def test_detections_below_s_closed_clamp_to_zero_rather_than_going_negative(
 
     exported = np.asarray(_open_zip(out)['data/robot0_gripper_width'][:]).ravel()
     assert exported.min() == 0.0, 'widths below closed width must clamp, not go negative'
-    assert exported.max() == pytest.approx(0.08 - 0.03, abs=1e-6), 'the top end is left alone'
+    # Well inside the calibrated stroke, so the top clamp doesn't bite here.
+    assert exported.max() == pytest.approx(0.08 - 0.03, abs=1e-6)
+
+
+def test_widths_above_the_calibrated_stroke_clamp_to_it(tmp_path: pathlib.Path, monkeypatch) -> None:
+    """
+    The gripper has a hard stop, so a separation past fully-open is a misread tag, not a wider demo.
+
+    Left unclamped it corrupts the whole channel rather than one frame: UMI normalizes
+    gripper_width by min/max, so a single bad detection sets the top of the range and squeezes
+    the real signal into a fraction of it. red_trapezoid_mug_v4 had exactly one such sample, at
+    2.4x the p99.9, and it cost ~59% of the channel's resolution.
+    """
+    monkeypatch.setattr(buffer, 'load_closed_width_m', lambda: 0.02)
+    monkeypatch.setattr(buffer, 'load_open_width_m', lambda: 0.05)  # stroke = 30 mm
+    scene = _build_scene(tmp_path)
+    out = tmp_path / 'buf.zarr.zip'
+
+    export_scene_to_dp(scene, out)
+
+    g = _open_zip(out)
+    exported = np.asarray(g['data/robot0_gripper_width'][:]).ravel()
+    # Raw series runs to 0.08 -> 0.06 of opening, which is past the 0.03 stroke.
+    assert exported.max() == pytest.approx(0.03, abs=1e-6)
+    assert exported.min() == pytest.approx(0.0, abs=1e-6)
+    assert float(g['meta'].attrs['gripper_open_width_m']) == pytest.approx(0.05)
+
+
+def test_clamping_the_top_end_warns(tmp_path: pathlib.Path, monkeypatch, caplog) -> None:
+    """
+    A miscalibrated open_mm must announce itself rather than silently reshaping every width.
+
+    This is what replaced simply not clamping. The original objection to a top clamp was that it
+    would hide a demo opening wider than the calibration recording — the warning keeps that
+    information visible while still bounding the data.
+    """
+    monkeypatch.setattr(buffer, 'load_closed_width_m', lambda: 0.02)
+    monkeypatch.setattr(buffer, 'load_open_width_m', lambda: 0.05)
+    scene = _build_scene(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger='export.dp'):
+        export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
+
+    assert any('exceed the calibrated stroke' in r.message for r in caplog.records)
+
+
+def test_no_warning_when_every_width_is_within_the_stroke(tmp_path: pathlib.Path, monkeypatch, caplog) -> None:
+    """The warning has to stay quiet on healthy data, or it trains people to ignore it."""
+    monkeypatch.setattr(buffer, 'load_closed_width_m', lambda: 0.02)
+    monkeypatch.setattr(buffer, 'load_open_width_m', lambda: 0.20)  # stroke far exceeds the fixture
+    scene = _build_scene(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger='export.dp'):
+        export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
+
+    assert not any('exceed the calibrated stroke' in r.message for r in caplog.records)

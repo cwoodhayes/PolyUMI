@@ -17,7 +17,7 @@ from rich.logging import RichHandler
 from rich.prompt import Confirm
 
 from polyumi_ingest.export.dp import MIN_SEGMENT_STEPS
-from polyumi_ingest.gopro_fetch import DEFAULT_THRESHOLD_MS, find_gopro_video
+from polyumi_ingest.gopro_fetch import DEFAULT_THRESHOLD_MS, find_gopro_mount, find_gopro_video
 from polyumi_ingest.pi_fetch import DEFAULT_HOST, PiFetch
 from polyumi_ingest.preproc import (
     available_preprocessing_steps,
@@ -322,6 +322,13 @@ def fetch_gopro(
         raise typer.Exit()
 
     log.info(f'{len(to_process)} session(s) to process.')
+
+    # Resolve the card once rather than per session. find_gopro_video would otherwise re-run
+    # the udisksctl/lsblk probe and re-log "Auto-detected GoPro SD card at ..." for every
+    # session. Cheap next to the ffprobe scan, but it also keeps the log readable. A None here
+    # is passed straight through so find_gopro_video raises its own "insert the card" error.
+    if mount_point is None:
+        mount_point = find_gopro_mount()
 
     failures: list[tuple[str, str]] = []
     for i, session_dir in enumerate(to_process, 1):

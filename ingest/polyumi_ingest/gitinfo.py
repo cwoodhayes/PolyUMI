@@ -10,7 +10,6 @@ poses mean different things depending on which commit produced them.
 
 from __future__ import annotations
 
-import functools
 import pathlib
 import subprocess
 
@@ -21,17 +20,17 @@ UNKNOWN_SHA = 'unknown'
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 
 
-@functools.lru_cache(maxsize=1)
-def git_sha() -> str:
+def _resolve_git_sha() -> str:
     """
-    Return the current HEAD commit of the polyumi repo, or ``'unknown'``.
+    Shell out for the repo's HEAD commit, or return ``'unknown'``.
 
     Resolved against this file's own location rather than the process cwd: the catalog
     server and the ingest CLI are routinely run from elsewhere, and a cwd-relative
     lookup would silently stamp whatever unrelated repo the shell happened to be in.
 
-    Cached — the answer can't change within a process, and this is called once per
-    preprocessing step.
+    Timed out because this runs at import: a git that hangs (a stale lock, an unresponsive
+    filesystem) would otherwise take the whole process down with it. TimeoutExpired is a
+    SubprocessError, so the handler below already covers it.
     """
     try:
         out = subprocess.check_output(
@@ -39,7 +38,22 @@ def git_sha() -> str:
             cwd=_REPO_ROOT,
             text=True,
             stderr=subprocess.DEVNULL,
+            timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
         return UNKNOWN_SHA
     return out.strip() or UNKNOWN_SHA
+
+
+#: Captured at **import**, not on first call: the catalog server can trigger preprocessing
+#: from the UI and stays up for days, so a lazily resolved sha reports whatever HEAD is at
+#: marking time — which may be several commits past the code actually doing the work.
+#:
+#: Not a perfect proxy (an editable checkout can be edited underneath a running process with
+#: no commit at all), but it answers the question the stamp is asked: which code ran.
+_LOADED_GIT_SHA = _resolve_git_sha()
+
+
+def git_sha() -> str:
+    """Return the commit this process's code was loaded from, or ``'unknown'``."""
+    return _LOADED_GIT_SHA

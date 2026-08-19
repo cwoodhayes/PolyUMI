@@ -89,7 +89,7 @@ from scipy.spatial.transform import Rotation
 
 from polyumi_ingest import quality
 from polyumi_ingest.camera_preproc import CAMERA0_RGB_RESOLUTION, resize_camera0_rgb
-from polyumi_ingest.config import load_closed_width_m
+from polyumi_ingest.config import load_closed_width_m, load_open_width_m
 from polyumi_ingest.manifests import SceneManifest
 from polyumi_ingest.preproc import available_preprocessing_steps, preprocessing_steps_done
 from polyumi_ingest.pzarr.scene_files import SceneFiles
@@ -208,7 +208,7 @@ def _auto_unusable_reasons_for_episode(ep: zarr.Group) -> list[str]:
     Threshold-derived reasons to exclude ``ep``; empty list means keep it.
 
     Thin adapter over ``polyumi_ingest.quality.auto_unusable_reasons`` that pulls the
-    two inputs off the episode group: the SLAM metrics written by step 2, and whether
+    two inputs off the episode group: the ``annotations/slam`` metrics, and whether
     OptiTrack is among step 5's ``available_sources`` (in which case the episode's
     poses don't come from SLAM and the SLAM-derived checks don't apply).
 
@@ -261,6 +261,7 @@ def _export_episode(
     scene_zarr: pathlib.Path,
     pose_source: str,
     closed_width_m: float,
+    open_width_m: float,
     min_segment_steps: int = MIN_SEGMENT_STEPS,
 ) -> list[tuple[int, dict]]:
     """
@@ -283,16 +284,29 @@ def _export_episode(
     # costs a re-export, not a re-detect. UMI applies it at the same stage, in
     # the upstream UMI repo's scripts_slam_pipeline/06_generate_dataset_plan.py, not at detection.
     #
-    # Clamped at zero because closed width is a percentile, so ~1% of detections sit below it by
-    # construction and would export negative. UMI clamps too, though not visibly: its
-    # get_gripper_calibration_interpolator (umi/common/interpolation_util.py, upstream) builds
-    # an interp1d over [min_width, max_width] with
-    # bounds_error=False, fill_value=(x[0], x[-1]), so anything under the calibrated minimum
-    # saturates to 0. We do not clamp the top end as UMI does — that would make open_mm
-    # load-bearing to hide a demo opening wider than the calibration recording, which is
-    # information, not error.
+    # Clamped at both ends, as UMI does: its get_gripper_calibration_interpolator
+    # (umi/common/interpolation_util.py, upstream) builds an interp1d over
+    # [min_width, max_width] with bounds_error=False, fill_value=(x[0], x[-1]), so detections
+    # outside the calibrated range saturate rather than escape.
+    #
+    # Bottom: closed width is a percentile, so ~1% of detections sit below it by construction
+    # and would export negative. Top: the handheld gripper has a hard stop, so a separation
+    # above open_mm is a misread tag, not a wider demonstration — and UMI normalizes this
+    # channel by min/max, so a single bad frame sets the top of the range and squeezes the real
+    # signal into a fraction of it. The warning below is what keeps open_mm honest: a
+    # miscalibrated one announces itself rather than silently widening the range.
+    max_opening_m = open_width_m - closed_width_m
     gripper = np.asarray(arr(ep, 'annotations/gripper_width/width_m')[:], dtype=np.float64)
     gripper = np.maximum(gripper - closed_width_m, 0.0)
+    n_over = int((gripper > max_opening_m).sum())
+    if n_over:
+        log.warning(
+            f'  {episode_key}: {n_over}/{len(gripper)} gripper width(s) exceed the calibrated '
+            f'stroke ({max_opening_m * 1e3:.2f} mm, max seen {gripper.max() * 1e3:.2f} mm); '
+            f'clamping. A few are misread tags; many mean open_mm in gripper_calib.yaml is '
+            f'wrong — re-derive it with `pingest calibrate-gripper`.'
+        )
+    gripper = np.minimum(gripper, max_opening_m)
     frames = open_gopro_frames(ep, scene_zarr)
 
     n = len(gopro_ts)
@@ -434,6 +448,7 @@ def _append_scene_episodes(
     total: int,
     provenance: list[dict],
     closed_width_m: float,
+    open_width_m: float,
     enforce_preprocessing: bool = True,
     min_segment_steps: int = MIN_SEGMENT_STEPS,
 ) -> int:
@@ -491,6 +506,7 @@ def _append_scene_episodes(
             pose_source,
             min_segment_steps=min_segment_steps,
             closed_width_m=closed_width_m,
+            open_width_m=open_width_m,
         ):
             total += t
             episode_ends.append(total)
@@ -557,7 +573,11 @@ def export_scenes_to_dp(
     # be in the same width units, and re-reading the config mid-export would silently mix two
     # calibrations if the file changed underneath.
     closed_width_m = load_closed_width_m()
-    log.info(f'Gripper widths exported as opening-from-closed (closed width = {closed_width_m * 1000:.2f} mm).')
+    open_width_m = load_open_width_m()
+    log.info(
+        f'Gripper widths exported as opening-from-closed (closed width = {closed_width_m * 1000:.2f} mm), '
+        f'clamped to the calibrated stroke ({(open_width_m - closed_width_m) * 1000:.2f} mm).'
+    )
 
     with tempfile.TemporaryDirectory(prefix='dp_export_') as tmp:
         build_dir = pathlib.Path(tmp) / 'buffer.zarr'
@@ -578,6 +598,7 @@ def export_scenes_to_dp(
                 enforce_preprocessing=enforce_preprocessing,
                 min_segment_steps=min_segment_steps,
                 closed_width_m=closed_width_m,
+                open_width_m=open_width_m,
             )
 
         # Every episode in one buffer must share a time base: UmiDataset reads a single
@@ -604,6 +625,7 @@ def export_scenes_to_dp(
         # indistinguishable from one exported before the subtraction existed, and the inference
         # side needs to know which convention a checkpoint was trained under to pick its offset.
         meta.attrs['gripper_closed_width_m'] = float(closed_width_m)
+        meta.attrs['gripper_open_width_m'] = float(open_width_m)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         _zip_zarr_dir(build_dir, output_path)
 

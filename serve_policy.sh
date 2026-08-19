@@ -14,6 +14,11 @@
 # Usage:
 #   CKPT=/abs/path/to/epoch=0070-....ckpt ./serve_policy.sh
 #   CKPT=... PORT=8001 ./serve_policy.sh
+#   CKPT=... CUDA_VISIBLE_DEVICES=1 ./serve_policy.sh    # pin to the second GPU
+#
+# serve_policy.py loads the policy on plain 'cuda', i.e. whatever CUDA_VISIBLE_DEVICES makes
+# device 0. Not defaulted here: which card is quiet changes hour to hour, so check `nvidia-smi`.
+# See docs/crb-fr3-inference.md for what pinning does and does not buy.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,6 +67,7 @@ exec docker run --rm -i ${TTY_FLAG} \
     ${USER_FLAG} \
     -p "${PORT}:8000" \
     -e HOME=/tmp \
+    -e CUDA_VISIBLE_DEVICES \
     -e MPLCONFIGDIR=/tmp/mpl \
     -e NUMBA_CACHE_DIR=/tmp/numba \
     -e HF_HOME=/hf_cache \

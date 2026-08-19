@@ -475,6 +475,35 @@ def test_tracking_ratio_still_counts_losses_among_fed_frames(tmp_path: pathlib.P
     assert attrs['tracking_ratio'] == pytest.approx(0.8)
 
 
+def test_relocalizations_are_counted_over_fed_frames(tmp_path: pathlib.Path) -> None:
+    """
+    A flawless stride-2 run has relocalized zero times, not once per tracked frame.
+
+    Counted over the whole grid, ``is_lost`` alternates by construction under decimation, so
+    every fed frame follows a 'lost' one and reads as a fresh relocalization — the attr came
+    out ≈ the tracked count and carried no information.
+    """
+    n = 100
+    poses = np.full((n, 7), np.nan)
+    poses[::2] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]  # every fed frame tracked
+
+    attrs = _slam_attrs_after_write(tmp_path, poses, stride=2)
+
+    assert attrs['n_relocalization_events'] == 0
+
+
+def test_relocalizations_count_real_gaps_among_fed_frames(tmp_path: pathlib.Path) -> None:
+    """Each run of tracked fed frames that follows a genuine gap counts once."""
+    n = 100
+    poses = np.full((n, 7), np.nan)
+    poses[::2] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    poses[10:20] = np.nan  # one gap: 5 fed frames lost, then tracking resumes
+
+    attrs = _slam_attrs_after_write(tmp_path, poses, stride=2)
+
+    assert attrs['n_relocalization_events'] == 1
+
+
 def test_tracking_ratio_unchanged_at_stride_one(tmp_path: pathlib.Path) -> None:
     """
     At stride 1 fed == all frames, so the definition is identical to the old one.

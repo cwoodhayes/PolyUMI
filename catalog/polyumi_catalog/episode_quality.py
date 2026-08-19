@@ -114,6 +114,7 @@ def quality_view(record: SlamRecord | None) -> dict | None:
         'n_frames_lost': record.attrs.get('n_frames_lost'),
         'tracking_ratio': record.attrs.get('tracking_ratio'),
         'n_relocalization_events': record.attrs.get('n_relocalization_events'),
+        'max_pose_jump_m': record.attrs.get('max_pose_jump_m'),
         'has_optitrack': record.has_optitrack,
         'low_quality': iquality.is_low_quality(record.attrs, thresholds=thresholds),
         #: Derived from the thresholds, not stored. An episode can also be unusable

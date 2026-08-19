@@ -319,7 +319,7 @@ def _parse_trajectory_csv(traj_path: pathlib.Path, frame_ts: np.ndarray, frame_s
     return poses
 
 
-def _post_chirp_start(ep_grp: zarr.Group, n_total: int) -> tuple[int, bool]:
+def post_chirp_start(ep_grp: zarr.Group, n_total: int) -> tuple[int, bool]:
     """
     First frame index at/after the sync chirp ends, and whether the marker was found.
 
@@ -369,14 +369,17 @@ def _write_slam_results(
     is_lost = np.isnan(poses[:, 0])
     n_total = int(len(is_lost))
     n_lost = int(is_lost.sum())
-    # count transitions lost→tracked (each run of tracked frames after a gap)
-    transitions = int(np.count_nonzero(np.diff(is_lost.astype(np.int8)) == -1))
 
     fed_idx = np.arange(0, n_total, frame_stride)
     n_fed = int(len(fed_idx))
     n_fed_tracked = int((~is_lost[fed_idx]).sum()) if n_fed else 0
+    # Transitions lost→tracked (each run of tracked frames after a gap), counted on the FED
+    # grid. On the whole grid this is meaningless above stride 1: the localizer never sees the
+    # skipped frames, so `is_lost` alternates tracked/lost even for a flawless run and the
+    # count comes out ≈ n_fed_tracked.
+    transitions = int(np.count_nonzero(np.diff(is_lost[fed_idx].astype(np.int8)) == -1))
 
-    i0, chirp_gated = _post_chirp_start(ep_grp, n_total)
+    i0, chirp_gated = post_chirp_start(ep_grp, n_total)
     fed_post = fed_idx[fed_idx >= i0]
     n_fed_post = int(len(fed_post))
     n_fed_post_lost = int(is_lost[fed_post].sum()) if n_fed_post else 0
