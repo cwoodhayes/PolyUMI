@@ -16,8 +16,14 @@ Run on the NUC, after fr3_bringup.launch.py is up:
 
     ros2 launch nuc/launch/fr3_inference.launch.py                       # dry run, nothing moves
     ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true # fingers only
+    ros2 launch nuc/launch/fr3_inference.launch.py execute_arm:=true     # servo drives the arm
     ros2 launch nuc/launch/fr3_inference.launch.py \
-        execute_arm:=true execute_gripper:=true max_velocity_scaling:=0.2
+        executor:=moveit execute_arm:=true max_velocity_scaling:=0.2     # the legacy path
+
+`executor` (default `servo`) picks which executor acts on the policy's output, and governs both
+halves of that choice so they cannot disagree: whether fr3_moveit_bridge subscribes to target
+chunks, and whether the impedance controller is activated. With `executor:=servo` the controller is
+only ACTIVATED when `execute_arm:=true`; otherwise it is loaded inactive and nothing moves.
 
 See docs/crb-fr3-inference.md for the full bringup order and its gotchas.
 """
@@ -25,10 +31,20 @@ See docs/crb-fr3-inference.md for the full bringup order and its gotchas.
 from pathlib import Path
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription
-from launch_ros.actions import Node
+from launch.actions import (
+    DeclareLaunchArgument,
+    ExecuteProcess,
+    IncludeLaunchDescription,
+    RegisterEventHandler,
+)
+from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch_ros.actions import Node
+
+SERVO_CONTROLLER = 'polyumi_cartesian_impedance_controller'
+MOVEIT_CONTROLLER = 'fr3_arm_controller'
 
 # The bridges are standalone scripts, not an installed ament package (they run from a plain
 # clone on the NUC, which has no PolyUMI workspace), so they are ExecuteProcess by path rather
@@ -44,9 +60,51 @@ def generate_launch_description():
     max_velocity_scaling = LaunchConfiguration('max_velocity_scaling')
     max_acceleration = LaunchConfiguration('max_acceleration')
     gripper_max_width = LaunchConfiguration('gripper_max_width')
+    executor = LaunchConfiguration('executor')
+
+    handle_chunks = PythonExpression(["'true' if '", executor, "' == 'moveit' else 'false'"])
+    activate_servo = PythonExpression(["'", executor, "' == 'servo' and '", execute_arm, "' == 'true'"])
+
+    # Hoisted out of the LaunchDescription list so the event handler below can name it: the switch
+    # has to wait for this to finish, and launch offers no ordering guarantee otherwise.
+    impedance_spawner = Node(
+        package='controller_manager',
+        executable='spawner',
+        name='polyumi_impedance_controller_spawner',
+        output='screen',
+        arguments=[
+            SERVO_CONTROLLER,
+            # Required, and not redundant with --param-file: Humble's spawner sets the `type`
+            # param only from -t. See the note in fr3_bringup.launch.py.
+            '-t',
+            'polyumi_fr3_controllers/CartesianImpedanceController',
+            '--param-file',
+            str(NUC_DIR / 'config' / 'polyumi_controllers.yaml'),
+            # Inactive in both modes. Activating means claiming the effort interfaces
+            # fr3_arm_controller already holds, which a spawner cannot do — that takes the switch.
+            '--inactive',
+            '--controller-manager-timeout',
+            '30',
+        ],
+    )
 
     return LaunchDescription(
         [
+            DeclareLaunchArgument(
+                'executor',
+                default_value='servo',
+                # Constrained, because both derived expressions fall through to their 'servo'
+                # branch on any unrecognised value: a typo would load the impedance controller,
+                # never activate it, and stop the bridge subscribing, leaving a stack where
+                # nothing at all drives the arm and nothing says why.
+                choices=['servo', 'moveit'],
+                description="Which executor drives the arm: 'servo' (the streaming Cartesian "
+                'impedance controller) or "moveit" (plan-then-execute, the path it replaces). '
+                'Governs BOTH whether fr3_moveit_bridge subscribes to target chunks and whether '
+                'the impedance controller is activated, so exactly one thing acts on the policy '
+                'output. With executor:=servo the controller is only ACTIVATED if execute_arm '
+                'is also true; otherwise it is loaded inactive and nothing moves.',
+            ),
             DeclareLaunchArgument(
                 'robot_ip',
                 default_value='192.168.51.20',
@@ -91,6 +149,8 @@ def generate_launch_description():
                 PythonLaunchDescriptionSource(str(NUC_DIR / 'launch' / 'fr3_move_group.launch.py')),
                 launch_arguments={'robot_ip': robot_ip, 'max_acceleration': max_acceleration}.items(),
             ),
+            # Always started: it owns /polyumi/home, which both executors need. Whether it also
+            # acts on streamed chunks is what `executor` decides.
             ExecuteProcess(
                 cmd=[
                     'python3',
@@ -100,31 +160,34 @@ def generate_launch_description():
                     ['execute:=', execute_arm],
                     '-p',
                     ['max_velocity_scaling:=', max_velocity_scaling],
+                    '-p',
+                    ['handle_target_chunks:=', handle_chunks],
                 ],
                 output='screen',
             ),
-            # The streaming Cartesian impedance controller, spawned INACTIVE. It claims the same
-            # <joint>/effort interfaces as fr3_arm_controller, so exactly one can run; activating it
-            # is what hands the arm from MoveIt to the policy. Deliberately not auto-activated —
-            # torque control starts the moment it does, and that should be a deliberate act with
-            # the workspace clear. /polyumi/home switches back and forth on its own.
-            Node(
-                package='controller_manager',
-                executable='spawner',
-                name='polyumi_impedance_controller_spawner',
-                output='screen',
-                arguments=[
-                    'polyumi_cartesian_impedance_controller',
-                    # Required, and not redundant with --param-file: Humble's spawner sets the
-                    # `type` param only from -t. See the note in fr3_bringup.launch.py.
-                    '-t',
-                    'polyumi_fr3_controllers/CartesianImpedanceController',
-                    '--param-file',
-                    str(NUC_DIR / 'config' / 'polyumi_controllers.yaml'),
-                    '--inactive',
-                    '--controller-manager-timeout',
-                    '30',
-                ],
+            impedance_spawner,
+            # Hand the arm to the servo, once the spawner has actually loaded it. Ordered on the
+            # spawner's exit rather than declared alongside it because launch gives no ordering
+            # guarantee, and switching to a controller that is not loaded yet just fails.
+            RegisterEventHandler(
+                OnProcessExit(
+                    target_action=impedance_spawner,
+                    on_exit=[
+                        ExecuteProcess(
+                            cmd=[
+                                'ros2',
+                                'control',
+                                'switch_controllers',
+                                '--deactivate',
+                                MOVEIT_CONTROLLER,
+                                '--activate',
+                                SERVO_CONTROLLER,
+                            ],
+                            output='screen',
+                            condition=IfCondition(activate_servo),
+                        )
+                    ],
+                )
             ),
             ExecuteProcess(
                 cmd=[

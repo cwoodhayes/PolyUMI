@@ -104,6 +104,12 @@ class Fr3MoveItBridge(Node):
         self.declare_parameter('base_frame', DEFAULT_BASE)
         self.declare_parameter('max_velocity_scaling', 0.1)
         self.declare_parameter('target_topic', '/polyumi/target_poses')
+        # Whether to act on streamed chunks at all. False leaves this node as ONLY the /polyumi/home
+        # service, which is what the streaming impedance controller needs from it: that controller
+        # is the executor, and a bridge still planning PoseArray chunks alongside it would be a
+        # second thing driving the arm off the same policy output. Not subscribing is what makes
+        # that impossible rather than merely unlikely.
+        self.declare_parameter('handle_target_chunks', True)
         self.declare_parameter('home_joints', HOME_JOINTS)
 
         self._execute = self.get_parameter('execute').get_parameter_value().bool_value
@@ -112,6 +118,7 @@ class Fr3MoveItBridge(Node):
         self._base = self.get_parameter('base_frame').get_parameter_value().string_value
         self._vscale = self.get_parameter('max_velocity_scaling').get_parameter_value().double_value
         topic = self.get_parameter('target_topic').get_parameter_value().string_value
+        self._handle_chunks = self.get_parameter('handle_target_chunks').get_parameter_value().bool_value
 
         self._home_joints = list(self.get_parameter('home_joints').get_parameter_value().double_array_value)
 
@@ -128,7 +135,8 @@ class Fr3MoveItBridge(Node):
         # flight so we always act on the freshest target without queuing up stale ones.
         self._busy = threading.Lock()
 
-        self.create_subscription(PoseArray, topic, self._on_target, 10, callback_group=self._cbgroup)
+        if self._handle_chunks:
+            self.create_subscription(PoseArray, topic, self._on_target, 10, callback_group=self._cbgroup)
 
         # Fail loudly at startup rather than on the first target pose.
         if not self._cartesian.wait_for_service(timeout_sec=10.0):
@@ -149,8 +157,15 @@ class Fr3MoveItBridge(Node):
         else:
             self.get_logger().info('move_group found (execute_trajectory ready).')
 
-        mode = 'EXECUTE (arm will move)' if self._execute else 'plan-only (no motion)'
-        self.get_logger().info(f'fr3_moveit_bridge started — listening on {topic} — mode: {mode}')
+        if self._handle_chunks:
+            mode = 'EXECUTE (arm will move)' if self._execute else 'plan-only (no motion)'
+            self.get_logger().info(f'fr3_moveit_bridge started — listening on {topic} — mode: {mode}')
+        else:
+            self.get_logger().info(
+                'fr3_moveit_bridge started — NOT subscribed to target chunks '
+                '(handle_target_chunks:=false). This node is the /polyumi/home service only; the '
+                'streaming impedance controller is the executor.'
+            )
         self.get_logger().info(
             '/polyumi/home is up (std_srvs/Trigger). It MOVES THE ARM even in plan-only mode — '
             'it is an explicit request, unlike the streamed chunks `execute` guards.'

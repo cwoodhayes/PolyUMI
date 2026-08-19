@@ -354,8 +354,20 @@ activation. Enable FCI on the Desk UI first.
 | Steps | Stack |
 |---|---|
 | 1–2 | `fr3_bringup` alone, plus a manual spawn (below) |
-| 3 | `fr3_bringup`; blocked on tooling |
-| 4–7 | `fr3_bringup` + `fr3_inference` (for move_group and the bridges) |
+| 3 | `fr3_bringup` + `fr3_inference execute_arm:=true`, or the manual spawn plus a hand switch |
+| 4–8 | `fr3_bringup` + `fr3_inference execute_arm:=true` (for move_group and the bridges) |
+
+`fr3_inference.launch.py` takes **`executor:=servo|moveit`, defaulting to `servo`**. One argument
+governs both halves of that choice — whether `fr3_moveit_bridge` subscribes to target chunks, and
+whether the impedance controller is activated — so the two cannot disagree. It used to be possible
+to launch the stack, run the policy, and have it drive **MoveIt** while looking like it was driving
+the servo: `policy_client_node` publishes to both topics, and only the MoveIt path was live by
+default. Silent, and plausible enough to believe.
+
+With `executor:=servo` the controller is activated only when `execute_arm:=true`; otherwise it is
+loaded inactive and nothing moves. That keeps `execute_arm` as the single "the arm may move" gate in
+both modes. A misspelt `executor` is rejected at launch with the valid options listed — both derived
+expressions would otherwise fall through to a stack where nothing drives the arm at all.
 
 Steps 1–2 deliberately do **not** use `fr3_inference` — it would start move_group and both bridges
 for nothing. Keep the first torque-control activation to the smallest stack that can express it:
