@@ -20,10 +20,14 @@ Run on the NUC, after fr3_bringup.launch.py is up:
     ros2 launch nuc/launch/fr3_inference.launch.py \
         executor:=moveit execute_arm:=true max_velocity_scaling:=0.2     # the legacy path
 
-`executor` (default `servo`) picks which executor acts on the policy's output, and governs both
-halves of that choice so they cannot disagree: whether fr3_moveit_bridge subscribes to target
-chunks, and whether the impedance controller is activated. With `executor:=servo` the controller is
+`executor` (default `servo`) decides which controller holds the arm: the streaming impedance
+controller, or fr3_arm_controller for move_group. With `executor:=servo` the impedance controller is
 only ACTIVATED when `execute_arm:=true`; otherwise it is loaded inactive and nothing moves.
+
+It must MATCH the laptop's `wire` parameter on policy_client_node (`multidof` for servo,
+`pose_array` for moveit), which is what decides where the chunks are sent. A mismatch is loud, not
+silent: nothing subscribes to what the client publishes, so the arm does not move and the client
+warns every second naming the topic and what should be listening.
 
 See docs/crb-fr3-inference.md for the full bringup order and its gotchas.
 """
@@ -62,10 +66,6 @@ def generate_launch_description():
     gripper_max_width = LaunchConfiguration('gripper_max_width')
     executor = LaunchConfiguration('executor')
 
-    # Both halves of the choice come from one argument so they cannot disagree:
-    # policy_client_node publishes to both target topics, so a stack where the bridge subscribes
-    # AND the servo is active has two executors acting on the same policy output.
-    handle_chunks = PythonExpression(["'true' if '", executor, "' == 'moveit' else 'false'"])
     # Torque control starts the moment the controller activates, so it is gated on the same flag
     # as every other way this file can move the arm.
     activate_servo = PythonExpression(["'", executor, "' == 'servo' and '", execute_arm, "' == 'true'"])
@@ -98,17 +98,15 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 'executor',
                 default_value='servo',
-                # Constrained, because both derived expressions fall through to their 'servo'
-                # branch on any unrecognised value: a typo would load the impedance controller,
-                # never activate it, and stop the bridge subscribing, leaving a stack where
-                # nothing at all drives the arm and nothing says why.
+                # Constrained, because activate_servo falls through to its 'not servo' branch on
+                # any unrecognised value: a typo would load the impedance controller and never
+                # activate it, leaving a stack where nothing drives the arm and nothing says why.
                 choices=['servo', 'moveit'],
-                description="Which executor drives the arm: 'servo' (the streaming Cartesian "
-                'impedance controller) or "moveit" (plan-then-execute, the path it replaces). '
-                'Governs BOTH whether fr3_moveit_bridge subscribes to target chunks and whether '
-                'the impedance controller is activated, so exactly one thing acts on the policy '
-                'output. With executor:=servo the controller is only ACTIVATED if execute_arm '
-                'is also true; otherwise it is loaded inactive and nothing moves.',
+                description="Which controller holds the arm: 'servo' (the streaming Cartesian "
+                'impedance controller) or "moveit" (fr3_arm_controller, plan-then-execute, the '
+                "path it replaces). Must match policy_client_node's `wire` on the laptop. With "
+                'executor:=servo the controller is only ACTIVATED if execute_arm is also true; '
+                'otherwise it is loaded inactive and nothing moves.',
             ),
             DeclareLaunchArgument(
                 'robot_ip',
@@ -154,8 +152,9 @@ def generate_launch_description():
                 PythonLaunchDescriptionSource(str(NUC_DIR / 'launch' / 'fr3_move_group.launch.py')),
                 launch_arguments={'robot_ip': robot_ip, 'max_acceleration': max_acceleration}.items(),
             ),
-            # Always started: it owns /polyumi/home, which both executors need. Whether it also
-            # acts on streamed chunks is what `executor` decides.
+            # Always started: it owns /polyumi/home, which both executors need, and homing borrows
+            # the arm back from the servo. Its chunk subscription simply stays idle under
+            # executor:=servo, because the client is then publishing the other wire format.
             ExecuteProcess(
                 cmd=[
                     'python3',
@@ -165,8 +164,6 @@ def generate_launch_description():
                     ['execute:=', execute_arm],
                     '-p',
                     ['max_velocity_scaling:=', max_velocity_scaling],
-                    '-p',
-                    ['handle_target_chunks:=', handle_chunks],
                 ],
                 output='screen',
             ),
