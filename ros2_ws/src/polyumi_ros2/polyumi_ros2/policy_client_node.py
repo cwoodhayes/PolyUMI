@@ -42,7 +42,7 @@ import numpy as np
 import rclpy
 import rclpy.time
 import tf2_ros
-from geometry_msgs.msg import Pose, PoseArray, Transform
+from geometry_msgs.msg import Pose, PoseArray
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
@@ -50,12 +50,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
 from std_msgs.msg import Float32
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException  # type: ignore[attr-defined]
-from trajectory_msgs.msg import (
-    JointTrajectory,
-    JointTrajectoryPoint,
-    MultiDOFJointTrajectory,
-    MultiDOFJointTrajectoryPoint,
-)
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint, MultiDOFJointTrajectory
 
 from polyumi_ros2.camera_preproc import (
     CAMERA0_RGB_INTERPOLATION,
@@ -64,6 +59,7 @@ from polyumi_ros2.camera_preproc import (
     discarded_bar_intensity,
 )
 from polyumi_ros2.gripper_map import policy_to_robot_width, robot_to_policy_width
+from polyumi_ros2.target_chunk import multidof_trajectory, pose_array
 
 # Name used for the single "joint" in the gripper trajectory chunk. Deliberately NOT a real joint
 # name (the FR3's fingers are fr3_finger_joint1/2, each reporting half the aperture): the value we
@@ -962,25 +958,26 @@ class PolicyClientNode(Node):
         if self._gripper_pub is not None and grip_actions:
             self._gripper_pub.publish(self._actions_to_gripper_trajectory(grip_actions))
 
+    @staticmethod
+    def _action_to_pose(action) -> Pose:
+        """Convert one 8-vector action [x,y,z,qx,qy,qz,qw,grip] to a Pose, dropping the width."""
+        pose = Pose()
+        pose.position.x = float(action[0])
+        pose.position.y = float(action[1])
+        pose.position.z = float(action[2])
+        pose.orientation.x = float(action[3])
+        pose.orientation.y = float(action[4])
+        pose.orientation.z = float(action[5])
+        pose.orientation.w = float(action[6])
+        return pose
+
     def _actions_to_pose_array(self, actions) -> PoseArray:
         """Build a PoseArray in base_frame from a list of 8-vector actions [x,y,z,qx,qy,qz,qw,grip]."""
-        poses = []
-        for action in actions:
-            pose = Pose()
-            pose.position.x = float(action[0])
-            pose.position.y = float(action[1])
-            pose.position.z = float(action[2])
-            pose.orientation.x = float(action[3])
-            pose.orientation.y = float(action[4])
-            pose.orientation.z = float(action[5])
-            pose.orientation.w = float(action[6])
-            poses.append(pose)
-
-        msg = PoseArray()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = self._base_frame
-        msg.poses = poses
-        return msg
+        return pose_array(
+            [self._action_to_pose(action) for action in actions],
+            frame_id=self._base_frame,
+            stamp=self.get_clock().now().to_msg(),
+        )
 
     def _actions_to_multidof(self, actions, t_obs: rclpy.time.Time, first_index: int) -> MultiDOFJointTrajectory:
         """
@@ -1006,24 +1003,14 @@ class PolicyClientNode(Node):
         :param t_obs: instant the observation was captured.
         :param first_index: index of ``actions[0]`` within the unsliced chunk.
         """
-        msg = MultiDOFJointTrajectory()
-        msg.header.stamp = (t_obs - Duration(seconds=self._latency_act)).to_msg()
-        msg.header.frame_id = self._base_frame
-        msg.joint_names = [self._eef_frame]
-        for i, action in enumerate(actions):
-            point = MultiDOFJointTrajectoryPoint()
-            transform = Transform()
-            transform.translation.x = float(action[0])
-            transform.translation.y = float(action[1])
-            transform.translation.z = float(action[2])
-            transform.rotation.x = float(action[3])
-            transform.rotation.y = float(action[4])
-            transform.rotation.z = float(action[5])
-            transform.rotation.w = float(action[6])
-            point.transforms = [transform]
-            point.time_from_start = Duration(seconds=(first_index + i) * self._action_dt).to_msg()
-            msg.points.append(point)
-        return msg
+        return multidof_trajectory(
+            [self._action_to_pose(action) for action in actions],
+            frame_id=self._base_frame,
+            joint_name=self._eef_frame,
+            stamp=(t_obs - Duration(seconds=self._latency_act)).to_msg(),
+            dt=self._action_dt,
+            first_index=first_index,
+        )
 
     def _actions_to_gripper_trajectory(self, actions) -> JointTrajectory:
         """

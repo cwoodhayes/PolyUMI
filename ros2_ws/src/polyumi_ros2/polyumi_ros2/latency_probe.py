@@ -68,7 +68,7 @@ import threading
 import time
 
 import cv2
-from geometry_msgs.msg import Pose, PoseArray
+from geometry_msgs.msg import Pose
 import numpy as np
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
@@ -78,6 +78,7 @@ from sensor_msgs.msg import Image, JointState
 from tf2_ros import Buffer, TransformListener
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
+from polyumi_ros2.target_chunk import TargetChunkPublisher, Wire
 from polyumi_ros2.latency_util import get_latency
 
 MODES = ('camera', 'arm', 'gripper')
@@ -293,7 +294,11 @@ class LatencyProbe(Node):
                     f'chirp_f1_hz ({self._f1}) must be below the Nyquist of command_hz '
                     f'({self._command_hz / 2}), or the commanded sweep aliases'
                 )
-            self.declare_parameter('target_topic', '/polyumi/target_poses')
+            # Which executor to measure. These are genuinely different numbers, not two ways of
+            # measuring one: PoseArray goes to fr3_moveit_bridge and returns a planning time, while
+            # MultiDOF goes to the streaming controller and returns transport plus a control cycle.
+            self.declare_parameter('wire', str(Wire.MULTIDOF))
+            self.declare_parameter('target_topic', '')
             self.declare_parameter('base_frame', 'fr3_link0')
             self.declare_parameter('eef_frame', 'polyumi_tcp')
             self.declare_parameter('amplitude_m', 0.03)
@@ -308,8 +313,11 @@ class LatencyProbe(Node):
                 errors.append(f"axis must be x, y or z, got '{self._axis}'")
             if self._amplitude <= 0:
                 errors.append(f'amplitude_m must be > 0, got {self._amplitude}')
-            topic = self.get_parameter('target_topic').get_parameter_value().string_value
-            self._pub = self.create_publisher(PoseArray, topic, 10)
+            wire = self.get_parameter('wire').get_parameter_value().string_value
+            topic = self.get_parameter('target_topic').get_parameter_value().string_value or None
+            self._pub = TargetChunkPublisher(
+                self, wire=wire, frame_id=self._base_frame, joint_name=self._eef_frame, topic=topic
+            )
             self._tf_buffer = Buffer()
             self._tf_listener = TransformListener(self._tf_buffer, self)
             #: (stamp_s, position on the swept axis)
@@ -513,11 +521,10 @@ class LatencyProbe(Node):
                 pose.position.z = base.transform.translation.z
                 setattr(pose.position, self._axis, base_offset + offset)
                 pose.orientation = base.transform.rotation
-                msg = PoseArray()
-                msg.header.stamp = self.get_clock().now().to_msg()
-                msg.header.frame_id = self._base_frame
-                msg.poses = [pose]
-                self._pub.publish(msg)
+                # One waypoint per publication, at command_hz. Under the streaming controller each
+                # of these splices onto the last, which IS the continuous case the policy produces;
+                # dt is therefore irrelevant with a single point.
+                self._pub.publish([pose])
                 commanded.append((self._now(), offset))
                 time.sleep(period)
         finally:
@@ -534,6 +541,14 @@ class LatencyProbe(Node):
                 '  dominated by planning time and it shifts with max_velocity_scaling. Measure it at\n'
                 '  the scaling you will actually run at. It feeds _n_stale_actions, in units of\n'
                 f'  action_dt={self._action_dt}s, so tens of ms of spread here is tolerable.'
+            )
+            if self._pub.wire is Wire.POSE_ARRAY
+            else (
+                'This is the streaming controller: transport plus a control cycle, not a planning\n'
+                '  time, so expect it far smaller and far sharper than the MoveIt figure and near\n'
+                "  UMI's robot_action_latency of 0.1. It does two jobs now — it still feeds\n"
+                '  _n_stale_actions, and it is subtracted from every chunk anchor, so an error here\n'
+                '  shifts the whole commanded timeline rather than just rounding a drop count.'
             ),
         )
 

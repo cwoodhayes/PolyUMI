@@ -450,18 +450,32 @@ the spawner — the spawner only says `Failed loading controller`, so the actual
       > Everything below this line is blocked on the probe tooling. Stop here for the first
       > session and confirm 1–2 before building it.
 
-- [ ] **3. Synthetic slow trajectory, no policy.** A circle at walking pace.
-      **Pass:** smooth tracking, no torque chatter, no `cartesian_reflex`. Bisect `max_pos_speed`
-      down if it faults. **Blocked** — see below.
+- [x] **3. Synthetic slow trajectory, no policy.** **Passed 2026-08-19.**
+
+      ```bash
+      # laptop, with the impedance controller ACTIVE on the NUC
+      ros2 run polyumi_ros2 servo_smoke_test
+      ```
+
+      A 3 cm circle around wherever the TCP already is, 12 s per lap, driven by **overlapping**
+      16-waypoint chunks at ~3.3 Hz — the same traffic shape the policy produces. That overlap is
+      the point: it is the only test here where two multi-waypoint chunks are in flight at once,
+      which is what the interpolator's splice exists for. `tcp_pivot_test` publishes one chunk and
+      waits; `latency_probe` publishes single waypoints; neither exercises it.
+
+      **Pass:** smooth continuous motion, no pause at chunk boundaries, no torque chatter, no
+      `cartesian_reflex`. A stutter at exactly `chunk_hz` is the splice, not the gains. Bisect
+      `max_pos_speed` down if it faults.
 
 - [ ] **4. `/polyumi/home` round trip.** `ros2 service call /polyumi/home std_srvs/srv/Trigger "{}"`.
       **Pass:** it switches out, homes, switches back, and the arm holds still afterwards.
       `ros2 control list_controllers` should show the impedance controller `active` again.
 
-- [ ] **5. `tcp_pivot_test` through the impedance controller.**
+- [ ] **5. `tcp_pivot_test` through the impedance controller.** It now defaults to the timed wire
+      format, so no extra flag; `-p wire:=pose_array` still drives the MoveIt path.
       **Pass:** closed fingertips stay visibly still. Same check that validated the TCP under
       MoveIt; here it additionally validates the Jacobian shift, which nothing else does in the
-      room. **Blocked** — see below.
+      room.
 
 - [ ] **6. End-to-end with the policy.** The finding to watch for is not accuracy, it is
       **continuity across chunk boundaries** — no stop-and-go at 10 Hz. Compare the motion against
@@ -476,7 +490,12 @@ the spawner — the spawner only says `Failed loading controller`, so the actual
       thresholds via `/service_server/set_full_collision_behavior` — the defaults treat contact as a
       fault, which is wrong for these tasks. The controller deliberately does not set them itself.
 
-- [ ] **8. Re-measure `latency.arm_exec`** and apply the follow-on edits. **Blocked** — see below.
+- [ ] **8. Re-measure `latency.arm_exec`** with `ros2 run polyumi_ros2 latency_probe --ros-args
+      -p mode:=arm`, which also defaults to the timed format now. Note this is a genuinely
+      different quantity from the old figure, not a better measurement of the same one: transport
+      plus a control cycle instead of a MoveIt planning time. It also does two jobs under the servo
+      — it still feeds `_n_stale_actions`, and it is subtracted from every chunk anchor, so an
+      error here shifts the whole commanded timeline rather than just rounding a drop count.
       Once it lands:
       - `ros2_ws/src/polyumi_ros2/config/inference.yaml` — re-check whether `n_action_steps: 16` is
         still needed (it was forced up by the 0.62 s MoveIt budget), and drop the "unacceptably
@@ -490,6 +509,10 @@ the spawner — the spawner only says `Failed loading controller`, so the actual
       `_on_target`, `_plan_cartesian`, `_run_execute` and the `PoseArray` subscription from
       `nuc/fr3_moveit_bridge.py`, and the `PoseArray` command publisher (not the preview) from
       `policy_client_node.py`. The node stays for `/polyumi/home`.
+
+- [ ] **10. Configure the end-effector load.** Deferred deliberately — see "End-effector load"
+      below. Do it programmatically (`franka_msgs/srv/SetLoad`) rather than in the Desk UI, so the
+      value lives in the repo next to the gains rather than in a robot's settings.
 
 ### Collision thresholds
 
@@ -524,30 +547,40 @@ indistinguishable from one where the gains are wrong. Refusing to load is the on
 Look for `collision thresholds set — force upper (...) N / (...) Nm` in the log. The command above
 remains the way to try a value before committing it to the yaml.
 
-### Blocked: the probe tools speak `PoseArray`
+### End-effector load (deferred)
 
-Steps 3, 5 and 8 cannot run yet, and this is one gap wearing three hats.
+The firmware's gravity compensation uses the **load mass configured on the robot**, and nothing in
+this repo sets it. libfranka's torque interface takes torques *"without gravity and friction"*
+(`control_types.h`), so gravity is compensated downstream and the controller correctly does not add
+it — but that compensation is only as good as the payload model behind it.
 
-`tcp_pivot_test` and `latency_probe -p mode:=arm` both publish **`geometry_msgs/PoseArray` on
-`/polyumi/target_poses`** (`tcp_pivot_test.py:179`, `latency_probe.py:312`) — the MoveIt topic. The
-impedance controller subscribes to `MultiDOFJointTrajectory` on `/polyumi/target_poses_traj` and
-never sees them. Both tools expose a `target_topic` parameter, but that only renames the topic; the
-message *type* is unchanged, so an override does not help.
+An unmodelled PolyUMI end-effector therefore shows up as a **steady-state position offset under
+load**, which is easy to misread as needing the integral term. It is not; `Ki` would be papering
+over a wrong dynamics model. For scale, `touch_in_the_wild` configures 1.8 kg with a CoM of
+(0.064, -0.06, 0.03) m for their comparable UMI gripper.
 
-The failure is silent in the worst way: with `fr3_arm_controller` deactivated, `PoseArray` chunks go
-to a bridge whose controller no longer holds the arm, so nothing moves and nothing errors.
+Sequenced last by choice, so the controller is characterised as-is first. **Move it ahead of step 7
+if the deliberate-contact test behaves oddly** — a mis-modelled payload and a real contact force are
+hard to tell apart, and this is the cheaper of the two to rule out.
 
-Consequences if run as-is:
+### Choosing which executor a probe drives
 
-| Step | What would actually happen |
-|---|---|
-| 3 | No tool exists at all — there is no synthetic `MultiDOFJointTrajectory` publisher |
-| 5 | Drives the MoveIt bridge, not the servo; validates nothing about the Jacobian shift |
-| 8 | Measures the MoveIt path's latency — the number we are replacing |
+Both executors take target poses, but in different message types on different topics, and aiming at
+the wrong one is **silent** — the other executor simply never subscribes, so nothing moves and
+nothing errors. `polyumi_ros2.target_chunk.Wire` is the single place that mapping lives:
 
-**Fix, when we get to it.** All three want the same thing: a chunk publisher that emits the timed
-format. `tcp_pivot_test` already generates pose sequences about the TCP, so extending it covers 3
-and 5 together (a circular sweep for 3, the existing pivot for 5), and `latency_probe`'s arm mode
-needs the same output path. One shared helper that builds a `MultiDOFJointTrajectory` from a list of
-poses plus a `dt`, and a flag on each tool selecting the wire format — keeping `PoseArray` until
-step 9 deletes the MoveIt path, then dropping the flag with it.
+| `wire` | Message | Topic | Consumer |
+|---|---|---|---|
+| `multidof` (default) | `MultiDOFJointTrajectory` | `/polyumi/target_poses_traj` | `polyumi_cartesian_impedance_controller`, **active** |
+| `pose_array` | `PoseArray` | `/polyumi/target_poses` | `fr3_moveit_bridge` |
+
+`tcp_pivot_test` and `latency_probe -p mode:=arm` both take `-p wire:=...` and default to the
+streaming controller. `servo_smoke_test` only speaks the timed format — MoveIt cannot splice, so
+the concept does not apply to it.
+
+When a probe reports *"Nothing is subscribed to ... Needs: ..."*, read the consumer it names. For
+the timed format that message says **ACTIVE, not merely loaded** — a controller spawned `--inactive`
+holds no subscription, and that is indistinguishable from a crashed one from the publisher's side.
+
+All of this goes away with step 9: once the MoveIt path is deleted, `Wire` collapses to one member
+and the flags come out with it.
