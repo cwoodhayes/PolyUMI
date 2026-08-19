@@ -226,7 +226,8 @@ above the max the probe reports, or good ticks get dropped as "capture pipeline 
 Chirps the commanded EEF pose sideways and cross-correlates it against where `polyumi_tcp` actually
 went. **This moves the arm.**
 
-1. **Bring up the arm with execution on**, and get it somewhere roomy — edge poses fail to plan:
+1. **Bring up the arm with execution on**, and get it somewhere roomy — edge poses fail to plan.
+   `executor` defaults to `servo`, so this activates the impedance controller:
    ```bash
    # NUC
    ros2 launch nuc/launch/fr3_inference.launch.py execute_arm:=true
@@ -266,18 +267,30 @@ went. **This moves the arm.**
 
 #### Gotchas
 
-- **`latency.arm_exec` is not a transport constant today.** `fr3_moveit_bridge` plans and executes
-  each chunk synchronously and drops chunks that arrive mid-flight, so the number is
-  dominated by MoveIt's planning time, and it shifts with `max_velocity_scaling`. Measure it at the
-  scaling you actually run at (default 1.0). This is tolerable because it only feeds `_n_stale_actions`, in units
-  of a 0.1 s `action_dt` — tens of milliseconds of error costs nothing there, and nowhere else. When
-  the Phase 4 streaming controller lands (see
-  [franka-inference-bringup.md](franka-inference-bringup.md)) it becomes UMI's
-  `robot_action_latency`: smaller, sharper, and subtracted per waypoint instead.
-- **The arm cannot be driven broadband, so its number carries roughly ±20 ms.** Correlation accuracy
-  is set by excitation bandwidth, and MoveIt's cadence caps how fast the arm can be swept. This is
-  why the probe chirps rather than using UMI's fixed sine, and why the arm is still the least
-  precise of the three. See the table in `polyumi_ros2/latency_util.py`.
+- **`latency.arm_exec` measures the arm's lag behind the equilibrium point**, under the streaming
+  impedance controller. It is not a transport delay. `policy_client_node` anchors each chunk at
+  `t_obs - arm_exec` so the equilibrium reaches pose k that far early and the arm, trailing it,
+  arrives on time. The probe correlates against each waypoint's *intended* instant rather than its
+  publication, so the probe's own `lead_s` cancels — re-run at a different `lead_s` and the answer
+  should not move.
+- **It now does two jobs, so it is worth more care than it used to be.** Besides feeding
+  `_n_stale_actions`, it sets every chunk's anchor. Those two cancel in *timing* — the first
+  published waypoint lands at ~now regardless — but not in *phase*: overstating it skips
+  `arm_exec / action_dt` steps ahead in the policy's intended trajectory. The pre-servo 0.620 would
+  now be six steps of skip.
+- **`-p wire:=pose_array` measures a different quantity**, not the same one less well: it drives
+  `fr3_moveit_bridge`, and returns a planning time dominated by `max_velocity_scaling`. Only use it
+  while the MoveIt executor still exists.
+- **The old ±20 ms bound was MoveIt's fault and is gone.** Correlation accuracy is set by excitation
+  bandwidth, and the planner's cadence used to cap how fast the arm could be swept. The servo
+  removes that cap, so expect a far sharper peak. A result still in the hundreds of milliseconds
+  means something is routing through MoveIt — check `ros2 control list_controllers` before believing
+  it. The probe chirps rather than using UMI's fixed sine for this reason; see the table in
+  `polyumi_ros2/latency_util.py`.
+- **A dead command path used to look like a marginal measurement.** If nothing is subscribed, or
+  every waypoint is rejected as already elapsed, the arm never moves and the correlation is noise —
+  which the sharpness check rejects with a message about peak width. The probe now detects this
+  directly and names the likely causes instead.
 - **The gripper is measured by step response, not cross-correlation, and that is deliberate.**
   `fr3_gripper_bridge` quantises commands to `min_command_period_s` (0.25 s), supersedes each
   in-flight `Move` goal with the next, and drops anything inside its 5 mm deadband. Correlation

@@ -502,7 +502,7 @@ the spawner — the spawner only says `Failed loading controller`, so the actual
       thresholds via `/service_server/set_full_collision_behavior` — the defaults treat contact as a
       fault, which is wrong for these tasks. The controller deliberately does not set them itself.
 
-- [ ] **8. Re-measure `latency.arm_exec`** with `ros2 run polyumi_ros2 latency_probe --ros-args
+- [x] **8. Re-measure `latency.arm_exec`** — **0.0810 s, measured 2026-08-19**, down from 0.620 and in line with UMI's 0.1. With `ros2 run polyumi_ros2 latency_probe --ros-args
       -p mode:=arm`, which also defaults to the timed format now. Note this is a genuinely
       different quantity from the old figure, not a better measurement of the same one: transport
       plus a control cycle instead of a MoveIt planning time. It also does two jobs under the servo

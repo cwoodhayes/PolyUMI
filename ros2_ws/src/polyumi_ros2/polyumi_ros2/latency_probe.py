@@ -71,6 +71,7 @@ import cv2
 from geometry_msgs.msg import Pose
 import numpy as np
 import rclpy
+from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 import scipy.signal as ss
@@ -305,7 +306,19 @@ class LatencyProbe(Node):
             # Lateral by default: a vertical sweep loads and unloads gravity asymmetrically, so
             # the arm's lag differs between the up and down halves and smears the peak.
             self.declare_parameter('axis', 'y')
+            # How far ahead of publication each waypoint is scheduled, for the timed wire format.
+            #
+            # Non-negotiable, not a tuning knob: the streaming controller ignores any waypoint at
+            # or before its current instant, so a waypoint stamped `now` is ALWAYS in the past by
+            # the time it crosses the network, and the arm never moves at all. One command period
+            # is a comfortable margin over transport.
+            #
+            # It does not bias the result, because what gets correlated is each waypoint's INTENDED
+            # instant rather than when it was published — see _run_arm. Re-run at two different
+            # leads and the answer should not move; if it does, that assumption has broken.
+            self.declare_parameter('lead_s', 0.25)
             self._amplitude = self.get_parameter('amplitude_m').get_parameter_value().double_value
+            self._lead = self.get_parameter('lead_s').get_parameter_value().double_value
             self._axis = self.get_parameter('axis').get_parameter_value().string_value
             self._base_frame = self.get_parameter('base_frame').get_parameter_value().string_value
             self._eef_frame = self.get_parameter('eef_frame').get_parameter_value().string_value
@@ -313,6 +326,8 @@ class LatencyProbe(Node):
                 errors.append(f"axis must be x, y or z, got '{self._axis}'")
             if self._amplitude <= 0:
                 errors.append(f'amplitude_m must be > 0, got {self._amplitude}')
+            if self._lead <= 0:
+                errors.append(f'lead_s must be > 0, got {self._lead} — every waypoint would be dropped as stale')
             wire = self.get_parameter('wire').get_parameter_value().string_value
             topic = self.get_parameter('target_topic').get_parameter_value().string_value or None
             self._pub = TargetChunkPublisher(
@@ -521,17 +536,59 @@ class LatencyProbe(Node):
                 pose.position.z = base.transform.translation.z
                 setattr(pose.position, self._axis, base_offset + offset)
                 pose.orientation = base.transform.rotation
+
                 # One waypoint per publication, at command_hz. Under the streaming controller each
-                # of these splices onto the last, which IS the continuous case the policy produces;
-                # dt is therefore irrelevant with a single point.
-                self._pub.publish([pose])
-                commanded.append((self._now(), offset))
+                # splices onto the last, which IS the continuous case the policy produces; dt is
+                # irrelevant with a single point.
+                #
+                # The two wire formats need different notions of "when was this commanded", because
+                # they measure genuinely different things:
+                #
+                # * PoseArray -> MoveIt re-times the chunk from arrival, so the command event is the
+                #   publication, and the answer is a planning time.
+                # * MultiDOF -> the waypoint carries its own absolute instant. Correlating against
+                #   the publication would fold `lead` into the answer; correlating against the
+                #   intended instant measures what the servo path actually needs, namely how far the
+                #   arm lags the equilibrium point. That is exactly the quantity policy_client_node
+                #   compensates when it anchors chunks at t_obs - arm_exec.
+                if self._pub.wire is Wire.MULTIDOF:
+                    target = self.get_clock().now() + Duration(seconds=self._lead)
+                    self._pub.publish([pose], stamp=target.to_msg())
+                    commanded.append((target.nanoseconds * 1e-9, offset))
+                else:
+                    self._pub.publish([pose])
+                    commanded.append((self._now(), offset))
                 time.sleep(period)
         finally:
             sampler.cancel()
 
         with self._lock:
             actual = [(t, x - base_offset) for t, x in self._actual]
+
+        # An arm that never moved correlates to noise, and the sharpness checks below reject that
+        # with a message about the peak — which reads like a marginal measurement rather than a
+        # dead command path. Say the actual thing instead: this exact failure (every waypoint
+        # discarded as stale by the streaming controller) cost a trawl through the NUC's log.
+        if actual:
+            actual_span = max(x for _, x in actual) - min(x for _, x in actual)
+            commanded_span = max(x for _, x in commanded) - min(x for _, x in commanded)
+            if actual_span < 0.1 * commanded_span:
+                print(
+                    f'\nFAILED: the arm barely moved — commanded {commanded_span * 100:.1f} cm, '
+                    f'observed {actual_span * 100:.2f} cm.\n'
+                    '  Nothing acted on the commands. In order of likelihood:\n'
+                    f'  1. no executor is subscribed to {self._pub.topic_name} — for the timed '
+                    'format the impedance\n'
+                    '     controller must be ACTIVE, not merely loaded '
+                    '(ros2 control list_controllers on the NUC).\n'
+                    '  2. every waypoint was rejected as already elapsed. The controller logs '
+                    '"already in the past"\n'
+                    '     in the NUC bringup log; raise lead_s if so.\n'
+                    '  3. the arm is faulted or the brakes are engaged.\n'
+                    '  No latency can be inferred from this run.'
+                )
+                return 1
+
         return self._report_xcorr(
             'latency.arm_exec',
             commanded,
