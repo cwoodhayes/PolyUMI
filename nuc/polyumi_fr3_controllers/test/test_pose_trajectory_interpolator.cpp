@@ -131,6 +131,87 @@ TEST(PoseTrajectoryInterpolator, PoseDistanceSplitsTranslationFromRotation) {
   EXPECT_NEAR(rot, M_PI / 2, kTol);
 }
 
+// The speed limit is ours, not UMI's — upstream splices with max_pos_speed = max_rot_speed = inf.
+// That divergence breaks an invariant UMI relies on: its caller stores the REQUESTED waypoint time
+// in `last_waypoint_time` (franka_interpolation_controller.py:351), which upstream is always the
+// trajectory's tail because nothing ever stretches a segment. Once a limit can stretch one, the
+// caller's record and the real tail are different numbers, and `scheduleWaypoint` uses the record
+// for two things at once: detecting a rewind, and bounding the trim window.
+//
+// These two tests pin what that divergence actually costs, because it is not obvious from reading:
+// the path keeps its shape, and the speed bound holds, but the reference's LAG is unbounded.
+
+TEST(PoseTrajectoryInterpolator, SpeedLimitedChunkKeepsItsPathShape) {
+  // A right-angle chunk: the first waypoint is 1.5 m out along +x, unreachable in the 0.5 s asked
+  // for at 1 m/s, so the limiter engages and stays engaged; the rest of the chunk turns and runs
+  // along +y. The corner is what discriminates. Feeding the trajectory's real tail back in as
+  // `last_waypoint_time` instead of the requested time sends every following waypoint down the
+  // rewind branch, which collapses the whole chunk to one straight segment from the origin to the
+  // last pose — the arm would cut the corner. Here the first leg must still be a straight run
+  // along +x with y pinned at zero.
+  const double t0 = 0.0;
+  PoseTrajectoryInterpolator interp(t0, makePose(0, 0, 0, 0));
+  double last_waypoint = t0;
+
+  for (int k = 0; k < 6; ++k) {
+    const double target = t0 + 0.5 + 0.1 * k;
+    interp = interp.scheduleWaypoint(makePose(1.5, 0.05 * k, 0, 0), target, t0, last_waypoint, 1.0,
+                                     kInf);
+    last_waypoint = target;
+  }
+
+  // The leading leg is pure +x: the limiter stretched it, it was not discarded.
+  EXPECT_NEAR(interp(0.25).position.x(), 0.25, 1e-3);
+  EXPECT_NEAR(interp(0.25).position.y(), 0.0, 1e-6);
+  EXPECT_NEAR(interp(0.50).position.x(), 0.50, 1e-3);
+  EXPECT_NEAR(interp(0.50).position.y(), 0.0, 1e-6);
+
+  // It still arrives at the chunk's final pose, and holds there.
+  EXPECT_NEAR(interp(interp.lastTime()).position.x(), 1.5, kTol);
+  EXPECT_NEAR(interp(interp.lastTime()).position.y(), 0.25, kTol);
+}
+
+TEST(PoseTrajectoryInterpolator, SpeedLimitBoundsReferenceSpeedButNotItsLag) {
+  // What the limit does and does not buy. It caps how fast the equilibrium point may TRAVEL, which
+  // is what bounds contact force. It does NOT cap how far behind the policy the reference may fall:
+  // a stream commanding 1.5 m/s against a 1.0 m/s limit accumulates the 0.5 m/s deficit forever, so
+  // the trajectory's tail runs ever further into the future and the arm keeps crawling toward a
+  // stale target long after the policy has stopped.
+  //
+  // Pinned deliberately rather than left to be discovered on the arm. If a cap on how far the tail
+  // may lead `now` is ever added, this is the test that must change, and changing it should be a
+  // decision rather than a surprise.
+  constexpr double kMaxSpeed = 1.0;
+  double curr = 0.0;
+  double last_waypoint = 0.0;
+  PoseTrajectoryInterpolator interp(curr, makePose(0, 0, 0, 0));
+
+  for (int chunk = 0; chunk < 40; ++chunk) {
+    curr = 0.3 * chunk;
+    for (int k = 0; k < 16; ++k) {
+      const double target = curr + 0.1 * (k + 1);
+      interp = interp.scheduleWaypoint(makePose(0.15 * (chunk * 3 + k + 1), 0, 0, 0), target, curr,
+                                       last_waypoint, kMaxSpeed, kInf);
+      last_waypoint = target;
+    }
+  }
+
+  // The reference never outruns the limit, anywhere on the trajectory.
+  for (double t = curr; t + 0.1 <= interp.lastTime(); t += 0.1) {
+    const double travelled = (interp(t + 0.1).position - interp(t).position).norm();
+    EXPECT_LE(travelled, kMaxSpeed * 0.1 + 1e-9) << "reference exceeded max_pos_speed at t=" << t;
+  }
+
+  // Knots stay bounded — the trim window discards what `curr` has passed, so a stream that limits
+  // forever does not grow the trajectory forever.
+  EXPECT_LE(interp.size(), 20u);
+
+  // But the backlog does grow without bound: ~0.5 s of deficit per second of streaming.
+  EXPECT_GT(interp.lastTime() - curr, 5.0) << "expected the reference to fall behind; if this now "
+                                              "fails, a lead cap was added and the comment above "
+                                              "is stale";
+}
+
 TEST(PoseTrajectoryInterpolator, RepeatedSplicesStayStrictlyIncreasing) {
   // A 10 Hz chunk stream splices continuously for the length of an episode. Coincident knots are
   // what scipy raises on in UMI; here they must simply be superseded, forever, without growing.
