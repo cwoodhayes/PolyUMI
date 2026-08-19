@@ -74,7 +74,11 @@ class ServoSmokeTest(Node):
         self.declare_parameter('waypoint_dt_s', 0.1)
         # Subtracted from each chunk anchor, exactly as policy_client_node applies latency.arm_exec.
         # Left at 0 so this test exercises the splice rather than the latency model.
-        self.declare_parameter('lead_s', 0.0)
+        #
+        # NOT latency_probe's `lead_s`, which is ADDED to schedule waypoints into the future. Here a
+        # larger value moves every waypoint earlier, so more of each chunk is dropped as stale —
+        # the opposite effect. Hence the different name.
+        self.declare_parameter('arm_exec_s', 0.0)
 
         self._base = self.get_parameter('base_frame').get_parameter_value().string_value
         self._eef = self.get_parameter('eef_frame').get_parameter_value().string_value
@@ -86,7 +90,7 @@ class ServoSmokeTest(Node):
         self._chunk_hz = self.get_parameter('chunk_hz').get_parameter_value().double_value
         self._n_waypoints = self.get_parameter('waypoints_per_chunk').get_parameter_value().integer_value
         self._waypoint_dt = self.get_parameter('waypoint_dt_s').get_parameter_value().double_value
-        self._lead = self.get_parameter('lead_s').get_parameter_value().double_value
+        self._arm_exec = self.get_parameter('arm_exec_s').get_parameter_value().double_value
 
         self._validate()
 
@@ -208,7 +212,7 @@ class ServoSmokeTest(Node):
 
         start = self.get_clock().now()
         while (elapsed := (self.get_clock().now() - start).nanoseconds * 1e-9) < self._duration:
-            anchor = self.get_clock().now() - Duration(seconds=self._lead)
+            anchor = self.get_clock().now() - Duration(seconds=self._arm_exec)
             self._pub.publish(self.chunk_at(centre, elapsed), dt=self._waypoint_dt, stamp=anchor.to_msg())
             time.sleep(interval)
 
