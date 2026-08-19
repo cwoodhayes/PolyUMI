@@ -7,16 +7,8 @@
 # fr3_arm_controller, so exactly one of the two can run: activating this one deactivates MoveIt's
 # path to the arm. See docs/franka-inference-bringup.md.
 
-# NOTE: the spawner does NOT read this block. Humble's spawner sets the `type` param only from its
-# -t argument; --param-file sets the controller's `params_file` and never extracts a type. This
-# declaration is here because it is what controller_manager reads when a yaml is loaded into the
-# manager itself, which is how a controller declared in franka_bringup's controllers.yaml works.
-# Ours is spawned by hand against an already-running manager, so -t is what does the work.
-controller_manager:
-  ros__parameters:
-    polyumi_cartesian_impedance_controller:
-      type: polyumi_fr3_controllers/CartesianImpedanceController
-
+# There is deliberately no `type` here: the spawner only looks for one under the controller's own
+# key, so it is passed with -t instead. See fr3_bringup.launch.py.
 polyumi_cartesian_impedance_controller:
   ros__parameters:
     arm_id: fr3

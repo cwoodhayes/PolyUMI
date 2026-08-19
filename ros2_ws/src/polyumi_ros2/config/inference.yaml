@@ -23,10 +23,6 @@
     # 16 is also the model's own action_horizon (the fork's config/task/polyumi.yaml), and
     # serve_policy returns min(requested, what the model has) — so this cannot over-read, and
     # raising it further buys nothing. Lower it only for a checkpoint with a shorter horizon.
-    #
-    # 16 is also the model's own action_horizon (the fork's config/task/polyumi.yaml), and
-    # serve_policy returns min(requested, what the model has) — so this cannot over-read, and
-    # raising it further buys nothing. Lower it only for a checkpoint with a shorter horizon.
     n_action_steps: 16
 
     # --- Per-component latencies, in seconds. ---
