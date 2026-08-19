@@ -388,8 +388,11 @@ the spawner — the spawner only says `Failed loading controller`, so the actual
       ```
 
       **Pass:** the arm holds position dead still and the controller logs the pose it is holding
-      plus the offset it resolved, which should read roughly
-      `fr3_hand_tcp -> polyumi_tcp offset (0.0000, 0.0196, -0.1535)`.
+      plus the offset it resolved, which should read
+      `fr3_hand_tcp -> polyumi_tcp offset (0.0196, -0.0000, 0.1535)` — confirmed on hardware
+      2026-08-19. That is `polyumi_tcp` expressed *in* `fr3_hand_tcp`, i.e. `tcp_calib.py`'s
+      `(0.019612, 0, 0.2569)` with franka_description's 0.1034 m `fr3_hand -> fr3_hand_tcp` taken
+      off the z. Note it is **not** the inverse of that; `lookupTransform(A, B)` returns B in A.
 
       **A jump on activation means the TCP lookup or the Jacobian shift is wrong — stop.** Do not
       tune around it. The controller seeds its equilibrium from the measured pose precisely so that
@@ -397,33 +400,52 @@ the spawner — the spawner only says `Failed loading controller`, so the actual
       the pose it is at, and every subsequent step inherits that error. A ~15 cm jump specifically
       points at the `polyumi_tcp` transform.
 
-- [ ] **2. Push it by hand.** The cheapest complete test of the control law, and it needs no
+- [x] **2. Push it by hand.** The cheapest complete test of the control law, and it needs no
       trajectory at all.
 
       **Pass:** it springs back, and the resisting force stops growing once you are past the error
       clip — roughly 20 N at the shipped gains (2000 N/m × 0.01 m). Then, live:
 
       ```bash
-      ros2 param set /polyumi_cartesian_impedance_controller translational_stiffness 500.0
+      # NOT `ros2 param set` — see below.
+      ros2 service call /polyumi_cartesian_impedance_controller/set_parameters \
+        rcl_interfaces/srv/SetParameters \
+        "{parameters: [{name: 'translational_stiffness', value: {type: 3, double_value: 500.0}}]}"
       ```
 
-      and confirm it gets noticeably softer. That exercises the full path: state read, TCP
-      transform, error, clip, gains, torque, saturation.
+      and confirm it gets noticeably softer within ~0.5 s. That exercises the full path: state
+      read, TCP transform, error, clip, gains, torque, saturation. Every gain, clip and speed limit
+      is live-tunable this way; the controller re-reads them off the realtime thread at 2 Hz, so
+      tuning against a real contact does not need a deactivate/activate cycle (which would stop and
+      restart the libfranka loop between every attempt).
+
+      **`ros2 param set` does not work here**, and the traceback does not say why:
+
+      ```
+      RCLError: Failed to get node names: empty node name returned by the RMW layer
+      ```
+
+      That is the rmw-version gap, described in
+      [crb-fr3-inference.md](crb-fr3-inference.md) — the ROS *graph* does not cross Humble↔Kilted,
+      so node-name enumeration fails on the NUC whenever the laptop's participants are on the same
+      domain. `ros2 param set` calls `get_node_names()` to validate the node before setting it, so
+      it dies there rather than on anything to do with the parameter. Service calls match on DDS
+      endpoints instead of the graph and are unaffected, which is why the form above works. The same
+      substitution applies to any `ros2 param`/`ros2 node` command in this setup.
 
       Watch for **oscillation** rather than a clean spring — that is the damping being wrong for
       the stiffness, not the clip. Rotational damping ships deliberately under-damped (150/7
       against a critical ~24.5); if rotation rings, that is the first knob.
 
-      **Observed 2026-08-19: the spring behaviour is right, but the arm trips a joint torque limit
-      shortly after being pushed.** Not yet diagnosed. Note this is a *joint* limit, while the error
-      clip bounds *Cartesian* force — 20 N at the fingertips is a much larger torque at joint 1 than
-      at joint 7, so a Cartesian bound does not imply a joint bound anywhere. Candidates, in the
-      order worth checking: franka's collision/torque thresholds
-      (`/service_server/set_full_collision_behavior`, whose defaults treat contact as a fault and
-      which this controller deliberately does not set — see step 7); the nullspace term, whose
-      joint-1 tier is 500x the rest and is Panda-tuned, not FR3-tuned; and `delta_tau_max = 1.0`
-      Nm/cycle interacting with a large step. Read which joint and which limit off the
-      `ros2_control_node` log before changing a gain.
+      **Passed 2026-08-19**: bounded spring, and the live stiffness sweep softens it as expected.
+
+      Getting there took two fixes, both since landed, and both worth knowing about because they
+      failed invisibly rather than with wrong numbers. The first push tripped `cartesian_reflex`
+      and took `ros2_control_node` down with it (exit -6) — franka's Cartesian collision reflex
+      fires on estimated *external* force, and a hand push is external force by definition, so the
+      controller now applies thresholds itself (see "Collision thresholds"). And the gains were
+      read only at configure and activate, so the sweep could not have changed anything even once
+      `set_parameters` reached the node.
 
       > Everything below this line is blocked on the probe tooling. Stop here for the first
       > session and confirm 1–2 before building it.
@@ -468,6 +490,39 @@ the spawner — the spawner only says `Failed loading controller`, so the actual
       `_on_target`, `_plan_cartesian`, `_run_execute` and the `PoseArray` subscription from
       `nuc/fr3_moveit_bridge.py`, and the `PoseArray` command publisher (not the preview) from
       `policy_client_node.py`. The node stays for `/polyumi/home`.
+
+### Collision thresholds
+
+`cartesian_reflex` aborts the motion **and kills `ros2_control_node`**, so it is not a soft failure
+you can push through. Raise the thresholds before any step that involves contact — which includes
+step 2, since a hand push is contact:
+
+```bash
+# NUC. franka_example_controllers' own DefaultRobotBehavior values; every franka example
+# controller applies these in on_configure. Nominal and acceleration are set to the same numbers.
+ros2 service call /service_server/set_full_collision_behavior \
+  franka_msgs/srv/SetFullCollisionBehavior \
+  "{lower_torque_thresholds_nominal:      [25,25,22,20,19,17,14],
+    upper_torque_thresholds_nominal:      [35,35,32,30,29,27,24],
+    lower_torque_thresholds_acceleration: [25,25,22,20,19,17,14],
+    upper_torque_thresholds_acceleration: [35,35,32,30,29,27,24],
+    lower_force_thresholds_nominal:       [30,30,30,25,25,25],
+    upper_force_thresholds_nominal:       [40,40,40,35,35,35],
+    lower_force_thresholds_acceleration:  [30,30,30,25,25,25],
+    upper_force_thresholds_acceleration:  [40,40,40,35,35,35]}"
+```
+
+These are franka's own defaults for the examples, not an aggressive setting — the point is that
+*nothing* currently applies them, so the arm is running on the firmware's more conservative
+factory values. Step 7 (deliberate contact against a surface) will likely need them higher still.
+
+**The controller applies these itself at `on_configure`**, from the `collision.*` parameters in
+`polyumi_controllers.yaml`, and **fails to configure if they do not take**. That is deliberate:
+`set_full_collision_behavior` is a non-realtime command whose effect is invisible in TF, the topic
+list and the controller's own logs, so a session where it silently did not apply is
+indistinguishable from one where the gains are wrong. Refusing to load is the only honest signal.
+Look for `collision thresholds set — force upper (...) N / (...) Nm` in the log. The command above
+remains the way to try a value before committing it to the yaml.
 
 ### Blocked: the probe tools speak `PoseArray`
 

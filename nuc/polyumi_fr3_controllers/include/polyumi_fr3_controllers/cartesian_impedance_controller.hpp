@@ -6,6 +6,7 @@
 #include <polyumi_fr3_controllers/pose_trajectory_interpolator.hpp>
 
 #include <controller_interface/controller_interface.hpp>
+#include <franka_msgs/srv/set_full_collision_behavior.hpp>
 #include <franka_semantic_components/franka_robot_model.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <realtime_tools/realtime_buffer.hpp>
@@ -65,13 +66,28 @@ class CartesianImpedanceController : public controller_interface::ControllerInte
   /// libfranka rejects torque jumps; this is SERL's per-cycle bound at 1 kHz.
   static constexpr double kMaxTorqueRate = 1.0;
 
+  /// Everything tunable while the arm is live, snapshotted so the realtime loop reads it coherently.
+  struct Gains {
+    Matrix6d stiffness{Matrix6d::Zero()};
+    Matrix6d damping{Matrix6d::Zero()};
+    Matrix6d ki{Matrix6d::Zero()};
+    ErrorClip clip;
+    double nullspace_stiffness{0.0};
+    double joint1_nullspace_stiffness{0.0};
+    double max_pos_speed{0.0};
+    double max_rot_speed{0.0};
+  };
+
   void declareParameters();
-  void readGainParameters();
+  Gains readGainParameters();
+  /// Push the configured collision thresholds to the robot. False if they did not take.
+  bool applyCollisionBehavior();
   /// Measured TCP pose and the Jacobian at the TCP, both in the base frame.
   void readState(Pose& pose, Jacobian& jacobian, Vector7d& q, Vector7d& dq);
   void onTrajectory(const trajectory_msgs::msg::MultiDOFJointTrajectory::SharedPtr msg);
 
   std::unique_ptr<franka_semantic_components::FrankaRobotModel> robot_model_;
+  rclcpp::Client<franka_msgs::srv::SetFullCollisionBehavior>::SharedPtr collision_client_;
 
   // Resolved by name at activation rather than indexed positionally into state_interfaces_. The
   // franka examples index by hardcoded offset, which silently reads the wrong joint the moment the
@@ -100,14 +116,11 @@ class CartesianImpedanceController : public controller_interface::ControllerInte
   std::string base_frame_;
   std::string tcp_frame_;
 
-  Matrix6d stiffness_{Matrix6d::Zero()};
-  Matrix6d damping_{Matrix6d::Zero()};
-  Matrix6d ki_{Matrix6d::Zero()};
-  ErrorClip clip_;
-  double nullspace_stiffness_{0.0};
-  double joint1_nullspace_stiffness_{0.0};
-  double max_pos_speed_{0.0};
-  double max_rot_speed_{0.0};
+  // Re-read off the realtime thread and handed over by pointer, so gains can be tuned against a
+  // real contact without deactivating the controller — which would stop and restart the libfranka
+  // loop between every attempt.
+  realtime_tools::RealtimeBuffer<Gains> gains_;
+  rclcpp::TimerBase::SharedPtr gain_refresh_timer_;
 
   Vector7d q_nullspace_{Vector7d::Zero()};
   Vector6d integral_error_{Vector6d::Zero()};

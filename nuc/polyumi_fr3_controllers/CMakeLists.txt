@@ -11,6 +11,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(ament_cmake REQUIRED)
 find_package(controller_interface REQUIRED)
 find_package(Eigen3 REQUIRED)
+find_package(franka_msgs REQUIRED)
 find_package(franka_semantic_components REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
@@ -23,6 +24,7 @@ find_package(trajectory_msgs REQUIRED)
 
 set(DEPENDENCIES
   controller_interface
+  franka_msgs
   franka_semantic_components
   hardware_interface
   pluginlib

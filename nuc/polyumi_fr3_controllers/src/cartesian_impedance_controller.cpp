@@ -7,7 +7,9 @@
 #include <tf2_eigen/tf2_eigen.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <future>
 #include <memory>
 #include <string>
 #include <vector>
@@ -18,6 +20,8 @@ namespace {
 
 constexpr char kRobotModelInterface[] = "robot_model";
 constexpr char kRobotStateInterface[] = "robot_state";
+constexpr char kCollisionService[] = "/service_server/set_full_collision_behavior";
+constexpr std::chrono::seconds kCollisionTimeout{5};
 
 Pose poseFromColumnMajor(const std::array<double, 16>& m) {
   const Eigen::Affine3d transform(Eigen::Matrix4d::Map(m.data()));
@@ -107,28 +111,99 @@ void CartesianImpedanceController::declareParameters() {
   // Bound how fast the equilibrium point may travel, which bounds how far it can lead the arm.
   auto_declare<double>("max_pos_speed", 1.0);
   auto_declare<double>("max_rot_speed", 3.14);
+
+  // Collision reflex thresholds. Defaults are franka_example_controllers' own
+  // DefaultRobotBehavior values, which every franka example applies in on_configure. The robot's
+  // factory defaults are lower, and `cartesian_reflex` does not degrade gracefully — it aborts the
+  // motion and takes ros2_control_node down with it.
+  auto_declare<std::vector<double>>("collision.lower_torque_thresholds",
+                                    {25.0, 25.0, 22.0, 20.0, 19.0, 17.0, 14.0});
+  auto_declare<std::vector<double>>("collision.upper_torque_thresholds",
+                                    {35.0, 35.0, 32.0, 30.0, 29.0, 27.0, 24.0});
+  auto_declare<std::vector<double>>("collision.lower_force_thresholds",
+                                    {30.0, 30.0, 30.0, 25.0, 25.0, 25.0});
+  auto_declare<std::vector<double>>("collision.upper_force_thresholds",
+                                    {40.0, 40.0, 40.0, 35.0, 35.0, 35.0});
 }
 
-void CartesianImpedanceController::readGainParameters() {
+bool CartesianImpedanceController::applyCollisionBehavior() {
   auto node = get_node();
-  stiffness_ = diagonalGain(node->get_parameter("translational_stiffness").as_double(),
-                            node->get_parameter("rotational_stiffness").as_double());
-  damping_ = diagonalGain(node->get_parameter("translational_damping").as_double(),
-                          node->get_parameter("rotational_damping").as_double());
-  ki_ = diagonalGain(node->get_parameter("translational_ki").as_double(),
-                     node->get_parameter("rotational_ki").as_double());
+  const auto lower_torque = node->get_parameter("collision.lower_torque_thresholds").as_double_array();
+  const auto upper_torque = node->get_parameter("collision.upper_torque_thresholds").as_double_array();
+  const auto lower_force = node->get_parameter("collision.lower_force_thresholds").as_double_array();
+  const auto upper_force = node->get_parameter("collision.upper_force_thresholds").as_double_array();
+
+  if (lower_torque.size() != 7 || upper_torque.size() != 7 || lower_force.size() != 6 ||
+      upper_force.size() != 6) {
+    RCLCPP_FATAL(node->get_logger(),
+                 "collision.* thresholds must be 7 torques and 6 forces; got %zu/%zu torque and "
+                 "%zu/%zu force values.",
+                 lower_torque.size(), upper_torque.size(), lower_force.size(), upper_force.size());
+    return false;
+  }
+
+  if (!collision_client_->wait_for_service(kCollisionTimeout)) {
+    RCLCPP_FATAL(node->get_logger(), "%s not available after 5s — is fr3_bringup running?",
+                 kCollisionService);
+    return false;
+  }
+
+  auto request = std::make_shared<franka_msgs::srv::SetFullCollisionBehavior::Request>();
+  // Nominal and acceleration get the same values, as DefaultRobotBehavior does. Splitting them
+  // only matters if you want to be more permissive while accelerating, which we do not.
+  std::copy_n(lower_torque.begin(), 7, request->lower_torque_thresholds_nominal.begin());
+  std::copy_n(upper_torque.begin(), 7, request->upper_torque_thresholds_nominal.begin());
+  std::copy_n(lower_torque.begin(), 7, request->lower_torque_thresholds_acceleration.begin());
+  std::copy_n(upper_torque.begin(), 7, request->upper_torque_thresholds_acceleration.begin());
+  std::copy_n(lower_force.begin(), 6, request->lower_force_thresholds_nominal.begin());
+  std::copy_n(upper_force.begin(), 6, request->upper_force_thresholds_nominal.begin());
+  std::copy_n(lower_force.begin(), 6, request->lower_force_thresholds_acceleration.begin());
+  std::copy_n(upper_force.begin(), 6, request->upper_force_thresholds_acceleration.begin());
+
+  // Blocking is safe here: ros2_control_node spins a MultiThreadedExecutor, so another thread
+  // services the response while this one waits. The franka example controllers do the same.
+  auto future = collision_client_->async_send_request(request);
+  if (future.wait_for(kCollisionTimeout) != std::future_status::ready) {
+    RCLCPP_FATAL(node->get_logger(), "%s did not answer within 5s.", kCollisionService);
+    return false;
+  }
+
+  const auto response = future.get();
+  if (!response->success) {
+    RCLCPP_FATAL(node->get_logger(), "%s refused the thresholds: %s", kCollisionService,
+                 response->error.c_str());
+    return false;
+  }
+
+  RCLCPP_INFO(node->get_logger(),
+              "collision thresholds set — force upper (%.0f, %.0f, %.0f) N / (%.0f, %.0f, %.0f) Nm",
+              upper_force[0], upper_force[1], upper_force[2], upper_force[3], upper_force[4],
+              upper_force[5]);
+  return true;
+}
+
+CartesianImpedanceController::Gains CartesianImpedanceController::readGainParameters() {
+  auto node = get_node();
+  Gains gains;
+  gains.stiffness = diagonalGain(node->get_parameter("translational_stiffness").as_double(),
+                                 node->get_parameter("rotational_stiffness").as_double());
+  gains.damping = diagonalGain(node->get_parameter("translational_damping").as_double(),
+                               node->get_parameter("rotational_damping").as_double());
+  gains.ki = diagonalGain(node->get_parameter("translational_ki").as_double(),
+                          node->get_parameter("rotational_ki").as_double());
 
   const double t_clip = std::abs(node->get_parameter("translational_clip").as_double());
   const double r_clip = std::abs(node->get_parameter("rotational_clip").as_double());
-  clip_.translation_min = Eigen::Vector3d::Constant(-t_clip);
-  clip_.translation_max = Eigen::Vector3d::Constant(t_clip);
-  clip_.rotation_min = Eigen::Vector3d::Constant(-r_clip);
-  clip_.rotation_max = Eigen::Vector3d::Constant(r_clip);
+  gains.clip.translation_min = Eigen::Vector3d::Constant(-t_clip);
+  gains.clip.translation_max = Eigen::Vector3d::Constant(t_clip);
+  gains.clip.rotation_min = Eigen::Vector3d::Constant(-r_clip);
+  gains.clip.rotation_max = Eigen::Vector3d::Constant(r_clip);
 
-  nullspace_stiffness_ = node->get_parameter("nullspace_stiffness").as_double();
-  joint1_nullspace_stiffness_ = node->get_parameter("joint1_nullspace_stiffness").as_double();
-  max_pos_speed_ = node->get_parameter("max_pos_speed").as_double();
-  max_rot_speed_ = node->get_parameter("max_rot_speed").as_double();
+  gains.nullspace_stiffness = node->get_parameter("nullspace_stiffness").as_double();
+  gains.joint1_nullspace_stiffness = node->get_parameter("joint1_nullspace_stiffness").as_double();
+  gains.max_pos_speed = node->get_parameter("max_pos_speed").as_double();
+  gains.max_rot_speed = node->get_parameter("max_rot_speed").as_double();
+  return gains;
 }
 
 CallbackReturn CartesianImpedanceController::on_configure(
@@ -141,7 +216,15 @@ CallbackReturn CartesianImpedanceController::on_configure(
   }
   base_frame_ = node->get_parameter("base_frame").as_string();
   tcp_frame_ = node->get_parameter("tcp_frame").as_string();
-  readGainParameters();
+  gains_.writeFromNonRT(readGainParameters());
+
+  // Poll rather than hook add_on_set_parameters_callback: that callback fires BEFORE the store is
+  // updated, so it would have to reconstruct the new value from the incoming vector by name — ~30
+  // lines of string matching to save 0.5 s of latency on a knob a human turns.
+  // ponytail: 2 Hz poll of ~12 doubles; switch to a post-set callback if rclcpp ever gains one here.
+  gain_refresh_timer_ = node->create_wall_timer(std::chrono::milliseconds(500), [this]() {
+    gains_.writeFromNonRT(readGainParameters());
+  });
 
   robot_model_ = std::make_unique<franka_semantic_components::FrankaRobotModel>(
       arm_id_ + "/" + kRobotModelInterface, arm_id_ + "/" + kRobotStateInterface);
@@ -155,22 +238,32 @@ CallbackReturn CartesianImpedanceController::on_configure(
         onTrajectory(msg);
       });
 
-  // Collision thresholds are deliberately NOT set here. The tasks involve intentional contact, and
-  // franka's defaults treat contact as a fault; raising them is a decision for the operator, via
-  // /service_server/set_full_collision_behavior, not something a controller should do silently.
+  collision_client_ =
+      node->create_client<franka_msgs::srv::SetFullCollisionBehavior>(kCollisionService);
+  // Hard failure, not a warning. The alternative is activating a torque controller against unknown
+  // reflex thresholds, which is invisible in TF, the topic list and this controller's own logs —
+  // a session where this silently did not apply looks exactly like one where the gains are wrong.
+  if (!applyCollisionBehavior()) {
+    RCLCPP_FATAL(node->get_logger(),
+                 "Refusing to configure without known collision thresholds. See "
+                 "docs/franka-inference-bringup.md, \"Collision thresholds\".");
+    return CallbackReturn::ERROR;
+  }
+
+  const Gains& startup = *gains_.readFromNonRT();
   RCLCPP_INFO(node->get_logger(),
               "cartesian impedance: K=(%.0f N/m, %.0f Nm/rad) D=(%.0f, %.0f) clip=(%.3f m, %.3f "
-              "rad) -> max force ~%.0f N",
-              stiffness_(0, 0), stiffness_(3, 3), damping_(0, 0), damping_(3, 3),
-              clip_.translation_max(0), clip_.rotation_max(0),
-              stiffness_(0, 0) * clip_.translation_max(0));
+              "rad) -> max force ~%.0f N (all tunable live via set_parameters)",
+              startup.stiffness(0, 0), startup.stiffness(3, 3), startup.damping(0, 0),
+              startup.damping(3, 3), startup.clip.translation_max(0), startup.clip.rotation_max(0),
+              startup.stiffness(0, 0) * startup.clip.translation_max(0));
   return CallbackReturn::SUCCESS;
 }
 
 CallbackReturn CartesianImpedanceController::on_activate(
     const rclcpp_lifecycle::State& /*previous_state*/) {
   robot_model_->assign_loaned_state_interfaces(state_interfaces_);
-  readGainParameters();
+  gains_.writeFromNonRT(readGainParameters());
 
   position_interfaces_.clear();
   velocity_interfaces_.clear();
@@ -251,6 +344,7 @@ void CartesianImpedanceController::onTrajectory(
 
   const double anchor = rclcpp::Time(msg->header.stamp).seconds();
   const double curr_time = now_seconds_.load(std::memory_order_relaxed);
+  const Gains& speeds = *gains_.readFromNonRT();
 
   auto interp = *interpolator_.readFromNonRT();
   if (!interp) {
@@ -277,7 +371,8 @@ void CartesianImpedanceController::onTrajectory(
     }
 
     interp = std::make_shared<const PoseTrajectoryInterpolator>(interp->scheduleWaypoint(
-        pose, target_time, curr_time, last_waypoint_time_, max_pos_speed_, max_rot_speed_));
+        pose, target_time, curr_time, last_waypoint_time_, speeds.max_pos_speed,
+        speeds.max_rot_speed));
     last_waypoint_time_ = target_time;
     ++spliced;
   }
@@ -339,15 +434,17 @@ controller_interface::return_type CartesianImpedanceController::update(
   // hold rather than an extrapolation off the end of the workspace.
   const Pose desired = (*interp)(now);
 
-  const Vector6d error = clipPoseError(poseError(pose, desired), clip_);
+  const Gains& gains = *gains_.readFromRT();
+  const Vector6d error = clipPoseError(poseError(pose, desired), gains.clip);
   integral_error_ = accumulateIntegralError(integral_error_, error);
 
   const Vector7d coriolis =
       Eigen::Map<const Vector7d>(robot_model_->getCoriolisForceVector().data());
-  const Vector7d tau = taskTorque(jacobian, error, integral_error_, dq, stiffness_, damping_, ki_) +
-                       nullspaceTorque(jacobian, q, dq, q_nullspace_, nullspace_stiffness_,
-                                       joint1_nullspace_stiffness_) +
-                       coriolis;
+  const Vector7d tau =
+      taskTorque(jacobian, error, integral_error_, dq, gains.stiffness, gains.damping, gains.ki) +
+      nullspaceTorque(jacobian, q, dq, q_nullspace_, gains.nullspace_stiffness,
+                      gains.joint1_nullspace_stiffness) +
+      coriolis;
 
   tau_previous_ = saturateTorqueRate(tau, tau_previous_, kMaxTorqueRate);
   for (int i = 0; i < kNumJoints; ++i) {

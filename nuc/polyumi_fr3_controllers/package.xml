@@ -15,6 +15,7 @@
 
   <depend>controller_interface</depend>
   <depend>eigen</depend>
+  <depend>franka_msgs</depend>
   <depend>franka_semantic_components</depend>
   <depend>hardware_interface</depend>
   <depend>pluginlib</depend>

@@ -59,3 +59,24 @@ polyumi_cartesian_impedance_controller:
     # alongside the clip.
     max_pos_speed: 1.0                # m/s
     max_rot_speed: 3.14               # rad/s
+
+    # --- Collision reflex thresholds ---
+    # Applied by the controller at on_configure; configure FAILS if they do not take, because a
+    # torque controller running against unknown reflex thresholds is invisible until it faults.
+    #
+    # These live next to the gains on purpose: they are not an independent choice. The error clip
+    # above caps *commanded* force at ~20 N, but the reflex fires on *estimated external* force,
+    # which includes whatever the environment (or a hand) pushes back with. Raise the clip and
+    # these have to follow, or the arm reflexes exactly when it starts doing useful work.
+    #
+    # Values are franka_example_controllers' DefaultRobotBehavior — what every franka example
+    # applies. The robot's factory defaults are lower, which is what tripped `cartesian_reflex` on
+    # a bare hand push (2026-08-19). Step 7's deliberate-contact test will likely need the force
+    # numbers higher still; raise upper_force first, and only as far as the task needs.
+    #
+    # Torques are per joint (7), forces are (x, y, z, R, P, Y) in N and Nm.
+    collision:
+      lower_torque_thresholds: [25.0, 25.0, 22.0, 20.0, 19.0, 17.0, 14.0]
+      upper_torque_thresholds: [35.0, 35.0, 32.0, 30.0, 29.0, 27.0, 24.0]
+      lower_force_thresholds: [30.0, 30.0, 30.0, 25.0, 25.0, 25.0]
+      upper_force_thresholds: [40.0, 40.0, 40.0, 35.0, 35.0, 35.0]
