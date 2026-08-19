@@ -31,12 +31,14 @@ def _scene(tmp_path: pathlib.Path, steps: list[int], n_episodes: int = 2) -> zar
     return root
 
 
-def test_rerunning_a_step_marks_the_later_ones_incomplete(tmp_path: pathlib.Path) -> None:
+def test_rerunning_a_step_invalidates_everything_after_it(tmp_path: pathlib.Path) -> None:
     """
     The bug this exists for: step 2 re-ran and steps 3-5 stayed 'done' against stale inputs.
 
-    Scene 31d6 exported 18 episodes of ``eef/pose_slam`` built from a superseded SLAM pass
-    because nothing invalidated step 5 when step 2 was re-run 90 minutes later.
+    All three levels have to move together. Scene marks alone would leave ``run_step``'s
+    episode loop skipping every episode of the steps this just re-opened; and the marks alone
+    would leave nothing to tell tomorrow's ``pingest pp`` that the work is owed, since
+    invalidation and rebuild are routinely different processes.
     """
     root = _scene(tmp_path, [1, 2, 3, 4, 5])
 
@@ -44,31 +46,19 @@ def test_rerunning_a_step_marks_the_later_ones_incomplete(tmp_path: pathlib.Path
 
     assert preprocessing_steps_done(root) == [1, 2]
     assert sorted(preprocessing_step_versions(root)) == ['1', '2']
-
-
-def test_invalidation_reaches_the_per_episode_marks(tmp_path: pathlib.Path) -> None:
-    """
-    Scene-level marks alone are not enough to make a step actually re-run.
-
-    ``run_step``'s episode loop skips any episode already carrying the step's number, so
-    leaving those behind would re-open the step and then skip every episode in it.
-    """
-    root = _scene(tmp_path, [1, 2, 3, 4, 5])
-
-    _mark_preprocessing_step(root, 2)
-
-    for key in ('episode_0', 'episode_1'):
-        assert episode_steps_done(root[key]) == [1, 2]
+    assert [episode_steps_done(root[k]) for k in ('episode_0', 'episode_1')] == [[1, 2], [1, 2]]
+    assert steps_needing_rebuild(root) == {3, 4, 5}
 
 
 def test_marking_the_last_step_invalidates_nothing(tmp_path: pathlib.Path) -> None:
-    """The common case — finishing the pipeline in order — must clear nothing."""
+    """The common case — finishing the pipeline in order — must clear nothing and owe nothing."""
     root = _scene(tmp_path, [1, 2, 3, 4])
 
     _mark_preprocessing_step(root, 5)
 
     assert preprocessing_steps_done(root) == [1, 2, 3, 4, 5]
     assert episode_steps_done(root['episode_0']) == [1, 2, 3, 4]
+    assert steps_needing_rebuild(root) == set()
 
 
 def test_invalidation_leaves_the_arrays_alone(tmp_path: pathlib.Path) -> None:
@@ -79,39 +69,6 @@ def test_invalidation_leaves_the_arrays_alone(tmp_path: pathlib.Path) -> None:
     _invalidate_downstream_steps(root, 2)
 
     assert 'eef/pose_slam' in root['episode_0']
-
-
-def test_invalidated_steps_are_recorded_for_rebuild(tmp_path: pathlib.Path) -> None:
-    """
-    Clearing marks is not enough — the debt has to persist for the run that rebuilds them.
-
-    Invalidation and rebuild are routinely different processes: `pingest pp 2 --force`
-    today, `pingest pp` tomorrow.
-    """
-    root = _scene(tmp_path, [1, 2, 3, 4, 5])
-
-    _mark_preprocessing_step(root, 2)
-
-    assert steps_needing_rebuild(root) == {3, 4, 5}
-
-
-def test_rebuild_debt_survives_reopening_the_store(tmp_path: pathlib.Path) -> None:
-    """It lives on the store, not in memory, so a later invocation still honours it."""
-    root = _scene(tmp_path, [1, 2, 3, 4, 5])
-    _mark_preprocessing_step(root, 2)
-
-    reopened = zarr.open_group(str(tmp_path / 'scene.zarr'), mode='a')
-
-    assert steps_needing_rebuild(reopened) == {3, 4, 5}
-
-
-def test_a_clean_run_records_no_rebuild_debt(tmp_path: pathlib.Path) -> None:
-    """Finishing the pipeline in order must not leave anything marked for recompute."""
-    root = _scene(tmp_path, [1, 2, 3, 4])
-
-    _mark_preprocessing_step(root, 5)
-
-    assert steps_needing_rebuild(root) == set()
 
 
 def test_run_preprocessing_forces_an_invalidated_step(tmp_path: pathlib.Path) -> None:
