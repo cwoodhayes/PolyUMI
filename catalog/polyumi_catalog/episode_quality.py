@@ -72,15 +72,7 @@ def scene_slam_records(scene_dir: pathlib.Path) -> dict[str, SlamRecord]:
         # exempt from the SLAM-derived checks. 'available_sources' is written by
         # step 5 (EefPoseStep); absent means step 5 hasn't run, i.e. not exempt.
         has_optitrack = 'optitrack' in list(ep['eef'].attrs.get('available_sources', [])) if 'eef' in ep else False
-        attrs = dict(ep['annotations']['slam'].attrs)
-        # Step 5 measures the hand-frame pose jump, so it lives on eef/pose_slam rather than
-        # in the SLAM annotations. Merged in here so it rides the existing cached column and
-        # reaches the same verdict function DP export calls — see polyumi_ingest.quality.
-        if 'eef' in ep and 'pose_slam' in ep['eef']:
-            jump = ep['eef']['pose_slam'].attrs.get('max_pose_jump_m')
-            if jump is not None:
-                attrs['max_pose_jump_m'] = jump
-        out[session_dir] = SlamRecord(attrs=attrs, has_optitrack=has_optitrack)
+        out[session_dir] = SlamRecord(attrs=dict(ep['annotations']['slam'].attrs), has_optitrack=has_optitrack)
     return out
 
 

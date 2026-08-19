@@ -128,6 +128,8 @@ def _build_scene(tmp_path: pathlib.Path, *, with_optitrack: bool, with_slam: boo
             rotation=Rotation.identity(n),
         )
         ep.create_group('gopro').create_array('slam_poses', data=_pose_array(T_s_gp))
+        # Step 2 always writes this alongside the poses, and step 5 adds max_pose_jump_m to it.
+        ep.require_group('annotations').create_group('slam').attrs['frame_stride'] = 1
 
     if with_optitrack:
         opti_ts = np.arange(2 * n, dtype=np.float64) / 120.0  # a faster, offset grid
@@ -341,8 +343,13 @@ def test_max_pose_jump_is_none_without_two_adjacent_tracked_frames(tmp_path: pat
     assert _max_pose_jump_m(ep, _poses(pos)) is None
 
 
-def test_eef_pose_step_records_the_jump_on_each_pose_array(tmp_path: pathlib.Path) -> None:
-    """The step stores the measurement; quality.py turns it into a verdict at read time."""
+def test_eef_pose_step_records_the_jump_beside_the_slam_metrics(tmp_path: pathlib.Path) -> None:
+    """
+    The step stores the measurement; quality.py turns it into a verdict at read time.
+
+    Into ``annotations/slam``, not onto the pose array: that is the mapping
+    ``auto_unusable_reasons`` is handed, so no consumer has to merge two sources.
+    """
     scene_zarr = _build_scene(tmp_path, with_optitrack=False, with_slam=True)
 
     EefPoseStep().run_step(scene_zarr)
@@ -350,4 +357,5 @@ def test_eef_pose_step_records_the_jump_on_each_pose_array(tmp_path: pathlib.Pat
     ep = zarr.open_group(str(scene_zarr / 'episode_0'), mode='r')
     # The fixture slides 0->1 m over 10 frames, and a pure translation carries the hand
     # frame with it unchanged, so each step is 1/9 m.
-    assert ep['eef/pose_slam'].attrs['max_pose_jump_m'] == pytest.approx(1 / 9)
+    assert ep['annotations/slam'].attrs['max_pose_jump_m'] == pytest.approx(1 / 9)
+    assert 'max_pose_jump_m' not in ep['eef/pose_slam'].attrs

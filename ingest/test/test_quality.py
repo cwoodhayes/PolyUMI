@@ -148,14 +148,6 @@ def test_normal_hand_motion_is_not_a_jump() -> None:
     assert auto_unusable_reasons(attrs, thresholds=_TH) == []
 
 
-def test_pose_jump_check_is_disabled_by_a_null_threshold() -> None:
-    """An empty `max_pose_jump_m:` in the config turns the check off."""
-    off = QualityThresholds(max_lost_frames=10, min_tracked_frames=60, max_pose_jump_m=None)
-    attrs = _attrs(n_fed=205, n_lost=0)
-    attrs['max_pose_jump_m'] = 3.06
-    assert auto_unusable_reasons(attrs, thresholds=off) == []
-
-
 def test_pose_jump_is_judged_even_without_usable_frame_counts() -> None:
     """
     A store too old to derive fed-frame counts from still gets its jump judged.

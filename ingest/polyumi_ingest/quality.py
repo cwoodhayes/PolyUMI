@@ -39,8 +39,7 @@ class QualityThresholds:
     min_tracked_frames: int = 60
     optitrack_always_usable: bool = True
     low_tracking_ratio: float = 0.90
-    #: None disables the check; every other threshold is disabled by setting it permissively.
-    max_pose_jump_m: float | None = 0.08
+    max_pose_jump_m: float = 0.08
 
 
 @functools.lru_cache(maxsize=1)
@@ -108,10 +107,10 @@ def auto_unusable_reasons(
     ``_fed_frame_counts`` and the config file. Feeding the whole-grid ``n_frames_lost``
     to ``max_lost_frames`` would reject every episode processed at a stride above 1.
 
-    ``max_pose_jump_m`` is written by step 5 onto ``eef/pose_<source>`` and merged into this
-    mapping by each caller, since it is measured on the hand-frame trajectory rather than
-    reported by the localizer. It catches what the frame counts structurally cannot: an
-    episode that tracked every frame it was fed and still teleported between two of them.
+    ``max_pose_jump_m`` sits in the same mapping but is measured by step 5, on the hand-frame
+    trajectory rather than reported by the localizer. It catches what the frame counts
+    structurally cannot: an episode that tracked every frame it was fed and still teleported
+    between two of them.
     """
     th = thresholds if thresholds is not None else load_quality_thresholds()
     if not slam_attrs:
@@ -124,11 +123,10 @@ def auto_unusable_reasons(
     # store too old to have post-chirp counts can still have a measured jump, and a metre-long
     # teleport is worth reporting on its own.
     jump = slam_attrs.get('max_pose_jump_m')
-    if th.max_pose_jump_m is not None and isinstance(jump, (int, float)) and not math.isnan(jump):
-        if jump > th.max_pose_jump_m:
-            reasons.append(
-                f'{jump * 100:.0f} cm pose jump between adjacent frames (threshold {th.max_pose_jump_m * 100:.0f} cm)'
-            )
+    if isinstance(jump, (int, float)) and not math.isnan(jump) and jump > th.max_pose_jump_m:
+        reasons.append(
+            f'{jump * 100:.0f} cm pose jump between adjacent frames (threshold {th.max_pose_jump_m * 100:.0f} cm)'
+        )
 
     counts = _fed_frame_counts(slam_attrs)
     if counts is None:

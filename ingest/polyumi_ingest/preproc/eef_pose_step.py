@@ -31,7 +31,9 @@ _SOURCE_PREFERENCE = ('optitrack', 'slam')
 
 def _max_pose_jump_m(ep: zarr.Group, pose: np.ndarray) -> float | None:
     """
-    Largest position step between adjacent tracked frames, or None if unmeasurable.
+    Largest position step between adjacent tracked frames of the SLAM trajectory.
+
+    Returns None if unmeasurable (fewer than two adjacent tracked frames).
 
     The usability gate's blind spot: an episode can track every frame it was fed, report a
     tracking_ratio of 1.000, and still teleport a metre between two of them when SLAM
@@ -208,11 +210,18 @@ class EefPoseStep(PreprocessingStep):
             pose_arr.attrs['body_frame'] = 'hand'
             pose_arr.attrs['grid'] = 'gopro'
             pose_arr.attrs['n_nan'] = n_nan
-            # Measurement only; the usable/unusable verdict is policy and lives in
-            # polyumi_ingest.quality, derived at read time from this number.
-            max_jump = _max_pose_jump_m(ep, pose)
-            if max_jump is not None:
-                pose_arr.attrs['max_pose_jump_m'] = max_jump
+
+            # Written into annotations/slam, beside step 2's own metrics, because that is the
+            # bag `polyumi_ingest.quality` reads: keeping it here would make every consumer
+            # merge two sources by hand. Step 5 owns the measurement, step 2 owns the bag.
+            # Measurement only — the usable/unusable verdict is policy and lives in quality.py.
+            max_jump = _max_pose_jump_m(ep, pose) if source == 'slam' else None
+            if 'annotations/slam' in ep:
+                slam_attrs = grp(ep, 'annotations/slam').attrs
+                if max_jump is None:
+                    slam_attrs.pop('max_pose_jump_m', None)
+                else:
+                    slam_attrs['max_pose_jump_m'] = max_jump
 
             jump_str = f', max jump {max_jump * 100:.1f} cm' if max_jump is not None else ''
             log.info(

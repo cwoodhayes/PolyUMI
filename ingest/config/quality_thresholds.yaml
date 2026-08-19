@@ -58,10 +58,6 @@ min_tracked_frames: 60
 # consumes, and because the lever arm amplifies orientation glitches the camera position
 # never sees: p_hand = p_cam + R_cam·t with |t| = 0.2685 m, so an orientation flip alone
 # moves the hand up to 54 cm.
-#
-# Leave the value empty to disable the check entirely. The two counts above have no such
-# switch — they are disabled by setting them permissively — but a threshold in metres has no
-# natural "off" value, and this one is new enough to be worth being able to turn off quickly.
 max_pose_jump_m: 0.08
 
 # Episodes with OptiTrack poses available (eef.attrs['available_sources']) skip
