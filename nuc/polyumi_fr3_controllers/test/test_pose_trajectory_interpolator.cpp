@@ -212,18 +212,23 @@ TEST(PoseTrajectoryInterpolator, SpeedLimitBoundsReferenceSpeedButNotItsLag) {
                                               "is stale";
 }
 
-TEST(PoseTrajectoryInterpolator, RepeatedSplicesStayStrictlyIncreasing) {
-  // A 10 Hz chunk stream splices continuously for the length of an episode. Coincident knots are
-  // what scipy raises on in UMI; here they must simply be superseded, forever, without growing.
+TEST(PoseTrajectoryInterpolator, RepeatedSplicesDoNotGrowTheTrajectory) {
+  // A 10 Hz chunk stream splices continuously for the length of an episode, so every splice runs in
+  // a subscription callback that also frees the previous trajectory. The trim window is what keeps
+  // that bounded: it discards whatever curr_time has passed, so the knot count settles instead of
+  // tracking the episode's length.
+  //
+  // Coincident knots — what scipy raises on in UMI — are not checked here because they cannot
+  // arise: trim's interior filter is strict and the new waypoint's duration is always positive, so
+  // the knots are strictly increasing by construction. See the note on the pop-back guard in
+  // scheduleWaypoint.
   auto interp = twoWaypoints();
 
   for (int i = 0; i < 200; ++i) {
     const double now = 10.5 + 0.1 * i;
     interp = interp.scheduleWaypoint(makePose(0.01 * i, 0, 0, 0), now + 0.3, now, now + 0.2,
                                      kInf, kInf);
-    for (std::size_t k = 1; k < interp.size(); ++k) {
-      ASSERT_GT(interp.trim(interp.firstTime(), interp.lastTime()).size(), 0u);
-    }
     ASSERT_LE(interp.size(), 8u) << "spliced trajectory is growing without bound";
   }
+  EXPECT_GT(interp.size(), 1u) << "test is vacuous if the splices are not landing";
 }

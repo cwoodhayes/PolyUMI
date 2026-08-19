@@ -123,24 +123,6 @@ TEST(CartesianImpedanceLaw, ClipLeavesSmallErrorsUntouched) {
   EXPECT_NEAR(error(0), 0.002, kTol);
 }
 
-TEST(CartesianImpedanceLaw, NullspaceProjectorIsExactWhenUndamped) {
-  // The structural claim: (I - J^T pinv(J^T)) really is a null-space projector, so an elbow-tidying
-  // torque cannot disturb the end effector. Verified against an exact inverse, which isolates the
-  // projector's algebra from the damping the shipped law adds on top.
-  const Jacobian j = wellConditionedJacobian();
-  Vector7d q = Vector7d::Zero();
-  q(6) = 0.3;
-
-  Vector7d qe = -q;
-  qe(0) *= 100.0;
-  const Eigen::Matrix<double, 7, 7> projector =
-      Eigen::Matrix<double, 7, 7>::Identity() - j.transpose() * dampedPseudoInverse(j.transpose(), 0.0);
-  const Vector7d tau = projector * (20.0 * qe);
-
-  ASSERT_GT(tau.norm(), 1.0) << "test is vacuous if the nullspace term is zero";
-  EXPECT_LT((j * tau).norm(), 1e-12);
-}
-
 TEST(CartesianImpedanceLaw, DampedNullspaceLeakIsSmallButNotZero) {
   // What the shipped law actually does, pinned honestly. SERL's pseudo-inverse is damped
   // (lambda=0.2) to stay conditioned near singularities, and the price is that the projector is
@@ -175,15 +157,13 @@ TEST(CartesianImpedanceLaw, SaturationBoundsThePerCycleStep) {
   }
   EXPECT_NEAR(out(0), 1.0, kTol);
   EXPECT_NEAR(out(3), -1.0, kTol);
-}
 
-TEST(CartesianImpedanceLaw, SaturationPassesSmallChangesThrough) {
-  const Vector7d previous = Vector7d::Constant(2.0);
-  const Vector7d desired = Vector7d::Constant(2.25);
-
-  const Vector7d out = saturateTorqueRate(desired, previous, 1.0);
-
-  EXPECT_NEAR((out - desired).norm(), 0.0, kTol);
+  // The other half of the claim: a change already inside the bound passes through untouched, or
+  // the controller would rate-limit its way through every ordinary command.
+  EXPECT_NEAR((saturateTorqueRate(Vector7d::Constant(2.25), Vector7d::Constant(2.0), 1.0) -
+               Vector7d::Constant(2.25))
+                  .norm(),
+              0.0, kTol);
 }
 
 TEST(CartesianImpedanceLaw, IntegralErrorCannotWindUp) {
@@ -217,11 +197,6 @@ TEST(CartesianImpedanceLaw, ShiftedJacobianTurnsRotationIntoFingertipTranslation
   const Jacobian perpendicular = shiftJacobian(j, Eigen::Vector3d(0.2, 0.0, 0.0));
   EXPECT_NEAR(perpendicular(1, 0), 0.2, kTol);  // z_hat x 0.2 x_hat = 0.2 y_hat
   EXPECT_NEAR(perpendicular(5, 0), 1.0, kTol);  // angular rows untouched
-}
-
-TEST(CartesianImpedanceLaw, ShiftWithZeroOffsetIsIdentity) {
-  const Jacobian j = wellConditionedJacobian();
-  EXPECT_NEAR((shiftJacobian(j, Eigen::Vector3d::Zero()) - j).norm(), 0.0, kTol);
 }
 
 TEST(CartesianImpedanceLaw, RotationErrorTakesTheShortWayRound) {

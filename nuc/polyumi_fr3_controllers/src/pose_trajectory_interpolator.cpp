@@ -107,8 +107,11 @@ PoseTrajectoryInterpolator PoseTrajectoryInterpolator::scheduleWaypoint(const Po
 
   std::vector<double> times = trimmed.times_;
   std::vector<Pose> poses = trimmed.poses_;
-  // The new waypoint supersedes any it lands on top of. UMI leaves this to scipy, which raises on
-  // non-increasing knots; a 1 kHz controller would rather drop a redundant point than throw.
+  // Belt and braces, and currently unreachable: trim() always ends exactly at end_time, and
+  // duration is at least `time - end_time` which is strictly positive, so new_waypoint_time is
+  // always past the last knot. Kept because the constructor THROWS on non-increasing times and
+  // this runs in a subscription callback — if the min/max sequence above is ever rearranged, this
+  // is what turns a crash into a dropped point.
   while (!times.empty() && times.back() >= new_waypoint_time) {
     times.pop_back();
     poses.pop_back();
