@@ -38,12 +38,7 @@ class Wire(StrEnum):
 
     @property
     def default_topic(self) -> str:
-        """
-        Where this format is published by convention.
-
-        Separate topics per format, rather than one topic carrying two types, so both executors
-        can be running at once and neither is handed a message it cannot parse.
-        """
+        """One topic per format, so neither executor is ever handed a message it cannot parse."""
         return {
             Wire.POSE_ARRAY: '/polyumi/target_poses',
             Wire.MULTIDOF: '/polyumi/target_poses_traj',
@@ -52,11 +47,10 @@ class Wire(StrEnum):
     @property
     def consumer(self) -> str:
         """
-        What has to be running for this format to reach the arm, for 'nobody is listening' errors.
+        What must be running for this format to reach the arm, for 'nobody is listening' errors.
 
-        Worth spelling out per format because the two fail differently: the MoveIt bridge is a
-        process that is either up or not, while the impedance controller can be loaded and still
-        have no subscription because it was never activated — which looks identical from here.
+        The two fail differently: the bridge is a process that is either up or not, while the
+        controller can be loaded and still not subscribed because it was never activated.
         """
         return {
             Wire.POSE_ARRAY: ('fr3_moveit_bridge (ros2 launch nuc/launch/fr3_inference.launch.py on the NUC)'),
@@ -71,10 +65,7 @@ def pose_array(poses: list[Pose], *, frame_id: str, stamp) -> PoseArray:
     """
     Build a PoseArray of `poses` in `frame_id`.
 
-    :param poses: waypoints, in order.
-    :param frame_id: frame the poses are expressed in.
-    :param stamp: builtin_interfaces Time for the header. Carries no per-waypoint meaning here —
-        the consumer re-times the chunk on arrival.
+    `stamp` carries no per-waypoint meaning — the consumer re-times the chunk from arrival.
     """
     msg = PoseArray()
     msg.header.stamp = stamp
@@ -95,18 +86,10 @@ def multidof_trajectory(
     """
     Build a MultiDOFJointTrajectory placing waypoint k at ``stamp + (first_index + k) * dt``.
 
-    `first_index` exists because a chunk is often published after its leading waypoints have been
-    dropped as stale. Numbering the survivors from zero would slide the whole timeline
-    ``first_index * dt`` earlier, and the consumer reads these as absolute instants, so the arm
-    would be driven to each pose that much too soon — a uniform shift that looks like tracking lag
-    rather than a bug.
-
-    :param poses: waypoints, in order, already sliced.
-    :param frame_id: frame the poses are expressed in; the controller rejects anything else.
-    :param joint_name: the frame being commanded, e.g. ``polyumi_tcp``.
-    :param stamp: builtin_interfaces Time the chunk is anchored at.
-    :param dt: seconds between consecutive waypoints.
-    :param first_index: index of ``poses[0]`` within the unsliced chunk.
+    `first_index` is the index of ``poses[0]`` in the UNSLICED chunk, because chunks are usually
+    published with their leading waypoints dropped as stale. Numbering the survivors from zero
+    would slide the whole timeline earlier, and the consumer reads these as absolute instants — a
+    uniform shift that looks like tracking lag rather than a bug.
     """
     msg = MultiDOFJointTrajectory()
     msg.header.stamp = stamp
@@ -129,10 +112,9 @@ class TargetChunkPublisher:
     """
     Publishes pose chunks in whichever wire format the running executor speaks.
 
-    Wraps a plain publisher rather than replacing it, so callers keep the two things they actually
-    use for liveness checks: ``topic_name`` and ``get_subscription_count()``. Those matter because
-    publishing the wrong format at the right topic is silent — the other executor simply never
-    subscribes, and nothing moves with no error anywhere.
+    Wraps a plain publisher rather than replacing it, so callers keep ``topic_name`` and
+    ``get_subscription_count()`` — aiming at the wrong executor is otherwise silent, since the
+    other one simply never subscribes and nothing moves with no error anywhere.
     """
 
     def __init__(
@@ -146,14 +128,8 @@ class TargetChunkPublisher:
         qos: int = 10,
     ):
         """
-        Create the underlying publisher for `wire`.
+        Create the underlying publisher for `wire`, defaulting the topic to its default_topic.
 
-        :param node: the rclpy Node to create the publisher on.
-        :param wire: a Wire, or the string form of one.
-        :param frame_id: frame the poses will be expressed in.
-        :param joint_name: commanded frame name, for the trajectory format.
-        :param topic: override the format's default_topic.
-        :param qos: publisher queue depth.
         :raises ValueError: if `wire` is not a known format.
         """
         self._wire = Wire(wire)
@@ -181,11 +157,9 @@ class TargetChunkPublisher:
         """
         Publish `poses` in this publisher's wire format.
 
-        :param poses: waypoints, in order.
-        :param dt: seconds between waypoints. Ignored for PoseArray, which carries no timing.
-        :param first_index: index of ``poses[0]`` in the unsliced chunk; see multidof_trajectory.
-        :param stamp: chunk anchor; defaults to now. Pass an earlier instant to command ahead of
-            time, which is how action latency is compensated.
+        `dt` and `first_index` are ignored for PoseArray, which carries no timing. `stamp` defaults
+        to now; pass an earlier instant to command ahead of time, which is how action latency is
+        compensated. See multidof_trajectory for what first_index indexes into.
         """
         stamp = stamp if stamp is not None else self._node.get_clock().now().to_msg()
         if self._wire is Wire.POSE_ARRAY:
