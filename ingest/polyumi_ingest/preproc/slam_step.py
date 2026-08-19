@@ -42,6 +42,12 @@ _DEFAULT_ORB_SLAM3_DIR = _REPO_ROOT / 'external' / 'ORB_SLAM3_PolyUMI'
 
 _DEFAULT_SETTINGS_YAML = _DEFAULT_ORB_SLAM3_DIR / 'Examples' / 'Monocular-Inertial' / 'gopro_hero12_slam.yaml'
 
+# Gripper mask: the camera-rigid hardware blanked out before tracking. Unlike the settings
+# YAML this lives in the repo proper, not the submodule, because it is ours — it describes
+# the PolyUMI gripper, and a `git submodule update` must not be able to clobber it.
+# Hand-drawn against a temporal-median frame; white (non-zero) = discarded, black = kept.
+_SLAM_MASK_PNG = _REPO_ROOT / 'ingest' / 'config' / 'slam_mask.png'
+
 # How far (as a fraction of a frame period) a trajectory row's timestamp may sit from the
 # frame its index maps to. Rows are indexed directly, so this is a consistency assertion on
 # the decimation stride rather than a matching tolerance — not a tuning knob, hence not in
@@ -209,6 +215,7 @@ def _make_temp_settings_yaml(
     viewer: bool = False,
     res_div: int = 1,
     fps_div: int = 1,
+    mask_png: pathlib.Path | None = _SLAM_MASK_PNG,
 ) -> pathlib.Path:
     """
     Copy ``src`` settings YAML to ``tmp_dir`` with atlas paths appended.
@@ -217,6 +224,18 @@ def _make_temp_settings_yaml(
     (``System.SaveAtlasToFile`` / ``System.LoadAtlasFromFile``); the binary
     has no CLI flag for them. We inject the right key here so the canonical
     config file stays untouched.
+
+    ``mask_png`` rides along the same way, for the same reason: both PolyUMI binaries
+    already overload their positional argv, so a new CLI arg would be ambiguous. It is
+    the gripper mask — the camera-rigid hardware (fingers, ArUco tags, LEDs, mirrors)
+    that must be blanked before tracking or it destroys both two-view init and
+    relocalization. Belongs with the camera settings because it describes the rig.
+
+    It defaults to the shipped mask rather than to None so that masking is what you get by
+    forgetting, not what you lose by it: an unmasked run doesn't crash, it quietly produces a
+    map nothing relocalizes against, and the debug viewer forgetting it is exactly how you
+    end up debugging a run that behaves unlike the one you're trying to reproduce. Pass
+    ``mask_png=None`` to deliberately track unmasked.
 
     ``res_div`` / ``fps_div`` optionally downsample the camera settings first; see
     ``_downsample_settings``.
@@ -229,6 +248,8 @@ def _make_temp_settings_yaml(
         content += f'\nSystem.SaveAtlasToFile: "{save_atlas}"\n'
     if load_atlas is not None:
         content += f'\nSystem.LoadAtlasFromFile: "{load_atlas}"\n'
+    if mask_png is not None:
+        content += f'\nMask.Path: "{mask_png}"\n'
     dst = tmp_dir / 'settings.yaml'
     dst.write_text(content)
     return dst
@@ -547,6 +568,16 @@ class OrbSlam3Step(PreprocessingStep):
         return self.orb_slam3_dir / 'Vocabulary' / 'ORBvoc.txt'
 
     def _validate_settings_yaml(self) -> None:
+        if not _SLAM_MASK_PNG.exists():
+            # Hard failure rather than an unmasked fallback: an unmasked run does not crash,
+            # it quietly produces a map nothing can relocalize against, and you only find out
+            # after re-running 60 episodes.
+            raise FileNotFoundError(
+                f'Gripper mask not found: {_SLAM_MASK_PNG}. SLAM needs the camera-rigid '
+                f'hardware (fingers, ArUco tags, LEDs, mirrors) blanked out; without it both '
+                f'two-view init and relocalization degrade badly. Draw one against a '
+                f'temporal-median frame — white = discard, black = keep.'
+            )
         if not self.settings_yaml.exists():
             raise FileNotFoundError(f'ORB-SLAM3 settings YAML not found: {self.settings_yaml}')
         value_lines = [ln for ln in self.settings_yaml.read_text().splitlines() if not ln.lstrip().startswith('#')]
@@ -703,8 +734,10 @@ class OrbSlam3Step(PreprocessingStep):
         Phase 1: build the ORB-SLAM3 atlas from the scene's MAPPING session.
 
         Expects one episode group with ``session_type`` set to ``'MAPPING'`` (written by
-        ``build_pzarr``). Falls back to treating the first episode as the mapping session for
-        zarr stores built before that attribute existed (see OQ-4).
+        ``build_pzarr``). A scene recorded without a mapping pass has none, and rather than
+        refuse it the step maps from its first episode — that scene's own walk is the only
+        thing on offer, and it is what the operator implicitly asked for by recording no
+        mapping session.
 
         A failure here is fatal to the step by design: without an atlas there is nothing for
         any episode to localize against, so this is not an episode-shaped failure.
@@ -719,14 +752,25 @@ class OrbSlam3Step(PreprocessingStep):
         episodes = scene.episodes
         mapping = next((ep for ep in episodes if ep.is_mapping), None)
 
-        # OQ-4 fallback: if no episode has session_type='MAPPING', treat first as mapping
         if mapping is None:
             log.warning(
-                'No episode with session_type=MAPPING found; treating first episode as mapping. '
-                'Rebuild the zarr store to get proper session_type attributes.'
+                'No episode with session_type=MAPPING in this scene; mapping from its first '
+                'episode instead. Expected for a scene recorded without a mapping walk; if you '
+                'did record one, that session did not make it into the store.'
             )
             mapping = episodes[0]
         self._mapping_key = mapping.key
+
+        # The map is built from this one episode, so a mapping session that failed to build
+        # has no video or timestamps to feed the binary. Say so plainly — without this the
+        # step dies further down on a bare `KeyError: 'timestamps/gopro'`.
+        mapping_failure = mapping.failure
+        if mapping_failure is not None:
+            raise RuntimeError(
+                f'{mapping.key} ({mapping.session_dir or "unknown session"}) is the mapping session but was '
+                f'flagged unusable in {mapping_failure.step}: {mapping_failure.error}. '
+                f'Fix or re-fetch that session and re-run; there is nothing to build a map from.'
+            )
 
         if len(episodes) == 1:
             log.warning(

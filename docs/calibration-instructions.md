@@ -8,6 +8,45 @@ while others may be substantially different (sensor + arm execution latencies).
 Here is a quick doc detailing the calibration procedures for the system & where to find the associated values:
 
 ## Geometric Constants
+
+### SLAM mask
+
+**Change required when: any hardware revision that changes what the GoPro can see** — fingers, mirrors, LED strips, wiring, mount.
+
+`ingest/config/slam_mask.png` blanks the camera-rigid hardware before ORB-SLAM3 tracks. Those pixels sit at a fixed image location no matter where the camera goes, so their features carry zero parallax (breaking two-view init) and give every keyframe the same DBoW2 signature (breaking relocalization). In practice this leads to widespread SLAM failures, which pretty much entirely go away after a correct mask (fully covering the device) is applied.
+
+**White (non-zero) = discarded. Black = kept.** Inverting it is worse than no mask at all.
+
+1. **Render a tracing template** from any mapping video. The temporal median leaves rigid hardware sharp and blurs the scene away — anything sharp is what you mask:
+   ```bash
+   uv run python -c "
+   import cv2, numpy as np
+   cap=cv2.VideoCapture('recordings/<scene>/<mapping_session>/gopro.mp4')
+   n=int(cap.get(cv2.CAP_PROP_FRAME_COUNT)); acc=[]
+   for i in np.linspace(0,n-1,120).astype(int):
+       cap.set(cv2.CAP_PROP_POS_FRAMES,int(i)); ok,f=cap.read()
+       if ok: acc.append(cv2.resize(f,(2704,2028)))
+   cv2.imwrite('/tmp/trace_template.png', np.median(np.stack(acc),0).astype('uint8'))"
+   ```
+
+2. **Trace over the gripper** using the template in a photo editor. Paint the mask in solid white, and everything else black. Must use a 4:3 canvas (ie 2704x2028). Export RGB or black and white with no alpha. I used GIMP (Photoshop works too of course)--make a layer on top of the template image, then paint white over the gripper with the brush tool, and then hide the template image, and then export.
+
+3. **Save to `ingest/config/slam_mask.png`** and check polarity + visually check fit:
+   ```bash
+   uv run pytest ingest/test/test_slam_step.py -q     # guards binary-ness and polarity
+   uv run python -c "
+   import cv2; m=cv2.imread('ingest/config/slam_mask.png',0)
+   f=cv2.resize(cv2.imread('/tmp/trace_template.png'),(m.shape[1],m.shape[0])); f[m>0]=(0,0,255)
+   cv2.imwrite('/tmp/mask_check.png',f)"                # red must cover every sharp edge
+   ```
+
+4. **Re-run SLAM on every affected scene** — `pingest pp 2 --scene <scene> --force`. The mask changes the map, so old atlases and old poses are not comparable to new ones.
+
+#### Gotchas
+
+- **Don't port UMI's polygons.** `umi/common/cv_util.py` describes *its* mount; ours has an extra PCB and mirrors further outboard, and its numbers misfit visibly. Upstream's `umi/asset/mask.json` is staler still — only `scripts/gen_image_mask.py` reads it, and it disagrees with the polygons the SLAM pipeline actually uses.
+- **Path reaches the binaries via `Mask.Path` in the generated settings YAML**, alongside the atlas paths.
+
 ### Hand -> TCP frame
 
 **Change required when: hardware design revision**
@@ -123,31 +162,19 @@ Currently, the handheld gripper opens ~6 mm wider than the arm can, so the top ~
 
 **Change required when: new capture hardware, new arm, or a change to the motion control path.**
 
-The policy is trained on observations that were all extracted from the same GoPro frames, so in the
-dataset every stream shares one instant exactly. On the robot they do not: the camera frame you feed
-the policy shows the world as it was ~150 ms ago, while TF will happily hand you the arm's pose from
-*now*. Pairing those two is the error latency compensation exists to prevent, and
-`policy_client_node` does it by looking every observation up at the camera's corrected capture
-instant — UMI's scheme. The constants below are what "corrected" means, and they all live in
-`ros2_ws/src/polyumi_ros2/config/inference.yaml`.
+The policy is trained on time-synced observations (as aligned by the preprocessing pipeline `pingest pp`). On the robot, the observations are not naturally synchronized. We must calibrate or measure all the latencies in the system to be able to give the model the zero-latency, fully synchronized environment it was trained on.
+We calibrate what we cannot measure in realtime, and place these calibration constants in `ros2_ws/src/polyumi_ros2/config/inference.yaml`.
 
-### Only one of them actually needs a rig
 
 ```
 photon ──(latency.gopro)──> header.stamp ──(measured live)──> response ──(latency.arm_exec)──> motion
         CALIBRATE                           nothing to do                CALIBRATE (loosely)
 ```
 
-`header.stamp` is the earliest instant the laptop has any handle on. Everything *after* it — the
+`header.stamp` is the earliest instant we can measure in our ROS client node orchestrating the inference process. Everything after that timestamp — the
 YUYV convert, tick phasing, the POST, the network, the server's own inference time — is measured
 empirically on every tick by `_n_stale_actions`, which runs *after* the response lands and computes
 `now() - t_obs`, then turns it straight into a count of leading actions to discard.
-
-**So there is deliberately no round-trip latency constant, and adding one would make things worse.**
-A configured guess cannot beat a live measurement of the same span. If you want to see the number,
-`policy_client_node` already logs it per tick (`latency_inference`). Upstream UMI ends up in the
-same place from the other direction: it prints inference time and never subtracts it, absorbing it
-through the `is_new` filter instead.
 
 | Value | Where it comes from |
 |---|---|
@@ -167,15 +194,11 @@ ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=<camera|arm|gripper>
 
 Each run prints the number, two quality figures, and the exact line to paste, and drops the raw
 series in an `.npz` so a marginal run can be re-judged without booking the hardware again. It
-**refuses to print a line to paste** when the correlation peak is too weak or too broad to believe —
-if you see `** DO NOT PASTE THIS **`, fix the run, don't squint at it.
+**refuses to print a line to paste** when the correlation peak is too weak or too broad to believe.
 
 #### How to calibrate — `latency.gopro`
 
-This is the load-bearing one. It sets the TF lookup instant, the gripper-width lookup instant, and
-`t_obs` for chunk truncation, so an error here mis-times *everything* the policy sees.
-
-The method is UMI's: film a clock. The laptop displays a QR code encoding the current time, the
+The method follows the original UMI: film a clock in the form of a QR code encoding the current time, then the
 GoPro films the screen, and the lag is how far behind that encoded time the frame's ROS stamp runs.
 
 1. **Bring up the camera only** — no arm needed, and nothing to install:
@@ -240,31 +263,13 @@ went. **This moves the arm.**
    - `latency.gripper` — the **observation** side, half the `/fr3_gripper/joint_states` publish
      interval. Goes in `config/inference.yaml`.
 
-#### Hardware verification (sanity checks)
-
-- **Trust the quality figures, not the number.** The arm run reports a *peak correlation* (is this a
-  match at all?), a *peak width* (is the lag actually localised?), and whether the winner was
-  *pinned* to the edge of the search window. A broad peak means the sweep was too slow or too small
-  to pin the lag down — raise `chirp_f1_hz` or `amplitude_m`, or lengthen `duration_s`, and re-run.
-  A pinned result is never a measurement, it is the search bound; see the gotcha below.
-- **Check the lag is invariant to how much of the sweep you use.** A real transport delay does not
-  care; if you re-analyse the saved `.npz` over the first half of the run and get a noticeably
-  smaller number, what you measured is *phase lag* from a plant that cannot follow, not latency.
-  This is the check that caught the gripper.
-- **Confirm `arm_exec` is planning-bound.** Re-run the arm probe at two different
-  `max_velocity_scaling` values. The number *should* move. If it does, you have confirmed it is a
-  planning-and-execution distribution rather than a fixed transport delay, which is what it is today
-  (see gotchas).
-- **End to end.** With the measured values in, run inference dry (`execute_motion:=false`, watch
-  `/polyumi/target_poses_preview` in Foxglove) and check the startup latency-budget line and the
-  stale-action count look sane before executing.
 
 #### Gotchas
 
 - **`latency.arm_exec` is not a transport constant today.** `fr3_moveit_bridge` plans and executes
-  each chunk synchronously and drops chunks that arrive mid-flight, so the number is a distribution
+  each chunk synchronously and drops chunks that arrive mid-flight, so the number is
   dominated by MoveIt's planning time, and it shifts with `max_velocity_scaling`. Measure it at the
-  scaling you actually run at. This is tolerable because it only feeds `_n_stale_actions`, in units
+  scaling you actually run at (default 1.0). This is tolerable because it only feeds `_n_stale_actions`, in units
   of a 0.1 s `action_dt` — tens of milliseconds of error costs nothing there, and nowhere else. When
   the Phase 4 streaming controller lands (see
   [franka-inference-bringup.md](franka-inference-bringup.md)) it becomes UMI's

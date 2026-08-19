@@ -11,12 +11,13 @@ from fastapi.testclient import TestClient
 from polyumi_catalog.app import create_app
 from polyumi_catalog.db import get_engine
 from polyumi_catalog.manifests import SceneManifest
-from polyumi_catalog.sync import sync_recordings
+from polyumi_catalog.sync import sync_recordings, sync_scene_quality
 from polyumi_pi.files.metadata import SessionMetadata, SessionType
 from sqlmodel import Session as DBSession
 from sqlmodel import select
 
 from polyumi_catalog.models import Scene, Task
+from polyumi_catalog.models import Session as SessionRow
 
 
 def _make_session(scene_dir: pathlib.Path, name: str, *, scene_id: str, session_type: SessionType):
@@ -171,58 +172,119 @@ def test_fetch_disabled_without_recordings_dir(tmp_path: pathlib.Path):
     assert _client(tmp_path, with_recordings=False).post('/fetch').status_code == 400
 
 
-def _fake_pi(monkeypatch, *, scenes: list[str], on_copy=None):
-    """Patch app.PiFetch with a stub listing `scenes` and running `on_copy` per copy."""
+def _fake_pi(monkeypatch, *, sessions: dict[str, list[str]], on_copy=None):
+    """
+    Patch app.PiFetch with a stub whose remote is ``{scene: [session, ...]}``.
+
+    ``missing_sessions`` mirrors the real one — remote sessions minus what's already on disk —
+    because that subtraction is exactly what lets a scene grow between fetches.
+    """
 
     class FakePi:
         def __init__(self, host: str) -> None:
             self.host = host
 
-        def list_remote_scenes(self) -> list[str]:
-            return scenes
+        def missing_sessions(self, local_recordings: pathlib.Path, scene_names=None) -> dict[str, list[str]]:
+            # Mirrors the real one, metadata.json completeness check included: a directory a
+            # dropped transfer left behind is not a fetched session. One call covers the whole
+            # tree, as the real one does -- the app makes no per-scene round trips.
+            plan = {}
+            for name, remote in sessions.items():
+                local_scene = local_recordings / name
+                local = (
+                    {
+                        p.name
+                        for p in local_scene.iterdir()
+                        if p.is_dir() and p.name.startswith('session_') and (p / 'metadata.json').exists()
+                    }
+                    if local_scene.is_dir()
+                    else set()
+                )
+                if missing := [s for s in remote if s not in local]:
+                    plan[name] = missing
+            return plan
 
-        def copy_scene(self, name: str, local_path: pathlib.Path, verbose: bool = False) -> None:
-            on_copy(name, local_path)
+        def copy_sessions(
+            self, name: str, session_names: list[str], local_parent: pathlib.Path, verbose: bool = False
+        ) -> None:
+            for session in session_names:
+                on_copy(name, local_parent / name, session)
 
     monkeypatch.setattr('polyumi_catalog.app.PiFetch', FakePi)
 
 
-def test_fetch_copies_only_new_scenes_then_syncs(tmp_path: pathlib.Path, monkeypatch):
-    """/fetch skips already-local scenes, copies the rest, and re-syncs so they appear in Tasks."""
+def test_fetch_copies_only_new_sessions_then_syncs(tmp_path: pathlib.Path, monkeypatch):
+    """/fetch skips sessions already local, copies the rest, and re-syncs so they appear in Tasks."""
     rec, engine = _seed(tmp_path)
     new_scene = 'scene_2026-07-27_11-00-00_beef'
 
-    def copy(name: str, local_path: pathlib.Path) -> None:
-        local_path.mkdir(parents=True)
+    def copy(name: str, local_path: pathlib.Path, session: str) -> None:
+        local_path.mkdir(parents=True, exist_ok=True)
         SceneManifest(scene_id='scene-2', task='wipe_table').write_to_scene_dir(local_path)
-        _make_session(local_path, 'session_1', scene_id='scene-2', session_type=SessionType.EPISODE)
+        _make_session(local_path, session, scene_id='scene-2', session_type=SessionType.EPISODE)
 
-    _fake_pi(monkeypatch, scenes=['scene_2026-07-26_10-00-00_abcd', new_scene], on_copy=copy)
+    _fake_pi(
+        monkeypatch,
+        sessions={'scene_2026-07-26_10-00-00_abcd': [], new_scene: ['session_1']},
+        on_copy=copy,
+    )
     app = create_app(engine, recordings_dir=rec, pi_host='fake')
     client = TestClient(app)
 
     assert client.post('/fetch').status_code == 200
     app.state.fetch_thread.join(timeout=30)
     assert app.state.fetch['status'] == 'done'
-    assert app.state.fetch['total'] == 1  # the already-local scene was skipped
+    assert app.state.fetch['total'] == 1  # the already-local scene contributed nothing
     assert (rec / new_scene).is_dir()
 
     poll = client.get('/fetch-poll').text
-    assert 'fetched 1 scene' in poll
+    assert 'fetched 1 session' in poll
     assert 'wipe_table' in poll  # OOB Tasks refresh, so the new scene is browsable
     assert 'hx-get="/fetch-poll"' not in poll  # polling stops once done
 
 
-def test_fetch_failure_names_the_scene_and_clears_its_partial_dir(tmp_path: pathlib.Path, monkeypatch):
-    """A half-finished transfer lands in the status line and leaves no partial dir behind."""
-    rec, engine = _seed(tmp_path)
-    failing = 'scene_2026-07-27_11-00-00_beef'
+def test_fetch_picks_up_sessions_added_to_an_existing_scene(tmp_path: pathlib.Path, monkeypatch):
+    """
+    A scene already on disk is re-visited for the sessions it doesn't have yet.
 
-    def boom(name: str, local_path: pathlib.Path) -> None:
-        (local_path / 'video').mkdir(parents=True)  # what tar leaves when the stream dies
+    This is the mapping-then-episodes loop: the scene arrives with only its mapping walk, gets
+    preprocessed, then grows as episodes are recorded into it on the Pi.
+    """
+    rec, engine = _seed(tmp_path)
+    existing = 'scene_2026-07-26_10-00-00_abcd'
+    copied: list[str] = []
+
+    def copy(name: str, local_path: pathlib.Path, session: str) -> None:
+        copied.append(session)
+        _make_session(local_path, session, scene_id='scene-1', session_type=SessionType.EPISODE)
+
+    local_sessions = [p.name for p in (rec / existing).iterdir() if p.name.startswith('session_')]
+    _fake_pi(monkeypatch, sessions={existing: [*local_sessions, 'session_new']}, on_copy=copy)
+    app = create_app(engine, recordings_dir=rec, pi_host='fake')
+    client = TestClient(app)
+
+    client.post('/fetch')
+    app.state.fetch_thread.join(timeout=30)
+    assert app.state.fetch['status'] == 'done'
+    assert copied == ['session_new']  # only the new one, not the whole scene again
+
+
+def test_fetch_failure_names_the_session_and_clears_only_its_dir(tmp_path: pathlib.Path, monkeypatch):
+    """
+    A half-finished transfer is reported, and only that session's directory is dropped.
+
+    Removing the whole scene would take previously-fetched sessions, scene.zarr, scene.json and
+    the SLAM atlas with it.
+    """
+    rec, engine = _seed(tmp_path)
+    existing = 'scene_2026-07-26_10-00-00_abcd'
+    kept = sorted(p.name for p in (rec / existing).iterdir() if p.name.startswith('session_'))
+
+    def boom(name: str, local_path: pathlib.Path, session: str) -> None:
+        (local_path / session / 'video').mkdir(parents=True)  # what tar leaves when the stream dies
         raise RuntimeError('ssh/tar sender failed with code 255')
 
-    _fake_pi(monkeypatch, scenes=[failing], on_copy=boom)
+    _fake_pi(monkeypatch, sessions={existing: [*kept, 'session_broken']}, on_copy=boom)
     app = create_app(engine, recordings_dir=rec, pi_host='fake')
     client = TestClient(app)
 
@@ -231,9 +293,12 @@ def test_fetch_failure_names_the_scene_and_clears_its_partial_dir(tmp_path: path
     assert app.state.fetch['status'] == 'error'
     status = client.get('/fetch-poll').text
     assert 'code 255' in status
-    assert failing in status  # which scene failed, not just that one did
-    # otherwise the .exists() filter would skip this scene on every future fetch
-    assert not (rec / failing).exists()
+    assert 'session_broken' in status  # which session failed, not just that one did
+    # otherwise the missing-session filter would treat the stub as already fetched
+    assert not (rec / existing / 'session_broken').exists()
+    # and the rest of the scene is untouched
+    assert (rec / existing).is_dir()
+    assert sorted(p.name for p in (rec / existing).iterdir() if p.name.startswith('session_')) == kept
 
 
 def test_delete_scene_removes_it_and_redirects(tmp_path: pathlib.Path):
@@ -1132,3 +1197,111 @@ def test_run_pp_without_force_leaves_completed_steps_ticked(tmp_path: pathlib.Pa
     client.post('/scenes/scene-1/run-pp')
 
     assert zarr.open_group(str(scene_dir / 'scene.zarr'), mode='r').attrs['preprocessing_steps'] == [1, 2]
+
+
+def test_pp_poll_reads_the_db_and_never_the_store(tmp_path: pathlib.Path):
+    """
+    The poll must stay a cheap render: it fires every 3s for the whole run.
+
+    Measurements reach it via the run's own sync_scene_quality when the pipeline finishes,
+    which the next tick then swaps in — not by the poll re-reading every episode's zarr attrs
+    on every tick. Guards against putting that back.
+    """
+    rec, engine = _seed(tmp_path)
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 1
+    ep = root.require_group('episode_0')
+    ep.attrs['session_dir'] = 'session_1'
+    slam = ep.require_group('annotations').require_group('slam')
+    slam.attrs['n_frames_total'] = 100
+    slam.attrs['n_frames_lost'] = 90
+    slam.attrs['tracking_ratio'] = 0.1
+    slam.attrs['n_relocalization_events'] = 0
+
+    app = create_app(engine, recordings_dir=rec)
+    app.state.pp_runs['scene-1'] = {'status': 'running', 'error': None}
+    client = TestClient(app)
+
+    # Mid-run: the attrs are on disk but nothing has synced them, and the poll must not.
+    resp = client.get('/scenes/scene-1/pp-poll')
+    assert resp.status_code == 200
+    assert 'col-episodes-body' in resp.text and 'hx-swap-oob' in resp.text
+    assert '10% tracked' not in resp.text
+    with DBSession(engine) as db:
+        row = db.exec(select(SessionRow).where(SessionRow.dir.like('%session_1'))).one()
+        assert row.slam_attrs_json is None
+
+    # Run completion syncs once; the next tick is what puts the badge on screen.
+    sync_scene_quality('scene-1', engine)
+    assert '10% tracked' in client.get('/scenes/scene-1/pp-poll').text
+
+
+def test_pp_poll_does_not_replace_the_notes_box(tmp_path: pathlib.Path):
+    """
+    The poll swaps the pipeline panel, not the whole pane, so mid-run typing survives.
+
+    It fires every 3s for the length of a run. Swapping #detail-body replaced the Notes
+    textarea along with everything else, so anything typed into it during a SLAM run was gone
+    within three seconds — with no error and nothing to suggest where it went.
+    """
+    rec, engine = _seed(tmp_path)
+    app = create_app(engine, recordings_dir=rec)
+    app.state.pp_runs['scene-1'] = {'status': 'running', 'error': None}
+
+    body = TestClient(app).get('/scenes/scene-1/pp-poll').text
+
+    # the pipeline panel is the swap target, and the poll re-arms itself from inside it
+    assert 'id="scene-pp-panel"' in body
+    assert 'hx-target="#scene-pp-panel"' in body
+    # nothing that carries user input comes back, so nothing of theirs is overwritten
+    assert 'scene-notes' not in body
+    assert 'assign-task-form' not in body
+    assert 'id="detail-body"' not in body
+
+
+def test_rescan_refreshes_the_open_scene_pane_with_new_slam_results(tmp_path: pathlib.Path):
+    """
+    Rescan is the only thing that pulls a finished run's results in, so it must leave no pane stale.
+
+    Nothing polls any more. A pipeline writes its per-episode SLAM attrs to the store, and the
+    operator presses Rescan; if that only swapped the task list, the scene pane and Episodes
+    column they are looking at would still show pre-run numbers with nothing to say otherwise.
+    """
+    rec, engine = _seed(tmp_path)
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 1
+    ep = root.require_group('episode_0')
+    ep.attrs['session_dir'] = 'session_1'
+    slam = ep.require_group('annotations').require_group('slam')
+    slam.attrs['n_frames_total'] = 100
+    slam.attrs['n_frames_lost'] = 90
+    slam.attrs['tracking_ratio'] = 0.1
+    slam.attrs['n_relocalization_events'] = 0
+
+    client = TestClient(create_app(engine, recordings_dir=rec))
+    resp = client.post('/rescan', data={'selected_scene_id': 'scene-1'})
+
+    assert resp.status_code == 200
+    # the scene pane and its Episodes column both came back as out-of-band swaps...
+    assert 'id="detail-body" hx-swap-oob="true"' in resp.text
+    assert 'id="col-episodes-body" class="col-body" hx-swap-oob="true"' in resp.text
+    # ...and only those two: the pane's own sub-fragments are rendered inline, since an
+    # out-of-band swap nested inside another one would be swapped twice, to two places.
+    assert resp.text.count('hx-swap-oob') == 2
+    # ...the pane kept its task dropdown (jinja iterates an undefined all_tasks as empty)...
+    assert '>fold_towel</option>' in resp.text
+    # ...and the measurement the run wrote is now cached on the row it renders from
+    with DBSession(engine) as db:
+        row = db.exec(select(SessionRow).where(SessionRow.dir.like('%session_1'))).one()
+        assert row.slam_attrs_json is not None and '"tracking_ratio": 0.1' in row.slam_attrs_json
+
+
+def test_rescan_without_a_selected_scene_returns_only_the_task_list(tmp_path: pathlib.Path):
+    """No scene open (or a deleted one) means no pane to refresh — and no OOB swap to send."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+
+    assert 'hx-swap-oob' not in client.post('/rescan').text
+    assert 'hx-swap-oob' not in client.post('/rescan', data={'selected_scene_id': 'nope'}).text

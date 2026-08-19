@@ -1,0 +1,23 @@
+{# The scene pane's SLAM figures. A run rewrites these, but they sit above the Notes box in
+   the left column, so the pp-poll brings them back as an out-of-band swap rather than
+   replacing the whole pane. The wrapper is rendered unconditionally, empty content included:
+   an out-of-band swap needs its target id to already be in the DOM, and a scene that has not
+   been through SLAM yet is exactly the one about to grow these figures mid-run. #}
+<div id="scene-quality"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% if detail.quality.n_episodes_with_slam %}
+  <h3>Episode quality</h3>
+  <dl>
+    <dt>Avg. SLAM tracking</dt>
+    <dd>{{ '%.1f%%' % (detail.quality.avg_tracking_ratio * 100) if detail.quality.avg_tracking_ratio is not none else '—' }}</dd>
+    <dt>Low-tracking episodes</dt>
+    <dd>{{ detail.quality.n_low_quality }} / {{ detail.quality.n_episodes_with_slam }}</dd>
+    <dt title="Automatically excluded from exports by the quality thresholds in ingest/config/quality_thresholds.yaml">Auto-unusable</dt>
+    <dd>
+      {{ detail.quality.n_auto_unusable }} / {{ detail.quality.n_episodes_with_slam }}
+      {% if detail.quality.n_auto_unusable %}<span class="badge warn">excluded</span>{% endif %}
+    </dd>
+    <dt>Dropped video frames</dt>
+    <dd>{{ detail.total_dropped_video_frames }}</dd>
+  </dl>
+  {% endif %}
+</div>

@@ -32,6 +32,8 @@ def _write_session(
     empty_frames: set[int] = frozenset(),
     empty_audio: bool = False,
     audio_channels: int = 2,
+    created_at: str | None = None,
+    session_type: str = 'EPISODE',
 ) -> pathlib.Path:
     """Write a minimal but genuine session directory: metadata, JPEGs + timestamps, stereo WAV."""
     session_dir = scene_dir / name
@@ -64,7 +66,7 @@ def _write_session(
             {
                 'session_id': f'{name}-id',
                 'scene_id': _SCENE_ID,
-                'created_at': f'2026-07-29T20:{30 + len(name) % 20:02d}:19.488374+00:00',
+                'created_at': created_at or f'2026-07-29T20:{30 + len(name) % 20:02d}:19.488374+00:00',
                 'duration_s': 1.0,
                 'pi_hostname': 'testpi',
                 'camera_fps': 10,
@@ -85,7 +87,7 @@ def _write_session(
                 'notes': None,
                 'task': 'red trapezoid in black mug',
                 'robot': 'polyumi_gripper',
-                'session_type': 'EPISODE',
+                'session_type': session_type,
                 'polyumi_version': 'test',
                 'file_version': 1,
             }
@@ -227,15 +229,15 @@ def test_interrupted_build_is_detectable(tmp_path: pathlib.Path) -> None:
     scene_dir.mkdir()
     _write_session(scene_dir, 'session_a')
 
-    from polyumi_ingest.main import _pzarr_needs_build
+    from polyumi_ingest.pzarr import pzarr_needs_build
 
     build_pzarr(scene_dir, skip_gopro=True)
-    assert _pzarr_needs_build(scene_dir) is False
+    assert pzarr_needs_build(scene_dir) is False
 
     root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='a')
     root.attrs['build_complete'] = False
-    assert _pzarr_needs_build(scene_dir) is True
+    assert pzarr_needs_build(scene_dir) is True
 
     # A store predating the attribute has no value at all, and must not be rebuilt on sight.
     del root.attrs['build_complete']
-    assert _pzarr_needs_build(scene_dir) is False
+    assert pzarr_needs_build(scene_dir) is False

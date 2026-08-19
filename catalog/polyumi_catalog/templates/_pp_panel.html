@@ -1,0 +1,77 @@
+{# The scene pane's right-hand column: everything a pipeline run changes.
+
+   Split out of _detail.html so the 3s pp-poll can swap *this* rather than the whole pane.
+   Swapping #detail-body every tick replaced the Notes textarea along with it, discarding
+   whatever had been typed into it mid-run. Nothing here holds user input, so it is safe to
+   replace on a timer; the two things outside it that a run also changes (the quality figures
+   and the Episodes column) come back from the same response as out-of-band swaps.
+
+   No oob flag, unlike the sibling partials: this is always rendered in place — inline in the
+   pane, or as the poll's primary target — never as an out-of-band swap. #}
+<div id="scene-pp-panel" class="scene-detail-side">
+  <h3>Preprocessing pipeline</h3>
+  {% if not detail.pp_status.pzarr_exists %}
+  <p class="muted">No pzarr built yet — running the pipeline will build it first.</p>
+  {% endif %}
+  <dl>
+    <dt>Steps complete</dt><dd>{{ detail.pp_status.n_complete }} / {{ detail.pp_status.n_total }}</dd>
+  </dl>
+  <ul class="pp-steps-list">
+    {% for step in detail.pp_status.steps %}
+    <li class="{{ 'pp-step-done' if step.complete else 'pp-step-pending' }}">
+      {{ '✓' if step.complete else '○' }} {{ step.number }}. {{ step.name }}
+      {% if step.complete %}
+      {% if step.git_sha | short_sha %}
+      <span class="mono pp-step-sha" title="Run at {{ step.completed_at or 'unknown time' }} on commit {{ step.git_sha }}">{{ step.git_sha | short_sha }}</span>
+      {% else %}
+      <span class="pp-step-sha muted" title="This step completed before per-step commit provenance was recorded; re-run it to stamp one">—</span>
+      {% endif %}
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% if detail.pp_running %}
+  <p
+    class="muted"
+    hx-get="/scenes/{{ detail.scene_id }}/pp-poll"
+    hx-trigger="load delay:3s"
+    hx-target="#scene-pp-panel"
+    hx-swap="outerHTML"
+  >
+    Running pipeline… (this can take a while — check the server terminal for progress; refreshing automatically)
+  </p>
+  {% else %}
+  {% set fully_processed = detail.pp_status.pzarr_exists and detail.pp_status.n_total > 0
+     and detail.pp_status.n_complete == detail.pp_status.n_total %}
+  {% set has_progress = detail.pp_status.n_complete > 0 %}
+  {% if not fully_processed %}
+  <button
+    hx-post="/scenes/{{ detail.scene_id }}/run-pp"
+    hx-vals='{"force": false}'
+    hx-target="#detail-body"
+    hx-swap="outerHTML"
+    hx-disabled-elt="this"
+  >
+    Run full pipeline
+  </button>
+  {% endif %}
+  {% if has_progress %}
+  <button
+    hx-post="/scenes/{{ detail.scene_id }}/run-pp"
+    hx-vals='{"force": true}'
+    hx-target="#detail-body"
+    hx-swap="outerHTML"
+    hx-disabled-elt="this"
+    class="warn"
+    {% if fully_processed %}
+    hx-confirm="This scene has already completed all {{ detail.pp_status.n_total }} preprocessing steps. Re-run every step from scratch anyway?"
+    {% else %}
+    hx-confirm="This will discard the {{ detail.pp_status.n_complete }} already-completed step(s) and re-run the entire pipeline from scratch. Continue?"
+    {% endif %}
+  >
+    Re-run pipeline
+  </button>
+  {% endif %}
+  {% if detail.pp_error %}<p class="warn">Last run failed: {{ detail.pp_error }}</p>{% endif %}
+  {% endif %}
+</div>

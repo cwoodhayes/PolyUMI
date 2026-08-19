@@ -17,7 +17,7 @@ from imagecodecs.numcodecs import Jpegxl
 from numcodecs import Blosc
 from polyumi_pi.files.session import SessionFiles
 
-from polyumi_ingest.episode_status import Episode, episode_guard
+from polyumi_ingest.episode_status import Episode, episode_guard, episode_keys
 from polyumi_ingest.gitinfo import git_sha
 from polyumi_ingest.gopro_fetch import _recording_start_time
 from polyumi_ingest.gpmf_parse import extract_gpmf_binary, parse_imu
@@ -327,9 +327,142 @@ def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) 
     ann_grp.attrs.update(ann_attrs)
 
 
-def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.Path:
+def _existing_episode_sessions(root: zarr.Group) -> set[str]:
+    """Return the ``session_dir`` attr of every episode already in a store that records one."""
+    found = set()
+    for key in episode_keys(root):
+        session_dir = root[key].attrs.get('session_dir')
+        if isinstance(session_dir, str) and session_dir:
+            found.add(session_dir)
+    return found
+
+
+def _mark_unloadable(scene: SceneFiles) -> None:
+    """Flag session dirs too damaged to become an episode at all, straight in scene.json."""
+    for session_dir_name, reason in scene.unloadable.items():
+        set_episode_unusable(scene.path, session_dir_name, True)
+        log.warning(f'{session_dir_name}: marked unusable in scene.json ({reason})')
+
+
+def _append_pzarr(
+    scene: SceneFiles,
+    sessions: list[SessionFiles],
+    previously_unusable: set[str],
+    skip_gopro: bool,
+) -> bool:
+    """
+    Add sessions not yet in an existing scene.zarr, leaving everything else untouched.
+
+    Returns False when the store can't be extended safely and the caller should fall back to
+    a full rebuild. This is the path that makes "record more episodes into an open scene, then
+    re-run pingest pp" work: a rebuild would discard every step's output (slam_poses, eef poses,
+    the preprocessing_steps marks) along with any per-episode curation.
+    """
+    root = zarr.open_group(str(scene.zarr_path), mode='a', zarr_format=2)
+    if root.attrs.get('build_complete') is False:
+        log.warning(f'{scene.path.name}: existing store is from an interrupted build; rebuilding instead.')
+        return False
+
+    # Before the early return below, because this is usually *why* we took it: a session
+    # directory too damaged to load never enters `sessions`, so it can never be appended, but
+    # it is still on disk and pzarr_new_sessions will keep naming it on every future run. Say
+    # once per run which dirs those are, and mark them, rather than leaving "2 new sessions"
+    # followed by "nothing to add" as the only explanation on offer.
+    _mark_unloadable(scene)
+
+    # Every episode has to name its session before we can tell which sessions are new. Stores
+    # built before the session_dir attr existed name none of them, so *every* session on disk
+    # would read as new and get appended alongside the episodes already holding it — the same
+    # scene twice. Rebuild instead; it is the only way to give those episodes an identity.
+    existing = _existing_episode_sessions(root)
+    if len(existing) != len(episode_keys(root)):
+        log.warning(
+            f'{scene.path.name}: existing store has episode(s) with no session_dir attr, so new '
+            f'sessions cannot be told apart from built ones; rebuilding the whole store instead.'
+        )
+        return False
+
+    new_sessions = [s for s in sessions if s.path.name not in existing]
+    if not new_sessions:
+        log.info(f'{scene.path.name}: scene.zarr already has every loadable session; nothing to add.')
+        return True
+
+    # Episode indices are positional over sessions sorted by created_at, so appending is only
+    # sound when every new session is chronologically after every existing one. A backfilled
+    # earlier session would have to renumber its successors, invalidating the per-episode
+    # results those indices name — cheaper and safer to rebuild than to rewrite them.
+    first_new = min(s.metadata.created_at for s in new_sessions)
+    would_renumber = [s.path.name for s in sessions if s.path.name in existing and s.metadata.created_at > first_new]
+    if would_renumber:
+        log.warning(
+            f'{scene.path.name}: new session(s) predate {len(would_renumber)} already-built episode(s); '
+            f'appending would renumber them, so rebuilding the whole store instead.'
+        )
+        return False
+
+    # Counted off the group keys, not off `existing`: an episode whose session_dir attr is
+    # missing contributes no entry there, and starting from its index would write straight over
+    # a live episode. No store on disk is in that state, but the failure mode is silent.
+    next_index = max((int(k.split('_')[1]) for k in episode_keys(root)), default=-1) + 1
+    log.info(f'{scene.path.name}: appending {len(new_sessions)} new session(s) from episode_{next_index}.')
+    # An append is as interruptible as a build, and leaves the same wreckage: an episode group
+    # carrying a session_dir (written before its arrays) but only part of its data. Without the
+    # flag down, nothing downstream can tell — _pzarr_needs_build sees a complete store and
+    # pzarr_new_sessions sees that session as already built, so the truncated episode gets
+    # preprocessed as if whole, forever.
+    root.attrs['build_complete'] = False
+    _write_sessions(root, scene, list(enumerate(new_sessions, start=next_index)), previously_unusable, skip_gopro)
+    root.attrs['n_episodes'] = len(episode_keys(root))
+    root.attrs['build_complete'] = True
+    return True
+
+
+def _write_sessions(
+    root: zarr.Group,
+    scene: SceneFiles,
+    indexed_sessions: list[tuple[int, SessionFiles]],
+    previously_unusable: set[str],
+    skip_gopro: bool,
+) -> None:
+    """Write one episode group per session, isolating a damaged session to its own episode."""
+    total = len(indexed_sessions)
+    for n, (i, session) in enumerate(indexed_sessions, 1):
+        log.info(f'[{n}/{total}] Episode {i}: {session.path.name}')
+        ep_grp = root.require_group(f'episode_{i}')
+        ep_grp.attrs['session_type'] = session.metadata.session_type.value
+        ep_grp.attrs['session_dir'] = session.path.name
+        # Explicitly "no preprocessing done", which is not the same as the attr being absent:
+        # absent means a store predating per-episode marks, whose episodes get backfilled from
+        # the scene-level marks. An episode appended to such a store must not be backfilled —
+        # it is new work — so it has to say so rather than stay silent. See step_base.
+        ep_grp.attrs['preprocessing_steps'] = []
+        episode = Episode(key=f'episode_{i}', index=i, group=ep_grp)
+        # A session damaged on disk (truncated JPEG, unreadable WAV) flags itself unusable
+        # and the build moves on; the whole scene no longer dies with it. See episode_status.
+        with episode_guard(episode, scene.path, step='build-pzarr'):
+            _write_episode(ep_grp, session, skip_gopro)
+        # A rebuild resets usability: the store is opened mode='w', so the previous run's
+        # `failure` attr is already gone and episode_guard's own retry-clearing path can never
+        # fire here. Without this, a session that failed once stays in scene.json's
+        # unusable_episodes forever, silently absent from every export even after the data
+        # behind it was re-fetched and now builds clean.
+        #
+        # Note this also clears a mark a human set in the catalog UI. That is intended --
+        # rebuilding is the "start over from the raw sessions" operation -- but it means
+        # per-episode curation must be redone after a rebuild. Only sessions written by *this*
+        # call are considered, so an append leaves curation on untouched episodes alone.
+        if episode.failure is None and session.path.name in previously_unusable:
+            set_episode_unusable(scene.path, session.path.name, False)
+            log.info(f'{session.path.name}: rebuilt cleanly; no longer flagged unusable in scene.json.')
+
+
+def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False, append: bool = False) -> pathlib.Path:
     """
     Build scene.zarr inside scene_path from processed session directories.
+
+    With ``append=True`` an existing, completely-built store is *extended* with whatever
+    sessions it doesn't have yet instead of being rebuilt, preserving preprocessing output and
+    curation. Default is False so ``pingest build-zarr`` keeps meaning "start over".
 
     Returns the path to the created zarr store.
     """
@@ -344,6 +477,15 @@ def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.P
     # written just to record that nothing is wrong.
     manifest = SceneManifest.from_scene_dir(scene.path)
     previously_unusable = set(manifest.unusable_episodes) if manifest else set()
+
+    # Only an explicit False rebuilds. An *exception* out of the append must propagate: the
+    # rebuild below opens the store mode='w', which erases exactly what the append path exists
+    # to protect — every step's output, and hours of SLAM. A disk-full or permission failure
+    # would then destroy the store on its way to failing anyway. _append_pzarr drops
+    # `build_complete` before it writes, so an interrupted append leaves the store marked
+    # incomplete and the *next* run rebuilds it deliberately, with the operator watching.
+    if append and scene.zarr_path.exists() and _append_pzarr(scene, sessions, previously_unusable, skip_gopro):
+        return scene.zarr_path
 
     root = zarr.open_group(str(scene.zarr_path), mode='w', zarr_format=2)
     # Flipped to True once every episode has been attempted. A store left False was interrupted
@@ -383,35 +525,109 @@ def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False) -> pathlib.P
 
     # A session directory too damaged to load at all never becomes an episode, so there is no
     # episode group to flag; mark it straight in scene.json instead of only warning about it.
-    for session_dir_name, reason in scene.unloadable.items():
-        set_episode_unusable(scene.path, session_dir_name, True)
-        log.warning(f'{session_dir_name}: marked unusable in scene.json ({reason})')
+    _mark_unloadable(scene)
 
-    for i, session in enumerate(sessions):
-        log.info(f'[{i + 1}/{len(sessions)}] Episode {i}: {session.path.name}')
-        ep_grp = root.require_group(f'episode_{i}')
-        ep_grp.attrs['session_type'] = session.metadata.session_type.value
-        ep_grp.attrs['session_dir'] = session.path.name
-        episode = Episode(key=f'episode_{i}', index=i, group=ep_grp)
-        # A session damaged on disk (truncated JPEG, unreadable WAV) flags itself unusable
-        # and the build moves on; the whole scene no longer dies with it. See episode_status.
-        with episode_guard(episode, scene.path, step='build-pzarr'):
-            _write_episode(ep_grp, session, skip_gopro)
-        # A rebuild resets usability: the store is opened mode='w', so the previous run's
-        # `failure` attr is already gone and episode_guard's own retry-clearing path can never
-        # fire here. Without this, a session that failed once stays in scene.json's
-        # unusable_episodes forever, silently absent from every export even after the data
-        # behind it was re-fetched and now builds clean.
-        #
-        # Note this also clears a mark a human set in the catalog UI. That is intended --
-        # rebuilding is the "start over from the raw sessions" operation -- but it means
-        # per-episode curation must be redone after a rebuild.
-        if episode.failure is None and session.path.name in previously_unusable:
-            set_episode_unusable(scene.path, session.path.name, False)
-            log.info(f'{session.path.name}: rebuilt cleanly; no longer flagged unusable in scene.json.')
+    _write_sessions(root, scene, list(enumerate(sessions)), previously_unusable, skip_gopro)
 
     root.attrs['build_complete'] = True
     return scene.zarr_path
+
+
+def pzarr_needs_build(scene_dir: pathlib.Path) -> bool:
+    """
+    Report whether ``scene_dir`` still needs a scene.zarr built from scratch.
+
+    A store whose ``build_complete`` attr is explicitly False was interrupted part-way and is
+    missing episodes, so it gets rebuilt rather than preprocessed as if it were whole. Stores
+    written before that attr existed don't have it at all, and a *missing* attr means "unknown,
+    assume complete" — otherwise every pre-existing store would be rebuilt on sight.
+    """
+    zarr_path = SceneFiles.resolve_zarr_path(scene_dir)
+    if not zarr_path.exists():
+        return True
+    try:
+        root = zarr.open_group(str(zarr_path), mode='r')
+    except Exception as e:
+        log.warning(f'{scene_dir.name}: scene.zarr present but unreadable ({e}); rebuilding.')
+        return True
+    if root.attrs.get('build_complete') is False:
+        log.warning(f'{scene_dir.name}: scene.zarr is from an interrupted build; rebuilding.')
+        return True
+    return False
+
+
+def pzarr_new_sessions(scene_dir: pathlib.Path) -> list[str]:
+    """
+    Return session directories on disk that the scene's store has no episode for.
+
+    A scene grows while it is being recorded, so a store that was complete at its last build
+    can still be missing episodes. Compared by the ``session_dir`` attr each episode records,
+    not by counting: an episode flagged unusable still counts as present.
+    """
+    zarr_path = SceneFiles.resolve_zarr_path(scene_dir)
+    if not zarr_path.exists():
+        return []
+    on_disk = {p.name for p in scene_dir.iterdir() if p.is_dir() and p.name.startswith('session_')}
+    try:
+        root = zarr.open_group(str(zarr_path), mode='r')
+        built = _existing_episode_sessions(root)
+    except Exception as e:
+        # Unreadable stores are pzarr_needs_build's business; don't double-report here.
+        log.debug(f'{scene_dir.name}: could not read episodes from scene.zarr ({e})')
+        return []
+    return sorted(on_disk - built)
+
+
+def missing_gopro_mp4s(scene_dir: pathlib.Path) -> list[str]:
+    """Return session directory names under scene_dir that lack their gopro.mp4 sidecar."""
+    scene = SceneFiles.from_path(scene_dir)
+    return [s.path.name for s in scene.sessions if not (s.path / GOPRO_MP4).exists()]
+
+
+def _require_gopro_mp4s(scene_dir: pathlib.Path) -> None:
+    """Raise FileNotFoundError if any session under scene_dir is missing gopro.mp4."""
+    missing = missing_gopro_mp4s(scene_dir)
+    if missing:
+        joined = '\n  '.join(str(scene_dir / name / GOPRO_MP4) for name in missing)
+        raise FileNotFoundError(
+            f'Cannot build pzarr for {scene_dir.name}: missing gopro.mp4 in '
+            f'{len(missing)} session(s):\n  {joined}\n'
+            f'Run `pingest fetch-gopro` first, or pass --skip-gopro to ingest without GoPro frames.'
+        )
+
+
+def ensure_pzarr(scene_dir: pathlib.Path, skip_gopro: bool = False) -> None:
+    """
+    Build ``scene_dir``'s store, or extend it with sessions recorded since it was built.
+
+    A no-op once the store covers every session on disk. This is the whole "is there anything
+    to build here?" decision, in one place, because every caller that runs preprocessing has to
+    make it identically — the CLI's ``pingest pp`` and the catalog's Run-pp button most of all.
+    Getting it wrong in one of them means a scene that grew silently preprocesses only its old
+    episodes.
+
+    Raises FileNotFoundError when a from-scratch build has no gopro.mp4 to read. A *growing*
+    scene only warns: the episodes already in the store are processable, and refusing the lot
+    because the newest session's video hasn't been pulled off the SD card yet helps nobody.
+    """
+    if pzarr_needs_build(scene_dir):
+        if not skip_gopro:
+            _require_gopro_mp4s(scene_dir)
+        log.info(f'No usable scene.zarr for {scene_dir.name}; building pzarr first...')
+        log.info(f'  -> {build_pzarr(scene_dir, skip_gopro=skip_gopro)}')
+        return
+
+    new_sessions = pzarr_new_sessions(scene_dir)
+    if not new_sessions:
+        return
+    log.info(f'{scene_dir.name}: {len(new_sessions)} new session(s) since the last build; adding...')
+    if not skip_gopro:
+        try:
+            _require_gopro_mp4s(scene_dir)
+        except FileNotFoundError as e:
+            log.warning(f'{e}\nLeaving the new session(s) out and preprocessing what the store already holds.')
+            return
+    log.info(f'  -> {build_pzarr(scene_dir, skip_gopro=skip_gopro, append=True)}')
 
 
 def _ts_freq_hz(ts: np.ndarray) -> float | None:

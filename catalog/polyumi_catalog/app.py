@@ -149,22 +149,26 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
         all_tasks = queries.list_task_options(db)
         return render(request, '_dataset_builder.html', pending_scenes=pending_scenes, all_tasks=all_tasks, oob=oob)
 
-    def _detail_with_episodes_oob(db: DBSession, session_id: str) -> HTMLResponse:
+    def _with_episodes_oob(db: DBSession, detail: dict, scene_id: str | None) -> HTMLResponse:
         """
-        Re-render the session detail pane plus an out-of-band update of its scene's Episodes column.
+        Render a detail pane plus an out-of-band update of ``scene_id``'s Episodes column.
 
-        This keeps a usable/unusable toggle's grey-out reflected immediately if that scene's
-        episode list happens to be open (same "update a currently-visible widget" pattern as
-        the dataset-draft builder — see the module docstring's Phase 3 paragraph).
+        Keeps a currently-visible episode list honest whenever something behind it changed —
+        a usable/unusable toggle's grey-out, a finished pipeline's quality badges (same
+        "update a currently-visible widget" pattern as the dataset-draft builder; see the
+        module docstring's Phase 3 paragraph).
         """
-        detail = queries.session_detail(db, session_id)
         detail_html = templates.env.get_template('_detail.html').render(detail=detail, oob=False)
-        if detail.get('scene_id'):
-            sessions = queries.list_sessions(db, detail['scene_id'])
-            episodes_html = templates.env.get_template('_episodes.html').render(sessions=sessions, oob=True)
-        else:
-            episodes_html = ''
+        if not scene_id:
+            return HTMLResponse(detail_html)
+        sessions = queries.list_sessions(db, scene_id)
+        episodes_html = templates.env.get_template('_episodes.html').render(sessions=sessions, oob=True)
         return HTMLResponse(detail_html + episodes_html)
+
+    def _detail_with_episodes_oob(db: DBSession, session_id: str) -> HTMLResponse:
+        """Session detail, with its scene's Episodes column refreshed out of band."""
+        detail = queries.session_detail(db, session_id)
+        return _with_episodes_oob(db, detail, detail.get('scene_id'))
 
     def _scene_detail_with_run_state(db: DBSession, scene_id: str) -> dict:
         """scene_detail plus this process's live pipeline-run status, if any."""
@@ -250,13 +254,37 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
         return render(request, '_detail.html', detail=detail, oob=False)
 
     @app.post('/rescan', response_class=HTMLResponse)
-    def rescan(request: Request) -> HTMLResponse:
+    def rescan(request: Request, selected_scene_id: str | None = Form(None)) -> HTMLResponse:
+        """
+        Re-read the recordings tree into the DB, and refresh whatever is on screen from it.
+
+        Rescan is how anything that changed on disk outside a pipeline run reaches the UI — a
+        scene fetched from the Pi, a store rebuilt from the CLI — so it should leave no stale
+        pane behind. (The pp-poll only covers a run started from *this* process, and only while
+        its pane is open.) ``selected_scene_id`` comes from the hidden input the scene detail
+        pane renders, via hx-include on the button; when a scene is open, its pane and its
+        Episodes column are swapped out of band alongside the task list. Absent means nothing,
+        or a session, is selected, and the task list alone is enough.
+        """
         if recordings_dir is not None:
             sync_recordings(recordings_dir, engine)
             sync_datasets(default_datasets_dir(recordings_dir), engine)
         with DBSession(engine) as db:
-            tasks = queries.list_tasks(db)
-        return render(request, '_tasks.html', tasks=tasks, oob=False)
+            tasks_html = templates.env.get_template('_tasks.html').render(tasks=queries.list_tasks(db), oob=False)
+            if not selected_scene_id:
+                return HTMLResponse(tasks_html)
+            detail = _scene_detail_with_run_state(db, selected_scene_id)
+            if detail.get('kind') != 'scene':  # deleted out from under the open pane
+                return HTMLResponse(tasks_html)
+            # all_tasks is not optional here: jinja iterates an undefined name as empty, so
+            # omitting it silently swaps in a scene pane whose Assign-task dropdown has lost
+            # every option.
+            detail_html = templates.env.get_template('_detail.html').render(
+                detail=detail, all_tasks=queries.list_task_options(db), oob=True
+            )
+            sessions = queries.list_sessions(db, selected_scene_id)
+            episodes_html = templates.env.get_template('_episodes.html').render(sessions=sessions, oob=True)
+        return HTMLResponse(tasks_html + detail_html + episodes_html)
 
     @app.post('/fetch', response_class=HTMLResponse)
     def post_fetch(request: Request) -> HTMLResponse:
@@ -280,15 +308,27 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
         def _run() -> None:
             # Broad except for the same reason as the pipeline thread: unattended, so an
             # ssh/tar failure has to land in the status dict or the topbar spins forever.
+            partial: pathlib.Path | None = None
             try:
                 pi = PiFetch(pi_host)
-                todo = [name for name in pi.list_remote_scenes() if not (recordings_dir / name).exists()]
+                # Per session, not per scene: a scene grows while it's being recorded, so its
+                # directory existing locally doesn't mean it's complete. Same helper the CLI
+                # `pingest fetch` uses, so the button and the terminal agree — and one ssh for
+                # the whole tree, so `total` below lands promptly rather than after a handshake
+                # per scene with the progress bar stuck at 0.
+                todo = [
+                    (name, session)
+                    for name, sessions in pi.missing_sessions(recordings_dir).items()
+                    for session in sessions
+                ]
                 with app.state.fetch_lock:
                     app.state.fetch |= {'total': len(todo)}
-                for i, name in enumerate(todo, 1):
+                for i, (name, session) in enumerate(todo, 1):
                     with app.state.fetch_lock:
-                        app.state.fetch |= {'current': name}
-                    pi.copy_scene(name, recordings_dir / name)
+                        app.state.fetch |= {'current': f'{name}/{session}'}
+                    partial = recordings_dir / name / session
+                    pi.copy_sessions(name, [session], recordings_dir)
+                    partial = None
                     with app.state.fetch_lock:
                         app.state.fetch |= {'done': i, 'current': None}
                 sync_recordings(recordings_dir, engine)
@@ -297,13 +337,15 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
                     app.state.fetch |= {'status': 'done'}
             except Exception as exc:
                 with app.state.fetch_lock:
-                    failed = app.state.fetch['current']  # None unless a copy_scene raised
+                    failed = app.state.fetch['current']  # None unless a copy_sessions raised
                     app.state.fetch |= {'status': 'error', 'error': f'{failed}: {exc}' if failed else str(exc)}
-                if failed is not None:
+                if partial is not None:
                     # tar extracts in place, so a transfer that died halfway leaves a partial
-                    # scene dir — and the .exists() filter above would then skip it on every
-                    # future fetch. Drop it so the retry is just pressing the button again.
-                    shutil.rmtree(recordings_dir / failed, ignore_errors=True)
+                    # session dir — and the missing-session filter above would then treat it as
+                    # already fetched. Drop it so the retry is just pressing the button again.
+                    # Only that one session: the scene around it holds sessions already
+                    # transferred, plus scene.zarr, scene.json, and the SLAM atlas.
+                    shutil.rmtree(partial, ignore_errors=True)
 
         if not already_running:
             # kept on app.state purely so tests can join it instead of sleeping
@@ -564,9 +606,28 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
         return render(request, '_detail.html', detail=detail, oob=False)
 
     @app.get('/scenes/{scene_id}/pp-poll', response_class=HTMLResponse)
-    def get_pp_poll(request: Request, scene_id: str) -> HTMLResponse:
+    def get_pp_poll(scene_id: str) -> HTMLResponse:
+        """
+        Re-render only the parts of a running scene's pane that a run changes.
+
+        Deliberately a cheap read — no disk, no re-sync. This fires every 3s for the whole run,
+        so anything it touches gets touched hundreds of times. It reads the DB and renders; the
+        fresh SLAM measurements it eventually shows are put there once, by the run's own
+        ``sync_scene_quality`` when the pipeline finishes, and the next tick after that swaps
+        them in. Resist re-syncing here to make the badges fill in progressively — that walks
+        every episode's zarr attrs on every tick.
+
+        Three fragments, not the whole pane: replacing ``#detail-body`` on a timer also
+        replaced the Notes textarea, throwing away anything typed into it during a run.
+        """
         with DBSession(engine) as db:
             detail = _scene_detail_with_run_state(db, scene_id)
-        return render(request, '_detail.html', detail=detail, oob=False)
+            sessions = queries.list_sessions(db, scene_id)
+        env = templates.env
+        return HTMLResponse(
+            env.get_template('_pp_panel.html').render(detail=detail)
+            + env.get_template('_scene_quality.html').render(detail=detail, oob=True)
+            + env.get_template('_episodes.html').render(sessions=sessions, oob=True)
+        )
 
     return app

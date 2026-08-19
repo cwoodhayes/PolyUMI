@@ -14,6 +14,7 @@ import zarr
 from numcodecs import Blosc
 from polyumi_ingest.preproc.slam_step import (
     OrbSlam3Step,
+    _SLAM_MASK_PNG,
     _downsample_settings,
     _export_telemetry_json,
     _make_temp_settings_yaml,
@@ -648,3 +649,54 @@ def test_slam_step_smoke() -> None:
         ep = root[ep_key]
         assert 'gopro/slam_poses' in ep
         assert 'annotations/slam' in ep
+
+
+def test_settings_yaml_carries_the_gripper_mask(tmp_path: pathlib.Path) -> None:
+    """
+    The mask path must reach ORB-SLAM3 through the generated settings YAML.
+
+    Neither PolyUMI binary has a CLI flag for it (both already overload their positional
+    argv), so the YAML is the only channel. If this key stops being emitted, SLAM silently
+    tracks on unmasked frames -- which does not crash, it just quietly produces a map
+    nothing can relocalize against.
+    """
+    # Note the source is deliberately not named settings.yaml: the function writes
+    # <tmp_dir>/settings.yaml, so a same-named source in the same directory is its own output.
+    src = tmp_path / 'camera.yaml'
+    src.write_text('%YAML:1.0\nCamera.fx: 400.0\n')
+    mask = tmp_path / 'slam_mask.png'
+
+    with_mask = tmp_path / 'with'
+    without_mask = tmp_path / 'without'
+    default_mask = tmp_path / 'default'
+    for d in (with_mask, without_mask, default_mask):
+        d.mkdir()
+
+    assert f'Mask.Path: "{mask}"' in _make_temp_settings_yaml(src, with_mask, mask_png=mask).read_text()
+
+    # Masked by default, so a caller that never thought about it (view_slam) still reproduces
+    # what production does. Opting out has to be deliberate -- the C++ treats an absent key as
+    # legal, so a forgotten mask would otherwise be a silent unmasked run.
+    assert f'Mask.Path: "{_SLAM_MASK_PNG}"' in _make_temp_settings_yaml(src, default_mask).read_text()
+    assert 'Mask.Path' not in _make_temp_settings_yaml(src, without_mask, mask_png=None).read_text()
+
+
+def test_shipped_gripper_mask_is_binary_and_masks_the_bottom() -> None:
+    """
+    Guard the shipped mask's polarity, which is silently invertible.
+
+    Non-zero means *discarded*: the C++ does setTo(0, mask), so a mask saved inverted would
+    blank the scene and keep the gripper -- strictly worse than no mask, and it looks fine
+    until you read a SLAM log. The gripper sits along the bottom edge of the fisheye, so a
+    correctly-signed mask covers far more of the last row than the first.
+    """
+    import cv2
+
+    m = cv2.imread(str(_SLAM_MASK_PNG), cv2.IMREAD_GRAYSCALE)
+    assert m is not None, f'{_SLAM_MASK_PNG} is missing or unreadable'
+    assert set(np.unique(m)).issubset({0, 255}), 'mask must be binary'
+
+    masked = m > 0
+    assert masked[-1].mean() > 0.9, 'bottom row should be almost entirely gripper'
+    assert masked[0].mean() < 0.5, 'top row is scene, not gripper -- mask may be inverted'
+    assert 0.15 < masked.mean() < 0.55, f'masked {masked.mean():.1%} of frame, implausible'

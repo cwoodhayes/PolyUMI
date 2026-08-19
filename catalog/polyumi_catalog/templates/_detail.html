@@ -26,6 +26,10 @@
   </dl>
 
   {% elif detail.kind == 'scene' %}
+  {# Lets the topbar's Rescan button say which scene is on screen (hx-include), so a rescan can
+     swap this pane and the Episodes column back in with what it just re-read from disk. The
+     server tracks no selection state; this is the whole mechanism. #}
+  <input type="hidden" id="selected-scene-id" name="selected_scene_id" value="{{ detail.scene_id }}" />
   <div class="scene-detail-layout">
     <div class="scene-detail-text">
       <h2>{{ detail.name }}</h2>
@@ -53,22 +57,11 @@
         <textarea id="scene-notes" name="notes" rows="3" placeholder="Add notes…">{{ detail.notes or '' }}</textarea>
         <button type="submit">Save notes</button>
       </form>
-      {% if detail.quality.n_episodes_with_slam %}
-      <h3>Episode quality</h3>
-      <dl>
-        <dt>Avg. SLAM tracking</dt>
-        <dd>{{ '%.1f%%' % (detail.quality.avg_tracking_ratio * 100) if detail.quality.avg_tracking_ratio is not none else '—' }}</dd>
-        <dt>Low-tracking episodes</dt>
-        <dd>{{ detail.quality.n_low_quality }} / {{ detail.quality.n_episodes_with_slam }}</dd>
-        <dt title="Automatically excluded from exports by the quality thresholds in ingest/config/quality_thresholds.yaml">Auto-unusable</dt>
-        <dd>
-          {{ detail.quality.n_auto_unusable }} / {{ detail.quality.n_episodes_with_slam }}
-          {% if detail.quality.n_auto_unusable %}<span class="badge warn">excluded</span>{% endif %}
-        </dd>
-        <dt>Dropped video frames</dt>
-        <dd>{{ detail.total_dropped_video_frames }}</dd>
-      </dl>
-      {% endif %}
+      {# oob is forced false, and {% include %} inheriting this pane's context is exactly why:
+         on the rescan path the pane itself is rendered oob=True, and a nested out-of-band swap
+         would be swapped twice, to two places. Only this partial needs the dance — it is the
+         one that is *sometimes* an out-of-band swap (from the pp poll). #}
+      {% with oob = False %}{% include "_scene_quality.html" %}{% endwith %}
       <h3>Provenance</h3>
       <dl>
         <dt title="Commit of polyumi running on the Pi when these sessions were recorded (metadata.json polyumi_version)">Recorded by</dt>
@@ -115,73 +108,7 @@
       </div>
       {% endif %}
     </div>
-    <div class="scene-detail-side">
-      <h3>Preprocessing pipeline</h3>
-      {% if not detail.pp_status.pzarr_exists %}
-      <p class="muted">No pzarr built yet — running the pipeline will build it first.</p>
-      {% endif %}
-      <dl>
-        <dt>Steps complete</dt><dd>{{ detail.pp_status.n_complete }} / {{ detail.pp_status.n_total }}</dd>
-      </dl>
-      <ul class="pp-steps-list">
-        {% for step in detail.pp_status.steps %}
-        <li class="{{ 'pp-step-done' if step.complete else 'pp-step-pending' }}">
-          {{ '✓' if step.complete else '○' }} {{ step.number }}. {{ step.name }}
-          {% if step.complete %}
-          {% if step.git_sha | short_sha %}
-          <span class="mono pp-step-sha" title="Run at {{ step.completed_at or 'unknown time' }} on commit {{ step.git_sha }}">{{ step.git_sha | short_sha }}</span>
-          {% else %}
-          <span class="pp-step-sha muted" title="This step completed before per-step commit provenance was recorded; re-run it to stamp one">—</span>
-          {% endif %}
-          {% endif %}
-        </li>
-        {% endfor %}
-      </ul>
-      {% if detail.pp_running %}
-      <p
-        class="muted"
-        hx-get="/scenes/{{ detail.scene_id }}/pp-poll"
-        hx-trigger="load delay:3s"
-        hx-target="#detail-body"
-        hx-swap="outerHTML"
-      >
-        Running pipeline… (this can take a while — check the server terminal for progress; refreshing automatically)
-      </p>
-      {% else %}
-      {% set fully_processed = detail.pp_status.pzarr_exists and detail.pp_status.n_total > 0
-         and detail.pp_status.n_complete == detail.pp_status.n_total %}
-      {% set has_progress = detail.pp_status.n_complete > 0 %}
-      {% if not fully_processed %}
-      <button
-        hx-post="/scenes/{{ detail.scene_id }}/run-pp"
-        hx-vals='{"force": false}'
-        hx-target="#detail-body"
-        hx-swap="outerHTML"
-        hx-disabled-elt="this"
-      >
-        Run full pipeline
-      </button>
-      {% endif %}
-      {% if has_progress %}
-      <button
-        hx-post="/scenes/{{ detail.scene_id }}/run-pp"
-        hx-vals='{"force": true}'
-        hx-target="#detail-body"
-        hx-swap="outerHTML"
-        hx-disabled-elt="this"
-        class="warn"
-        {% if fully_processed %}
-        hx-confirm="This scene has already completed all {{ detail.pp_status.n_total }} preprocessing steps. Re-run every step from scratch anyway?"
-        {% else %}
-        hx-confirm="This will discard the {{ detail.pp_status.n_complete }} already-completed step(s) and re-run the entire pipeline from scratch. Continue?"
-        {% endif %}
-      >
-        Re-run pipeline
-      </button>
-      {% endif %}
-      {% if detail.pp_error %}<p class="warn">Last run failed: {{ detail.pp_error }}</p>{% endif %}
-      {% endif %}
-    </div>
+    {% include "_pp_panel.html" %}
   </div>
 
   {% elif detail.kind == 'session' %}
