@@ -14,6 +14,7 @@ import zarr
 from numcodecs import Blosc
 from polyumi_ingest.preproc.slam_step import (
     OrbSlam3Step,
+    _SLAM_MASK_PNG,
     _downsample_settings,
     _export_telemetry_json,
     _make_temp_settings_yaml,
@@ -696,13 +697,17 @@ def test_settings_yaml_carries_the_gripper_mask(tmp_path: pathlib.Path) -> None:
 
     with_mask = tmp_path / 'with'
     without_mask = tmp_path / 'without'
-    with_mask.mkdir()
-    without_mask.mkdir()
+    default_mask = tmp_path / 'default'
+    for d in (with_mask, without_mask, default_mask):
+        d.mkdir()
 
     assert f'Mask.Path: "{mask}"' in _make_temp_settings_yaml(src, with_mask, mask_png=mask).read_text()
 
-    # Omitting it must stay legal: the out-of-tree binaries share the header and run unmasked.
-    assert 'Mask.Path' not in _make_temp_settings_yaml(src, without_mask).read_text()
+    # Masked by default, so a caller that never thought about it (view_slam) still reproduces
+    # what production does. Opting out has to be deliberate -- the C++ treats an absent key as
+    # legal, so a forgotten mask would otherwise be a silent unmasked run.
+    assert f'Mask.Path: "{_SLAM_MASK_PNG}"' in _make_temp_settings_yaml(src, default_mask).read_text()
+    assert 'Mask.Path' not in _make_temp_settings_yaml(src, without_mask, mask_png=None).read_text()
 
 
 def test_shipped_gripper_mask_is_binary_and_masks_the_bottom() -> None:
@@ -715,8 +720,6 @@ def test_shipped_gripper_mask_is_binary_and_masks_the_bottom() -> None:
     correctly-signed mask covers far more of the last row than the first.
     """
     import cv2
-
-    from polyumi_ingest.preproc.slam_step import _SLAM_MASK_PNG
 
     m = cv2.imread(str(_SLAM_MASK_PNG), cv2.IMREAD_GRAYSCALE)
     assert m is not None, f'{_SLAM_MASK_PNG} is missing or unreadable'

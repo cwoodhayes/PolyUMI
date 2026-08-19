@@ -313,11 +313,13 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
                 pi = PiFetch(pi_host)
                 # Per session, not per scene: a scene grows while it's being recorded, so its
                 # directory existing locally doesn't mean it's complete. Same helper the CLI
-                # `pingest fetch` uses, so the button and the terminal agree.
+                # `pingest fetch` uses, so the button and the terminal agree — and one ssh for
+                # the whole tree, so `total` below lands promptly rather than after a handshake
+                # per scene with the progress bar stuck at 0.
                 todo = [
                     (name, session)
-                    for name in pi.list_remote_scenes()
-                    for session in pi.missing_sessions(name, recordings_dir / name)
+                    for name, sessions in pi.missing_sessions(recordings_dir).items()
+                    for session in sessions
                 ]
                 with app.state.fetch_lock:
                     app.state.fetch |= {'total': len(todo)}

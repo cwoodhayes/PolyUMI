@@ -177,3 +177,69 @@ def test_run_preprocessing_forces_an_invalidated_step(tmp_path: pathlib.Path) ->
     assert seen[2] is True, 'an invalidated step must run as if forced'
     # and the debt is cleared once it has actually been rebuilt
     assert steps_needing_rebuild(zarr.open_group(str(scene_zarr), mode='r')) == set()
+
+
+def test_a_forced_step_still_invalidates_the_ones_after_it(tmp_path: pathlib.Path) -> None:
+    """
+    Clearing marks for a forced run must not swallow the downstream debt it then creates.
+
+    `pingest pp 2 --force` drops step 2's own marks up front (so an interrupted run can't
+    leave them falsely complete), then re-runs it — which makes steps 3+ describe superseded
+    inputs, exactly as an unforced re-run would. The two mechanisms touch the same attrs, so
+    this pins that they compose: the forced step's marks go, its successors' debt appears.
+    """
+    root = _scene(tmp_path, steps=[1, 2, 3])
+    scene_zarr = tmp_path / 'scene.zarr'
+
+    class _FakeStep:
+        step_name = 'fake'
+        step_number = 2
+
+        def run(self, path, copy=False, force=False):
+            return path
+
+    with mock.patch.dict(
+        'polyumi_ingest.preproc.step_base.PREPROCESSING_STEPS',
+        {2: _FakeStep},
+        clear=True,
+    ):
+        run_preprocessing(scene_zarr, step_number=2, force=True)
+
+    root = zarr.open_group(str(scene_zarr), mode='r')
+    assert preprocessing_steps_done(root) == [1, 2]  # 3 invalidated by the re-run
+    assert steps_needing_rebuild(root) == {3}
+    # 2 cleared by the force, 3 by the invalidation. The stand-in step does no per-episode
+    # work, so nothing puts 2 back here — the real one re-marks each episode as it finishes.
+    assert episode_steps_done(root['episode_0']) == [1]
+
+
+def test_healing_still_reports_before_a_forced_run_clears_the_stamps(tmp_path: pathlib.Path, caplog) -> None:
+    """
+    Out-of-order steps are detected off ``completed_at``, which the force-clear then discards.
+
+    So the staleness check has to run first, or `pingest pp --force` would heal the store in
+    silence and never say which steps had been running against superseded inputs.
+    """
+    root = _scene(tmp_path, steps=[1, 2, 3])
+    # step 3 finished before step 2 did: it describes inputs step 2 has since replaced
+    versions = dict(root.attrs['preprocessing_step_versions'])
+    versions['3'] = {'git_sha': 'sha3', 'completed_at': '2026-01-01T12:00:00+00:00'}
+    root.attrs['preprocessing_step_versions'] = versions
+    scene_zarr = tmp_path / 'scene.zarr'
+
+    class _FakeStep:
+        step_name = 'fake'
+        step_number = 1
+
+        def run(self, path, copy=False, force=False):
+            return path
+
+    with mock.patch.dict(
+        'polyumi_ingest.preproc.step_base.PREPROCESSING_STEPS',
+        {1: _FakeStep},
+        clear=True,
+    ):
+        with caplog.at_level('WARNING'):
+            run_preprocessing(scene_zarr, step_number=1, force=True)
+
+    assert 'completed before a step they depend on' in caplog.text
