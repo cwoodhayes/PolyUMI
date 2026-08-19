@@ -11,17 +11,18 @@
     # per-tick POST/publish storm. 1 = infer every tick. Should be <= n_action_steps.
     steps_per_inference: 3
 
-    # How many action steps to request per inference. The chunk has to span the WHOLE
+    # How many action steps to request per inference. The chunk must span the whole
     # observation->motion budget for a device, or every action in it is already in the past by the
     # time that device can act, _n_stale_actions drops all of them, and nothing is published:
     #
     #   obs age at response ~0.62s (0.31 capture+convert, 0.30 inference) + that device's *_exec
     #
-    # against a span of n_action_steps * action_dt. At 8 (0.8 s) the arm never moved at all under
-    # the old MoveIt executor — observed 2026-08-10, "Whole action chunk stale for both devices"
-    # every tick. The servo cut arm_exec to 0.081, so the ARM now clears 0.8 s comfortably; the
-    # GRIPPER, still at 0.514, is what sets the requirement, needing ~1.14 s. 16 gives 1.6 s and
-    # leaves both with margin, so there is no reason to trim it.
+    # against n_action_steps * action_dt. The GRIPPER sets the requirement, at ~1.14s; the arm is
+    # far cheaper. 16 gives 1.6s and leaves both margin.
+    #
+    # 16 is also the model's own action_horizon (the fork's config/task/polyumi.yaml), and
+    # serve_policy returns min(requested, what the model has) — so this cannot over-read, and
+    # raising it further buys nothing. Lower it only for a checkpoint with a shorter horizon.
     #
     # 16 is also the model's own action_horizon (the fork's config/task/polyumi.yaml), and
     # serve_policy returns min(requested, what the model has) — so this cannot over-read, and
@@ -69,22 +70,16 @@
       # hardcodes robot_obs_latency: 0.0001. The arm_exec measurement below returns
       # (arm_exec + proprio), which at this magnitude is well inside its own noise floor.
       proprio: 0.001
-      # How far the arm lags the equilibrium point of the impedance controller.
+      # How far the arm lags the impedance controller's equilibrium point. Not a transport delay:
+      # policy_client_node anchors each chunk at t_obs - arm_exec so the equilibrium reaches pose k
+      # that far early and the arm, trailing it, arrives on time.
       #
-      # NOT a transport delay, and not the same quantity the pre-servo value measured. Under the
-      # streaming controller policy_client_node anchors each chunk at t_obs - arm_exec, so the
-      # equilibrium reaches pose k this far early and the arm — which trails it — arrives on time.
-      # The probe measures it that way too, correlating against each waypoint's INTENDED instant
-      # rather than when it was published, so the probe's own lead_s cancels out.
+      # Used twice — by _n_stale_actions and by the chunk anchor — and the two cancel in timing but
+      # not in phase. The first published waypoint lands at ~now whatever this value is, but WHICH
+      # waypoint that is shifts by arm_exec/action_dt steps, so overstating it skips ahead in the
+      # policy's trajectory rather than commanding early.
       #
-      # It is used twice, and the two uses cancel in timing but not in phase: n_stale_actions and
-      # the chunk anchor both shift by arm_exec, so the first published waypoint always lands at
-      # ~now, but WHICH waypoint that is moves by arm_exec/action_dt steps. Overstating it does not
-      # command the arm early — it skips that far ahead in the policy's intended trajectory. The old
-      # 0.620 was six steps of skip.
-      #
-      # Calibrated 2026-08-19 in servo mode. The pre-servo figure was 0.620, dominated by MoveIt
-      # planning; this is close to UMI's robot_action_latency of 0.1, as expected.
+      # Calibrated 2026-08-19 in servo mode; close to UMI's robot_action_latency of 0.1.
       arm_exec: 0.0810
 
       # Delay from publishing a width to the fingers actually starting to move — the gripper's
@@ -93,15 +88,11 @@
       # split. Most of it is fr3_gripper_bridge's own min_command_period_s (0.25 s) quantisation,
       # which is real delay in service and belongs here.
       #
-      # The sign of this gap FLIPPED when the servo landed. The hand used to be ~106 ms faster than
-      # the arm; now the arm is ~433 ms faster than the hand (0.514 - 0.081), because the arm shed
-      # MoveIt's planning time while the hand still goes through fr3_gripper_bridge unchanged. The
-      # hand is now by far the slower device and truncates ~5 more waypoints than the arm.
-      #
-      # This is exactly why the two are truncated independently. A shared slice would now force the
-      # ARM to inherit the hand's lead and act 0.43 s early — the same bug as before, in the
-      # opposite direction. (fr3_gripper_bridge's gripper_lead_steps, removed when the split landed,
-      # could only ever add lead, never remove it, so it could not have fixed this direction at all.)
+      # The hand is the slower device by ~433 ms (0.514 - 0.081): the arm is servoed, while the
+      # hand is driven by fr3_gripper_bridge's discrete, rate-limited Move/Grasp goals. It
+      # truncates ~5 more waypoints than the arm as a result. This is why the two are sliced
+      # independently — a shared slice would force the arm to inherit the hand's lead and act that
+      # much early.
       #
       # Calibrated on 08-10-2026: 8 steps, 514 ms median (376-710), open 514 / close 534.
       gripper_exec: 0.514

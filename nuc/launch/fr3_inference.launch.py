@@ -62,7 +62,12 @@ def generate_launch_description():
     gripper_max_width = LaunchConfiguration('gripper_max_width')
     executor = LaunchConfiguration('executor')
 
+    # Both halves of the choice come from one argument so they cannot disagree:
+    # policy_client_node publishes to both target topics, so a stack where the bridge subscribes
+    # AND the servo is active has two executors acting on the same policy output.
     handle_chunks = PythonExpression(["'true' if '", executor, "' == 'moveit' else 'false'"])
+    # Torque control starts the moment the controller activates, so it is gated on the same flag
+    # as every other way this file can move the arm.
     activate_servo = PythonExpression(["'", executor, "' == 'servo' and '", execute_arm, "' == 'true'"])
 
     # Hoisted out of the LaunchDescription list so the event handler below can name it: the switch

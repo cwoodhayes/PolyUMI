@@ -307,15 +307,12 @@ class LatencyProbe(Node):
             # the arm's lag differs between the up and down halves and smears the peak.
             self.declare_parameter('axis', 'y')
             # How far ahead of publication each waypoint is scheduled, for the timed wire format.
+            # Required, not a tuning knob: the controller ignores any waypoint at or before its
+            # current instant, so one stamped `now` is always stale by the time it crosses the
+            # network. One command period is a comfortable margin over transport.
             #
-            # Non-negotiable, not a tuning knob: the streaming controller ignores any waypoint at
-            # or before its current instant, so a waypoint stamped `now` is ALWAYS in the past by
-            # the time it crosses the network, and the arm never moves at all. One command period
-            # is a comfortable margin over transport.
-            #
-            # It does not bias the result, because what gets correlated is each waypoint's INTENDED
-            # instant rather than when it was published — see _run_arm. Re-run at two different
-            # leads and the answer should not move; if it does, that assumption has broken.
+            # It does not bias the result — _run_arm correlates against each waypoint's intended
+            # instant, not its publication. Re-run at a different lead to confirm that still holds.
             self.declare_parameter('lead_s', 0.25)
             self._amplitude = self.get_parameter('amplitude_m').get_parameter_value().double_value
             self._lead = self.get_parameter('lead_s').get_parameter_value().double_value
@@ -537,20 +534,15 @@ class LatencyProbe(Node):
                 setattr(pose.position, self._axis, base_offset + offset)
                 pose.orientation = base.transform.rotation
 
-                # One waypoint per publication, at command_hz. Under the streaming controller each
-                # splices onto the last, which IS the continuous case the policy produces; dt is
-                # irrelevant with a single point.
+                # One waypoint per publication, at command_hz; each splices onto the last, which
+                # is the continuous case the policy produces. dt is irrelevant with a single point.
                 #
-                # The two wire formats need different notions of "when was this commanded", because
-                # they measure genuinely different things:
-                #
-                # * PoseArray -> MoveIt re-times the chunk from arrival, so the command event is the
-                #   publication, and the answer is a planning time.
-                # * MultiDOF -> the waypoint carries its own absolute instant. Correlating against
-                #   the publication would fold `lead` into the answer; correlating against the
-                #   intended instant measures what the servo path actually needs, namely how far the
-                #   arm lags the equilibrium point. That is exactly the quantity policy_client_node
-                #   compensates when it anchors chunks at t_obs - arm_exec.
+                # The two formats measure different quantities, so "when was this commanded" means
+                # different things. MoveIt re-times a PoseArray from arrival, so the command event
+                # is the publication and the answer is a planning time. A MultiDOF waypoint carries
+                # its own instant, so correlating against that — not the publication — measures how
+                # far the arm lags the equilibrium point, which is what policy_client_node
+                # compensates when it anchors chunks at t_obs - arm_exec.
                 if self._pub.wire is Wire.MULTIDOF:
                     target = self.get_clock().now() + Duration(seconds=self._lead)
                     self._pub.publish([pose], stamp=target.to_msg())
@@ -565,10 +557,9 @@ class LatencyProbe(Node):
         with self._lock:
             actual = [(t, x - base_offset) for t, x in self._actual]
 
-        # An arm that never moved correlates to noise, and the sharpness checks below reject that
-        # with a message about the peak — which reads like a marginal measurement rather than a
-        # dead command path. Say the actual thing instead: this exact failure (every waypoint
-        # discarded as stale by the streaming controller) cost a trawl through the NUC's log.
+        # An arm that never moved correlates to noise, which the sharpness checks below reject
+        # with a message about peak width — indistinguishable from a marginal measurement. Name
+        # the real condition instead.
         if actual:
             actual_span = max(x for _, x in actual) - min(x for _, x in actual)
             commanded_span = max(x for _, x in commanded) - min(x for _, x in commanded)
