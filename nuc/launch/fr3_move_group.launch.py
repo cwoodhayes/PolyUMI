@@ -30,11 +30,9 @@
 #   3. Build robot_description from nuc/description/fr3_polyumi.urdf.xacro instead of
 #      franka_description's fr3.urdf.xacro, so the model carries `polyumi_tcp`.
 #   4. Supply joint ACCELERATION limits. Neither upstream nor franka_description declares any,
-#      so move_group's time parameterization fell back to a default of 1 rad/s^2 and logged
-#      "Joint acceleration limits are not defined. Using the default 1 rad/s^2." Every Cartesian
-#      chunk then came back slower than the policy asked for — measured 3.4 s against a
-#      commanded 2.75 s on 2026-08-18 — so the bridge could never hit the commanded timeline
-#      and dropped ~6 of every 7 chunks as still-busy.
+#      so move_group's time parameterization falls back to 1 rad/s^2 and every Cartesian chunk
+#      comes back slower than the policy asked for — the bridge then never hits the commanded
+#      timeline and drops most chunks as still-busy.
 # See docs/crb-fr3-inference.md for how to run this and the gotchas around it.
 
 """Launch a standalone MoveIt move_group for the FR3, alongside a running fr3-bringup."""
@@ -114,14 +112,13 @@ def generate_launch_description():
 
     db_arg = DeclareLaunchArgument('db', default_value='False', description='Database flag')
 
-    # See header change 4. This is the knob that sets how fast a planned chunk actually runs:
-    # with no acceleration limit declared anywhere, MoveIt time-parameterizes at a default
-    # 1 rad/s^2, which is slower than the policy's own timeline and cannot be sped back up
-    # (Humble's GetCartesianPath has no velocity_scaling field). Deliberately NOT the FR3's
-    # datasheet maximum — the arm fired a reflex on 2026-08-18 and the honest state of this
-    # number is "conservative, raise it while watching". fr3_moveit_bridge stretches the result
-    # back to the span the incoming Path asks for, so a faster plan does not mean a faster arm;
-    # it means the commanded timeline becomes reachable instead of being the slower of the two.
+    # See header change 4. This is the knob that sets how fast a planned chunk actually runs,
+    # and Humble's GetCartesianPath has no velocity_scaling field to speed one back up after
+    # the fact. Deliberately NOT the FR3's datasheet maximum: conservative, raise it while
+    # watching — the arm will fire a reflex if a chunk is too aggressive. fr3_moveit_bridge
+    # stretches the result back to the span the incoming Path asks for, so a faster plan does
+    # not mean a faster arm; it means the commanded timeline becomes reachable instead of
+    # being the slower of the two.
     max_acceleration_arg = DeclareLaunchArgument(
         'max_acceleration',
         default_value='1.5',

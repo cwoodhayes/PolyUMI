@@ -321,6 +321,35 @@ python python/run_gopro_calibration.py \
   --path_to_build build/applications/
 ```
 
+## Comment Content
+
+Comments explain the code as it is now. **Git history is where the code's past lives** — a
+comment that narrates what the code used to be, when it changed, or which incident forced the
+change is duplicating `git log`, and unlike `git log` it goes stale silently.
+
+Cut on sight:
+
+- **"This used to …" / "Deliberately omitted until …" / "X was tried and failed"** — the
+  rejected alternative belongs in the commit message. Keep it only when a reader would
+  otherwise re-introduce it, and then in one clause, not a paragraph.
+- **Dates on changes.** "Fixed 2026-08-18", "seen on 2026-08-17". Dates on *measurements* are
+  the exception and should stay: a calibrated constant needs to say when it was measured
+  (`gripper_calib.yaml`, `tcp_calib.py`).
+- **Incident forensics.** Which scene broke, how many episodes it cost, the exact log line.
+  State the failure mode in the present tense instead; the postmortem goes in the commit.
+- **Personal anecdote.** "mine sets 63", "cost an hour".
+
+Keep, always: why the code is shaped this way, constraints that still bind, where a magic
+number came from, upstream behaviour we are matching, and gotchas a reader would trip on.
+
+Two more rules of thumb:
+
+- **Don't duplicate `docs/`.** For anything with a doc section (the FR3 troubleshooting modes
+  in `docs/crb-fr3-inference.md`, especially), state the mechanism in a sentence or two and
+  point at the doc. Two copies of a narrative drift.
+- **If the explanation is longer than the code it explains, it is probably a doc, a commit
+  message, or a docstring — not an inline comment.**
+
 ## Docstring Formatting
 
 This project enforces pydocstyle via ruff. The rules that come up most often:

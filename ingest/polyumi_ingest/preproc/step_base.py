@@ -82,9 +82,8 @@ def preprocessing_step_versions(root: zarr.Group) -> dict[str, dict]:
 #: Clearing the marks is not enough on its own. Several steps carry their own
 #: "output already present; use --force to recompute" guard (so_align's ``StepComplete``,
 #: eef-pose's per-episode check), so an invalidated step would be re-entered by the harness
-#: and then decline to do anything — which is exactly what happened on the first attempt to
-#: rebuild scene 31d6: all 63 episodes logged "eef/pose_* already present" and the stale
-#: poses survived a run that looked, from the outside, like a successful rebuild.
+#: and then decline to do anything, leaving the stale output behind a run that looked
+#: successful from the outside.
 #:
 #: Persisted on the store rather than held in memory because the invalidation and the rebuild
 #: are routinely different processes: `pingest pp 2 --force` today, `pingest pp` tomorrow.
@@ -115,15 +114,9 @@ def _invalidate_downstream_steps(root: zarr.Group, step_number: int) -> list[int
     Drop the completion marks for every step after ``step_number``. Returns what was cleared.
 
     Steps form a chain — each reads what the ones before it wrote — so re-running step N makes
-    the output of every later step describe inputs that no longer exist. Nothing in the store
-    said so: the marks are a flat set of "done" numbers with no dependency order, so a re-run
-    of one step left its successors looking complete forever.
-
-    That is not hypothetical. Scene 31d6 had step 2 re-run under the gripper-mask fix 90
-    minutes *after* step 5 last ran, so ``eef/pose_slam`` — the array DP export reads — was
-    still the retarget of the previous SLAM pass. It exported 18 episodes (17% of the dataset)
-    of poses belonging to a superseded trajectory, and every frame count and tracking ratio
-    alongside them described the new one.
+    the output of every later step describe inputs that no longer exist. The marks are a flat
+    set of "done" numbers with no dependency order, so without this a re-run of one step
+    leaves its successors looking complete forever, and DP export happily reads them.
 
     Only marks are cleared, never data: the later steps' arrays stay until those steps re-run
     and overwrite them. Per-episode marks go too, otherwise ``run_step``'s own

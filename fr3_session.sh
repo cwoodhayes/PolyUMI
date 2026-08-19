@@ -83,19 +83,16 @@ if [ "${1:-}" = "--kill-local" ] || [ "${1:-}" = "--kill" ]; then
   # these clean up on: the Pi leaves the finger LED lit (its `finally:` only runs via
   # KeyboardInterrupt), sheep's `docker run` CLI dies without forwarding it so the container and
   # its port survive, and ros2 launch skips the shutdown that reports whether the FCI was
-  # released. 8s covers the Pi's worst case, the longest of the three: stream() stops both child
-  # streamers (2s SIGTERM + 2s SIGKILL join each) before it touches the LED.
+  # released. 8s covers the Pi's worst case: stream() stops both child streamers (2s SIGTERM +
+  # 2s SIGKILL join each) before it touches the LED.
   KILL_GRACE_S="${KILL_GRACE_S:-8}"
   NEEDS_GRACE=0
 
   # The Pi on BOTH paths, --kill-local included: that pane is a plain `ssh -t` with no remote
   # tmux to survive into, so it dies either way — this only decides whether it dies cleanly.
-  #
-  # ^C into the pane, not `pkill -INT` over ssh. pkill was tried and silently "succeeded":
-  # `polyumi-pi` is a zsh ALIAS, so the real cmdline is `.../python .../polyumi_pi/main.py
-  # stream` and never contains the pattern — which instead matched the remote shell running
-  # pkill, since ssh puts the pattern in its argv. Addressed by window name because the kill path
-  # is a different invocation from the one that captured the pane IDs.
+  # ^C into the pane rather than `pkill` over ssh: `polyumi-pi` is a zsh alias, so no remote
+  # cmdline contains the pattern. Addressed by window name because the kill path is a different
+  # invocation from the one that captured the pane IDs.
   PI_PANE="$(tmux list-panes -t "$SESSION:polyumi-pi" -F '#{pane_id}' 2>/dev/null | head -1 || true)"
   if [ -n "$PI_PANE" ]; then
     tmux send-keys -t "$PI_PANE" C-c
@@ -335,16 +332,14 @@ fi
 # --- Pi: RUN the stream. Stateless, moves nothing, and the laptop warns without it.
 #
 # Stop polyumi-pi.service first. It runs `start-scene` on boot, and start-scene and stream both
-# construct an LEDManager — which means both drive the same hardware PWM channel. Whoever
-# constructs one last wins, because HardwarePWM.start(0) zeroes the duty cycle, and the loser goes
-# on believing its LED is lit. The service is Restart=on-failure, and it fails repeatedly while
-# stream holds the camera, so each retry silently darkens the finger LED mid-run (seen 2026-08-17
-# with NRestarts=18). Nothing in the stream path can defend against this; the other process owns
-# the pin just as legitimately.
+# construct an LEDManager on the same hardware PWM channel; whoever constructs one last wins,
+# because HardwarePWM.start(0) zeroes the duty cycle, and the loser goes on believing its LED is
+# lit. Restart=on-failure means the service retries all through a stream that holds the camera,
+# darkening the finger LED each time. Nothing in the stream path can defend against this — the
+# other process owns the pin just as legitimately. See docs/crb-fr3-inference.md.
 #
-# `;` not `&&`: a Pi without this unit — anyone who did not install it — would otherwise get
-# "Unit not loaded", a non-zero exit, and no stream at all. The error still prints in the pane, so
-# a real permission failure is visible rather than swallowed.
+# `;` not `&&`: a Pi without this unit would otherwise get "Unit not loaded", a non-zero exit,
+# and no stream at all. The error still prints in the pane, so a real failure stays visible.
 tmux send-keys -t "$PI_PANE" "sudo systemctl stop polyumi-pi; polyumi-pi stream" C-m
 
 # --- Sheep: PRETYPE. The checkpoint changes every training run, so the path is yours to pick.
@@ -361,12 +356,9 @@ fi
 #
 # The line re-sources setup_franka_env.sh even though the pane already did so above, and that
 # redundancy is the point: this is the command that lands in shell history, so every later
-# recall of it — in this pane, a pane opened by hand, tomorrow's terminal — carries its own DDS
-# env instead of inheriting whatever the shell happened to have. Without it, an interactive rc
-# that exports its own ROS_DOMAIN_ID (mine sets 63) silently overrides tmux's inherited
-# environment and the whole laptop stack comes up on a private domain: camera, Pi stream and
-# Foxglove all work, the NUC is simply absent, and the only symptom is policy_client_node
-# repeating `TF lookup failed: "fr3_link0" ... does not exist`. Cost an hour on 2026-08-17.
+# recall of it carries its own DDS env instead of inheriting whatever the shell happened to
+# have. An interactive rc exporting its own ROS_DOMAIN_ID silently beats tmux's inherited
+# environment, and the only symptom is policy_client_node never seeing fr3_link0.
 pretype "$LAPTOP_PANE" \
   "source setup_franka_env.sh >/dev/null && $(logged policy_client "ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=$INFERENCE_URL execute_motion:=$EXECUTE_MOTION max_image_age_s:=$MAX_IMAGE_AGE_S pi_host:=$PI_HOST")"
 

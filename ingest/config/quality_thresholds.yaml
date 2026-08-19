@@ -41,23 +41,19 @@ min_tracked_frames: 60
 # Stores written before pzarr v4 have no post-chirp counts; quality.py falls back to
 # the whole-episode fed-frame count for those and says so in the reason string.
 
-# Largest tolerated position step (metres) between two adjacent tracked frames of the
-# hand-frame trajectory, measured by step 5 onto `eef/pose_slam` as `max_pose_jump_m`.
+# Largest tolerated position step (metres) between two adjacent tracked frames, written by
+# step 5 into `annotations/slam` as `max_pose_jump_m`. Catches what the frame counts
+# structurally cannot: an episode can be fed every frame, lose none, report tracking_ratio
+# 1.000, and still teleport a metre when the localizer relocalizes against the wrong part of
+# the map.
 #
-# This catches what the two frame counts structurally cannot. An episode can be fed every
-# frame, lose none of them, report tracking_ratio 1.000 — and still teleport a metre when
-# the localizer relocalizes against the wrong part of the map. Measured on the 98 episodes
-# of red_trapezoid_mug_v3, three such episodes were exported with jumps of 23 cm, 55 cm and
-# 306 cm while every existing threshold called them healthy.
-#
-# 0.08 sits in a real gap in the data: 93 of 97 episodes across the three clean scenes peak
-# at 6.2 cm or below (p50 3.4, p95 5.9), and the next value up is 10.6 cm. It is a ceiling on
+# 0.08 sits in a real gap in the data: 93 of 97 episodes across three clean scenes peak at
+# 6.2 cm or below (p50 3.4, p95 5.9), and the next value up is 10.6 cm. It is a ceiling on
 # plausible hand speed, not a tuning knob — at the 30 Hz fed rate, 8 cm/frame is 2.4 m/s.
 #
-# Measured on the hand frame rather than the camera's because that is what the policy
-# consumes, and because the lever arm amplifies orientation glitches the camera position
-# never sees: p_hand = p_cam + R_cam·t with |t| = 0.2685 m, so an orientation flip alone
-# moves the hand up to 54 cm.
+# Measured on the hand frame, not the camera's: that is what the policy consumes, and the
+# lever arm amplifies orientation glitches the camera position never sees — p_hand =
+# p_cam + R_cam·t with |t| = 0.2685 m, so an orientation flip alone moves the hand up to 54 cm.
 max_pose_jump_m: 0.08
 
 # Episodes with OptiTrack poses available (eef.attrs['available_sources']) skip

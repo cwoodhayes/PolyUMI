@@ -27,15 +27,10 @@ _MOUNT_ROOTS = [
 
 #: Memoized recording start times, keyed by (path, mtime_ns, size).
 #:
-#: ``find_gopro_video`` probes every MP4 on the card to find the closest match, and it is
-#: called once per session, so a fetch of N sessions against a card of M clips ran N*M
-#: ffprobes for M distinct answers — 20 x 451 = 9020 on the fetch that prompted this. A clip's
-#: creation_time never changes, so all but the first pass were recomputing what they already
-#: knew. Measured at ~100 ms per probe that is 15 minutes instead of 45 seconds.
-#:
-#: The ~100 ms is ffprobe *process startup*, not I/O: probing a local SSD file costs the same
-#: as one on the card, and `ffprobe -version`, which opens no file at all, costs the same
-#: again. So the only lever that matters is calling it fewer times.
+#: ``find_gopro_video`` probes every MP4 on the card and runs once per session, so a fetch of
+#: N sessions against a card of M clips costs N*M ffprobes for M distinct answers. Each probe
+#: is ~100 ms of ffprobe *process startup*, not I/O — `ffprobe -version`, which opens no file,
+#: costs the same — so calling it fewer times is the only lever there is.
 #:
 #: Keyed on stat rather than path alone so swapping cards mid-run cannot serve a stale answer
 #: for a filename the new card happens to reuse — GoPro numbering restarts per card.

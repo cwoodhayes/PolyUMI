@@ -33,7 +33,7 @@ def _scene(tmp_path: pathlib.Path, steps: list[int], n_episodes: int = 2) -> zar
 
 def test_rerunning_a_step_invalidates_everything_after_it(tmp_path: pathlib.Path) -> None:
     """
-    The bug this exists for: step 2 re-ran and steps 3-5 stayed 'done' against stale inputs.
+    Re-running step 2 must not leave steps 3-5 marked 'done' against inputs it replaced.
 
     All three levels have to move together. Scene marks alone would leave ``run_step``'s
     episode loop skipping every episode of the steps this just re-opened; and the marks alone
@@ -73,11 +73,11 @@ def test_invalidation_leaves_the_arrays_alone(tmp_path: pathlib.Path) -> None:
 
 def test_run_preprocessing_forces_an_invalidated_step(tmp_path: pathlib.Path) -> None:
     """
-    The bug behind the bug: an invalidated step was re-entered but declined to recompute.
+    An invalidated step that is merely re-entered will decline to recompute.
 
     so_align and eef-pose both carry an "output already present; use --force to recompute"
-    guard, so rebuilding scene 31d6 logged "eef/pose_* already present" for all 63 episodes
-    and kept the stale poses through a run that looked successful from the outside.
+    guard, so clearing the marks alone leaves the stale output behind a run that looks
+    successful from the outside.
     """
     scene_zarr = tmp_path / 'scene.zarr'
     root = zarr.open_group(str(scene_zarr), mode='w', zarr_format=2)

@@ -16,20 +16,9 @@
 #   CKPT=... PORT=8001 ./serve_policy.sh
 #   CKPT=... CUDA_VISIBLE_DEVICES=1 ./serve_policy.sh    # pin to the second GPU
 #
-# ON PICKING A GPU. serve_policy.py loads the policy on plain 'cuda' — GPU 0, always, and only
-# GPU 0. There is no multi-GPU path here and there is no point adding one: this is single-sample
-# inference, so a second card cannot make one forward pass faster, it can only give it a card to
-# itself. On a shared box that is the whole game, and sheep is shared — GPU 0 is where everyone
-# lands by default. Check `nvidia-smi` and export CUDA_VISIBLE_DEVICES to whichever card is quiet.
-#
-# How much this buys is unmeasured, and worth saying plainly rather than assuming. Pinned to an
-# idle GPU 1 on 2026-08-17, model time held at 92-95 ms across every request while GPU 0 ran at
-# 96% under someone else's Isaac Sim and two PPO jobs. Nothing was measured on a contended GPU 0
-# with the same checkpoint, so treat this as insurance whose premium is one env var, not as a
-# known win. If you want the number, run both and read the `model NNms` figure in the server log.
-#
-# Deliberately not defaulted to 1: which card is busy changes hour to hour and machine to machine,
-# so a hardcoded default would just be wrong in a different way. It is passed through below.
+# serve_policy.py loads the policy on plain 'cuda', i.e. whatever CUDA_VISIBLE_DEVICES makes
+# device 0. Not defaulted here: which card is quiet changes hour to hour, so check `nvidia-smi`.
+# See docs/crb-fr3-inference.md for what pinning does and does not buy.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

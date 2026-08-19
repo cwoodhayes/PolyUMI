@@ -375,9 +375,8 @@ def _write_slam_results(
     n_fed_tracked = int((~is_lost[fed_idx]).sum()) if n_fed else 0
     # Transitions lost→tracked (each run of tracked frames after a gap), counted on the FED
     # grid. On the whole grid this is meaningless above stride 1: the localizer never sees the
-    # skipped frames, so `is_lost` alternates tracked/lost even for a flawless run and every
-    # tracked frame reads as a fresh relocalization. Measured across the corpus the attr came
-    # out ≈ n_fed_tracked (95-305 for episodes that never lost the map once).
+    # skipped frames, so `is_lost` alternates tracked/lost even for a flawless run and the
+    # count comes out ≈ n_fed_tracked.
     transitions = int(np.count_nonzero(np.diff(is_lost[fed_idx].astype(np.int8)) == -1))
 
     i0, chirp_gated = post_chirp_start(ep_grp, n_total)

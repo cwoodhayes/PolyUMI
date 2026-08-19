@@ -28,10 +28,9 @@ def _resolve_git_sha() -> str:
     server and the ingest CLI are routinely run from elsewhere, and a cwd-relative
     lookup would silently stamp whatever unrelated repo the shell happened to be in.
 
-    Timed out rather than left to block: this now runs at import, so a git that hangs
-    (a stale lock, an unresponsive filesystem) would take the whole process down with
-    it instead of only the first caller. TimeoutExpired is a SubprocessError, so the
-    handler below already covers it.
+    Timed out because this runs at import: a git that hangs (a stale lock, an unresponsive
+    filesystem) would otherwise take the whole process down with it. TimeoutExpired is a
+    SubprocessError, so the handler below already covers it.
     """
     try:
         out = subprocess.check_output(
@@ -46,21 +45,12 @@ def _resolve_git_sha() -> str:
     return out.strip() or UNKNOWN_SHA
 
 
-#: Captured at **import**, which is the closest thing to "the commit whose code is
-#: actually running" that we can cheaply observe.
+#: Captured at **import**, not on first call: the catalog server can trigger preprocessing
+#: from the UI and stays up for days, so a lazily resolved sha reports whatever HEAD is at
+#: marking time — which may be several commits past the code actually doing the work.
 #:
-#: This used to be resolved lazily on first call, which is subtly wrong for any process
-#: that outlives a commit. The catalog server can trigger preprocessing from the UI and
-#: stays up for days; on 2026-08-17 one had been running since before a batch of commits
-#: landed, so it executed the *old* eef-pose step while `git rev-parse` — run fresh at
-#: marking time — reported the *new* HEAD. Scene 30ed ended up stamped with a commit whose
-#: code had never touched it, and the missing `max_pose_jump_m` attr it should have written
-#: looked, from the provenance alone, impossible.
-#:
-#: Import time is not a perfect proxy — an editable checkout can still be edited underneath
-#: a running process without any commit at all — but it moves the stamp from "whenever
-#: someone asked" to "when this code was loaded", which is the question it is meant to
-#: answer.
+#: Not a perfect proxy (an editable checkout can be edited underneath a running process with
+#: no commit at all), but it answers the question the stamp is asked: which code ran.
 _LOADED_GIT_SHA = _resolve_git_sha()
 
 

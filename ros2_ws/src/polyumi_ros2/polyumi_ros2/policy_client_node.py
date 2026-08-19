@@ -724,17 +724,10 @@ class PolicyClientNode(Node):
         Report, once, that no arm TF has EVER arrived — which is an env fault, not a TF fault.
 
         The arm's frames come from the NUC, so "frame does not exist" from the very first tick
-        means this process is not talking to the NUC at all. tf2 cannot say that; it only knows
-        the frame is absent, and its message reads like the arm dropped out mid-run. Printing the
-        DDS env alongside turns the usual hour of tf2 archaeology into one glance, because the
-        cause is nearly always one of these three lines being wrong.
-
-        The specific trap this exists for: an interactive shell rc that exports its own
-        ROS_DOMAIN_ID (mine sets 63) silently wins over tmux's inherited environment, so a laptop
-        pane opened by hand — rather than by fr3_session.sh, which sources setup_franka_env.sh —
-        comes up on a private domain. Everything laptop-local still works, which is what makes it
-        so slow to spot: the camera, the Pi stream and Foxglove are all fine, and only the arm
-        (the one thing coming over the wire) is missing.
+        means this process is not reaching the NUC at all. tf2 cannot say that; its message reads
+        like the arm dropped out mid-run. The usual cause is a shell rc exporting its own
+        ROS_DOMAIN_ID over the one tmux inherited, so the DDS env goes in the message.
+        See docs/crb-fr3-inference.md.
         """
         if self._tf_ever_ok:
             return

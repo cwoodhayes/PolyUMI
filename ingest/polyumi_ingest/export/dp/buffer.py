@@ -289,20 +289,12 @@ def _export_episode(
     # [min_width, max_width] with bounds_error=False, fill_value=(x[0], x[-1]), so detections
     # outside the calibrated range saturate rather than escape.
     #
-    # The bottom clamp is unavoidable: closed width is a percentile, so ~1% of detections sit
-    # below it by construction and would export negative.
-    #
-    # The top clamp was deliberately omitted until 2026-08-18, on the reasoning that it would
-    # make open_mm load-bearing and hide a demo opening wider than the calibration recording —
-    # "information, not error". That holds for a compliant mechanism; it does not hold for this
-    # one. The handheld gripper has a hard stop, so a separation above open_mm is not a wider
-    # demonstration, it is a misread tag. red_trapezoid_mug_v4 carried a single sample at
-    # 208.8 mm of opening — 253.4 mm of raw tag separation on a gripper that stops at 132.33 —
-    # and because UMI normalizes this channel by min/max, that one frame in 22640 set the top of
-    # the range and squeezed the real 0-86 mm signal into the bottom 41% of it.
-    #
-    # The old concern survives as the warning below rather than as missing clamping: a
-    # miscalibrated open_mm now announces itself instead of silently widening the range.
+    # Bottom: closed width is a percentile, so ~1% of detections sit below it by construction
+    # and would export negative. Top: the handheld gripper has a hard stop, so a separation
+    # above open_mm is a misread tag, not a wider demonstration — and UMI normalizes this
+    # channel by min/max, so a single bad frame sets the top of the range and squeezes the real
+    # signal into a fraction of it. The warning below is what keeps open_mm honest: a
+    # miscalibrated one announces itself rather than silently widening the range.
     max_opening_m = open_width_m - closed_width_m
     gripper = np.asarray(arr(ep, 'annotations/gripper_width/width_m')[:], dtype=np.float64)
     gripper = np.maximum(gripper - closed_width_m, 0.0)

@@ -92,10 +92,8 @@ def test_git_sha_is_fixed_at_import_not_re_read_per_call() -> None:
     """
     The stamp must describe the code that is running, not HEAD at the moment it is asked.
 
-    A process that outlives a commit would otherwise stamp a commit it never executed.
-    That is not hypothetical: a catalog server up since before a batch of commits ran the
-    old eef-pose step while reporting the new HEAD, and scene 30ed was stamped with a
-    commit whose code had never touched it.
+    The catalog server can trigger preprocessing and stays up for days, so a per-call lookup
+    would stamp a commit whose code the process never executed.
     """
     before = gitinfo.git_sha()
 
