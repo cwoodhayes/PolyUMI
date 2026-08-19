@@ -31,11 +31,27 @@ Pose poseFromColumnMajor(const std::array<double, 16>& m) {
   return pose;
 }
 
+/// Smallest speed limit that still behaves like a limit rather than a division by zero.
+constexpr double kMinSpeed = 1e-6;
+
 Matrix6d diagonalGain(double translational, double rotational) {
   Matrix6d gain = Matrix6d::Identity();
   gain.topLeftCorner(3, 3) *= translational;
   gain.bottomRightCorner(3, 3) *= rotational;
   return gain;
+}
+
+double clampedSpeed(const std::shared_ptr<rclcpp_lifecycle::LifecycleNode>& node,
+                    const char* name) {
+  const double value = node->get_parameter(name).as_double();
+  if (value >= kMinSpeed) {
+    return value;
+  }
+  RCLCPP_WARN_THROTTLE(node->get_logger(), *node->get_clock(), 5000,
+                       "%s is %g; clamping to %g. A non-positive speed limit makes every spliced "
+                       "waypoint land at infinity and the arm holds silently.",
+                       name, value, kMinSpeed);
+  return kMinSpeed;
 }
 
 }  // namespace
@@ -201,8 +217,11 @@ CartesianImpedanceController::Gains CartesianImpedanceController::readGainParame
 
   gains.nullspace_stiffness = node->get_parameter("nullspace_stiffness").as_double();
   gains.joint1_nullspace_stiffness = node->get_parameter("joint1_nullspace_stiffness").as_double();
-  gains.max_pos_speed = node->get_parameter("max_pos_speed").as_double();
-  gains.max_rot_speed = node->get_parameter("max_rot_speed").as_double();
+  // Floored, not just validated: scheduleWaypoint divides by these, so zero puts the trajectory's
+  // last knot at infinity and the arm holds forever with nothing logged. They are live-tunable, so
+  // a bad value can arrive long after startup.
+  gains.max_pos_speed = clampedSpeed(node, "max_pos_speed");
+  gains.max_rot_speed = clampedSpeed(node, "max_rot_speed");
   return gains;
 }
 
@@ -312,6 +331,7 @@ CallbackReturn CartesianImpedanceController::on_activate(
   q_nullspace_ = q;
   integral_error_.setZero();
   tau_previous_.setZero();
+  active_.store(true, std::memory_order_release);
 
   RCLCPP_INFO(get_node()->get_logger(),
               "activated holding %s at (%.3f, %.3f, %.3f); %s -> %s offset (%.4f, %.4f, %.4f)",
@@ -323,6 +343,7 @@ CallbackReturn CartesianImpedanceController::on_activate(
 
 CallbackReturn CartesianImpedanceController::on_deactivate(
     const rclcpp_lifecycle::State& /*previous_state*/) {
+  active_.store(false, std::memory_order_release);
   robot_model_->release_interfaces();
   position_interfaces_.clear();
   velocity_interfaces_.clear();
@@ -335,6 +356,11 @@ CallbackReturn CartesianImpedanceController::on_deactivate(
 
 void CartesianImpedanceController::onTrajectory(
     const trajectory_msgs::msg::MultiDOFJointTrajectory::SharedPtr msg) {
+  // Only update() advances now_seconds_, so splicing while inactive would schedule against a
+  // frozen clock. on_activate re-seeds the interpolator anyway, so nothing is lost by dropping.
+  if (!active_.load(std::memory_order_acquire)) {
+    return;
+  }
   if (!msg->header.frame_id.empty() && msg->header.frame_id != base_frame_) {
     RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1000,
                          "Ignoring chunk in frame '%s'; this controller commands in '%s'.",

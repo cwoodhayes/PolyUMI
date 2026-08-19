@@ -88,9 +88,9 @@ Vector7d nullspaceTorque(const Jacobian& jacobian,
 /**
  * Bound the per-cycle change in commanded torque against what was last commanded.
  *
- * libfranka rejects torque jumps outright; at 1 kHz, 1.0 Nm/cycle is SERL's limit. Note this is
- * measured against `tau_J_d` (the last DESIRED torque), not the measured one — chaining against
- * the measurement would let the bound drift with load.
+ * libfranka rejects torque jumps outright; at 1 kHz, 1.0 Nm/cycle is SERL's limit. `tau_previous`
+ * must be the last DESIRED torque, never the measured one — chaining against the measurement would
+ * let the bound drift with load. The controller passes its own last command.
  */
 Vector7d saturateTorqueRate(const Vector7d& tau_desired,
                             const Vector7d& tau_previous,

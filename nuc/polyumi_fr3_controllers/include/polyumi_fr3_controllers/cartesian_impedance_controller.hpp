@@ -36,8 +36,11 @@ namespace polyumi_fr3_controllers {
  *
  *   MultiDOFJointTrajectory (10 Hz, absolute times)   [non-realtime subscription]
  *     -> PoseTrajectoryInterpolator::scheduleWaypoint  splices without stopping
- *       -> update() at 1 kHz evaluates it              [realtime, allocation-free]
+ *       -> update() at 1 kHz evaluates it              [realtime; the eval allocates nothing]
  *         -> Cartesian impedance law -> 7 joint torques
+ *
+ * The law itself is NOT allocation-free: nullspaceTorque runs a dynamic-size JacobiSVD every
+ * cycle. Inherited from SERL, which ships the same thing in a 1 kHz franka_ros controller.
  *
  * The control law is SERL's (see cartesian_impedance_law.hpp), which is polymetis's — what UMI
  * actually deploys — plus an error clip and a nullspace term.
@@ -100,6 +103,10 @@ class CartesianImpedanceController : public controller_interface::ControllerInte
   // The interpolator is rebuilt (which allocates) in the subscription callback and handed to the
   // realtime loop by pointer. update() only ever reads and evaluates.
   realtime_tools::RealtimeBuffer<std::shared_ptr<const PoseTrajectoryInterpolator>> interpolator_;
+  /// Gates onTrajectory. The subscription lives from on_configure, so without this a chunk
+  /// arriving while the arm is on loan to move_group (a /polyumi/home) splices against a
+  /// now_seconds_ that update() stopped advancing, growing the trajectory for the whole home.
+  std::atomic<bool> active_{false};
   /// Written by update(), read by the subscription callback so its splice knows "now".
   std::atomic<double> now_seconds_{0.0};
   /// Latest scheduled waypoint time; the splice window's upper bound. Callback-thread only.
@@ -124,10 +131,8 @@ class CartesianImpedanceController : public controller_interface::ControllerInte
 
   Vector7d q_nullspace_{Vector7d::Zero()};
   Vector6d integral_error_{Vector6d::Zero()};
-  /// Last torque we commanded. Rate-limiting against our own output rather than against the
-  /// robot's reported tau_J_d keeps the bound on the signal we actually control, and needs no
-  /// extra state interface. Both start at zero, which is also what a zero-error activation
-  /// commands, so there is nothing to seed.
+  /// Last torque we commanded, which is what saturateTorqueRate bounds against. Starts at zero,
+  /// which is also what a zero-error activation commands, so there is nothing to seed.
   Vector7d tau_previous_{Vector7d::Zero()};
 };
 
