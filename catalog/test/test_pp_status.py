@@ -264,12 +264,15 @@ def test_reset_pp_status_is_a_noop_without_pzarr(tmp_path: pathlib.Path):
     assert not (scene_dir / 'scene.zarr').exists()
 
 
-def test_run_full_pipeline_force_resets_status_before_running(tmp_path: pathlib.Path, monkeypatch):
+def test_run_full_pipeline_delegates_the_force_reset_to_ingest(tmp_path: pathlib.Path, monkeypatch):
     """
-    A forced run clears completion marks *before* preprocessing starts, not after.
+    Forcing clears the marks inside run_preprocessing, not here.
 
-    Asserted from inside the fake run_preprocessing: if the reset happened afterwards the
-    pane would show stale "complete" ticks for the whole run, which is the thing this fixes.
+    It has to reach the *per-episode* marks as well as the root's, and those gate ingest's own
+    episode loop — clearing only the root's here left a forced run that died part-way able to
+    skip every episode on the next run and mark the step complete anyway. The route still
+    clears up front for its own rendering (see test_app), which is why nothing is asserted
+    about the marks at this point.
     """
     scene_dir = tmp_path / 'scene_force_reset'
     scene_dir.mkdir()
@@ -277,15 +280,33 @@ def test_run_full_pipeline_force_resets_status_before_running(tmp_path: pathlib.
     root.attrs['n_episodes'] = 0
     root.attrs['preprocessing_steps'] = [1, 2, 3]
 
-    seen_at_start = []
-    monkeypatch.setattr(
-        'polyumi_ingest.preproc.run_preprocessing',
-        lambda *a, **k: seen_at_start.append(pp_status.scene_pp_status(scene_dir)['n_complete']),
-    )
+    calls = []
+    monkeypatch.setattr('polyumi_ingest.preproc.run_preprocessing', lambda *a, **k: calls.append(k))
 
     pp_status.run_full_pipeline(scene_dir, force=True)
 
-    assert seen_at_start == [0]
+    assert [c['force'] for c in calls] == [True]
+
+
+def test_reset_pp_status_also_clears_per_episode_marks(tmp_path: pathlib.Path):
+    """
+    The route's up-front reset must reach both levels, or it re-creates the bug it hides.
+
+    Root-only clearing leaves each episode still claiming the step, so the run that follows
+    skips every episode and re-stamps the scene complete having computed nothing.
+    """
+    scene_dir = tmp_path / 'scene_reset_episodes'
+    scene_dir.mkdir()
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='w')
+    root.attrs['n_episodes'] = 1
+    root.attrs['preprocessing_steps'] = [1, 2]
+    root.create_group('episode_0').attrs['preprocessing_steps'] = [1, 2]
+
+    pp_status.reset_pp_status(scene_dir)
+
+    reopened = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='r')
+    assert list(reopened.attrs['preprocessing_steps']) == []
+    assert list(reopened['episode_0'].attrs['preprocessing_steps']) == []
 
 
 def test_run_full_pipeline_without_force_keeps_completion_marks(tmp_path: pathlib.Path, monkeypatch):

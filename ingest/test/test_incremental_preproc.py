@@ -29,12 +29,17 @@ class _CountingStep(PreprocessingStep):
     step_name = 'counting-step'
     processed: list[str] = []
     complete_early = False
+    dies = False
 
     def prepare_scene(self, scene: SceneContext) -> None:
         if type(self).complete_early:
             raise StepComplete('nothing to do here.')
 
     def process_episode(self, scene: SceneContext, episode: Episode) -> None:
+        if type(self).dies:
+            # Not an Exception, so episode_guard lets it out — a Ctrl-C mid-run, which is how
+            # a long forced pipeline actually dies.
+            raise KeyboardInterrupt
         type(self).processed.append(episode.key)
 
 
@@ -47,6 +52,7 @@ def only_counting_step(monkeypatch):
     )
     _CountingStep.processed = []
     _CountingStep.complete_early = False
+    _CountingStep.dies = False
     yield _CountingStep
     assert 1 in PREPROCESSING_STEPS  # the real registry is untouched outside the patch
 
@@ -168,3 +174,52 @@ def test_a_failed_episode_is_not_marked_done(tmp_path: pathlib.Path, only_counti
     ep = zarr.open_group(str(scene_zarr), mode='r')['episode_0']
     assert ep.attrs['preprocessing_steps'] == []
     assert ep.attrs['failure']['step'] == 'counting-step'
+
+
+def test_a_legacy_store_that_grew_still_backfills_its_old_episodes(tmp_path: pathlib.Path, only_counting_step) -> None:
+    """
+    Appending to a store from before per-episode marks must not re-run the whole pipeline.
+
+    The appended episode carries an explicit ``[]``, so judging the *store* — "some episode
+    has marks, therefore this store keeps per-episode records" — declared the old episodes
+    up to date... by leaving them unmarked, which reads as nothing done. Every one of them
+    got re-processed, a full re-SLAM of finished work, on the single most likely path there
+    is: record more episodes into a scene, re-run pingest pp.
+    """
+    scene_zarr = _scene(tmp_path, n_episodes=2, episode_marks=None)  # pre-marks episodes
+    root = zarr.open_group(str(scene_zarr), mode='a')
+    root.attrs['preprocessing_steps'] = [1]
+    new = root.create_group('episode_2')
+    new.attrs['session_dir'] = 'session_2'
+    new.attrs['preprocessing_steps'] = []  # what build_pzarr's append path writes
+
+    run_preprocessing(scene_zarr)
+
+    assert only_counting_step.processed == ['episode_2']
+
+
+def test_an_interrupted_forced_run_does_not_leave_a_step_falsely_complete(
+    tmp_path: pathlib.Path, only_counting_step
+) -> None:
+    """
+    A forced run that dies part-way must not let the next run stamp its steps done for free.
+
+    Stale per-episode marks are the trap: with the root mark cleared the step runs again, but
+    finds nothing outstanding, skips every episode, and marks the scene complete having
+    computed nothing. Clearing both levels up front is what closes it.
+    """
+    scene_zarr = _scene(tmp_path, n_episodes=2, episode_marks=[1])
+    root = zarr.open_group(str(scene_zarr), mode='a')
+    root.attrs['preprocessing_steps'] = [1]
+
+    only_counting_step.dies = True
+    with pytest.raises(KeyboardInterrupt):
+        run_preprocessing(scene_zarr, force=True)
+    only_counting_step.dies = False
+
+    # Resume without --force: the step must actually re-do the work, not skip and re-stamp.
+    run_preprocessing(scene_zarr)
+
+    assert only_counting_step.processed == ['episode_0', 'episode_1']
+    root = zarr.open_group(str(scene_zarr), mode='r')
+    assert root['episode_0'].attrs['preprocessing_steps'] == [1]

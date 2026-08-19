@@ -327,13 +327,13 @@ def _write_episode(ep_grp: zarr.Group, session: SessionFiles, skip_gopro: bool) 
     ann_grp.attrs.update(ann_attrs)
 
 
-def _existing_episode_sessions(root: zarr.Group) -> dict[str, int]:
-    """Map ``session_dir`` attr -> episode index for the episodes already in a store."""
-    found: dict[str, int] = {}
+def _existing_episode_sessions(root: zarr.Group) -> set[str]:
+    """Return the ``session_dir`` attr of every episode already in a store that records one."""
+    found = set()
     for key in episode_keys(root):
         session_dir = root[key].attrs.get('session_dir')
         if isinstance(session_dir, str) and session_dir:
-            found[session_dir] = int(key.split('_')[1])
+            found.add(session_dir)
     return found
 
 
@@ -370,7 +370,18 @@ def _append_pzarr(
     # followed by "nothing to add" as the only explanation on offer.
     _mark_unloadable(scene)
 
+    # Every episode has to name its session before we can tell which sessions are new. Stores
+    # built before the session_dir attr existed name none of them, so *every* session on disk
+    # would read as new and get appended alongside the episodes already holding it — the same
+    # scene twice. Rebuild instead; it is the only way to give those episodes an identity.
     existing = _existing_episode_sessions(root)
+    if len(existing) != len(episode_keys(root)):
+        log.warning(
+            f'{scene.path.name}: existing store has episode(s) with no session_dir attr, so new '
+            f'sessions cannot be told apart from built ones; rebuilding the whole store instead.'
+        )
+        return False
+
     new_sessions = [s for s in sessions if s.path.name not in existing]
     if not new_sessions:
         log.info(f'{scene.path.name}: scene.zarr already has every loadable session; nothing to add.')
@@ -467,12 +478,14 @@ def build_pzarr(scene_path: pathlib.Path, skip_gopro: bool = False, append: bool
     manifest = SceneManifest.from_scene_dir(scene.path)
     previously_unusable = set(manifest.unusable_episodes) if manifest else set()
 
-    if append and scene.zarr_path.exists():
-        try:
-            if _append_pzarr(scene, sessions, previously_unusable, skip_gopro):
-                return scene.zarr_path
-        except Exception as e:
-            log.warning(f'{scene.path.name}: could not append to the existing store ({e}); rebuilding.')
+    # Only an explicit False rebuilds. An *exception* out of the append must propagate: the
+    # rebuild below opens the store mode='w', which erases exactly what the append path exists
+    # to protect — every step's output, and hours of SLAM. A disk-full or permission failure
+    # would then destroy the store on its way to failing anyway. _append_pzarr drops
+    # `build_complete` before it writes, so an interrupted append leaves the store marked
+    # incomplete and the *next* run rebuilds it deliberately, with the operator watching.
+    if append and scene.zarr_path.exists() and _append_pzarr(scene, sessions, previously_unusable, skip_gopro):
+        return scene.zarr_path
 
     root = zarr.open_group(str(scene.zarr_path), mode='w', zarr_format=2)
     # Flipped to True once every episode has been attempted. A store left False was interrupted
@@ -557,7 +570,7 @@ def pzarr_new_sessions(scene_dir: pathlib.Path) -> list[str]:
     on_disk = {p.name for p in scene_dir.iterdir() if p.is_dir() and p.name.startswith('session_')}
     try:
         root = zarr.open_group(str(zarr_path), mode='r')
-        built = set(_existing_episode_sessions(root))
+        built = _existing_episode_sessions(root)
     except Exception as e:
         # Unreadable stores are pzarr_needs_build's business; don't double-report here.
         log.debug(f'{scene_dir.name}: could not read episodes from scene.zarr ({e})')

@@ -178,3 +178,49 @@ def test_ensure_pzarr_requires_gopro_only_for_a_first_build(tmp_path: pathlib.Pa
     root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='r')
     assert root.attrs['n_episodes'] == 1
     assert pzarr_new_sessions(scene_dir) == ['session_b']
+
+
+def test_an_append_error_does_not_wipe_the_store(tmp_path: pathlib.Path) -> None:
+    """
+    An unexpected failure mid-append must propagate, never fall through to a rebuild.
+
+    The rebuild path opens the store ``mode='w'``, which erases exactly what appending exists
+    to protect. A disk-full or permission failure would then destroy hours of SLAM on its way
+    to failing anyway. The store is left flagged incomplete instead, so the next run rebuilds
+    deliberately, with someone watching.
+    """
+    scene_dir = _scene_with_two_sessions(tmp_path)
+    _mark_as_preprocessed(scene_dir)
+    _write_session(scene_dir, 'session_c', created_at=_T2)
+
+    with mock.patch('polyumi_ingest.pzarr.store._write_sessions', side_effect=OSError('No space left on device')):
+        with pytest.raises(OSError, match='No space left'):
+            build_pzarr(scene_dir, skip_gopro=True, append=True)
+
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='r')
+    assert 'gopro/slam_poses' in root['episode_0']  # the expensive output is still there
+    assert pzarr_needs_build(scene_dir) is True  # ...and the store says it needs rebuilding
+
+
+def test_a_store_predating_session_dir_rebuilds_rather_than_duplicating(tmp_path: pathlib.Path) -> None:
+    """
+    Episodes with no ``session_dir`` can't be told apart from sessions never built.
+
+    Every session on disk would read as new and get appended alongside the episodes already
+    holding it — the same scene twice. Only a rebuild can give those episodes an identity.
+    """
+    scene_dir = _scene_with_two_sessions(tmp_path)
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='a')
+    for key in ('episode_0', 'episode_1'):
+        del root[key].attrs['session_dir']  # what a pre-e04385d store looks like
+
+    _write_session(scene_dir, 'session_c', created_at=_T2)
+    build_pzarr(scene_dir, skip_gopro=True, append=True)
+
+    root = zarr.open_group(str(scene_dir / 'scene.zarr'), mode='r')
+    assert root.attrs['n_episodes'] == 3
+    assert [root[f'episode_{i}'].attrs['session_dir'] for i in range(3)] == [
+        'session_a',
+        'session_b',
+        'session_c',
+    ]

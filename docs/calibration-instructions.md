@@ -162,7 +162,7 @@ Currently, the handheld gripper opens ~6 mm wider than the arm can, so the top ~
 
 **Change required when: new capture hardware, new arm, or a change to the motion control path.**
 
-The policy is trained on time-synced observations (as aligned by the preprocessing pipeline `pingest pp`.On the robot, the observations are not naturally synchronized. We must calibrate or measure all the latencies in the system to be able to give the model the zero-latency, fully synchronized environment it was trained on.
+The policy is trained on time-synced observations (as aligned by the preprocessing pipeline `pingest pp`). On the robot, the observations are not naturally synchronized. We must calibrate or measure all the latencies in the system to be able to give the model the zero-latency, fully synchronized environment it was trained on.
 We calibrate what we cannot measure in realtime, and place these calibration constants in `ros2_ws/src/polyumi_ros2/config/inference.yaml`.
 
 

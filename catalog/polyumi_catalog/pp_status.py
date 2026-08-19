@@ -94,17 +94,21 @@ def reset_pp_status(scene_dir: pathlib.Path) -> None:
     every frame, which a preprocessing re-run has no reason to pay for.
 
     A no-op if the pzarr doesn't exist yet (nothing to reset).
+
+    The clearing itself is ingest's ``clear_step_marks``, not a second implementation here:
+    it has to reach the per-episode marks as well as the root's, and those gate ingest's own
+    episode loop. This function only exists because the route wants the marks gone *before*
+    it renders its response, without waiting for the pipeline thread.
     """
     import zarr
 
+    from polyumi_ingest.preproc import clear_step_marks
     from polyumi_ingest.pzarr.scene_files import SceneFiles
 
     zarr_path = SceneFiles.resolve_zarr_path(scene_dir)
     if not zarr_path.exists():
         return
-    root = zarr.open_group(str(zarr_path), mode='a')
-    root.attrs['preprocessing_steps'] = []
-    root.attrs['preprocessing_step_versions'] = {}
+    clear_step_marks(zarr.open_group(str(zarr_path), mode='a'))
 
 
 def run_full_pipeline(scene_dir: pathlib.Path, force: bool = False) -> None:
@@ -116,8 +120,9 @@ def run_full_pipeline(scene_dir: pathlib.Path, force: bool = False) -> None:
     fully-processed scene, since it's then a no-op); with it, every step re-runs from
     scratch regardless of completion, discarding whatever it previously wrote (the
     "re-run" button — e.g. to pick up a preprocessing code change on an already-processed
-    scene). A forced run first clears the recorded completion marks (``reset_pp_status``)
-    so progress reads from zero as the run proceeds.
+    scene). A forced run clears the recorded completion marks first — inside
+    ``run_preprocessing`` now, so the CLI's ``--force`` gets it too — and progress reads
+    from zero as the run proceeds.
 
     Blocks for as long as the pipeline takes — SLAM in particular can take minutes —
     so callers should run this on a background thread rather than the request thread.
@@ -132,7 +137,7 @@ def run_full_pipeline(scene_dir: pathlib.Path, force: bool = False) -> None:
     # decision separately here is what let the Fetch button pull new sessions that Run pp then
     # never put in the store.
     ensure_pzarr(scene_dir)
-    if force:
-        reset_pp_status(scene_dir)
-
+    # No reset_pp_status here: run_preprocessing clears the marks for the steps it is about
+    # to force, root and per-episode both. The route calls reset_pp_status itself beforehand,
+    # for its own rendering reasons.
     run_preprocessing(scene_dir, step_number=None, force=force)

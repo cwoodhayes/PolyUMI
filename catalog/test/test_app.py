@@ -184,22 +184,25 @@ def _fake_pi(monkeypatch, *, sessions: dict[str, list[str]], on_copy=None):
         def __init__(self, host: str) -> None:
             self.host = host
 
-        def list_remote_scenes(self) -> list[str]:
-            return list(sessions)
-
-        def missing_sessions(self, name: str, local_scene: pathlib.Path) -> list[str]:
+        def missing_sessions(self, local_recordings: pathlib.Path, scene_names=None) -> dict[str, list[str]]:
             # Mirrors the real one, metadata.json completeness check included: a directory a
-            # dropped transfer left behind is not a fetched session.
-            local = (
-                {
-                    p.name
-                    for p in local_scene.iterdir()
-                    if p.is_dir() and p.name.startswith('session_') and (p / 'metadata.json').exists()
-                }
-                if local_scene.is_dir()
-                else set()
-            )
-            return [s for s in sessions[name] if s not in local]
+            # dropped transfer left behind is not a fetched session. One call covers the whole
+            # tree, as the real one does -- the app makes no per-scene round trips.
+            plan = {}
+            for name, remote in sessions.items():
+                local_scene = local_recordings / name
+                local = (
+                    {
+                        p.name
+                        for p in local_scene.iterdir()
+                        if p.is_dir() and p.name.startswith('session_') and (p / 'metadata.json').exists()
+                    }
+                    if local_scene.is_dir()
+                    else set()
+                )
+                if missing := [s for s in remote if s not in local]:
+                    plan[name] = missing
+            return plan
 
         def copy_sessions(
             self, name: str, session_names: list[str], local_parent: pathlib.Path, verbose: bool = False

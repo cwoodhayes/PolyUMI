@@ -95,15 +95,8 @@ def fetch(
 
     # Plan per session, not per scene: a scene stays open on the Pi while episodes are recorded
     # into it, so "the directory exists locally" says nothing about whether it is complete.
-    plan: dict[str, list[str]] = {}
-    n_grown = 0
-    for name in scenes_to_fetch:
-        missing = pi.missing_sessions(name, output_dir / name)
-        if not missing:
-            continue
-        plan[name] = missing
-        if (output_dir / name).exists():
-            n_grown += 1
+    plan = pi.missing_sessions(output_dir, scenes_to_fetch)
+    n_grown = sum(1 for name in plan if (output_dir / name).exists())
 
     n_skipped = len(scenes_to_fetch) - len(plan)
     if n_skipped:

@@ -8,6 +8,7 @@ import logging
 import os
 import pathlib
 import subprocess
+from collections.abc import Iterable
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +24,26 @@ REMOTE_RECORDINGS_DIR = '~/recordings'
 # be an alias in your ssh config carrying a User (see docs/pi-provisioning.md), since there is
 # no 'pi@' here to supply one.
 DEFAULT_HOST = os.environ.get('POLYUMI_PI_HOST') or 'polyumi-pi'
+
+
+def _local_sessions(scene_dir: pathlib.Path) -> set[str]:
+    """
+    Return the session directories already fetched into ``scene_dir``.
+
+    A local session counts as fetched only once it has a ``metadata.json``. tar extracts in
+    place, so a transfer killed part-way — a dropped ssh connection, Ctrl-C, the Pi falling
+    off the network — leaves a directory holding some of a session. Taking mere existence as
+    proof would strand that session as permanently "already fetched", silently truncated in
+    every export built from it. Re-fetching is cheap and tar overwrites, so erring towards
+    re-fetching is the safe direction.
+    """
+    if not scene_dir.is_dir():
+        return set()
+    return {
+        p.name
+        for p in scene_dir.iterdir()
+        if p.is_dir() and p.name.startswith('session_') and (p / 'metadata.json').exists()
+    }
 
 
 class PiFetch:
@@ -52,56 +73,71 @@ class PiFetch:
         )
         return pathlib.Path(result.stdout.strip()).name
 
-    def list_remote_sessions(self, scene_name: str) -> list[str]:
+    def list_remote_sessions(self) -> dict[str, list[str]]:
         """
-        Return the *finalized* session directory names inside a remote scene.
+        Return ``{scene_name: [finalized session dirs]}`` for every scene on the Pi.
 
         A scene stays open on the Pi for the whole ``start-scene`` run, so a fetch can land
         while a session is mid-write. ``metadata.json`` is written at session creation with
         ``duration_s`` still null and only filled in by ``finalize()``, which makes it the
-        finished/unfinished marker. ``grep -L`` prints the files that *don't* match, i.e. the
-        finished ones, in a single round trip.
+        finished/unfinished marker.
 
-        ``check=False`` because two ordinary outcomes exit non-zero: grep exits 1 when every
-        session is still recording, and the shell glob fails on a scene with no sessions yet.
-        Both mean "nothing to fetch", not an error.
+        The whole tree in one round trip, not one ssh per scene: this runs before anything is
+        transferred, and a Pi holding fifty scenes would otherwise spend fifty handshakes
+        deciding there is nothing to do — with the catalog's progress bar sitting at 0
+        throughout, since it can't know the total until this returns.
+
+        ``find ... ! -exec grep -q`` rather than ``grep -L``, so the exit status stays worth
+        checking: find reports only its own failures and ignores what the predicate matched,
+        while grep exits 1 when every session is still recording — indistinguishable from ssh
+        failing outright. With ``check=True`` a dead connection or an unreadable directory now
+        raises instead of quietly reporting every scene as fully fetched.
         """
         result = subprocess.run(
             [
                 'ssh',
                 self.host,
-                f'grep -L \'"duration_s": null\' {REMOTE_RECORDINGS_DIR}/{scene_name}/session_*/metadata.json',
+                f'find {REMOTE_RECORDINGS_DIR} -mindepth 3 -maxdepth 3 -name metadata.json '
+                f'! -exec grep -q \'"duration_s": null\' {{}} \\; -print',
             ],
             capture_output=True,
             text=True,
-            check=False,
+            check=True,
         )
-        names = [pathlib.PurePosixPath(line).parent.name for raw in result.stdout.splitlines() if (line := raw.strip())]
-        return sorted(n for n in names if n.startswith('session_'))
+        found: dict[str, list[str]] = {}
+        for raw in result.stdout.splitlines():
+            if not (line := raw.strip()):
+                continue
+            path = pathlib.PurePosixPath(line)
+            scene, session = path.parent.parent.name, path.parent.name
+            if scene.startswith('scene_') and session.startswith('session_'):
+                found.setdefault(scene, []).append(session)
+        return {scene: sorted(found[scene]) for scene in sorted(found)}
 
-    def missing_sessions(self, scene_name: str, local_scene: pathlib.Path) -> list[str]:
+    def missing_sessions(
+        self,
+        local_recordings: pathlib.Path,
+        scene_names: Iterable[str] | None = None,
+    ) -> dict[str, list[str]]:
         """
-        Return finalized remote sessions of ``scene_name`` that aren't in ``local_scene`` yet.
+        Return ``{scene: [sessions]}`` finalized on the Pi but not yet under ``local_recordings``.
+
+        ``scene_names`` restricts the answer to those scenes; None means every scene on the Pi.
 
         The unit of "already fetched" is the session, not the scene: a scene grows as episodes
         are recorded into it, so a scene directory existing locally says nothing about whether
-        it is complete.
-
-        A local session counts as fetched only once it has a ``metadata.json``. tar extracts in
-        place, so a transfer killed part-way — a dropped ssh connection, Ctrl-C, the Pi falling
-        off the network — leaves a directory holding some of a session. Taking mere existence as
-        proof would strand that session as permanently "already fetched", silently truncated in
-        every export built from it. Re-fetching is cheap and tar overwrites, so erring towards
-        re-fetching is the safe direction.
+        it is complete. Scenes with nothing outstanding are left out entirely, so the result is
+        both the plan and the count.
         """
-        local: set[str] = set()
-        if local_scene.is_dir():
-            local = {
-                p.name
-                for p in local_scene.iterdir()
-                if p.is_dir() and p.name.startswith('session_') and (p / 'metadata.json').exists()
-            }
-        return [s for s in self.list_remote_sessions(scene_name) if s not in local]
+        wanted = None if scene_names is None else set(scene_names)
+        plan: dict[str, list[str]] = {}
+        for scene, sessions in self.list_remote_sessions().items():
+            if wanted is not None and scene not in wanted:
+                continue
+            local = _local_sessions(local_recordings / scene)
+            if missing := [s for s in sessions if s not in local]:
+                plan[scene] = missing
+        return plan
 
     def copy_scene(
         self,

@@ -7,6 +7,7 @@ import logging
 import pathlib
 import shutil
 from abc import ABC
+from collections.abc import Iterable
 from typing import TypeVar
 
 import zarr
@@ -128,19 +129,50 @@ def _backfill_episode_steps(root: zarr.Group) -> None:
     gate below would re-run the whole pipeline — a full re-SLAM of everything already
     processed.
 
-    It only fires when *no* episode carries a mark, which is what makes it safe. Once any
-    episode has one the store is keeping per-episode records, so an episode without one is a
-    newly appended session rather than an unmigrated old one — and build_pzarr writes an
-    explicit empty list on every episode it creates precisely so that stays distinguishable.
+    Decided per episode, not for the store as a whole. build_pzarr writes an explicit empty
+    list on every episode it creates — including appended ones — so a *missing* attr always
+    means an episode from before per-episode marks, whatever its neighbours look like. Judging
+    the store as a whole got this backwards on the case that matters most: appending one
+    session to a pre-marks store gave that store a marked episode, which suppressed the
+    backfill for every old episode and re-ran the whole pipeline on all of them.
     """
     completed = preprocessing_steps_done(root)
     if not completed:
         return
-    keys = episode_keys(root)
-    if any(episode_steps_done(root[key]) is not None for key in keys):
-        return
-    for key in keys:
-        root[key].attrs['preprocessing_steps'] = sorted(completed)
+    for key in episode_keys(root):
+        if episode_steps_done(root[key]) is None:
+            root[key].attrs['preprocessing_steps'] = sorted(completed)
+
+
+def clear_step_marks(root: zarr.Group, step_numbers: Iterable[int] | None = None) -> None:
+    """
+    Drop the completion marks for the given steps (all recorded ones if None).
+
+    Both levels, root and per-episode, or the clear is worse than useless: per-episode marks
+    gate the episode loop, so clearing only the root's leaves a forced run that died part-way
+    with its later steps' *stale* episode marks intact. The next non-forced run then sees the
+    root mark gone (so it runs the step), finds nothing outstanding (so it skips every
+    episode), and stamps the step complete having computed nothing.
+
+    Called up front for the whole pipeline rather than per step as each begins, so a run that
+    dies at step 2 stops advertising steps 3-5 — whose outputs were computed from the
+    *previous* step 2 — and so the catalog's progress display drops to 0/N for the duration
+    instead of sitting at N/N until the last step finishes.
+    """
+    recorded = set(preprocessing_steps_done(root))
+    drop = recorded if step_numbers is None else set(step_numbers)
+    drop_keys = {str(n) for n in drop}
+    root.attrs['preprocessing_steps'] = sorted(recorded - drop)
+    root.attrs['preprocessing_step_versions'] = {
+        k: v for k, v in preprocessing_step_versions(root).items() if k not in drop_keys
+    }
+    for key in episode_keys(root):
+        # None means an episode from before per-episode marks; _backfill_episode_steps has
+        # already run by the time a forced run gets here, so one still unmarked has nothing
+        # to clear — writing [] would claim it was newly built, which it wasn't.
+        steps = episode_steps_done(root[key])
+        if steps is not None:
+            root[key].attrs['preprocessing_steps'] = sorted(set(steps) - drop)
 
 
 def _episodes_missing_step(root: zarr.Group, step_number: int) -> list[str]:
@@ -218,6 +250,12 @@ class StepComplete(Exception):  # noqa: N818 — control flow, not an error
     complete. Used for "output already present, use --force" and for the degenerate inputs a
     step answers at scene level (so-align storing an identity transform when there's no
     OptiTrack data to align to).
+
+    Only for steps whose answer is genuinely scene-wide, because the harness marks *every*
+    episode done on the way out — including ones appended since the last run, which it never
+    looked at. so-align qualifies: its output is one T_ws for the whole scene, so a new
+    episode needs nothing computed for it. A step that raised this because its own per-episode
+    output "already exists" would silently skip the episodes that have none.
     """
 
 
@@ -339,8 +377,14 @@ def run_preprocessing(
     root = zarr.open_group(str(scene_zarr), mode='a')
     _warn_if_outdated_pzarr(root, scene_zarr.parent.name)
     _backfill_episode_steps(root)
-    completed_steps = set(preprocessing_steps_done(root))
     step_numbers = [step_number] if step_number is not None else sorted(PREPROCESSING_STEPS)
+    if force:
+        # Exactly the steps about to re-run, and at both levels. Without this a forced run
+        # that dies part-way leaves stale per-episode marks that make the next non-forced run
+        # skip the work and mark it done anyway. The catalog clears the same marks up front
+        # for its progress display; this is what makes the CLI's --force honest too.
+        clear_step_marks(root, step_numbers)
+    completed_steps = set(preprocessing_steps_done(root))
 
     current_path = scene_path
     ran: set[int] = set()

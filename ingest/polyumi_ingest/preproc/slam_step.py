@@ -215,7 +215,7 @@ def _make_temp_settings_yaml(
     viewer: bool = False,
     res_div: int = 1,
     fps_div: int = 1,
-    mask_png: pathlib.Path | None = None,
+    mask_png: pathlib.Path | None = _SLAM_MASK_PNG,
 ) -> pathlib.Path:
     """
     Copy ``src`` settings YAML to ``tmp_dir`` with atlas paths appended.
@@ -230,6 +230,12 @@ def _make_temp_settings_yaml(
     the gripper mask — the camera-rigid hardware (fingers, ArUco tags, LEDs, mirrors)
     that must be blanked before tracking or it destroys both two-view init and
     relocalization. Belongs with the camera settings because it describes the rig.
+
+    It defaults to the shipped mask rather than to None so that masking is what you get by
+    forgetting, not what you lose by it: an unmasked run doesn't crash, it quietly produces a
+    map nothing relocalizes against, and the debug viewer forgetting it is exactly how you
+    end up debugging a run that behaves unlike the one you're trying to reproduce. Pass
+    ``mask_png=None`` to deliberately track unmasked.
 
     ``res_div`` / ``fps_div`` optionally downsample the camera settings first; see
     ``_downsample_settings``.
@@ -625,7 +631,6 @@ class OrbSlam3Step(PreprocessingStep):
                 tmp_dir,
                 save_atlas=atlas_path,
                 res_div=self.resolution_divisor,
-                mask_png=_SLAM_MASK_PNG,
             )
             traj_out = log_dir / 'mapping_trajectory.csv'
             cmd = [
@@ -681,7 +686,6 @@ class OrbSlam3Step(PreprocessingStep):
                 load_atlas=atlas_path,
                 res_div=self.resolution_divisor,
                 fps_div=self.localization_frame_stride,
-                mask_png=_SLAM_MASK_PNG,
             )
             traj_out = tmp_dir / 'trajectory.csv'
             # Forward pass only. The binary still accepts an optional 6th argument that makes
