@@ -8,9 +8,9 @@
 #     ./fr3_session.sh --kill-local   # tear down the LOCAL session only (remote ones survive)
 #     ./fr3_session.sh --kill         # --kill-local, plus stop the remote sessions too
 #
-# Both --kill forms interrupt what is running and wait KILL_GRACE_S (default 5) before killing
-# any pane, because SIGHUP — what a pane getting killed actually delivers — leaves the Pi's LED
-# lit and sheep's inference container running. See the block by the flags for the details.
+# Both --kill forms interrupt what is running and wait KILL_GRACE_S (default 8) before killing
+# any pane: SIGHUP, what killing a pane delivers, leaves the Pi's LED lit and sheep's inference
+# container running.
 #
 # Every fresh start (not a re-attach) also makes each machine run this working copy — builds
 # polyumi_ros2 here, rsyncs nuc/ to the NUC, and calls ./deploy.sh for the Pi — so nothing runs
@@ -79,45 +79,33 @@ MAX_IMAGE_AGE_S="${MAX_IMAGE_AGE_S:-0.3}"
 EXECUTE_MOTION="${EXECUTE_MOTION:-true}"
 
 if [ "${1:-}" = "--kill-local" ] || [ "${1:-}" = "--kill" ]; then
-  # Seconds between "stop what you're doing" and killing the pane out from under it. Every
-  # process below needs SIGINT specifically, and needs to still be alive when it arrives —
-  # killing the pane first delivers SIGHUP instead, which none of them clean up on:
-  #
-  #   Pi      `polyumi-pi stream` turns the finger LED off in a `finally:` reached through
-  #           KeyboardInterrupt. Python does not unwind `finally` on SIGHUP, so on a hard kill
-  #           the LED stays lit until someone notices it (pi/polyumi_pi/main.py, stream()).
-  #   sheep   serve_policy.sh ends in `exec docker run --rm -i -t`. Under -t the ^C reaches the
-  #           container through the pty, but a SIGHUP to the docker CLI is not forwarded: the CLI
-  #           dies, the container keeps running, --rm never fires, and the port stays held. That
-  #           is the "old inference server is still up when I get back on sheep".
-  #   NUC     ros2 launch needs SIGINT to run its shutdown sequence — which is the part that says
-  #           whether bringup released the FCI cleanly (see "WHERE THE LOGS GO" above).
-  #
-  # One grace window covers all of them: every interrupt goes out first, then a single sleep,
-  # then the kills. Raise it if a teardown is still mid-flight when the pane disappears.
-  KILL_GRACE_S="${KILL_GRACE_S:-5}"
+  # Interrupt everything, wait once, then kill. Killing a pane delivers SIGHUP, which none of
+  # these clean up on: the Pi leaves the finger LED lit (its `finally:` only runs via
+  # KeyboardInterrupt), sheep's `docker run` CLI dies without forwarding it so the container and
+  # its port survive, and ros2 launch skips the shutdown that reports whether the FCI was
+  # released. 8s covers the Pi's worst case, the longest of the three: stream() stops both child
+  # streamers (2s SIGTERM + 2s SIGKILL join each) before it touches the LED.
+  KILL_GRACE_S="${KILL_GRACE_S:-8}"
   NEEDS_GRACE=0
 
-  # The Pi first, and on BOTH paths — including --kill-local, which is not the exception it looks
-  # like. The Pi pane is a plain `ssh -t`, not a remote tmux, so it has nothing to survive into:
-  # dropping the local session closes the connection and the Pi's sshd SIGHUPs the stream either
-  # way. This only decides whether it dies cleanly, so it is not "killing a remote".
+  # The Pi on BOTH paths, --kill-local included: that pane is a plain `ssh -t` with no remote
+  # tmux to survive into, so it dies either way — this only decides whether it dies cleanly.
   #
-  # Scoped to `stream`, the one thing this script starts on the Pi. A `record-episode` or the
-  # polyumi-pi.service `start-scene` is someone else's process and is left alone. pkill exits 1
-  # when nothing matched, which is a normal "nothing to stop", not an error.
-  if ssh -o ConnectTimeout=5 -o BatchMode=yes "$POLYUMI_PI_HOST" \
-      "pkill -INT -f 'polyumi-pi stream'" 2>/dev/null; then
-    echo "Interrupted 'polyumi-pi stream' on $POLYUMI_PI_HOST (so the LED goes out)."
+  # ^C into the pane, not `pkill -INT` over ssh. pkill was tried and silently "succeeded":
+  # `polyumi-pi` is a zsh ALIAS, so the real cmdline is `.../python .../polyumi_pi/main.py
+  # stream` and never contains the pattern — which instead matched the remote shell running
+  # pkill, since ssh puts the pattern in its argv. Addressed by window name because the kill path
+  # is a different invocation from the one that captured the pane IDs.
+  PI_PANE="$(tmux list-panes -t "$SESSION:polyumi-pi" -F '#{pane_id}' 2>/dev/null | head -1 || true)"
+  if [ -n "$PI_PANE" ]; then
+    tmux send-keys -t "$PI_PANE" C-c
+    echo "Sent C-c to the Pi pane (so 'polyumi-pi stream' turns the LED off on its way out)."
     NEEDS_GRACE=1
   fi
 
-  # send-keys C-c rather than `pkill -INT` over ssh: the remote pane may be holding a pre-typed
-  # line or running something the operator started by hand, and ^C into the pty does the right
-  # thing for all of it without this script needing to know what is in there. Every pane of the
-  # session, not just the active one, in case it was split by hand. has-session gates it so the
-  # exit status distinguishes "interrupted something" from "nothing there" — xargs would report
-  # success either way.
+  # Same ^C, and it also spares a pre-typed line or anything started by hand. Every pane, in case
+  # one was split. has-session gates it so the exit status means "interrupted something" — xargs
+  # reports success either way.
   interrupt_remote_session() {
     local host="$1" sess="$2"
     ssh -o ConnectTimeout=5 -o BatchMode=yes "$host" \
