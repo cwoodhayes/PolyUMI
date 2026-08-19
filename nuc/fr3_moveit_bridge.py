@@ -32,6 +32,7 @@ empty, but service calls match on DDS endpoints and work fine):
 import math
 import threading
 
+from controller_manager_msgs.srv import SwitchController
 from geometry_msgs.msg import Pose, PoseArray
 from moveit_msgs.action import ExecuteTrajectory
 from moveit_msgs.msg import Constraints, JointConstraint, MoveItErrorCodes, RobotTrajectory
@@ -79,6 +80,16 @@ HOME_PLAN_TIME_S = 5.0
 # abort it partway.
 HOME_EXECUTE_TIMEOUT_S = 120.0
 
+# --- Controller handover ---
+# move_group executes through fr3_arm_controller; the streaming impedance controller claims the
+# same <joint>/effort interfaces, so the two are mutually exclusive and homing has to borrow the
+# arm back. Switching restarts the libfranka control loop (franka_hardware's
+# perform_command_mode_switch calls stopRobot() then re-initialises), so it must only happen with
+# the arm stationary — which, at the start and end of a home, it is.
+SERVO_CONTROLLER = 'polyumi_cartesian_impedance_controller'
+MOVEIT_CONTROLLER = 'fr3_arm_controller'
+SWITCH_TIMEOUT_S = 5.0
+
 
 class Fr3MoveItBridge(Node):
     """Receive target EEF pose chunks and drive the FR3 via the local move_group."""
@@ -108,6 +119,9 @@ class Fr3MoveItBridge(Node):
         self._cartesian = self.create_client(GetCartesianPath, 'compute_cartesian_path', callback_group=self._cbgroup)
         self._joint_plan = self.create_client(GetMotionPlan, 'plan_kinematic_path', callback_group=self._cbgroup)
         self._exec = ActionClient(self, ExecuteTrajectory, 'execute_trajectory', callback_group=self._cbgroup)
+        self._switch = self.create_client(
+            SwitchController, '/controller_manager/switch_controller', callback_group=self._cbgroup
+        )
         self.create_service(Trigger, '/polyumi/home', self._on_home, callback_group=self._cbgroup)
 
         # Latest-goal, skip-while-busy: drop poses that arrive while a plan/execute is in
@@ -188,21 +202,68 @@ class Fr3MoveItBridge(Node):
             return response
         try:
             self.get_logger().warn('/polyumi/home called — MOVING THE ARM to the home pose.')
-            trajectory = self._plan_to_joints(self._home_joints)
-            if trajectory is None:
-                response.success = False
-                response.message = 'planning to the home pose failed — see the bridge log'
+            # Borrow the arm from the streaming controller if it holds it. Not conditional on
+            # having seen it start: this bridge and the controller come up independently, and a
+            # switch naming an inactive controller is a no-op, so asking is cheaper than tracking.
+            handed_over = self._switch_controllers(activate=MOVEIT_CONTROLLER, deactivate=SERVO_CONTROLLER)
+            try:
+                trajectory = self._plan_to_joints(self._home_joints)
+                if trajectory is None:
+                    response.success = False
+                    response.message = 'planning to the home pose failed — see the bridge log'
+                    return response
+                if self._run_execute(trajectory, HOME_EXECUTE_TIMEOUT_S):
+                    response.success = True
+                    response.message = 'homed'
+                    self.get_logger().info('Homed.')
+                else:
+                    response.success = False
+                    response.message = 'execution failed — see the bridge log'
                 return response
-            if self._run_execute(trajectory, HOME_EXECUTE_TIMEOUT_S):
-                response.success = True
-                response.message = 'homed'
-                self.get_logger().info('Homed.')
-            else:
-                response.success = False
-                response.message = 'execution failed — see the bridge log'
-            return response
+            finally:
+                # Hand the arm back only if we took it. Leaving the servo deactivated after a
+                # failed home would look like the policy silently doing nothing.
+                if handed_over:
+                    self._switch_controllers(activate=SERVO_CONTROLLER, deactivate=MOVEIT_CONTROLLER)
         finally:
             self._busy.release()
+
+    def _switch_controllers(self, *, activate: str, deactivate: str) -> bool:
+        """
+        Swap which controller drives the arm; return whether the switch actually happened.
+
+        STRICT, not BEST_EFFORT: a partial switch would leave the arm with either two controllers
+        claiming its effort interfaces or none at all, and the second is indistinguishable from a
+        working system that has simply stopped moving.
+
+        A False return is not always an error — asking to deactivate a controller that was never
+        spawned fails the same way, which is the normal case when running without the streaming
+        controller at all.
+        """
+        if not self._switch.wait_for_service(timeout_sec=SWITCH_TIMEOUT_S):
+            self.get_logger().warn(
+                'controller_manager switch_controller not available; leaving controllers as they are.'
+            )
+            return False
+
+        request = SwitchController.Request()
+        request.activate_controllers = [activate]
+        request.deactivate_controllers = [deactivate]
+        request.strictness = SwitchController.Request.STRICT
+        future = self._switch.call_async(request)
+        if not self._wait(future, SWITCH_TIMEOUT_S):
+            self.get_logger().error(f'switch to {activate} timed out after {SWITCH_TIMEOUT_S}s')
+            return False
+
+        ok = bool(future.result() and future.result().ok)
+        if ok:
+            self.get_logger().info(f'Controller switched: {deactivate} -> {activate}')
+        else:
+            self.get_logger().info(
+                f'Controller switch {deactivate} -> {activate} declined; '
+                f'{deactivate} is probably not running. Continuing.'
+            )
+        return ok
 
     def _plan_to_joints(self, positions: list[float]) -> RobotTrajectory | None:
         """Plan a collision-checked joint-space move to `positions`; return the trajectory or None."""

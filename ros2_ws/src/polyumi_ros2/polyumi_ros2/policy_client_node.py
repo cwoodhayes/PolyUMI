@@ -42,7 +42,7 @@ import numpy as np
 import rclpy
 import rclpy.time
 import tf2_ros
-from geometry_msgs.msg import Pose, PoseArray
+from geometry_msgs.msg import Pose, PoseArray, Transform
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
@@ -50,7 +50,12 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
 from std_msgs.msg import Float32
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException  # type: ignore[attr-defined]
-from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from trajectory_msgs.msg import (
+    JointTrajectory,
+    JointTrajectoryPoint,
+    MultiDOFJointTrajectory,
+    MultiDOFJointTrajectoryPoint,
+)
 
 from polyumi_ros2.camera_preproc import (
     CAMERA0_RGB_INTERPOLATION,
@@ -311,10 +316,19 @@ class PolicyClientNode(Node):
         # carry a width, and the Franka Hand is action-only (no ros2_control interface, libfranka
         # offers only blocking move/grasp), so it cannot be driven at the arm's cadence anyway.
         # fr3_gripper_bridge on the NUC deadbands and rate-limits it into Move/Grasp goals.
+        #
+        # The pose chunk goes out TWICE, to two different executors:
+        #   /polyumi/target_poses      PoseArray, untimed -> fr3_moveit_bridge (plan-then-execute)
+        #   /polyumi/target_poses_traj MultiDOFJointTrajectory -> the streaming impedance controller
+        # The second carries per-waypoint absolute times, which is what lets a 1 kHz interpolator
+        # splice chunks without stopping. Which one acts is decided by which NUC nodes are running;
+        # the PoseArray path goes away once the streaming controller is verified on hardware.
         self._target_pub = None
+        self._target_traj_pub = None
         self._gripper_pub = None
         if self._execute_motion:
             self._target_pub = self.create_publisher(PoseArray, '/polyumi/target_poses', 10)
+            self._target_traj_pub = self.create_publisher(MultiDOFJointTrajectory, '/polyumi/target_poses_traj', 10)
             self._gripper_pub = self.create_publisher(JointTrajectory, '/polyumi/target_gripper', 10)
 
         # Viz-only preview publisher (always on when publish_preview). Shows every commanded chunk
@@ -943,6 +957,8 @@ class PolicyClientNode(Node):
         # still drive the hand rather than stalling both.
         if self._target_pub is not None and arm_actions:
             self._target_pub.publish(self._actions_to_pose_array(arm_actions))
+        if self._target_traj_pub is not None and arm_actions:
+            self._target_traj_pub.publish(self._actions_to_multidof(arm_actions, t_obs, n_stale_arm))
         if self._gripper_pub is not None and grip_actions:
             self._gripper_pub.publish(self._actions_to_gripper_trajectory(grip_actions))
 
@@ -964,6 +980,49 @@ class PolicyClientNode(Node):
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = self._base_frame
         msg.poses = poses
+        return msg
+
+    def _actions_to_multidof(self, actions, t_obs: rclpy.time.Time, first_index: int) -> MultiDOFJointTrajectory:
+        """
+        Build the arm half of an action chunk as an absolutely-timed pose trajectory.
+
+        Action i in the chunk is the policy's target for ``t_obs + i * action_dt``. That timeline is
+        what the streaming controller's interpolator splices on, so it has to survive the trip
+        intact — hence a MultiDOFJointTrajectory rather than the PoseArray, which carries no timing
+        and leaves the NUC to re-time the chunk from arrival.
+
+        Two details that are easy to get wrong:
+
+        * ``first_index`` is the index in the ORIGINAL chunk, before the stale-drop slice. Using the
+          slice index instead would slide the whole timeline ``first_index * action_dt`` earlier.
+          (_actions_to_gripper_trajectory deliberately does use the slice index — its consumer reads
+          time_from_start as a relative shape to derive a move speed, not as an absolute schedule.)
+        * The header stamp carries ``latency.arm_exec`` already subtracted, so every waypoint is
+          commanded that far ahead of when it should be reached. This is UMI's per-waypoint
+          ``target_time - robot_action_latency`` (exec_actions in bimanual_umi_env.py), folded into
+          the anchor because the offset is the same for every waypoint.
+
+        :param actions: 8-vector actions [x,y,z,qx,qy,qz,qw,grip], already sliced.
+        :param t_obs: instant the observation was captured.
+        :param first_index: index of ``actions[0]`` within the unsliced chunk.
+        """
+        msg = MultiDOFJointTrajectory()
+        msg.header.stamp = (t_obs - Duration(seconds=self._latency_act)).to_msg()
+        msg.header.frame_id = self._base_frame
+        msg.joint_names = [self._eef_frame]
+        for i, action in enumerate(actions):
+            point = MultiDOFJointTrajectoryPoint()
+            transform = Transform()
+            transform.translation.x = float(action[0])
+            transform.translation.y = float(action[1])
+            transform.translation.z = float(action[2])
+            transform.rotation.x = float(action[3])
+            transform.rotation.y = float(action[4])
+            transform.rotation.z = float(action[5])
+            transform.rotation.w = float(action[6])
+            point.transforms = [transform]
+            point.time_from_start = Duration(seconds=(first_index + i) * self._action_dt).to_msg()
+            msg.points.append(point)
         return msg
 
     def _actions_to_gripper_trajectory(self, actions) -> JointTrajectory:

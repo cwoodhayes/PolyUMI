@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>polyumi_fr3_controllers</name>
+  <version>0.1.0</version>
+  <description>
+    Streaming Cartesian impedance controller for the FR3, driven by absolutely-timed pose chunks
+    from PolyUMI's policy client. Control law ported from serl_franka_controllers; reference
+    generator ported from UMI's PoseTrajectoryInterpolator.
+  </description>
+  <maintainer email="cwoodhayes@gmail.com">conorbot</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>controller_interface</depend>
+  <depend>eigen</depend>
+  <depend>franka_semantic_components</depend>
+  <depend>hardware_interface</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>realtime_tools</depend>
+  <depend>tf2_eigen</depend>
+  <depend>tf2_ros</depend>
+  <depend>trajectory_msgs</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+    <controller_interface plugin="${prefix}/polyumi_fr3_controllers.xml"/>
+  </export>
+</package>

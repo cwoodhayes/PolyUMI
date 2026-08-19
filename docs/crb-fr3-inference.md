@@ -49,16 +49,52 @@ action goals get corrupted across the laptop/NUC rmw-version gap (see
 
 ### Action-chunk execution
 
-`policy_client_node` requests an `n_action_steps`-long chunk from the inference server
-each tick (param `n_action_steps`, default **8**) and publishes the *whole chunk* as one
-`PoseArray`, rather than just `actions[0]`. This is deliberate, not incidental: at
-10 Hz a single-waypoint target is a discrete ~2 cm hop the arm cannot track in real
-time, and `fr3_moveit_bridge`'s skip-while-busy would drop nearly every tick. Publishing
-the full chunk lets `move_group` plan one smooth multi-waypoint Cartesian path per chunk
-(receding-horizon control, the standard UMI/DP execution pattern) instead of stuttering
-between unreachable single-step goals. The bridge still applies skip-while-busy at the
-*chunk* level — if a chunk is still executing when the next one is published, the new
-one is dropped and picked up on the next available tick.
+`policy_client_node` requests an `n_action_steps`-long chunk from the inference server each tick
+(param `n_action_steps`, default **8**) and publishes the *whole chunk*, not just `actions[0]`. At
+10 Hz a single-waypoint target is a discrete ~2 cm hop the arm cannot track in real time. This is
+receding-horizon control, the standard UMI/DP execution pattern.
+
+The chunk goes out on **two topics, for two different executors**:
+
+| Topic | Type | Consumer |
+|---|---|---|
+| `/polyumi/target_poses` | `PoseArray`, untimed | `fr3_moveit_bridge` — plan-then-execute via move_group |
+| `/polyumi/target_poses_traj` | `MultiDOFJointTrajectory`, absolute per-waypoint times | `polyumi_cartesian_impedance_controller` — 1 kHz streaming servo |
+
+Which one acts is decided by what is running on the NUC, not by a flag. **The streaming controller
+is the target design**; the MoveIt path is what it replaces and will be deleted once the servo is
+verified on hardware. See `docs/franka-inference-bringup.md` Phase 4.
+
+* **MoveIt path**: plans one multi-waypoint Cartesian path per chunk, with skip-while-busy at the
+  *chunk* level — a chunk arriving mid-execution is dropped. Each chunk therefore starts from rest
+  and stops at its end, which is where the 0.62 s `latency.arm_exec` comes from.
+* **Streaming path**: the chunk's waypoints are spliced into a `PoseTrajectoryInterpolator` at
+  their absolute times, and a 1 kHz ros2_control loop evaluates it as the equilibrium pose of a
+  Cartesian impedance law. Nothing stops between chunks, and the arm is compliant. The chunk's
+  `header.stamp` already has `latency.arm_exec` subtracted, so waypoints are commanded early.
+
+#### Handing the arm between them
+
+Both `fr3_arm_controller` (MoveIt's) and `polyumi_cartesian_impedance_controller` claim the same
+`<joint>/effort` interfaces, so **exactly one can hold the arm**. The impedance controller is
+spawned `--inactive` by `fr3_inference.launch.py`; activating it is a deliberate act:
+
+```bash
+# NUC. Arm must be STATIONARY — switching restarts the libfranka control loop.
+ros2 control switch_controllers \
+    --deactivate fr3_arm_controller \
+    --activate polyumi_cartesian_impedance_controller
+```
+
+`/polyumi/home` does this swap itself, in both directions, so homing works with either executor
+running and hands the arm back afterwards.
+
+**First activation should be uneventful**: the controller seeds its equilibrium pose from the arm's
+measured pose, so error is zero and it commands nothing but gravity/Coriolis. If the arm jumps on
+activation, the `polyumi_tcp` lookup or the Jacobian shift is wrong — stop and check, do not tune
+around it. Push the arm by hand afterwards: it should spring back with a force that stops growing
+once you are past the error clip (~20 N at the shipped gains). That single test exercises the whole
+control law and needs no trajectory at all.
 
 ### User PC (i.e. my personal Ubuntu laptop)
 
@@ -860,6 +896,36 @@ Note the counts are now per device (`dropped 13 arm / 12 gripper`) and each uses
 `latency.*_exec`, so a chunk too stale for the arm can still drive the hand. The budget arithmetic
 and how each latency was measured are in
 [calibration-instructions.md](calibration-instructions.md), "Latencies".
+
+### The arm holds still while the gripper works — the streaming controller is not active
+
+Both executors subscribe to their own topic, so a stack where the impedance controller was spawned
+but never activated looks entirely healthy: the policy logs chunks, `n_published_arm` is non-zero,
+and nothing errors. The arm just does not move.
+
+```bash
+ros2 control list_controllers   # on the NUC
+```
+
+Exactly one of `fr3_arm_controller` / `polyumi_cartesian_impedance_controller` must be `active`. If
+the impedance controller is `inactive`, activate it (see [Action-chunk execution](#action-chunk-execution)).
+If *neither* is active, a `/polyumi/home` probably failed midway — it deactivates one before
+activating the other.
+
+Its own log line is the other tell: on activation it prints the pose it is holding and the
+`fr3_hand_tcp -> polyumi_tcp` offset it resolved. No such line, no active controller.
+
+### The arm holds still with the controller active — every waypoint arrived in the past
+
+The controller warns `Whole chunk of N waypoints was already in the past; arm is holding`. Unlike
+the MoveIt path, it does not stall or error; the interpolator clamps at its last waypoint, so the
+arm holds its position indefinitely and everything else keeps running.
+
+Two causes, and they are distinguishable: if `latency.arm_exec` is stale (still the ~0.62 s MoveIt
+planning figure after the servo landed), the anchor is pushed so far back that the whole chunk
+lands behind `now`. Re-measure it. If the laptop and NUC clocks have drifted, the absolute
+timestamps are meaningless on arrival — check `ssh jailfranka chronyc sources` for `^* 10.0.0.1`,
+same as the TF-extrapolation failure above.
 
 Confirm the loop is live: `policy_client_node` logs one `episode /reset sent` line, then
 `action chunk n=… (dropped … arm / … gripper, inference=…ms) first: x=… y=… z=… grip=…` each tick

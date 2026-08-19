@@ -808,3 +808,61 @@ def test_gripper_preview_publishes_full_chunk(make_node):
 
     grip_preview.assert_called_once()
     assert len(grip_preview.call_args[0][0].points) == 8
+
+
+# ----------------------------------------------------------------------
+# Absolutely-timed pose chunk (the streaming controller's input)
+# ----------------------------------------------------------------------
+
+
+def _action(i: int) -> list:
+    """Build an 8-vector action distinguishable by index, so ordering survives the round trip."""
+    return [float(i), 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+
+
+def test_multidof_times_are_absolute_and_use_the_preslice_index(make_node):
+    """
+    Waypoint k must land at t_obs + (first_index + k) * action_dt, NOT at t_obs + k * action_dt.
+
+    The arm's chunk is sliced by the stale-drop before publication. Numbering the surviving
+    waypoints from zero would slide the whole timeline first_index * action_dt earlier, and the
+    NUC interpolator — which reads these as absolute instants — would drive the arm to each pose
+    that much too soon. A whole chunk shifted uniformly is exactly the kind of error that looks
+    like tracking lag rather than a bug.
+    """
+    node = make_node(control_hz=10.0, **{'latency.arm_exec': 0.0})
+    chunk = [_action(i) for i in range(8)]
+    first_index = 3
+
+    msg = node._actions_to_multidof(chunk[first_index:], _t(5.0), first_index)
+
+    assert [p.transforms[0].translation.x for p in msg.points] == [3.0, 4.0, 5.0, 6.0, 7.0]
+    offsets = [p.time_from_start.sec + p.time_from_start.nanosec * 1e-9 for p in msg.points]
+    assert offsets == pytest.approx([0.3, 0.4, 0.5, 0.6, 0.7])
+
+
+def test_multidof_stamp_subtracts_arm_exec_latency(make_node):
+    """
+    The anchor carries latency.arm_exec already subtracted, so waypoints are commanded early.
+
+    UMI does this per waypoint (`target_time - robot_action_latency` in exec_actions); the offset
+    is identical for every waypoint in a chunk, so folding it into header.stamp is the same thing.
+    Getting the sign backwards would command every pose one arm_exec LATE, doubling the lag this
+    whole path exists to remove.
+    """
+    node = make_node(control_hz=10.0, **{'latency.arm_exec': 0.62})
+
+    msg = node._actions_to_multidof([_action(0)], _t(5.0), 0)
+
+    stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+    assert stamp == pytest.approx(4.38)  # 5.0 - 0.62
+
+
+def test_multidof_carries_the_frames_the_nuc_matches_on(make_node):
+    """The controller rejects chunks whose frame_id is not its base frame, so both must be set."""
+    node = make_node(control_hz=10.0)
+
+    msg = node._actions_to_multidof([_action(0)], _t(5.0), 0)
+
+    assert msg.header.frame_id == BASE_FRAME
+    assert msg.joint_names == [EEF_FRAME]

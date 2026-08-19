@@ -26,6 +26,7 @@ from pathlib import Path
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription
+from launch_ros.actions import Node
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 
@@ -101,6 +102,29 @@ def generate_launch_description():
                     ['max_velocity_scaling:=', max_velocity_scaling],
                 ],
                 output='screen',
+            ),
+            # The streaming Cartesian impedance controller, spawned INACTIVE. It claims the same
+            # <joint>/effort interfaces as fr3_arm_controller, so exactly one can run; activating it
+            # is what hands the arm from MoveIt to the policy. Deliberately not auto-activated —
+            # torque control starts the moment it does, and that should be a deliberate act with
+            # the workspace clear. /polyumi/home switches back and forth on its own.
+            Node(
+                package='controller_manager',
+                executable='spawner',
+                name='polyumi_impedance_controller_spawner',
+                output='screen',
+                arguments=[
+                    'polyumi_cartesian_impedance_controller',
+                    # Required, and not redundant with --param-file: Humble's spawner sets the
+                    # `type` param only from -t. See the note in fr3_bringup.launch.py.
+                    '-t',
+                    'polyumi_fr3_controllers/CartesianImpedanceController',
+                    '--param-file',
+                    str(NUC_DIR / 'config' / 'polyumi_controllers.yaml'),
+                    '--inactive',
+                    '--controller-manager-timeout',
+                    '30',
+                ],
             ),
             ExecuteProcess(
                 cmd=[
