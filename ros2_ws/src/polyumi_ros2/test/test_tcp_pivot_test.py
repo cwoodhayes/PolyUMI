@@ -146,30 +146,14 @@ def test_defaults_to_the_streaming_controller():
     The streaming controller is the executor this test is for; MoveIt is the legacy path.
 
     Defaulting the other way would silently drive the wrong executor, and the pivot would report a
-    drift figure for a controller nobody is validating.
+    drift figure for a controller nobody is validating. The wire formats themselves are covered by
+    test_target_chunk.py; what matters here is which one this node picks when told nothing.
     """
     node = TcpPivotTest()
     try:
         assert node._pub.wire is Wire.MULTIDOF
-        assert node._pub.topic_name == '/polyumi/target_poses_traj'
     finally:
         node.destroy_node()
-
-
-def test_wire_selects_the_moveit_topic():
-    """The legacy executor stays reachable while it still exists."""
-    node = TcpPivotTest(parameter_overrides=[Parameter('wire', value=str(Wire.POSE_ARRAY))])
-    try:
-        assert node._pub.wire is Wire.POSE_ARRAY
-        assert node._pub.topic_name == '/polyumi/target_poses'
-    finally:
-        node.destroy_node()
-
-
-def test_unknown_wire_fails_fast():
-    """A typo must not leave the probe publishing where nothing subscribes."""
-    with pytest.raises(ValueError):
-        TcpPivotTest(parameter_overrides=[Parameter('wire', value='multidoff')])
 
 
 @pytest.mark.parametrize('bad', [{'axes': ''}, {'axes': 'xq'}, {'step_deg': 0.0}])

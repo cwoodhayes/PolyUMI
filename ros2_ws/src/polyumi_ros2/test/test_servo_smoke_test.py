@@ -15,7 +15,6 @@ import rclpy
 from rclpy.parameter import Parameter
 
 from polyumi_ros2.servo_smoke_test import ServoSmokeTest
-from polyumi_ros2.target_chunk import Wire
 
 
 @pytest.fixture(scope='module', autouse=True)
@@ -141,11 +140,3 @@ def test_invalid_parameters_fail_fast(make_node, bad):
     """Each of these would otherwise move the arm in a way that looks deliberate."""
     with pytest.raises(ValueError):
         make_node(**bad)
-
-
-def test_only_drives_the_streaming_controller(make_node):
-    """There is no PoseArray form of this test — MoveIt cannot splice, so the concept does not apply."""
-    node = make_node()
-
-    assert node._pub.wire is Wire.MULTIDOF
-    assert node._pub.topic_name == '/polyumi/target_poses_traj'
