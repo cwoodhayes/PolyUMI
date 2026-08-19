@@ -6,12 +6,11 @@
 //
 // This is the same law polymetis runs for UMI (torchcontrol OperationalSpacePD:
 // `tau = J^T (Kp*e + Kd*(-J*dq)) + coriolis`), with the error sign convention flipped and two
-// additions kept from SERL: a per-axis error clip, which caps commanded force while leaving the
-// stiffness high enough to track accurately, and a nullspace term, which polymetis lacks entirely
-// and without which a 7-DOF elbow drifts.
+// additions kept from SERL: a per-axis error clip, and a nullspace term, without which a 7-DOF
+// elbow drifts.
 //
-// Deliberately free functions over plain Eigen arguments rather than methods on the controller:
-// the law is the part worth unit-testing, and it must not need a robot to run.
+// Free functions over plain Eigen arguments rather than methods on the controller: the law is the
+// part worth unit-testing, and it must not need a robot to run.
 
 #pragma once
 
@@ -26,7 +25,7 @@ using Vector6d = Eigen::Matrix<double, 6, 1>;
 using Matrix6d = Eigen::Matrix<double, 6, 6>;
 using Jacobian = Eigen::Matrix<double, 6, 7>;
 
-/// Per-axis bounds on the pose error, in metres and radians. See clipPoseError.
+/// Per-axis bounds on the pose error, in metres and radians. Defaults are SERL's.
 struct ErrorClip {
   Eigen::Vector3d translation_min{Eigen::Vector3d::Constant(-0.01)};
   Eigen::Vector3d translation_max{Eigen::Vector3d::Constant(0.01)};
@@ -44,21 +43,17 @@ struct ErrorClip {
 Vector6d poseError(const Pose& current, const Pose& desired);
 
 /**
- * Clamp each axis of the error independently.
+ * Clamp each axis of the error independently, which is what bounds commanded force.
  *
- * SERL's contribution and the reason this controller can be both stiff and safe: force is
- * `stiffness * error`, so bounding the error bounds the force regardless of how far the
- * equilibrium point has run away. At the shipped 2000 N/m and 0.01 m that is ~20 N. Without it a
- * policy commanding an unreachable pose leans on the environment with everything the arm has.
+ * Force is `stiffness * error`, so a bounded error is a bounded force however far the equilibrium
+ * point has run away. Why the shipped numbers are what they are: nuc/config/polyumi_controllers.yaml.
  */
 Vector6d clipPoseError(const Vector6d& error, const ErrorClip& clip);
 
 /**
- * Accumulate the integral error, clamped so it cannot wind up.
- *
- * Bounds are SERL's: 0.1 on translation, 0.3 on rotation. With the default zero Ki this term
- * contributes nothing, but it still accumulates, so the clamp is what keeps it bounded if Ki is
- * ever turned on mid-run.
+ * Accumulate the integral error, clamped to SERL's 0.1 translation / 0.3 rotation so it cannot
+ * wind up. It accumulates even at the default zero Ki, so the clamp still matters if Ki is turned
+ * on mid-run.
  */
 Vector6d accumulateIntegralError(const Vector6d& integral, const Vector6d& error);
 
@@ -72,11 +67,12 @@ Vector7d taskTorque(const Jacobian& jacobian,
                     const Matrix6d& ki);
 
 /**
- * Joint-space pull toward `q_nullspace`, projected into the Jacobian's null space.
+ * Joint-space pull toward `q_nullspace`, projected into the Jacobian's null space, so it resolves
+ * the 7th DOF without disturbing the end effector. `joint1_stiffness` multiplies joint 1 alone,
+ * pinning the base rotation while the elbow stays free.
  *
- * Being in the null space, it cannot disturb the end-effector — it only resolves the 7th DOF.
- * `joint1_stiffness` is a multiplier on joint 1 alone (SERL runs it ~500x the rest), which pins the
- * base rotation while leaving the elbow free.
+ * The projector uses a DAMPED pseudo-inverse, so the isolation is approximate — see
+ * DampedNullspaceLeakIsSmallButNotZero in the tests for how much leaks through.
  */
 Vector7d nullspaceTorque(const Jacobian& jacobian,
                          const Vector7d& q,
@@ -99,13 +95,13 @@ Vector7d saturateTorqueRate(const Vector7d& tau_desired,
 /**
  * Move a base-frame ("zero") Jacobian from one rigidly-attached point to another.
  *
- * `offset` is the base-frame vector from the current point to the new one. Only the translation
- * matters: a zero Jacobian already expresses both linear and angular velocity in the base frame,
- * so the new point's rotation offset changes nothing, and `v_new = v_old + w x offset`.
+ * `offset` is the base-frame vector from the current point to the new one; `v_new = v_old + w x
+ * offset`, and the angular rows are unchanged. Only the translation matters, because a zero
+ * Jacobian already expresses both velocities in the base frame.
  *
- * We need this because franka reports `O_T_EE` and its Jacobian at `fr3_hand_tcp`, while the
- * policy — and the physical contact — happen at `polyumi_tcp`, ~15 cm away. Anchoring the spring
- * at the wrong point makes an orientation error show up as a large fingertip translation.
+ * Needed because franka reports its Jacobian at `fr3_hand_tcp` while the contact happens at
+ * `polyumi_tcp`, ~15 cm away — a spring anchored at the wrong point turns an orientation error
+ * into a large fingertip translation.
  */
 Jacobian shiftJacobian(const Jacobian& jacobian, const Eigen::Vector3d& offset);
 

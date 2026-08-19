@@ -244,10 +244,10 @@ topic and `schedule_waypoint`s each future pose, and in `update()` at 1 kHz eval
 dropped — the interpolator already guarantees continuity and the lag would only add tracking delay.
 This retires `fr3_moveit_bridge` from the inference path; it stays for homing.
 
-**Stage 3 — gains + latency.** Start from SERL's defaults, not UMI's: 2000 N/m translational with a
-±0.01 m clip bounds commanded force near 20 N while keeping tracking accuracy, where UMI's softer
-750 N/m spring is unbounded. Re-measure `latency.arm_exec` — it stops being a MoveIt planning time
-and becomes transport plus one control cycle.
+**Stage 3 — gains + latency.** Start from SERL's defaults rather than UMI's, for the reason set out
+next to the numbers in [polyumi_controllers.yaml](../nuc/config/polyumi_controllers.yaml). Re-measure
+`latency.arm_exec` — it stops being a MoveIt planning time and becomes transport plus one control
+cycle.
 
 ### Risks
 

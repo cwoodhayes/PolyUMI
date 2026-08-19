@@ -111,8 +111,8 @@ void CartesianImpedanceController::declareParameters() {
   auto_declare<std::string>("tcp_frame", "polyumi_tcp");
   auto_declare<std::string>("target_topic", "/polyumi/target_poses_traj");
 
-  // SERL's shipped defaults. 2000 N/m with a 0.01 m clip is ~20 N of commanded force: stiff enough
-  // to track, soft enough to lean on. See docs/franka-inference-bringup.md for why not UMI's.
+  // SERL's shipped defaults, mirrored from nuc/config/polyumi_controllers.yaml, which is where the
+  // reasoning for each number lives. These exist so the controller still runs with no param file.
   auto_declare<double>("translational_stiffness", 2000.0);
   auto_declare<double>("translational_damping", 89.0);
   auto_declare<double>("rotational_stiffness", 150.0);
