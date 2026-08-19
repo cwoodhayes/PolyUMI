@@ -58,6 +58,9 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # $HOME — franka on the NUC, xhy7159 on the GPU box.
 NUC_SSH_HOST="${NUC_SSH_HOST:-jailfranka}"
 NUC_REPO="${NUC_REPO:-~/Documents/PolyUMI}"
+# The NUC's franka_ros2 workspace. ~/franka_ws/src/polyumi_fr3_controllers is a symlink into
+# $NUC_REPO/nuc, so a build here picks up whatever the rsync above just landed.
+NUC_FRANKA_WS="${NUC_FRANKA_WS:-~/franka_ws}"
 SHEEP_SSH_HOST="${SHEEP_SSH_HOST:-sheep}"
 SHEEP_REPO="${SHEEP_REPO:-~/repos/PolyUMI}"
 
@@ -198,6 +201,25 @@ else
   if rsync -a --delete --mkpath --exclude='__pycache__/' --exclude='*.pyc' \
       nuc "${NUC_SSH_HOST}:${NUC_REPO}/"; then
     echo "    done."
+
+    # The bridges are plain scripts and run straight from the synced tree, but
+    # polyumi_fr3_controllers is C++: rsync only updates the source that ~/franka_ws/src symlinks
+    # at, so without this the NUC keeps loading the previously built .so. That is the worst kind of
+    # stale — it is a torque controller, and the old build's behaviour includes the old build's
+    # error messages. Sourcing is explicit because `ssh host 'cmd'` gets no ~/.bashrc.
+    echo "==> Rebuilding polyumi_fr3_controllers on $NUC_SSH_HOST ..."
+    if ssh -o ConnectTimeout=10 "$NUC_SSH_HOST" \
+        "source /opt/ros/humble/setup.bash \
+         && source $NUC_FRANKA_WS/install/setup.bash \
+         && cd $NUC_FRANKA_WS \
+         && colcon build --packages-select polyumi_fr3_controllers \
+              --cmake-args -DCMAKE_BUILD_TYPE=Release"; then
+      echo "    done. NOTE: pluginlib keeps a loaded .so mapped, so a controller_manager that has"
+      echo "    already touched this controller keeps running the OLD build until fr3_bringup is"
+      echo "    restarted. Re-attaching to a live bringup session does not pick this up."
+    else
+      echo "WARNING: colcon build on $NUC_SSH_HOST failed — it may run a stale impedance controller." >&2
+    fi
   else
     echo "WARNING: rsync to $NUC_SSH_HOST failed — it may be running stale nuc/ code." >&2
   fi
