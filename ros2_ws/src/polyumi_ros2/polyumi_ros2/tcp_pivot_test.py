@@ -108,11 +108,20 @@ def axis_quat(axis: str, angle_rad: float) -> np.ndarray:
 
 
 def sweep_angles(angle_deg: float, step_deg: float) -> list[float]:
-    """Angles for a 0 -> +A -> -A -> 0 sweep, in radians, at roughly step_deg spacing."""
+    """
+    Angles for a 0 -> +A -> -A -> 0 sweep, in radians, at roughly step_deg spacing.
+
+    The leading 0 is a literal first element, not just the implicit starting point: the timed wire
+    stamps waypoint 0 at "now", which is already stale by the time it reaches the NUC, so whichever
+    angle is first in this list is the one silently dropped. Making that angle 0 (the pose the arm
+    already holds) means dropping it costs nothing; without it, the real first step (angle 1) was
+    the one that got dropped, and the sweep's first VISIBLE motion was two steps wide instead of one.
+    """
     # ceil, not round: rounding down would space the waypoints WIDER than asked (30deg at 7deg
     # spacing rounds to 4 steps of 7.5), and that spacing is the interpolation resolution.
     steps = max(math.ceil(abs(angle_deg) / max(step_deg, 1e-6)), 1)
-    out = [angle_deg * i / steps for i in range(1, steps + 1)]  # 0 -> +A
+    out = [0.0]  # the pose already held, so losing it as the stale first waypoint is free
+    out += [angle_deg * i / steps for i in range(1, steps + 1)]  # 0 -> +A
     out += [angle_deg * (1 - 2 * i / (2 * steps)) for i in range(1, 2 * steps + 1)]  # +A -> -A
     out += [-angle_deg * (1 - i / steps) for i in range(1, steps + 1)]  # -A -> 0
     return [math.radians(a) for a in out]

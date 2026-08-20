@@ -75,6 +75,7 @@ def test_sweep_visits_both_extremes_and_returns_to_start():
     """0 -> +A -> -A -> 0, so the arm ends where it began and the test is repeatable."""
     angles = np.degrees(sweep_angles(20.0, 5.0))
 
+    assert angles[0] == pytest.approx(0.0), 'leading 0 must be a literal element, not implicit'
     assert angles[-1] == pytest.approx(0.0)
     assert angles.max() == pytest.approx(20.0)
     assert angles.min() == pytest.approx(-20.0)
@@ -88,8 +89,10 @@ def test_sweep_steps_never_exceed_the_requested_spacing():
     by the planner — the spacing here IS the interpolation resolution.
     """
     for angle, step in ((20.0, 5.0), (30.0, 7.0), (5.0, 1.0)):
+        # sweep_angles' own first element is now the leading 0, so the list already includes that
+        # first step; no need to prepend one here as well.
         angles = np.degrees(sweep_angles(angle, step))
-        deltas = np.abs(np.diff(np.concatenate([[0.0], angles])))
+        deltas = np.abs(np.diff(angles))
         assert deltas.max() <= step + 1e-9, f'{angle}deg at {step}deg spacing'
 
 
