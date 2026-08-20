@@ -33,6 +33,9 @@ Pose poseFromColumnMajor(const std::array<double, 16>& m) {
 
 /// Smallest speed limit that still behaves like a limit rather than a division by zero.
 constexpr double kMinSpeed = 1e-6;
+/// Below this, a quaternion's direction is noise, not a pose — normalize() on anything smaller is
+/// dividing by (near) zero.
+constexpr double kMinQuaternionNorm = 1e-6;
 
 Matrix6d diagonalGain(double translational, double rotational) {
   Matrix6d gain = Matrix6d::Identity();
@@ -41,17 +44,39 @@ Matrix6d diagonalGain(double translational, double rotational) {
   return gain;
 }
 
-double clampedSpeed(const std::shared_ptr<rclcpp_lifecycle::LifecycleNode>& node,
-                    const char* name) {
+/// Every live-tunable double below funnels through here. Bad input (NaN, a stray minus sign) must
+/// stop at this boundary: several of these get sqrt()'d in nullspaceTorque, where NaN or a negative
+/// stiffness reaches command_interfaces_ with no further check between here and the joint.
+double clampedAtLeast(const std::shared_ptr<rclcpp_lifecycle::LifecycleNode>& node,
+                      const char* name,
+                      double floor) {
   const double value = node->get_parameter(name).as_double();
-  if (value >= kMinSpeed) {
+  if (std::isfinite(value) && value >= floor) {
     return value;
   }
   RCLCPP_WARN_THROTTLE(node->get_logger(), *node->get_clock(), 5000,
-                       "%s is %g; clamping to %g. A non-positive speed limit makes every spliced "
-                       "waypoint land at infinity and the arm holds silently.",
-                       name, value, kMinSpeed);
-  return kMinSpeed;
+                       "%s is %g; clamping to %g. A non-finite or out-of-range value here reaches "
+                       "the realtime torque loop unchecked.",
+                       name, value, floor);
+  return floor;
+}
+
+double clampedSpeed(const std::shared_ptr<rclcpp_lifecycle::LifecycleNode>& node, const char* name) {
+  return clampedAtLeast(node, name, kMinSpeed);
+}
+
+/// Clip magnitudes accept either sign as a convenience (the axis is symmetric), so unlike
+/// clampedAtLeast this only screens for non-finite input; the caller still takes abs().
+double finiteOrZero(const std::shared_ptr<rclcpp_lifecycle::LifecycleNode>& node, const char* name) {
+  const double value = node->get_parameter(name).as_double();
+  if (std::isfinite(value)) {
+    return value;
+  }
+  RCLCPP_WARN_THROTTLE(node->get_logger(), *node->get_clock(), 5000,
+                       "%s is %g; clamping to 0. A non-finite clip does not fail loud — "
+                       "std::clamp with a NaN bound silently returns its input unclipped.",
+                       name, value);
+  return 0.0;
 }
 
 }  // namespace
@@ -201,22 +226,26 @@ bool CartesianImpedanceController::applyCollisionBehavior() {
 CartesianImpedanceController::Gains CartesianImpedanceController::readGainParameters() {
   auto node = get_node();
   Gains gains;
-  gains.stiffness = diagonalGain(node->get_parameter("translational_stiffness").as_double(),
-                                 node->get_parameter("rotational_stiffness").as_double());
-  gains.damping = diagonalGain(node->get_parameter("translational_damping").as_double(),
-                               node->get_parameter("rotational_damping").as_double());
-  gains.ki = diagonalGain(node->get_parameter("translational_ki").as_double(),
-                          node->get_parameter("rotational_ki").as_double());
+  // Floored at 0, not merely validated: a negative stiffness or damping does not fail safe, it
+  // reverses the spring (pushes away from the target) or cancels the damping term, and
+  // nullspace_stiffness / joint1_nullspace_stiffness get sqrt()'d in nullspaceTorque, where
+  // negative input is NaN by definition of the function, not just an unwise value.
+  gains.stiffness = diagonalGain(clampedAtLeast(node, "translational_stiffness", 0.0),
+                                 clampedAtLeast(node, "rotational_stiffness", 0.0));
+  gains.damping = diagonalGain(clampedAtLeast(node, "translational_damping", 0.0),
+                               clampedAtLeast(node, "rotational_damping", 0.0));
+  gains.ki = diagonalGain(clampedAtLeast(node, "translational_ki", 0.0),
+                          clampedAtLeast(node, "rotational_ki", 0.0));
 
-  const double t_clip = std::abs(node->get_parameter("translational_clip").as_double());
-  const double r_clip = std::abs(node->get_parameter("rotational_clip").as_double());
+  const double t_clip = std::abs(finiteOrZero(node, "translational_clip"));
+  const double r_clip = std::abs(finiteOrZero(node, "rotational_clip"));
   gains.clip.translation_min = Eigen::Vector3d::Constant(-t_clip);
   gains.clip.translation_max = Eigen::Vector3d::Constant(t_clip);
   gains.clip.rotation_min = Eigen::Vector3d::Constant(-r_clip);
   gains.clip.rotation_max = Eigen::Vector3d::Constant(r_clip);
 
-  gains.nullspace_stiffness = node->get_parameter("nullspace_stiffness").as_double();
-  gains.joint1_nullspace_stiffness = node->get_parameter("joint1_nullspace_stiffness").as_double();
+  gains.nullspace_stiffness = clampedAtLeast(node, "nullspace_stiffness", 0.0);
+  gains.joint1_nullspace_stiffness = clampedAtLeast(node, "joint1_nullspace_stiffness", 0.0);
   // Floored, not just validated: scheduleWaypoint divides by these, so zero puts the trajectory's
   // last knot at infinity and the arm holds forever with nothing logged. They are live-tunable, so
   // a bad value can arrive long after startup.
@@ -250,12 +279,6 @@ CallbackReturn CartesianImpedanceController::on_configure(
 
   tf_buffer_ = std::make_unique<tf2_ros::Buffer>(node->get_clock());
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
-
-  target_sub_ = node->create_subscription<trajectory_msgs::msg::MultiDOFJointTrajectory>(
-      node->get_parameter("target_topic").as_string(), rclcpp::QoS(10),
-      [this](const trajectory_msgs::msg::MultiDOFJointTrajectory::SharedPtr msg) {
-        onTrajectory(msg);
-      });
 
   collision_client_ =
       node->create_client<franka_msgs::srv::SetFullCollisionBehavior>(kCollisionService);
@@ -333,6 +356,15 @@ CallbackReturn CartesianImpedanceController::on_activate(
   tau_previous_.setZero();
   active_.store(true, std::memory_order_release);
 
+  // Created here, not on_configure: get_subscription_count() on the publishing side is a DDS match,
+  // which would otherwise go true the moment this controller is loaded — before it is ACTIVE, while
+  // onTrajectory still drops everything. A probe's "is anyone listening" check would then lie.
+  target_sub_ = get_node()->create_subscription<trajectory_msgs::msg::MultiDOFJointTrajectory>(
+      get_node()->get_parameter("target_topic").as_string(), rclcpp::QoS(10),
+      [this](const trajectory_msgs::msg::MultiDOFJointTrajectory::SharedPtr msg) {
+        onTrajectory(msg);
+      });
+
   RCLCPP_INFO(get_node()->get_logger(),
               "activated holding %s at (%.3f, %.3f, %.3f); %s -> %s offset (%.4f, %.4f, %.4f)",
               tcp_frame_.c_str(), pose.position.x(), pose.position.y(), pose.position.z(),
@@ -344,6 +376,10 @@ CallbackReturn CartesianImpedanceController::on_activate(
 CallbackReturn CartesianImpedanceController::on_deactivate(
     const rclcpp_lifecycle::State& /*previous_state*/) {
   active_.store(false, std::memory_order_release);
+  // Torn down, not just gated: leaving it matched would keep get_subscription_count() reporting
+  // "listening" through a whole home cycle, the exact false confidence on_activate's re-creation
+  // fixes for the loaded-but-never-activated case.
+  target_sub_.reset();
   robot_model_->release_interfaces();
   position_interfaces_.clear();
   velocity_interfaces_.clear();
@@ -367,6 +403,14 @@ void CartesianImpedanceController::onTrajectory(
                          msg->header.frame_id.c_str(), base_frame_.c_str());
     return;
   }
+  // joint_names names the commanded frame, e.g. polyumi_tcp; a chunk addressed to anything else
+  // (a typo, or a producer built for a different message convention) must not be interpreted as
+  // one anyway just because it landed on this topic.
+  if (msg->joint_names.size() != 1 || msg->joint_names.front() != tcp_frame_) {
+    RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1000,
+                         "Ignoring chunk naming joint(s) other than '%s'.", tcp_frame_.c_str());
+    return;
+  }
 
   const double anchor = rclcpp::Time(msg->header.stamp).seconds();
   const double curr_time = now_seconds_.load(std::memory_order_relaxed);
@@ -379,15 +423,29 @@ void CartesianImpedanceController::onTrajectory(
 
   int spliced = 0;
   for (const auto& point : msg->points) {
-    if (point.transforms.empty()) {
+    // Must match joint_names 1:1, which is already checked to be exactly [tcp_frame_] above.
+    if (point.transforms.size() != 1) {
       continue;
     }
     const auto& tf = point.transforms.front();
+    const Eigen::Vector3d position(tf.translation.x, tf.translation.y, tf.translation.z);
+    const Eigen::Quaterniond orientation(tf.rotation.w, tf.rotation.x, tf.rotation.y, tf.rotation.z);
+    // A malformed waypoint — NaN from a bad upstream computation, or a near-zero quaternion —
+    // must not reach the interpolator: normalize() on a (near-)zero quaternion is a division by
+    // (near-)zero, and the NaN it produces propagates through slerp and the impedance law straight
+    // to command_interfaces_. Drop just this point; one bad waypoint should not cost the rest of
+    // an otherwise-good chunk.
+    if (!position.allFinite() || !orientation.coeffs().allFinite() ||
+        orientation.norm() < kMinQuaternionNorm) {
+      RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1000,
+                           "Dropping a malformed waypoint (non-finite, or a near-zero-length "
+                           "quaternion) on %s.",
+                           get_node()->get_parameter("target_topic").as_string().c_str());
+      continue;
+    }
     Pose pose;
-    pose.position = Eigen::Vector3d(tf.translation.x, tf.translation.y, tf.translation.z);
-    pose.orientation =
-        Eigen::Quaterniond(tf.rotation.w, tf.rotation.x, tf.rotation.y, tf.rotation.z);
-    pose.orientation.normalize();
+    pose.position = position;
+    pose.orientation = orientation.normalized();
 
     const double target_time = anchor + rclcpp::Duration(point.time_from_start).seconds();
     // scheduleWaypoint ignores anything at or before curr_time; skipping here keeps the
