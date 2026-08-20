@@ -125,6 +125,19 @@ def test_non_overlapping_chunks_are_rejected(make_node):
         make_node(waypoints_per_chunk=2, waypoint_dt_s=0.05, chunk_hz=1.0)
 
 
+def test_borderline_non_overlapping_chunk_is_rejected(make_node):
+    """
+    Span is (n - 1) * dt, not n * dt: n waypoints spaced by dt cover n - 1 intervals, not n.
+
+    Two waypoints 0.6 s apart at 1 Hz (interval 1.0 s) span 0.6 s, not 1.2 s — the last waypoint of
+    one chunk lands 0.4 s before the next chunk's first, so the splice this tool exists to exercise
+    never happens even though the chunks never overlap. Overcounting by one dt let exactly this
+    configuration through.
+    """
+    with pytest.raises(ValueError, match='overlap'):
+        make_node(waypoints_per_chunk=2, waypoint_dt_s=0.6, chunk_hz=1.0)
+
+
 @pytest.mark.parametrize(
     'bad',
     [

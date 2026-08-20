@@ -16,7 +16,10 @@ one.
 
     # NUC: fr3_bringup up, impedance controller ACTIVE (docs/franka-inference-bringup.md)
     ros2 run polyumi_ros2 servo_smoke_test
-    ros2 run polyumi_ros2 servo_smoke_test --ros-args -p radius_m:=0.03 -p period_s:=12.0
+    ros2 run polyumi_ros2 servo_smoke_test --ros-args -p radius_m:=0.05 -p period_s:=6.0
+
+The plain invocation is the one validated on hardware (docs/franka-inference-bringup.md, "Phase 4
+bringup" step 3) — do not run a bigger or faster override as the FIRST pass on a new arm.
 
 Watch for smooth continuous motion, no pause at chunk boundaries, and no ``cartesian_reflex``. A
 stutter at exactly ``chunk_hz`` is the splice going wrong, not the gains.
@@ -60,16 +63,16 @@ class ServoSmokeTest(Node):
         self.declare_parameter('base_frame', 'fr3_link0')
         self.declare_parameter('eef_frame', 'polyumi_tcp')
         self.declare_parameter('target_topic', '')
-        self.declare_parameter('radius_m', 0.1)
+        self.declare_parameter('radius_m', 0.03)
         # Seconds for one lap. Slow by default: this is meant to be watched, not timed.
-        self.declare_parameter('period_s', 3.3)
+        self.declare_parameter('period_s', 12.0)
         self.declare_parameter('duration_s', 30.0)
         # Plane of the circle, as two distinct base-frame axes.
         self.declare_parameter('plane', 'xy')
         # These three make the traffic policy-shaped. Defaults mirror the real inference loop: a
         # 16-waypoint chunk at 0.1 s spacing re-issued every ~0.3 s, so each chunk supersedes the
         # tail of the previous one with over a second still unplayed.
-        self.declare_parameter('chunk_hz', 5.0)
+        self.declare_parameter('chunk_hz', 3.3)
         self.declare_parameter('waypoints_per_chunk', 16)
         self.declare_parameter('waypoint_dt_s', 0.1)
         # Subtracted from each chunk anchor, exactly as policy_client_node applies latency.arm_exec.
@@ -122,8 +125,11 @@ class ServoSmokeTest(Node):
 
         # Overlap is the entire point. Chunks that finish before the next arrives make this a slow
         # sequence of independent moves, which proves nothing tcp_pivot_test does not already.
+        # Span is (n-1)*dt, not n*dt: n waypoints at spacing dt cover n-1 intervals, from the first
+        # to the last. Overcounting by one dt let configurations through whose chunks do not
+        # actually overlap — the exact thing this check exists to catch.
         if self._chunk_hz > 0 and self._waypoint_dt > 0 and self._n_waypoints >= 2:
-            span = self._n_waypoints * self._waypoint_dt
+            span = (self._n_waypoints - 1) * self._waypoint_dt
             interval = 1.0 / self._chunk_hz
             if span <= interval:
                 errors.append(
@@ -202,7 +208,7 @@ class ServoSmokeTest(Node):
         if not self.wait_for_subscriber():
             return False
 
-        span = self._n_waypoints * self._waypoint_dt
+        span = (self._n_waypoints - 1) * self._waypoint_dt
         interval = 1.0 / self._chunk_hz
         self.get_logger().warn(
             f'MOVING THE ARM: {self._radius * 100:.1f} cm circle in {self._plane}, '
