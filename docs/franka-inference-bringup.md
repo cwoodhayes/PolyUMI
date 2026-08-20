@@ -137,16 +137,39 @@ was once in this doc has been deleted.
   bridge therefore never waits for a goal to *finish* — a `Move`'s result arrives only once the
   fingers stop, so gating on it makes the hand deaf to a policy reversal for a whole stroke. The
   aborts are logged at INFO and are the normal case, not a fault.
-- **~0.34 s of `latency.gripper_exec` is the hand itself.** `Gripper::move` is one
-  `tcpSendRequest`; everything after it is firmware. That is a floor. SERL
-  (`serl_robot_infra/franka_env/envs/franka_env.py`) hits the same wall and simply `sleep(0.6)`s
-  through it, binarising the gripper action with hysteresis so the transitions are rare.
+- **~0.37 s of `latency.gripper_exec` is the hand itself — measured, 2026-08-20.** `Gripper::move`
+  is one `tcpSendRequest`; everything after it is firmware. `gripper_timing_probe` (section A)
+  times send -> first width change with **no ROS in the path at all**: 359 ms and 386 ms median
+  across two runs. That is a floor, and the step-response figure of 380 ms measured *through*
+  franka_gripper sits inside it — so the middleware costs ~0-20 ms, not the 40-85 ms estimated
+  below. SERL (`serl_robot_infra/franka_env/envs/franka_env.py`) hits the same wall and simply
+  `sleep(0.6)`s through it, binarising the gripper action with hysteresis so transitions are rare.
+- **A superseding `Move` STOPS the fingers, even when it aims further the same way.** This is the
+  finding that governs the whole gripper design. `gripper_timing_probe` section D deliberately
+  extends the target ahead of a hand that is already moving, so no `Move` can ever run out of
+  travel — and the hand still spends **70-75% of its samples stationary**, with a ~200 ms stall at
+  every re-issue (30% moving at a 150 ms period, 25% at 250 ms). Section B agrees from the other
+  side: a supersede takes effect in 60-270 ms rather than a full cold start, but that interval is
+  a *stall*, not continued motion. Three independent observations of the same number — D, B, and
+  `latency_probe mode:=gripper_chirp`'s 76% stationary.
+  **Consequence: the hand cannot follow a continuous width trajectory.** Any scheme that re-issues
+  periodically — a lookahead controller, a UMI-style interpolated setpoint stream — makes it worse
+  than leaving it alone. A `Move` must be allowed to run to completion, which caps the useful
+  command rate at roughly 1-2 Hz. Section C confirms the other half: because `move()` returns only
+  when the motion *ends*, consecutive segments each start from rest and each re-pays the ~0.37 s.
+- **Homing is not optional, and an unhomed hand fails silently.** Before homing, `readOnce()`
+  reports `width=0, max_width=0` while `move()` returns **`true`** and does nothing — libfranka's
+  `executeCommand` maps `kUnsuccessful` to a plain `false` and only `kFail`/`kAborted` throw, so
+  neither a return check nor a try/catch catches this one. `max_width` is published on no topic,
+  so `readOnce()` is the only place the hand admits it is uncalibrated.
 - **`franka_gripper` runs single-threaded, and `readOnce()` blocks.** Its state timer, all four
   action servers and the default callback group are shared, the generated `franka_gripper_node`
   uses a `SingleThreadedExecutor`, and `Gripper::readOnce()` always waits for a fresh UDP datagram
   after draining the buffer — so that thread sits inside the blocking receive for most of each
   ~43 ms inter-datagram gap, whatever `state_publish_rate` says. Goal-accept callbacks queue behind
-  it, worth ~40-85 ms of `gripper_exec` and its jitter. Fixing it means patching
+  it. The ~40-85 ms of `gripper_exec` once attributed to this is **not borne out**: the probe's
+  ROS-free section A brackets the through-franka_gripper figure, so the real cost is ~0-20 ms and
+  bypassing it buys reliability, not latency. Fixing it would mean patching
   `external/franka_ros2` (own callback group for the timer, `EXECUTOR MultiThreadedExecutor` on the
   `rclcpp_components_register_node` line) and rebuilding on the NUC — not done, measure first.
 - **`Move` applies no force** and stalls on contact; `Grasp` is the only action that *holds* an

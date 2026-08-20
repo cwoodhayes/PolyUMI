@@ -4,9 +4,10 @@
   <name>polyumi_fr3_controllers</name>
   <version>0.1.0</version>
   <description>
-    Streaming Cartesian impedance controller for the FR3, driven by absolutely-timed pose chunks
-    from PolyUMI's policy client. Control law ported from serl_franka_controllers; reference
-    generator ported from UMI's PoseTrajectoryInterpolator.
+    FR3 motion control for PolyUMI: a streaming Cartesian impedance controller for the arm,
+    driven by absolutely-timed pose chunks from the policy client, plus the Franka Hand tooling
+    that talks to libfranka directly rather than through franka_gripper. Control law ported from
+    serl_franka_controllers; reference generator ported from UMI's PoseTrajectoryInterpolator.
   </description>
   <maintainer email="cwoodhayes@gmail.com">conorbot</maintainer>
   <license>MIT</license>
@@ -15,6 +16,7 @@
 
   <depend>controller_interface</depend>
   <depend>eigen</depend>
+  <depend>libfranka</depend>
   <depend>franka_msgs</depend>
   <depend>franka_semantic_components</depend>
   <depend>hardware_interface</depend>

@@ -11,6 +11,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(ament_cmake REQUIRED)
 find_package(controller_interface REQUIRED)
 find_package(Eigen3 REQUIRED)
+# The gripper executables talk to the hand directly. Franka is a plain CMake package
+# (install/libfranka/lib/cmake/Franka), not an ament one, so it is linked by target rather
+# than carried in DEPENDENCIES via ament_target_dependencies.
+find_package(Franka REQUIRED)
 find_package(franka_msgs REQUIRED)
 find_package(franka_semantic_components REQUIRED)
 find_package(hardware_interface REQUIRED)
@@ -61,7 +65,15 @@ ament_target_dependencies(polyumi_fr3_controllers PUBLIC ${DEPENDENCIES})
 
 pluginlib_export_plugin_description_file(controller_interface polyumi_fr3_controllers.xml)
 
+# Phase 0 characterisation of the Franka Hand: what a Move actually costs with no ROS, no
+# action server and no shared executor in the way. Deliberately not a node — the whole point
+# is that nothing else shares its threads. See the file header.
+add_executable(gripper_timing_probe src/gripper_timing_probe.cpp)
+target_link_libraries(gripper_timing_probe Franka::Franka)
+
 install(DIRECTORY include/ DESTINATION include)
+install(TARGETS gripper_timing_probe DESTINATION lib/${PROJECT_NAME})
+
 install(
   TARGETS polyumi_fr3_control_core polyumi_fr3_controllers
   EXPORT export_polyumi_fr3_controllers
