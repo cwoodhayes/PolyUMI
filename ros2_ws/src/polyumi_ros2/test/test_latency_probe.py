@@ -194,6 +194,75 @@ def test_gripper_report_emits_the_measured_latency_unmodified(tmp_path, capsys):
     probe.destroy_node()
 
 
+def test_gripper_chirp_amplitude_must_clear_the_bridge_deadband():
+    """
+    Too small an amplitude leaves too few deadband-sized steps for the sweep to read as a sinusoid.
+
+    fr3_gripper_bridge suppresses any width within its deadband of the last one it sent, so the
+    hand is only ever offered a staircase. The quantisation is in SPACE, not time — how many steps
+    fit in a half stroke depends on amplitude alone, which is why frequency does not appear here.
+    """
+    with pytest.raises(ValueError, match='deadband-sized steps'):
+        _probe(mode='gripper_chirp', amplitude_m=0.005)
+
+
+def test_gripper_chirp_is_bounded_by_the_bridge_send_rate_not_the_publish_rate():
+    """
+    Publishing faster than the bridge sends buys nothing; above its Nyquist the sweep cannot land.
+
+    The guard against command_hz alone would wave this through — 2.5 Hz is well under the 10 Hz
+    publish Nyquist of 5 Hz — while the bridge, emitting one goal per 0.25 s, hands the hand fewer
+    than two goals per cycle. That is a sweep the hand could not reproduce even if it were perfect.
+    """
+    with pytest.raises(ValueError, match="Nyquist of the bridge's own"):
+        _probe(mode='gripper_chirp', chirp_f1_hz=2.5)
+
+
+def test_gripper_chirp_defaults_satisfy_their_own_guards():
+    """
+    The shipped band and amplitude must construct. Guards this file's constants against each other.
+
+    This is the test that catches a hand-tuned CHIRP_BAND_HZ entry that the probe would then refuse
+    to run at all — which is otherwise only discovered with the hardware already booked.
+    """
+    probe = _probe(mode='gripper_chirp')
+    probe.destroy_node()
+
+
+def test_gripper_chirp_cannot_command_past_the_hand_stroke():
+    """An amplitude that would push the sweep past 0 or BRIDGE_MAX_WIDTH_M must be rejected."""
+    with pytest.raises(ValueError, match='must stay within'):
+        _probe(mode='gripper_chirp', amplitude_m=0.05)
+
+
+def test_gripper_chirp_recovers_a_known_lag_end_to_end(tmp_path, capsys):
+    """
+    Feed the xcorr reporter a commanded chirp and a copy delayed by a known lag; check it comes back.
+
+    This is the one check that fails if the new mode's wiring into _report_xcorr is wrong — the
+    estimator itself is already covered by test_latency_util.
+    """
+    true_lag = 0.65
+    t = np.arange(0.0, 20.0, 1 / 50.0)
+    probe = _probe(mode='gripper_chirp', output_npz=str(tmp_path / 'gc.npz'), plot=False)
+    commanded = [(float(ti), 0.04 + 0.03 * float(probe._chirp(ti))) for ti in t]
+    actual = [(ti + true_lag, w) for ti, w in commanded]
+    # A separate series from `actual` above — this is what _joint_state_interval_lines reads, the
+    # same /fr3_gripper/joint_states samples the correlation itself consumes, just summarised
+    # differently. 50 ms apart, so latency.gripper should come back as half of that.
+    probe._actual = [(float(i) * 0.05, 0.04) for i in range(20)]
+
+    assert probe._report_xcorr('gripper_exec', commanded, actual, extra_lines=probe._joint_state_interval_lines()) == 0
+    saved = np.load(tmp_path / 'gc.npz')
+    assert float(saved['latency_s']) == pytest.approx(true_lag, abs=0.02)
+    out = capsys.readouterr().out
+    # Against the saved value rather than a literal, so re-tuning the shipped band cannot break
+    # this on a rounding difference that says nothing about the wiring.
+    assert f'gripper_exec: {float(saved["latency_s"]):.4f}' in out
+    assert 'latency.gripper: 0.0250' in out
+    probe.destroy_node()
+
+
 def _filmed(qr, blur=0, perspective=0, scale=1.0):
     """Paste a rendered QR into a 1080p frame and degrade it the way filming a screen would."""
     import cv2

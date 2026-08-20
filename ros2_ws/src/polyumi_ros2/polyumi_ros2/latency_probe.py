@@ -38,9 +38,24 @@ Modes
     against the ``polyumi_tcp`` TF. **Moves the arm.**
 
 ``mode:=gripper``
-    ``latency.gripper_exec``, the hand's command->motion delay, plus the
-    ``/fr3_gripper/joint_states`` publish interval that sets ``latency.gripper``.
+    ``latency.gripper_exec`` as a **step response** — command a step, time until the fingers start
+    moving — plus the ``/fr3_gripper/joint_states`` publish interval that sets ``latency.gripper``.
     **Moves the fingers.**
+
+``mode:=gripper_chirp``
+    ``latency.gripper_exec`` by chirp-and-cross-correlate, the same estimator the arm uses.
+    **Moves the fingers.**
+
+The two gripper modes measure **different quantities**. The step times command -> *onset of motion*,
+which bottoms out at the ~0.34 s libfranka firmware floor. The chirp measures how far the hand's
+*width* lags the commanded width — the quantity ``gripper_exec`` actually needs, since it picks
+which action index the hand is handed, so the hand should *be* at that width rather than merely
+starting toward it.
+
+``mode:=gripper`` remains the source of the shipped ``gripper_exec``: as of 2026-08-20 the chirp
+mode **has never cleared its own quality gates on this hardware** — the Franka Hand does not track
+a swept target through discrete ``Move`` goals at all. That null result is the point of keeping it;
+see ``_run_gripper_chirp``.
 
 Usage (laptop, after ``source setup_franka_env.sh``)::
 
@@ -54,6 +69,7 @@ Usage (laptop, after ``source setup_franka_env.sh``)::
 
     # 3. gripper — NUC: ... execute_gripper:=true, and nothing between the fingers
     ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper
+    ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper_chirp   # -p duration_s:=40 for more cycles
 
 Each mode prints the number, its quality, and the exact line to paste, then saves the raw series to
 ``.npz`` so a marginal run can be re-judged without booking the hardware again. Pass ``-p
@@ -68,36 +84,55 @@ import threading
 import time
 
 import cv2
-from geometry_msgs.msg import Pose
 import numpy as np
 import rclpy
+import scipy.signal as ss
+from geometry_msgs.msg import Pose
 from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-import scipy.signal as ss
 from sensor_msgs.msg import Image, JointState
 from tf2_ros import Buffer, TransformListener
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-from polyumi_ros2.target_chunk import TargetChunkPublisher, Wire
 from polyumi_ros2.latency_util import get_latency
+from polyumi_ros2.target_chunk import TargetChunkPublisher, Wire
 
-MODES = ('camera', 'arm', 'gripper')
+MODES = ('camera', 'arm', 'gripper', 'gripper_chirp')
 
-#: Chirp band, in Hz. Bandwidth is what makes the correlation peak sharp (see latency_util), so
-#: this sits as high as the arm can actually follow through MoveIt's plan-then-execute cadence.
-#: Driving it faster does not sharpen the peak, it just stops exciting the plant. Only the arm
-#: chirps; the gripper is measured by step response instead (see _run_gripper).
-CHIRP_BAND_HZ = {'arm': (0.05, 0.4)}
+#: Chirp band, in Hz. Bandwidth is what makes the correlation peak sharp (see latency_util). The
+#: arm's sits as high as it can actually follow through MoveIt's plan-then-execute cadence; the
+#: gripper_chirp band is sized in _init_gripper_chirp against the bridge's deadband and tracker,
+#: not listed here as a bare constant.
+CHIRP_BAND_HZ = {'arm': (0.05, 0.4), 'gripper_chirp': (0.1, 0.7)}
 
 #: Arm command rate, deliberately slow: `fr3_moveit_bridge` plans and executes each chunk
 #: synchronously and drops any that arrive mid-flight, so commanding at the 10 Hz control rate
 #: would discard most of them. Dropping *some* is harmless — the arm still traverses the same
 #: smooth chirp, and it is the chirp we correlate against — but it is noise we can avoid.
-COMMAND_HZ = {'arm': 4.0}
+#:
+#: The gripper bridge has no such synchronous stage — it just rate-limits sends — so gripper_chirp
+#: commands faster than the bridge's own send rate, to keep it fed a fresh target every window.
+COMMAND_HZ = {'arm': 4.0, 'gripper_chirp': 10.0}
 
 #: Joint name on /polyumi/target_gripper, matching policy_client_node and gripper_range_probe.
 GRIPPER_JOINT_NAME = 'fr3_gripper_width'
+
+#: fr3_gripper_bridge's shipped defaults (nuc/fr3_gripper_bridge.py), mirrored here to size the
+#: chirp excitation — the bridge runs on the NUC under a different distro, so this module cannot
+#: import it. Pass matching -p overrides on both sides if you've changed the bridge's.
+BRIDGE_DEADBAND_M = 0.005
+BRIDGE_PERIOD_S = 0.25
+BRIDGE_MAX_WIDTH_M = 0.08
+
+#: Highest frequency the bridge can convey at all. It emits at most one goal per BRIDGE_PERIOD_S
+#: however fast the probe publishes, so this — not ``command_hz`` — is the real ceiling on the
+#: sweep.
+BRIDGE_SEND_NYQUIST_HZ = 1 / (2 * BRIDGE_PERIOD_S)
+
+#: How many deadband-sized steps the commanded sweep must have per half stroke to still read as a
+#: sinusoid rather than a square wave. Four is the fewest that gives a rise, a top, and a fall.
+MIN_DEADBAND_LEVELS = 4.0
 
 #: Window the gripper must hold still over before a step is timed, and the spread that counts as
 #: still. Longer than the bridge's 0.25 s command period, so a rep cannot start while the previous
@@ -334,6 +369,8 @@ class LatencyProbe(Node):
             self._tf_listener = TransformListener(self._tf_buffer, self)
             #: (stamp_s, position on the swept axis)
             self._actual: list[tuple[float, float]] = []
+        elif self._mode == 'gripper_chirp':
+            errors += self._init_gripper_chirp()
         else:
             self.declare_parameter('target_topic', '/polyumi/target_gripper')
             self.declare_parameter('state_topic', '/fr3_gripper/joint_states')
@@ -352,8 +389,8 @@ class LatencyProbe(Node):
             self._reps = self.get_parameter('reps').get_parameter_value().integer_value
             self._onset_threshold = self.get_parameter('onset_threshold_m').get_parameter_value().double_value
             self._settle_timeout_s = self.get_parameter('settle_timeout_s').get_parameter_value().double_value
-            if self._step <= 0.005:
-                errors.append(f"step_m must exceed the bridge's 0.005 m deadband, got {self._step}")
+            if self._step <= BRIDGE_DEADBAND_M:
+                errors.append(f"step_m must exceed the bridge's {BRIDGE_DEADBAND_M} m deadband, got {self._step}")
             if self._center - self._step / 2 < 0:
                 errors.append(
                     f'center_width_m ({self._center}) - step_m/2 ({self._step / 2}) is negative; '
@@ -372,6 +409,80 @@ class LatencyProbe(Node):
             self.create_subscription(JointState, state_topic, self._on_gripper_state, 10)
             #: (stamp_s, aperture)
             self._actual: list[tuple[float, float]] = []
+        return errors
+
+    def _init_gripper_chirp(self) -> list[str]:
+        """Declare gripper_chirp params and wire the command publisher and state source."""
+        errors = []
+        # The band is squeezed from both sides. Below: the correlation peak broadens as 1/chirp_f0_hz,
+        # and a peak wider than MAX_PEAK_WIDTH_S cannot localise the lag — so a low f0 costs
+        # sharpness even when the lag itself is recovered correctly. Above: BRIDGE_SEND_NYQUIST_HZ,
+        # since the bridge only emits a goal every BRIDGE_PERIOD_S no matter how fast we publish.
+        f0, f1 = CHIRP_BAND_HZ['gripper_chirp']
+        self.declare_parameter('chirp_f0_hz', f0)
+        self.declare_parameter('chirp_f1_hz', f1)
+        self.declare_parameter('command_hz', COMMAND_HZ['gripper_chirp'])
+        self.declare_parameter('target_topic', '/polyumi/target_gripper')
+        self.declare_parameter('state_topic', '/fr3_gripper/joint_states')
+        self.declare_parameter('center_width_m', 0.04)
+        # Half the peak-to-peak sweep. Sized against BRIDGE_DEADBAND_M and BRIDGE_MAX_WIDTH_M
+        # below, not against the step mode's step_m — the two are unrelated sweeps.
+        self.declare_parameter('amplitude_m', 0.03)
+        self.declare_parameter('settle_timeout_s', 10.0)
+        self._f0 = self.get_parameter('chirp_f0_hz').get_parameter_value().double_value
+        self._f1 = self.get_parameter('chirp_f1_hz').get_parameter_value().double_value
+        self._command_hz = self.get_parameter('command_hz').get_parameter_value().double_value
+        self._center = self.get_parameter('center_width_m').get_parameter_value().double_value
+        self._amplitude = self.get_parameter('amplitude_m').get_parameter_value().double_value
+        self._settle_timeout_s = self.get_parameter('settle_timeout_s').get_parameter_value().double_value
+        if not 0 < self._f0 < self._f1:
+            errors.append(f'need 0 < chirp_f0_hz < chirp_f1_hz, got {self._f0} and {self._f1}')
+        if self._command_hz <= 0:
+            errors.append(f'command_hz must be > 0, got {self._command_hz}')
+        # Same aliasing guard as the arm's — see there.
+        elif self._f1 >= self._command_hz / 2:
+            errors.append(
+                f'chirp_f1_hz ({self._f1}) must be below the Nyquist of command_hz '
+                f'({self._command_hz / 2}), or the commanded sweep aliases'
+            )
+        # The binding limit is not command_hz but the bridge, which emits at most one goal per
+        # BRIDGE_PERIOD_S however fast we publish. Past its Nyquist the hand is handed fewer than
+        # two goals per cycle and cannot reproduce the sweep even in principle.
+        elif self._f1 >= BRIDGE_SEND_NYQUIST_HZ:
+            errors.append(
+                f'chirp_f1_hz ({self._f1}) must be below {BRIDGE_SEND_NYQUIST_HZ} Hz, the Nyquist '
+                f"of the bridge's own {BRIDGE_PERIOD_S}s send rate — above it the hand gets fewer "
+                'than two goals per cycle regardless of command_hz'
+            )
+        if self._amplitude <= 0:
+            errors.append(f'amplitude_m must be > 0, got {self._amplitude}')
+        else:
+            if self._center - self._amplitude < 0 or self._center + self._amplitude > BRIDGE_MAX_WIDTH_M:
+                errors.append(
+                    f'center_width_m ({self._center}) +/- amplitude_m ({self._amplitude}) must stay '
+                    f'within [0, {BRIDGE_MAX_WIDTH_M}]; the bridge would clamp the sweep and flatten '
+                    'its peaks into a signal the correlation then locks onto'
+                )
+            # The deadband quantises the commanded sweep in SPACE, not time: the bridge suppresses
+            # anything within BRIDGE_DEADBAND_M of the last width it actually sent, so the hand
+            # sees a staircase of at-least-deadband-sized steps. How many steps fit in a half
+            # stroke is therefore set by amplitude alone — frequency does not enter it. Too few and
+            # the "sinusoid" the hand is offered is a square wave.
+            levels = 2 * self._amplitude / BRIDGE_DEADBAND_M
+            if levels < MIN_DEADBAND_LEVELS:
+                errors.append(
+                    f'amplitude_m ({self._amplitude}) gives only {levels:.1f} deadband-sized steps '
+                    f"per half stroke against the bridge's {BRIDGE_DEADBAND_M * 1e3:.0f} mm "
+                    f'deadband, under the {MIN_DEADBAND_LEVELS} needed for the commanded sweep to '
+                    'still resemble a sinusoid — raise amplitude_m.'
+                )
+
+        topic = self.get_parameter('target_topic').get_parameter_value().string_value
+        state_topic = self.get_parameter('state_topic').get_parameter_value().string_value
+        self._pub = self.create_publisher(JointTrajectory, topic, 10)
+        self.create_subscription(JointState, state_topic, self._on_gripper_state, 10)
+        #: (stamp_s, aperture)
+        self._actual: list[tuple[float, float]] = []
         return errors
 
     # ------------------------------------------------------------------
@@ -435,7 +546,11 @@ class LatencyProbe(Node):
             return self._run_camera()
         if not self._wait_for_subscriber():
             return 1
-        return self._run_arm() if self._mode == 'arm' else self._run_gripper()
+        return {
+            'arm': self._run_arm,
+            'gripper': self._run_gripper,
+            'gripper_chirp': self._run_gripper_chirp,
+        }[self._mode]()
 
     def _wait_for_subscriber(self) -> bool:
         """Block until a bridge has matched our command topic, so commands are not published into a void."""
@@ -652,19 +767,13 @@ class LatencyProbe(Node):
         """
         Step the commanded aperture and time how long until the fingers respond.
 
-        Deliberately **not** the chirp-and-cross-correlate that upstream UMI uses for the WSG and
-        that the arm mode uses here. `fr3_gripper_bridge` rate-limits to at most one goal per
-        ``min_command_period_s`` (0.25 s), lets a new goal supersede whatever is in flight, and
-        drops anything inside its 5 mm deadband. Cross-correlation assumes the response is a
-        delayed *linear echo* of the command, and a discrete goal-superseding commander is not one:
-        driven at 0.6 Hz on hardware the hand fell most of a cycle behind, and the estimator
-        faithfully reported the resulting phase lag — 1.2 s — as though it were a delay. The
-        giveaway was that the answer grew with how much of the accelerating sweep it was given
-        (0.41 s -> 0.94 -> 1.04 -> 1.20), where a real transport delay is invariant to that.
+        Measures command -> *onset of motion* only, which is why the answer bottoms out near the
+        ~0.34 s libfranka firmware floor. `mode:=gripper_chirp` measures the fuller quantity — how
+        far the hand's *width* lags the commanded width — see `_run_gripper_chirp` for why that
+        used to be the wrong tool for this plant and no longer is.
 
-        A step response has no such assumption, and it is also what the bridge actually does in
-        service. Each rep here settles for GRIPPER_SETTLE_S (0.5 s) before the next command is
-        published — comfortably past the 0.25 s floor — so that floor plays no part in the number.
+        Each rep here settles for GRIPPER_SETTLE_S (0.5 s) before the next command is published —
+        comfortably past the bridge's 0.25 s rate limit — so that limit plays no part in the number.
         """
         low, high = self._center - self._step / 2, self._center + self._step / 2
         self.get_logger().warning(
@@ -702,6 +811,96 @@ class LatencyProbe(Node):
             )
         return self._report_gripper_steps(lags, float(np.max(noises)))
 
+    def _run_gripper_chirp(self) -> int:
+        """
+        Sweep the commanded aperture and cross-correlate it against the measured one.
+
+        Cross-correlation assumes the response is a delayed *linear echo* of the command. **On this
+        hardware it is not, and this mode has not yet produced a usable number.** Swept 0.3-0.7 Hz
+        at +/-30 mm on 2026-08-20 the hand was stationary for 76% of the state samples, moving in
+        short bursts, and the correlation peaked at 0.096 — no tracking at all. `Move` is a discrete
+        point-to-point goal carrying its own start-up delay, so superseding one every
+        `min_command_period_s` aborts each before it achieves much.
+
+        The mode is kept because that null result is exactly what it is for: it is the only thing
+        here that measures whether the hand *tracks* rather than merely *starts*, and it is how any
+        replacement command path gets judged. Read `peak_corr` first — under MIN_PEAK_CORR the
+        reported lag is meaningless, whatever it says. Once a run does clear the gates, re-run at a
+        different chirp_f0_hz/chirp_f1_hz and duration_s before pasting: a real delay is invariant
+        to both, a phase lag from a hand that cannot keep up is not.
+        """
+        self.get_logger().warning(
+            f'FINGERS WILL MOVE: sweeping the aperture by +/-{self._amplitude * 1e3:.0f} mm about '
+            f'{self._center * 1e3:.0f} mm for {self._duration_s:g}s. Nothing between the fingers. '
+            'Ctrl-C to abort.'
+        )
+        self._publish_width(self._center)
+        if self._wait_until_still() is None:
+            self.get_logger().error(
+                f'Aperture never settled within {self._settle_timeout_s:g}s. Is something between the fingers?'
+            )
+            return 1
+
+        commanded: list[tuple[float, float]] = []
+        start = self._now()
+        period = 1 / self._command_hz
+        while (elapsed := self._now() - start) < self._duration_s:
+            width = self._center + self._amplitude * float(self._chirp(elapsed))
+            commanded.append((self._publish_width(width), width))
+            time.sleep(period)
+
+        with self._lock:
+            actual = list(self._actual)
+
+        # Park before reporting. The loop just stops publishing, so the bridge is left holding the
+        # sweep's final width while the hand is still a whole gripper_exec behind it — and that gap
+        # is worst-case by construction, since a sweep of a whole number of cycles ends at its
+        # maximum while the lagging hand is near its minimum. Left alone the fingers cross most of
+        # the stroke while the plot window is already up. Snapshot first: this motion is not part
+        # of the measurement, and get_latency would ignore it anyway (it windows to the last
+        # command), but the series must not carry it either.
+        self._publish_width(self._center)
+        if self._wait_until_still() is None:
+            # Not fatal — the measurement is already taken. Only the resting position is in doubt.
+            self.get_logger().warning(
+                f'Fingers did not settle back at {self._center * 1e3:.0f} mm within '
+                f'{self._settle_timeout_s:g}s; check where they ended up before the next run.'
+            )
+
+        # A hand that never moved correlates to noise, which the sharpness checks in
+        # _report_xcorr reject with a message about peak width — indistinguishable from a
+        # marginal measurement. Name the real condition instead, as _run_arm does.
+        if actual:
+            actual_span = max(w for _, w in actual) - min(w for _, w in actual)
+            if actual_span < 0.1 * (2 * self._amplitude):
+                print(
+                    f'\nFAILED: the hand barely moved — commanded {2 * self._amplitude * 1e3:.1f} mm '
+                    f'peak-to-peak, observed {actual_span * 1e3:.2f} mm.\n'
+                    '  Nothing acted on the commands. In order of likelihood:\n'
+                    f'  1. no bridge is subscribed to {self._pub.topic_name} — is fr3_gripper_bridge '
+                    'running on the NUC,\n'
+                    '     with execute_gripper:=true?\n'
+                    '  2. the hand is faulted, or something is jammed between the fingers.\n'
+                    '  No latency can be inferred from this run.'
+                )
+                return 1
+
+        return self._report_xcorr(
+            'gripper_exec',
+            commanded,
+            actual,
+            note=(
+                'This is the whole command->width loop, not the onset of motion mode:=gripper\n'
+                "  times — it also carries the bridge's rate limit and the tracker its\n"
+                '  speed=|err|/lead_s amounts to, so expect several hundred ms above the step\n'
+                '  figure. That is the right quantity: gripper_exec picks which action index the\n'
+                '  hand is handed, so the hand should BE at that width, not merely starting toward\n'
+                '  it. Re-run at a different chirp_f0_hz/chirp_f1_hz before pasting — see this\n'
+                "  method's docstring for why."
+            ),
+            extra_lines=self._joint_state_interval_lines(),
+        )
+
     def _lookup_tcp(self):
         """Read the current TCP transform, or None (having logged why) if TF cannot supply it."""
         deadline = time.monotonic() + SUBSCRIBER_TIMEOUT_S
@@ -737,14 +936,39 @@ class LatencyProbe(Node):
     # Reporting
     # ------------------------------------------------------------------
 
+    def _joint_state_interval_lines(self) -> list[str]:
+        """
+        Report ``latency.gripper`` from the observed ``/fr3_gripper/joint_states`` publish rate.
+
+        Shared by both gripper modes — each collects its own ``self._actual`` in the same
+        ``(stamp_s, aperture)`` shape, so the topic's own publish interval means the same thing
+        either way. Half the interval is the honest bound: isolating the true value needs ground
+        truth of the aperture, and franka_gripper exposes no measure timestamp (UMI reads the
+        WSG's).
+
+        :returns: printable lines, or ``[]`` if too few samples arrived to trust an interval.
+        """
+        with self._lock:
+            samples = list(self._actual)
+        if len(samples) < 3:
+            return []
+        interval = float(np.median(np.diff([t for t, _ in samples])))
+        return [
+            f'  Separately: /fr3_gripper/joint_states publishes every {interval * 1e3:.1f} ms, so',
+            '  the honest bound on the OBSERVATION latency is half of that:',
+            '',
+            f'      latency.gripper: {interval / 2:.4f}',
+            '',
+            '  A different quantity from the figure above, which is the ACTION side.',
+            '',
+        ]
+
     def _report_gripper_steps(self, lags: list[tuple[str, float]], worst_noise_m: float) -> int:
         """Turn the per-rep step onsets into latency.gripper_exec, and judge the spread."""
         values = np.array([lag for _, lag in lags])
         opening = np.array([lag for d, lag in lags if d == 'open'])
         closing = np.array([lag for d, lag in lags if d == 'close'])
         median = float(np.median(values))
-        with self._lock:
-            samples = list(self._actual)
 
         lines = [
             '',
@@ -782,19 +1006,7 @@ class LatencyProbe(Node):
                 '  the bridge.',
                 '',
             ]
-        if len(samples) >= 3:
-            interval = float(np.median(np.diff([t for t, _ in samples])))
-            lines += [
-                f'  Separately: /fr3_gripper/joint_states publishes every {interval * 1e3:.1f} ms, so',
-                '  the honest bound on the OBSERVATION latency is half of that:',
-                '',
-                f'      latency.gripper: {interval / 2:.4f}',
-                '',
-                '  A different quantity from the step above, which is the ACTION side. Isolating the',
-                '  observation half needs ground truth of the true aperture; franka_gripper exposes no',
-                "  measure timestamp (UMI reads the WSG's), so this bound is as far as it goes.",
-                '',
-            ]
+        lines += self._joint_state_interval_lines()
         print('\n'.join(lines))
         self._save_npz(
             method='step',
@@ -805,8 +1017,14 @@ class LatencyProbe(Node):
         )
         return 1 if noisy else 0
 
-    def _report_xcorr(self, key, commanded, actual, note='') -> int:
-        """Cross-correlate commanded against measured, judge the peak, and print the config line."""
+    def _report_xcorr(self, key, commanded, actual, note='', extra_lines: tuple[str, ...] = ()) -> int:
+        """
+        Cross-correlate commanded against measured, judge the peak, and print the config line.
+
+        :param extra_lines: additional printable lines appended after ``note``, regardless of
+            whether the peak passed judgement — e.g. gripper_chirp's ``latency.gripper`` figure,
+            which is an independent measurement off the same samples and worth printing either way.
+        """
         if len(commanded) < 2 or len(actual) < 2:
             self.get_logger().error(
                 f'Not enough samples to correlate: {len(commanded)} commanded, {len(actual)} measured. '
@@ -866,6 +1084,7 @@ class LatencyProbe(Node):
             ]
         if note:
             lines += [f'  {note}', '']
+        lines += list(extra_lines)
         print('\n'.join(lines))
 
         self._save_npz(
