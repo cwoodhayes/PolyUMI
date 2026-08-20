@@ -499,8 +499,10 @@ the spawner — the spawner only says `Failed loading controller`, so the actual
 
 - [ ] **7. Deliberate contact.** Drive into a fixed surface.
       **Pass:** the arm complies and does not trip Franka's collision monitor. If it does, raise the
-      thresholds via `/service_server/set_full_collision_behavior` — the defaults treat contact as a
-      fault, which is wrong for these tasks. The controller deliberately does not set them itself.
+      `collision.*` thresholds in `nuc/config/polyumi_controllers.yaml` — the controller applies
+      them itself at `on_configure` (see "Collision thresholds" below) and refuses to configure if
+      they do not take, so a fault here means the values in that yaml are still too low for this
+      task, not that nothing is applying them.
 
 - [x] **8. Re-measure `latency.arm_exec`** — **0.0810 s, measured 2026-08-19**, down from 0.620 and in line with UMI's 0.1. With `ros2 run polyumi_ros2 latency_probe --ros-args
       -p mode:=arm`, which also defaults to the timed format now. Note this is a genuinely

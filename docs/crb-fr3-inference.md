@@ -37,15 +37,15 @@ The PolyUMI ROS2 nodes use only distro-agnostic APIs (`rclpy`, `sensor_msgs`,
 stack is Humble-only and stays on the NUC; the two machines interoperate purely at
 the DDS wire level.
 
-**Motion execution is split deliberately.** The laptop does *not* call MoveIt — it
-publishes the returned inference **action chunk** as a `geometry_msgs/PoseArray` on
-`/polyumi/target_poses` (one waypoint per action step, `n_action_steps` long — see
-[chunk execution](#action-chunk-execution) below), and the NUC-side `fr3_moveit_bridge`
-does all the MoveIt calls against its **local** move_group, planning the whole chunk as
-one multi-waypoint Cartesian path. This is not a style choice: large nested MoveIt
-action goals get corrupted across the laptop/NUC rmw-version gap (see
-[rmw mismatch](#rmw-version-mismatch--what-is-and-isnt-harmless)). Small messages like
-`PoseArray` cross fine, so the pose chunk is the interop boundary.
+**Motion execution is split deliberately.** The laptop does *not* call MoveIt's action
+interface directly — it publishes the returned inference **action chunk** as a small
+pose-chunk message (one waypoint per action step, `n_action_steps` long — see
+[chunk execution](#action-chunk-execution) below) and the NUC-side executor drives the
+arm from there. This is not a style choice: large nested MoveIt action goals get
+corrupted across the laptop/NUC rmw-version gap (see
+[rmw mismatch](#rmw-version-mismatch--what-is-and-isnt-harmless)). Small pose-chunk
+messages cross fine either way, so the chunk is the interop boundary regardless of
+which executor is running.
 
 ### Action-chunk execution
 
@@ -54,16 +54,23 @@ action goals get corrupted across the laptop/NUC rmw-version gap (see
 10 Hz a single-waypoint target is a discrete ~2 cm hop the arm cannot track in real time. This is
 receding-horizon control, the standard UMI/DP execution pattern.
 
-The chunk goes out on **two topics, for two different executors**:
+`policy_client_node` builds ONE of two wire formats, chosen by its `wire` parameter, and publishes
+it to exactly one topic:
 
-| Topic | Type | Consumer |
-|---|---|---|
-| `/polyumi/target_poses` | `PoseArray`, untimed | `fr3_moveit_bridge` — plan-then-execute via move_group |
-| `/polyumi/target_poses_traj` | `MultiDOFJointTrajectory`, absolute per-waypoint times | `polyumi_cartesian_impedance_controller` — 1 kHz streaming servo |
+| `wire` | Topic | Type | Consumer |
+|---|---|---|---|
+| `pose_array` | `/polyumi/target_poses` | `PoseArray`, untimed | `fr3_moveit_bridge` — plan-then-execute via move_group |
+| `multidof` (default) | `/polyumi/target_poses_traj` | `MultiDOFJointTrajectory`, absolute per-waypoint times | `polyumi_cartesian_impedance_controller` — 1 kHz streaming servo |
 
-Which one acts is decided by what is running on the NUC, not by a flag. **The streaming controller
-is the target design**; the MoveIt path is what it replaces and will be deleted once the servo is
-verified on hardware. See `docs/franka-inference-bringup.md` Phase 4.
+`wire` must MATCH the NUC's `executor` launch argument (`fr3_inference.launch.py`) — the laptop
+decides which format goes out, the NUC decides which controller is active, and the two have to
+agree on which executor is actually driving the arm. A mismatch is loud, not silent: nothing
+subscribes to whichever topic the client publishes, so the arm holds still and the client warns
+every second, naming the topic and the consumer it expected. See `ros2_ws/src/polyumi_ros2/polyumi_ros2/target_chunk.py`'s module
+docstring and `docs/franka-inference-bringup.md` Phase 4 for the full contract.
+
+**The streaming controller is the target design**; the MoveIt path is what it replaces and will be
+deleted once the servo is verified on hardware.
 
 * **MoveIt path**: plans one multi-waypoint Cartesian path per chunk, with skip-while-busy at the
   *chunk* level — a chunk arriving mid-execution is dropped. Each chunk therefore starts from rest
