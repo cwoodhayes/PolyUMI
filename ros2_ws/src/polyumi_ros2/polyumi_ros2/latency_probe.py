@@ -653,8 +653,8 @@ class LatencyProbe(Node):
         Step the commanded aperture and time how long until the fingers respond.
 
         Deliberately **not** the chirp-and-cross-correlate that upstream UMI uses for the WSG and
-        that the arm mode uses here. `fr3_gripper_bridge` quantises commands to
-        ``min_command_period_s`` (0.25 s), supersedes each in-flight `Move` goal with the next, and
+        that the arm mode uses here. `fr3_gripper_bridge` rate-limits to at most one goal per
+        ``min_command_period_s`` (0.25 s), lets a new goal supersede whatever is in flight, and
         drops anything inside its 5 mm deadband. Cross-correlation assumes the response is a
         delayed *linear echo* of the command, and a discrete goal-superseding commander is not one:
         driven at 0.6 Hz on hardware the hand fell most of a cycle behind, and the estimator
@@ -663,8 +663,8 @@ class LatencyProbe(Node):
         (0.41 s -> 0.94 -> 1.04 -> 1.20), where a real transport delay is invariant to that.
 
         A step response has no such assumption, and it is also what the bridge actually does in
-        service. Note the ~0.25 s command quantisation is *inside* the number and belongs there:
-        the policy's commands are quantised by the same timer.
+        service. Each rep here settles for GRIPPER_SETTLE_S (0.5 s) before the next command is
+        published — comfortably past the 0.25 s floor — so that floor plays no part in the number.
         """
         low, high = self._center - self._step / 2, self._center + self._step / 2
         self.get_logger().warning(
@@ -776,10 +776,10 @@ class LatencyProbe(Node):
                 '  policy_client_node truncates the gripper chunk by this value alone, independently',
                 '  of latency.arm_exec, so it goes in as measured — no arithmetic against the arm.',
                 '',
-                "  Most of the spread is the bridge's own min_command_period_s (0.25 s default): a",
-                '  step published just after its timer fires waits nearly a full period. That',
-                "  quantisation is real delay in service too — the policy's commands go through the",
-                '  same timer — so it belongs in the number, and the median summarises it.',
+                '  The bridge rate-limits sends to min_command_period_s apart (0.25 s default) but',
+                '  ticks far faster than that, so quantisation from its own timer is sub-20 ms — most',
+                '  of the spread above is the open/close asymmetry and firmware/network jitter, not',
+                '  the bridge.',
                 '',
             ]
         if len(samples) >= 3:

@@ -127,11 +127,28 @@ was once in this doc has been deleted.
   has **zero** ros2_control interfaces — no analogue of the arm's `cartesian_pose`. UMI servos its
   WSG50 at 30 Hz (`wsg_controller.py:144-250`) around the same interpolator as its arm; we cannot.
 - **It must also be rate-limited.** `gripper_action_server.cpp` returns `ACCEPT_AND_EXECUTE`
-  unconditionally and spawns a detached thread per goal — no queue, no preemption. libfranka aborts
-  the superseded command. Streaming at 10 Hz would mean ~9 spurious `Command aborted!` per second
-  plus unbounded thread churn. Hence a discrete, deadbanded, rate-limited commander, and hence a
+  unconditionally and spawns a detached thread per goal, with no queue. Streaming at 10 Hz would
+  mean unbounded thread churn. Hence a discrete, deadbanded, rate-limited commander, and hence a
   **separate node** from `fr3_moveit_bridge`, whose `_busy` lock would otherwise drop gripper
   commands precisely while an arm chunk executes.
+- **Superseding an unfinished goal is fine, and the bridge relies on it.** libfranka's
+  `tcpBlockingReceiveResponse` holds the TCP mutex with `defer_lock` and releases it between polls,
+  so a new `Move` goes out immediately and the one it replaces returns `Command aborted!`. The
+  bridge therefore never waits for a goal to *finish* — a `Move`'s result arrives only once the
+  fingers stop, so gating on it makes the hand deaf to a policy reversal for a whole stroke. The
+  aborts are logged at INFO and are the normal case, not a fault.
+- **~0.34 s of `latency.gripper_exec` is the hand itself.** `Gripper::move` is one
+  `tcpSendRequest`; everything after it is firmware. That is a floor. SERL
+  (`serl_robot_infra/franka_env/envs/franka_env.py`) hits the same wall and simply `sleep(0.6)`s
+  through it, binarising the gripper action with hysteresis so the transitions are rare.
+- **`franka_gripper` runs single-threaded, and `readOnce()` blocks.** Its state timer, all four
+  action servers and the default callback group are shared, the generated `franka_gripper_node`
+  uses a `SingleThreadedExecutor`, and `Gripper::readOnce()` always waits for a fresh UDP datagram
+  after draining the buffer — so that thread sits inside the blocking receive for most of each
+  ~43 ms inter-datagram gap, whatever `state_publish_rate` says. Goal-accept callbacks queue behind
+  it, worth ~40-85 ms of `gripper_exec` and its jitter. Fixing it means patching
+  `external/franka_ros2` (own callback group for the timer, `EXECUTOR MultiThreadedExecutor` on the
+  `rclcpp_components_register_node` line) and rebuilding on the NUC — not done, measure first.
 - **`Move` applies no force** and stalls on contact; `Grasp` is the only action that *holds* an
   object, opt-in via `use_grasp_below_m`, shipped disabled.
 - **`franka_gripper` publishes `max_width` on no topic**, so neither end of the range is readable
@@ -288,6 +305,11 @@ Everything below is blocked only on arm/GoPro access.
          …/255 — pillarbox as expected`. An error there means the crop is eating real image.
 - [ ] **Gripper on-arm dry run** (`fr3_gripper_bridge` with `execute:=false`)
 - [ ] **Gripper on-arm execution** (`execute:=true`, arm bridge plan-only)
+- [ ] **Re-measure `latency.gripper_exec`** — `ros2 run polyumi_ros2 latency_probe --ros-args -p
+      mode:=gripper`. The shipped 0.514 predates the bridge decoupling its rate limit from its tick
+      period, so it carries 0-250 ms of quantisation in both the median and its 376-710 spread.
+      Expect ~0.38 s, tighter. Once it lands, re-check whether `n_action_steps: 16` is still
+      needed — the gripper is what forced it up.
 
 Anything that **moves the arm** now lives in [Phase 4 bringup](#phase-4-bringup-the-on-arm-sequence)
 instead. Arm execution and the continuous 10 Hz loop were listed here against the MoveIt executor,

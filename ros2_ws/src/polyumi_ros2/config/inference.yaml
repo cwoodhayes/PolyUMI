@@ -81,17 +81,21 @@
       # Delay from publishing a width to the fingers actually starting to move — the gripper's
       # counterpart to arm_exec. Each device's chunk is truncated by its OWN value, so the hand
       # never inherits the arm's lead; this is UMI's robot_action_latency / gripper_action_latency
-      # split. Most of it is fr3_gripper_bridge's own min_command_period_s (0.25 s) quantisation,
-      # which is real delay in service and belongs here.
+      # split.
       #
-      # The hand is the slower device by ~433 ms (0.514 - 0.081): the arm is servoed, while the
-      # hand is driven by fr3_gripper_bridge's discrete, rate-limited Move/Grasp goals. It
-      # truncates ~5 more waypoints than the arm as a result. This is why the two are sliced
-      # independently — a shared slice would force the arm to inherit the hand's lead and act that
-      # much early.
+      # Roughly 0.34 s of it is the Franka Hand itself — libfranka's Gripper::move sends one TCP
+      # request and everything after that is firmware, so it is a floor, not a tuning target. The
+      # rest is fr3_gripper_bridge's min_command_period_s rate limit plus franka_gripper's own
+      # single-threaded executor, which sits inside a blocking UDP readOnce most of the time.
       #
-      # Calibrated on 08-10-2026: 8 steps, 514 ms median (376-710), open 514 / close 534.
-      gripper_exec: 0.514
+      # The hand is the slower device by a wide margin: the arm is servoed at 1 kHz, while the
+      # hand takes discrete, rate-limited Move/Grasp goals. It therefore truncates several more
+      # waypoints than the arm, which is why the two are sliced independently — a shared slice
+      # would force the arm to inherit the hand's lead and act that much early.
+      #
+      # Calibrated on 08-19-2026 via
+      #   ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper
+      gripper_exec: 0.380
 
       # Delay from the hand's true aperture to it appearing on /fr3_gripper/joint_states.
       # Kept separate from proprio because the gripper is a different device on its own link and

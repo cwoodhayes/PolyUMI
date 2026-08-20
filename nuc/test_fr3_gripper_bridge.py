@@ -1,11 +1,10 @@
 """
 Tests for the NUC-side gripper bridge's command loop.
 
-This is where every stateful decision on the gripper path lives — the single in-flight goal
-slot, the watchdog that frees it, the deadband, and the deferred _last_commanded commit — and
-all of it fails *quietly*: a wedged slot just stops commanding, a mis-committed _last_commanded
-just parks the hand at a width it never received. Nothing raises, so nothing shows up in a log
-except an absence.
+This is where every stateful decision on the gripper path lives — the rate limit, the deadband,
+and the _last_commanded claim it measures against — and all of it fails *quietly*: a rate limit
+that never releases just stops commanding, a _last_commanded left claiming a width the hand never
+got just parks the hand there. Nothing raises, so nothing shows up in a log except an absence.
 
 Runs on the laptop despite the bridge targeting the Humble NUC: only the franka_msgs *message
 definitions* are needed, and those are built in ros2_ws. No action servers are involved — the
@@ -16,7 +15,6 @@ ActionClient is mocked out, so these tests exercise the bridge's logic and nothi
       && /usr/bin/python3 -m pytest nuc/test_fr3_gripper_bridge.py -q'
 """
 
-import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -81,6 +79,11 @@ def _capture_sends(node) -> list:
     return sent
 
 
+def _allow_send(node) -> None:
+    """Clear the rate limit so the next _tick may command, isolating the logic under test."""
+    node._last_sent_at = None
+
+
 def _push_state(node, width_m: float) -> None:
     """Feed one gripper joint state, split across the two fingers as the FR3 reports it."""
     msg = JointState()
@@ -139,7 +142,7 @@ def test_degenerate_chunks_are_ignored(make_node):
 
 
 # ----------------------------------------------------------------------
-# Command loop: deadband and the in-flight slot
+# Command loop: the rate limit and the deadband
 # ----------------------------------------------------------------------
 
 
@@ -154,6 +157,7 @@ def test_deadband_suppresses_a_repeat_command(make_node):
     node._on_target(_chunk([0.05]))
     node._tick()
     node._on_target(_chunk([0.052]))  # 2mm — inside the deadband
+    _allow_send(node)  # so it is the deadband being tested, not the rate limit
     node._tick()
 
     logged = [c for c in node.get_logger().info.call_args_list if 'log-only' in str(c)]
@@ -166,15 +170,16 @@ def test_a_move_past_the_deadband_commands_again(make_node):
     node._on_target(_chunk([0.05]))
     node._tick()
     node._on_target(_chunk([0.07]))
+    _allow_send(node)
     node._tick()
 
     logged = [c for c in node.get_logger().info.call_args_list if 'log-only' in str(c)]
     assert len(logged) == 2
 
 
-def test_only_one_goal_is_in_flight_at_a_time(make_node):
-    """A second tick while a goal is unresolved sends nothing — the slot is claimed."""
-    node = make_node(execute=True)
+def test_the_rate_limit_holds_off_the_next_command(make_node):
+    """A second tick inside min_command_period_s sends nothing, however far the target moved."""
+    node = make_node(execute=True, min_command_period_s=0.25)
     sent = _capture_sends(node)
     node._on_target(_chunk([0.05]))
 
@@ -185,35 +190,43 @@ def test_only_one_goal_is_in_flight_at_a_time(make_node):
     assert len(sent) == 1
 
 
-def test_watchdog_frees_a_slot_whose_goal_never_resolved(make_node):
+def test_the_rate_limit_is_not_the_tick_period(make_node):
     """
-    A goal that never resolves must not wedge the bridge permanently.
+    Ticks are far cheaper than commands, so a ready target waits at most the period.
 
-    Goal resolution is callback-driven, so a lost result callback (server died mid-motion) would
-    otherwise stop the bridge commanding forever, and silently.
+    The two used to be the same number, which meant a target that became ready just after a tick
+    waited a whole period for no reason — pure quantisation on top of the hand's own delay.
+    """
+    node = make_node(min_command_period_s=0.25)
+    assert gb.TICK_PERIOD_S < node._period
+
+
+def test_an_unresolved_goal_does_not_block_the_next_command(make_node):
+    """
+    The bridge waits on the rate limit, never on the previous goal finishing.
+
+    A Move's result arrives only once the fingers stop, so gating on it made the hand deaf to a
+    policy reversal for the whole stroke. libfranka lets a new goal supersede an unfinished one —
+    the superseded command returns "Command aborted!", which _on_goal_result logs at INFO.
     """
     node = make_node(execute=True)
-    sent = _capture_sends(node)
+    sent = _capture_sends(node)  # nothing ever resolves: _send is replaced, no callbacks fire
     node._on_target(_chunk([0.05]))
     node._tick()
-    assert node._goal_in_flight
 
-    node._goal_sent_at = time.monotonic() - (gb.GOAL_RESULT_TIMEOUT_S + 1.0)
-    node._tick()  # notices the timeout, frees the slot, commands on the NEXT tick
-    assert not node._goal_in_flight
-    assert len(sent) == 1
-
+    node._on_target(_chunk([0.02]))
+    _allow_send(node)
     node._tick()
+
     assert len(sent) == 2
 
 
-def test_log_only_mode_never_claims_the_slot(make_node):
-    """A dry run must keep logging every distinct width, not stall behind a phantom goal."""
+def test_log_only_mode_still_deadbands(make_node):
+    """A dry run's log must be deadbanded, not one line per tick."""
     node = make_node(execute=False)
     node._on_target(_chunk([0.05]))
     node._tick()
 
-    assert not node._goal_in_flight
     assert node._last_commanded == pytest.approx(0.05)
 
 
@@ -231,10 +244,10 @@ def _goal_response(accepted: bool):
     return future, handle
 
 
-def test_last_commanded_is_committed_only_on_acceptance(make_node):
-    """The deadband measures drift from what the hand actually accepted, not what we attempted."""
+def test_an_accepted_goal_keeps_the_deadband_reference(make_node):
+    """The width _tick claimed stays claimed once the hand has it."""
     node = make_node(execute=True)
-    node._goal_in_flight = True
+    node._last_commanded = 0.05
     future, _ = _goal_response(accepted=True)
 
     node._on_goal_response(future, 'Move', width=0.05)
@@ -246,61 +259,69 @@ def test_a_rejected_goal_stays_retryable(make_node):
     """
     A goal the hand never got must not be deadbanded away.
 
-    Committing _last_commanded on send would suppress every retry until the policy's target
-    drifted a full deadband, parking the hand at a width it was never told about.
+    Leaving _last_commanded claimed would suppress every retry until the policy's target drifted
+    a full deadband, parking the hand at a width it was never told about.
     """
     node = make_node(execute=True)
-    node._goal_in_flight = True
+    node._last_commanded = 0.05
     future, _ = _goal_response(accepted=False)
 
     node._on_goal_response(future, 'Move', width=0.05)
 
     assert node._last_commanded is None
-    assert not node._goal_in_flight
 
 
-def test_a_send_failure_frees_the_slot_instead_of_wedging_it(make_node):
+def test_a_late_rejection_does_not_unclaim_a_newer_width(make_node):
     """
-    A send whose future carries an exception must free the slot, not escape the callback.
+    Goals resolve out of order under preemption, so unclaiming must match on the width.
 
-    rclpy's Future.result() re-raises what the send stored rather than returning None.
-
-    Unguarded, the raise escapes into rclpy internals and _clear_in_flight never runs — the
-    bridge then stops commanding for a full GOAL_RESULT_TIMEOUT_S, with nothing in the log to
-    say why.
+    Otherwise a rejection arriving after the next goal was already accepted drops that newer
+    claim, and the bridge re-sends a width the hand is already holding.
     """
     node = make_node(execute=True)
-    node._goal_in_flight = True
+    node._last_commanded = 0.02  # a newer goal has since been sent and claimed
+    future, _ = _goal_response(accepted=False)
+
+    node._on_goal_response(future, 'Move', width=0.05)  # the OLD one, rejected late
+
+    assert node._last_commanded == pytest.approx(0.02)
+
+
+def test_a_send_failure_stays_retryable(make_node):
+    """
+    A send whose future carries an exception must unclaim, not escape the callback.
+
+    rclpy's Future.result() re-raises what the send stored rather than returning None. Unguarded,
+    the raise escapes into rclpy internals and _last_commanded keeps claiming a width the hand
+    never got — which the deadband then suppresses every retry against.
+    """
+    node = make_node(execute=True)
+    node._last_commanded = 0.05
     future = MagicMock()
     future.result.side_effect = RuntimeError('send failed')
 
     node._on_goal_response(future, 'Move', width=0.05)
 
-    assert not node._goal_in_flight
     assert node._last_commanded is None
 
 
-def test_a_raising_result_future_frees_the_slot_too(make_node):
-    """Same guarantee on the result half of the handshake."""
+def test_a_raising_result_future_does_not_escape(make_node):
+    """Same guard on the result half; there is nothing to release, only a raise to swallow."""
     node = make_node(execute=True)
-    node._goal_in_flight = True
     future = MagicMock()
     future.result.side_effect = RuntimeError('result failed')
 
-    node._on_goal_result(future, 'Move')
-
-    assert not node._goal_in_flight
+    node._on_goal_result(future, 'Move')  # must not raise
 
 
-def test_an_unavailable_server_drops_the_goal_and_frees_the_slot(make_node):
-    """A dropped goal has to leave the bridge able to retry, not holding a claimed slot."""
+def test_an_unavailable_server_drops_the_goal_and_stays_retryable(make_node):
+    """A dropped goal has to leave the bridge able to retry, not holding the claim."""
     node = make_node(execute=True)
-    node._goal_in_flight = True
+    node._last_commanded = 0.05
     node._move.server_is_ready.return_value = False
 
     node._send(node._move, gb.Move.Goal(), 'Move', width=0.05)
 
-    assert not node._goal_in_flight
     assert node._last_commanded is None
 
 
@@ -340,7 +361,7 @@ def test_grasp_is_used_only_when_closing_below_the_threshold(make_node):
     node._tick()
     assert sent[-1][0] == 'Grasp'
 
-    node._clear_in_flight()
+    _allow_send(node)
     _push_state(node, 0.01)
     node._on_target(_chunk([0.025]))  # below the threshold but OPENING
     node._tick()
@@ -425,7 +446,7 @@ def test_deadband_hold_logs_again_after_the_target_moves_away(make_node):
 
     node._desired_width = 0.070  # past the deadband: sends, clearing the latch
     node._tick()
-    node._clear_in_flight()
+    _allow_send(node)
     node._last_commanded = 0.070
     node._desired_width = 0.072  # inside the deadband again
     node._tick()

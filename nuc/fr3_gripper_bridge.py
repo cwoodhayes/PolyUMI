@@ -15,10 +15,17 @@ franka::Gripper exposes only blocking homing/grasp/move/stop. So instead of trac
 waypoint, this node holds the latest desired width and issues a discrete goal only when the
 target has moved past a deadband and a minimum period has elapsed.
 
-That rate limit is mandatory, not a nicety: franka_gripper's action server ACCEPTs every goal
-unconditionally into a detached thread, with no queue and no preemption, and libfranka aborts
-whichever command a new goal supersedes. Commanding at the 10 Hz control rate would produce ~9
-aborted goals per second plus unbounded thread churn.
+That rate limit is what bounds the cost: franka_gripper's action server ACCEPTs every goal
+unconditionally into a detached thread, with no queue, so commanding at the 10 Hz control rate
+would mean unbounded thread churn. It is deliberately NOT tied to the tick rate — the timer runs
+at TICK_PERIOD_S so a command that becomes ready just after a tick does not wait a whole period
+for no reason.
+
+Superseding an unfinished goal is fine, and the bridge relies on it. libfranka's
+tcpBlockingReceiveResponse holds the TCP mutex with defer_lock and releases it between polls, so a
+new Move goes out immediately and the one it replaces returns "Command aborted!". So the bridge
+never waits for a goal to *finish* before commanding again: a Move's result arrives only once the
+fingers stop, and blocking on that made the hand deaf to a policy reversal for the whole stroke.
 
 Self-contained (no PolyUMI package deps) so it runs from a plain clone on the NUC:
     source /opt/ros/humble/setup.bash
@@ -48,11 +55,10 @@ DEFAULT_STATE_TOPIC = '/fr3_gripper/joint_states'
 # The hand's true max is ~0.0817 m after homing, but max_width is not published on any topic —
 # it lives only inside franka_gripper — so it has to be a constant here.
 DEFAULT_MAX_WIDTH = 0.08
-# Watchdog on the single in-flight goal slot. Goal resolution is callback-driven, so a goal that
-# never resolves (server died mid-motion, result callback lost) would otherwise wedge the bridge
-# permanently — it would stop commanding and never say why. A full-stroke Move at our slowest
-# allowed speed takes a few seconds, so this is generous.
-GOAL_RESULT_TIMEOUT_S = 10.0
+# How often _tick looks, as distinct from how often it may command (min_command_period_s). Fast
+# enough that the look-interval is small against the hand's own ~0.35 s command->motion delay, so
+# it contributes nothing measurable; the rate limit still decides what actually goes out.
+TICK_PERIOD_S = 0.02
 
 
 class Fr3GripperBridge(Node):
@@ -107,22 +113,21 @@ class Fr3GripperBridge(Node):
         self._move = ActionClient(self, Move, '/fr3_gripper/move', callback_group=self._cbgroup)
         self._grasp = ActionClient(self, Grasp, '/fr3_gripper/grasp', callback_group=self._cbgroup)
 
-        # Latest-wins target; no queue. _last_commanded is what the hand actually *accepted* (not
-        # what was last requested, nor what was merely attempted), so the deadband measures drift
-        # from the hand's real commanded state and a goal that never landed stays retryable.
+        # Latest-wins target; no queue. _last_commanded is the deadband's reference: claimed when
+        # a goal is sent, and dropped again by _forget_commanded if that goal never lands, so a
+        # width the hand never received stays retryable instead of being deadbanded away.
         self._state_lock = threading.Lock()
         self._desired_width: float | None = None
         self._desired_lead_s = self._period
         self._last_commanded: float | None = None
         self._current_width: float | None = None
-        self._goal_in_flight = False
-        self._goal_sent_at: float | None = None
+        self._last_sent_at: float | None = None
         # Latched so entering the deadband says so once, rather than every period. See _tick.
         self._holding_logged = False
 
         self.create_subscription(JointTrajectory, topic, self._on_target, 10, callback_group=self._cbgroup)
         self.create_subscription(JointState, state_topic, self._on_state, 10, callback_group=self._cbgroup)
-        self.create_timer(self._period, self._tick, callback_group=self._cbgroup)
+        self.create_timer(min(TICK_PERIOD_S, self._period), self._tick, callback_group=self._cbgroup)
 
         # Fail loudly at startup rather than on the first chunk.
         for client, name in ((self._move, 'move'), (self._grasp, 'grasp')):
@@ -218,24 +223,17 @@ class Fr3GripperBridge(Node):
     # ------------------------------------------------------------------
 
     def _tick(self) -> None:
-        """Issue at most one gripper goal per period, and only if the target has really moved."""
+        """Issue at most one gripper goal per min_command_period_s, and only if the target moved."""
         now = time.monotonic()
-        # Read the state AND claim the in-flight slot in ONE critical section. The subscriptions
-        # and this timer share a ReentrantCallbackGroup under a MultiThreadedExecutor, so two
-        # ticks can genuinely overlap; checking the slot here and setting it further down would
-        # let both pass the guard and both send.
+        # Read the state AND claim the send in ONE critical section. The subscriptions and this
+        # timer share a ReentrantCallbackGroup under a MultiThreadedExecutor, so two ticks can
+        # genuinely overlap; checking the rate limit here and stamping it further down would let
+        # both pass the guard and both send.
         with self._state_lock:
-            if self._goal_in_flight:
-                # Watchdog: a goal whose result never arrives would otherwise block every future
-                # command silently. Free the slot and say so; the next tick commands.
-                sent_at = self._goal_sent_at
-                if sent_at is not None and now - sent_at > GOAL_RESULT_TIMEOUT_S:
-                    self._goal_in_flight = False
-                    self._goal_sent_at = None
-                    self.get_logger().warning(
-                        f'Gripper goal has been in flight for {now - sent_at:.1f}s with no result; '
-                        'releasing the slot. If this repeats, check that fr3-bringup is still up.'
-                    )
+            # The rate limit, deliberately measured against the last SEND rather than being the
+            # timer period. Nothing waits on the previous goal *finishing* — see the module
+            # docstring on preemption.
+            if self._last_sent_at is not None and now - self._last_sent_at < self._period:
                 return
             desired = self._desired_width
             lead_s = self._desired_lead_s
@@ -260,14 +258,8 @@ class Fr3GripperBridge(Node):
                     )
                 return
             self._holding_logged = False
-            if self._execute:
-                self._goal_in_flight = True
-                self._goal_sent_at = now
-                # NB: _last_commanded is deliberately NOT set here. It records what the hand was
-                # actually told, and the goal can still fail to go out (server gone) or be
-                # rejected. Setting it now would let the deadband suppress every retry until the
-                # policy's target drifted past it, parking the hand at a width it never received.
-                # _on_goal_response commits it once the goal is accepted.
+            self._last_sent_at = now
+            self._last_commanded = desired
 
         speed = self._desired_speed(desired, current, lead_s)
         use_grasp = (
@@ -276,10 +268,6 @@ class Fr3GripperBridge(Node):
         action = 'Grasp' if use_grasp else 'Move'
         if not self._execute:
             self.get_logger().info(f'[log-only] would send {action}(width={desired:.4f}m, speed={speed:.3f}m/s)')
-            # Nothing can fail in log-only mode, so commit immediately — this is what keeps a
-            # dry run's log deadbanded rather than one line per period.
-            with self._state_lock:
-                self._last_commanded = desired
             return
 
         self.get_logger().info(f'{action}(width={desired:.4f}m, speed={speed:.3f}m/s)')
@@ -311,74 +299,73 @@ class Fr3GripperBridge(Node):
 
     def _send(self, client: ActionClient, goal, label: str, width: float) -> None:
         """
-        Send a gripper goal and free the in-flight slot when it resolves.
+        Send a gripper goal, unclaiming the deadband reference if it never lands.
 
-        :param width: the commanded aperture, carried through so _on_goal_response can record it
-            as _last_commanded only once the goal is accepted — a goal that never lands must stay
-            retryable rather than being deadbanded away.
+        :param width: the commanded aperture, carried through so _forget_commanded only unclaims
+            THIS width — a later goal may already have been sent and accepted by the time a
+            rejection for this one arrives.
         """
         if not client.server_is_ready():
             self.get_logger().error(f'{label} server not available; dropping goal (will retry).')
-            self._clear_in_flight()
+            self._forget_commanded(width)
             return
         future = client.send_goal_async(goal)
         future.add_done_callback(lambda f: self._on_goal_response(f, label, width))
 
     def _on_goal_response(self, future, label: str, width: float) -> None:
         """
-        Handle goal acceptance, record what was commanded, then chain to the result.
+        Chain to the result, or unclaim the deadband reference if the goal never landed.
 
         rclpy's ``Future.result()`` **re-raises** whatever exception the send stored rather than
         returning None, and this runs as a done-callback — so an unguarded raise here escapes into
-        rclpy internals and skips _clear_in_flight, wedging the slot until the watchdog expires.
-        Catching it turns a silent GOAL_RESULT_TIMEOUT_S stall into an immediate retry.
+        rclpy internals and leaves _last_commanded claiming a width the hand never got, which the
+        deadband would then suppress every retry against.
         """
         try:
             handle = future.result()
-        except Exception as e:  # broad on purpose: ANY send failure must still free the slot
+        except Exception as e:  # broad on purpose: ANY send failure must still stay retryable
             self.get_logger().warning(f'{label} goal failed to send: {e} (will retry).')
-            self._clear_in_flight()
+            self._forget_commanded(width)
             return
         if handle is None or not handle.accepted:
-            # Leave _last_commanded alone: the hand never got this width, so the next tick should
-            # be free to try again rather than treating it as already satisfied.
             self.get_logger().warning(f'{label} goal rejected (will retry).')
-            self._clear_in_flight()
+            self._forget_commanded(width)
             return
-        with self._state_lock:
-            self._last_commanded = width
         handle.get_result_async().add_done_callback(lambda f: self._on_goal_result(f, label))
 
     def _on_goal_result(self, future, label: str) -> None:
         """
-        Log the outcome and free the slot.
+        Log the outcome. Nothing is waiting on it — the bridge commands on the rate limit alone.
 
-        A failed/aborted result is logged at INFO, not as an error: franka_gripper has no
-        preemption, so libfranka aborts whichever command the next goal supersedes, and a
-        moving target legitimately produces these. Treating them as faults would generate
-        exactly the log spam the rate limiting exists to prevent. A *steady stream* of them
-        still means the deadband or period is too small — see docs/crb-fr3-inference.md.
+        A failed/aborted result is logged at INFO, not as an error: libfranka aborts whichever
+        command the next goal supersedes, and superseding is the normal case here, so a moving
+        target legitimately produces these. Treating them as faults would be pure log spam. What
+        a *steady stream* of them means is the deadband or period is too small — see
+        docs/crb-fr3-inference.md.
 
         Guarded for the same reason as _on_goal_response: ``Future.result()`` re-raises, and an
-        escaping exception here would skip _clear_in_flight and wedge the slot.
+        escaping exception in a done-callback lands in rclpy internals rather than anywhere useful.
         """
         try:
             result = future.result()
-        except Exception as e:  # broad on purpose: ANY result failure must still free the slot
+        except Exception as e:  # broad on purpose: a done-callback must not raise into rclpy
             self.get_logger().warning(f'{label} result raised: {e}')
-            self._clear_in_flight()
             return
         if result is None:
             self.get_logger().warning(f'{label} returned no result.')
         elif not result.result.success:
             self.get_logger().info(f'{label} did not complete: {result.result.error}')
-        self._clear_in_flight()
 
-    def _clear_in_flight(self) -> None:
-        """Release the single-goal slot so the next tick can command again."""
+    def _forget_commanded(self, width: float) -> None:
+        """
+        Drop the deadband reference so a goal the hand never got is retried, not suppressed.
+
+        Only if it is still ``width``: goals resolve out of order under preemption, so a late
+        rejection must not unclaim a newer width that was accepted in the meantime.
+        """
         with self._state_lock:
-            self._goal_in_flight = False
-            self._goal_sent_at = None
+            if self._last_commanded == width:
+                self._last_commanded = None
 
 
 def main():
