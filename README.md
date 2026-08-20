@@ -3,15 +3,15 @@ https://github.com/user-attachments/assets/2f902600-9682-4e67-a75c-fc8fa358cb92
 # PolyUMI: Visual + Auditory + Tactile Manipulation Platform for Imitation Learning
 
 **Project website:** https://cwoodhayes.github.io/projects/polyumi  
-**Hardware guide:** [Google Doc](https://docs.google.com/document/d/1T0v_7H8YAJjOud9QWYlQct29a78YKvELPIpKTzajFs0/edit?usp=sharing)
+**Hardware build guide:** [Google Doc](https://docs.google.com/document/d/1T0v_7H8YAJjOud9QWYlQct29a78YKvELPIpKTzajFs0/edit?usp=sharing)
 
-PolyUMI is a real-time data collection & control platform for robotic imitation learning, which unifies the following sensor modalities in a single end-effector:
+PolyUMI is an imitation learning platform supporting UMI-style data collection via handheld gripper which unifies the following sensor modalities in a single end-effector:
 - **touch** (via a custom optical tactile-sensing finger, based off of [PolyTouch](https://polytouch.alanz.info/)) - *10fps 540x480 MJPEG video (MP4)*
 - **mechanical vibration** (via a contact microphone fixed to the finger housing) - *16kHz PCM audio (WAV)*
 - **vision** (via GoPro camera on wrist + finger camera peripheral vision) - *60fps 1920x1080 MJPEG video (MP4) + 10fps 540x480 MJPEG video*
-- **proprioception** (via monocular inertial SLAM from GoPro + IMU in gripper, or robot joint encoders + FK in embodiments)
+- **proprioception** (via monocular inertial SLAM from GoPro + IMU in gripper, or OptiTrack for the same; and robot joint encoders + FK in embodiments)
 
-It combines the [Universal Manipulation Interface (UMI)](https://umi-gripper.github.io/) platform with a custom touch-sensing finger inspired by the [PolyTouch tactile + audio sensor](https://polytouch.alanz.info/), with hardware, firmware, and software built from scratch for a modern robotics stack (ROS2 Kilted + Python 3.13 + Foxglove visualizer).
+It combines the [Universal Manipulation Interface (UMI)](https://umi-gripper.github.io/) platform with a custom touch-sensing finger inspired by the [PolyTouch tactile + audio sensor](https://polytouch.alanz.info/), with hardware, firmware, and software designed from scratch for modularity and hardware performance on a modern robotics stack (ROS2 Kilted/Humble, Python 3.13, Foxglove).
 
 <div align="center" style="display: flex; flex-wrap: wrap; gap: 12px; justify-content: center;">
   <div style="flex: 1 1 480px; min-width: 320px; max-width: 600px;">
@@ -27,15 +27,31 @@ It combines the [Universal Manipulation Interface (UMI)](https://umi-gripper.git
 ## Repo Structure
 
 ```
-pi/               # RPi client: camera, audio, LED streaming + episode recording
-ingest/           # PC-side CLI: fetch sessions from Pi, encode video
-inference_server/ # GPU-side FastAPI server for diffusion-policy inference (see docs/franka-inference-bringup.md)
-ros2_ws/
+catalog/          # Catalog UI: Web UI for organizing datasets collected on the gripper
+docs/             # Documentation for this repo
+external/         # Git submodules
+  franka_ros2/              # ROS2 control stack for Franka Emika Panda robot arm
+  ORB_SLAM3_PolyUMI/        # PolyUMI's ORB_SLAM3 fork (monocular visual-inertial SLAM for the GoPro Hero 12)
+  polyumi_diffusion_policy  # control policy implementations, dockerized & wrapped in an API server
+inference_server/ # dummy inference server for testing inference pipeline without the model
+infra/            # RPi provisioning infrastructure (see docs/pi-provisioning.md)
+ingest/           # PC-side CLI: fetch sessions from Pi, run preprocessing pipeline, and export training datasets
+notebooks/        # jupyter notebooks for bringup/debugging
+nuc/              # inference pipeline code specific to Northwestern CRB's Franka FR3 arm setup
+pi/               # RPi app: streaming server for video + audio on the EE, gripper episode recording, etc
+ros2_ws/          
   src/
     polyumi_pi_msgs/   # Protobuf message definitions (camera frame, audio chunk)
     polyumi_ros2/      # ROS 2 nodes + Foxglove launch files
-external/
-  ORB_SLAM3_PolyUMI/   # Git submodule: PolyUMI's ORB_SLAM3 fork (monocular visual-inertial SLAM for the GoPro Hero 12)
+```
+
+**Additional scripts:**  
+```
+deploy.sh           # deploys code updates to the pi
+fr3_session.sh      # brings up tmux sessions for inference on the CRB's arm
+serve_policy.sh     # brings up inference server for a trained model
+setup_franka_env.sh # sets up PC-side environment for interacting with the CRB's arm
+train_policy.sh     # starts model training
 ```
 
 ## Prerequisites
