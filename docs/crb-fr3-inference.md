@@ -20,16 +20,31 @@ laptop talk to a Humble NUC. If something here drifts from reality, fix it here 
 Laptop (Kilted, Noble)                        NUC (Humble, Jammy)  [nu-crb]
 RMW=rmw_cyclonedds_cpp, DOMAIN=0  ◄─ DDS over ─►  RMW=rmw_cyclonedds_cpp, DOMAIN=0
 enp0s31f6 = 10.0.0.1/24            10.0.0.x      enx00249b860356 = 10.0.0.2/24
-  - foxglove_bridge                               - fr3_bringup.launch.py (franka_bringup
-  - v4l2_camera (GoPro)                             + fr3_arm_controller spawner)
-  - pi_receiver_node                              - move_group  (nuc/launch/fr3_move_group.launch.py)
-  - policy_client_node ──HTTP──┐                  - fr3_moveit_bridge  (nuc/fr3_moveit_bridge.py)
-  - dummy_server (localhost:8000) ◄┘              - fr3_gripper_bridge (nuc/fr3_gripper_bridge.py)
+  - foxglove_bridge                               - fr3_bringup.launch.py: franka_bringup
+  - v4l2_camera (GoPro)                              (controller_manager + hardware interface)
+  - pi_receiver_node                                 + fr3_arm_controller spawner
+  - policy_client_node ──HTTP──┐                  - fr3_inference.launch.py: move_group,
+  - dummy_server (localhost:8000) ◄┘                 fr3_moveit_bridge, fr3_gripper_bridge, and the
+        │                                           polyumi_cartesian_impedance_controller spawner
+        │                                           (nuc/polyumi_fr3_controllers/, spawned --inactive)
         │                                         - publishes fr3_* TF + joint states
         │                                         - enp89s0 = 192.168.51.10 → robot @ .20
-        ├── /polyumi/target_poses (PoseArray) ─────────► fr3_moveit_bridge ──► move_group
+        │
+        │   `wire` (laptop param) picks ONE of these two — must match `executor` (NUC arg):
+        │
+        ├─ wire=pose_array ── /polyumi/target_poses ────────► fr3_moveit_bridge ─► move_group
+        │                       (PoseArray, untimed)            (plan-then-execute)
+        │
+        ├─ wire=multidof   ── /polyumi/target_poses_traj ─────► polyumi_cartesian_impedance_controller
+        │   (default)          (MultiDOFJointTrajectory,          (1 kHz streaming servo; ACTIVE only
+        │                       absolute per-waypoint times)       when executor:=servo, execute_arm:=true)
+        │
         └── /polyumi/target_gripper ───────────────────► fr3_gripper_bridge ─► /fr3_gripper/{move,grasp}
               (JointTrajectory)
+
+fr3_arm_controller and polyumi_cartesian_impedance_controller claim the same <joint>/effort
+interfaces, so exactly one holds the arm at a time — /polyumi/home (on fr3_moveit_bridge) switches
+between them for homing and hands back to whichever was active.
 ```
 
 The PolyUMI ROS2 nodes use only distro-agnostic APIs (`rclpy`, `sensor_msgs`,
