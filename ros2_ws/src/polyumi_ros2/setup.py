@@ -59,6 +59,7 @@ setup(
             'tcp_pivot_test = polyumi_ros2.tcp_pivot_test:main',
             'gripper_range_probe = polyumi_ros2.gripper_range_probe:main',
             'latency_probe = polyumi_ros2.latency_probe:main',
+            'servo_smoke_test = polyumi_ros2.servo_smoke_test:main',
         ],
     },
 )

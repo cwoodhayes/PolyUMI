@@ -704,10 +704,10 @@ def test_gripper_and_pose_chunks_stay_index_aligned(make_node):
     ):
         node._post_and_act(payload={}, t_obs=t_obs)
 
-    pose_msg = pose_pub.call_args[0][0]
+    poses = pose_pub.call_args[0][0]
     grip_msg = grip_pub.call_args[0][0]
-    assert 0 < len(pose_msg.poses) < 8  # the drop actually happened
-    assert len(grip_msg.points) == len(pose_msg.poses)
+    assert 0 < len(poses) < 8  # the drop actually happened
+    assert len(grip_msg.points) == len(poses)
 
 
 def _diag_values(captured):
@@ -808,3 +808,62 @@ def test_gripper_preview_publishes_full_chunk(make_node):
 
     grip_preview.assert_called_once()
     assert len(grip_preview.call_args[0][0].points) == 8
+
+
+# ----------------------------------------------------------------------
+# Where the arm chunk is aimed, and how it is anchored in time
+# ----------------------------------------------------------------------
+#
+# The message layout itself is covered by test_target_chunk.py. What this node contributes is the
+# two arguments it derives: the anchor instant, and the pre-slice index.
+
+
+def test_arm_chunk_is_anchored_at_t_obs_minus_arm_exec(make_node):
+    """
+    The anchor carries latency.arm_exec already subtracted, so waypoints are commanded early.
+
+    UMI does this per waypoint (`target_time - robot_action_latency` in exec_actions); the offset is
+    identical for every waypoint in a chunk, so folding it into the anchor is the same thing.
+    Getting the sign backwards would command every pose one arm_exec LATE, doubling the lag this
+    whole path exists to remove.
+
+    first_index must be the index in the ORIGINAL chunk, before the stale-drop slice — the poses are
+    sliced but their timeline is not, so the two have to be passed separately.
+    """
+    node = make_node(control_hz=10.0, execute_motion=True, publish_preview=False, **{'latency.arm_exec': 0.3})
+    actions = _actions_with_grip([0.02] * 8)
+
+    with (
+        patch.object(node, '_http_post_json', return_value={'actions': actions}),
+        patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))),
+        patch.object(node._target_pub, 'publish') as pose_pub,
+    ):
+        node._post_and_act(payload={}, t_obs=_t(99.9))
+
+    kwargs = pose_pub.call_args[1]
+    stamp = kwargs['stamp'].sec + kwargs['stamp'].nanosec * 1e-9
+    assert stamp == pytest.approx(99.6)  # 99.9 - 0.3
+    # 0.1s obs age + 0.3s arm_exec over a 0.1s action_dt drops 4, so the survivors start at 4.
+    assert kwargs['first_index'] == 4
+    assert len(pose_pub.call_args[0][0]) == 4
+
+
+def test_wire_decides_where_the_arm_chunk_goes(make_node):
+    """
+    One format, one topic — publishing both let the NUC alone decide which executor acted.
+
+    A stack could then drive MoveIt while looking like it was driving the servo. Now a mismatch
+    between this and the NUC's `executor` means nothing subscribes, which the publish path warns
+    about rather than silently doing the wrong thing.
+    """
+    servo = make_node(control_hz=10.0, execute_motion=True)
+    assert servo._target_pub.topic_name == '/polyumi/target_poses_traj'
+
+    moveit = make_node(control_hz=10.0, execute_motion=True, wire='pose_array')
+    assert moveit._target_pub.topic_name == '/polyumi/target_poses'
+
+
+def test_unknown_wire_fails_fast(make_node):
+    """A typo must not bring the node up publishing where nothing subscribes."""
+    with pytest.raises(ValueError):
+        make_node(control_hz=10.0, execute_motion=True, wire='multidoff')

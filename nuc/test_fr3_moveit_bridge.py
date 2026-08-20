@@ -204,3 +204,129 @@ def test_execute_success_does_not_cancel(make_node):
     assert node._run_execute(RobotTrajectory())
 
     node._exec.send_goal_async.return_value.result.return_value.cancel_goal_async.assert_not_called()
+
+
+# ----------------------------------------------------------------------
+# Controller handover
+# ----------------------------------------------------------------------
+
+
+def _stub_switch(node, ok=True):
+    """Make /controller_manager/switch_controller answer `ok`, and record the requests it got."""
+    node._switch.wait_for_service.return_value = True
+    result = MagicMock()
+    result.ok = ok
+    node._switch.call_async.return_value.result.return_value = result
+    return node._switch.call_async
+
+
+def _switch_pairs(call_async) -> list:
+    """Return the (activate, deactivate) pairs the bridge asked for, in order."""
+    return [
+        (tuple(c[0][0].activate_controllers), tuple(c[0][0].deactivate_controllers)) for c in call_async.call_args_list
+    ]
+
+
+def _stub_switch_sequence(node, oks: list[bool]):
+    """Like _stub_switch, but each successive switch_controller call answers the next `oks` value."""
+    node._switch.wait_for_service.return_value = True
+    futures = []
+    for ok in oks:
+        result = MagicMock()
+        result.ok = ok
+        future = MagicMock()
+        future.result.return_value = result
+        futures.append(future)
+    node._switch.call_async.side_effect = futures
+    return node._switch.call_async
+
+
+def test_home_borrows_the_arm_from_the_servo_and_gives_it_back(make_node):
+    """
+    Homing must borrow the arm from the streaming controller and then give it back.
+
+    Homing goes through move_group, which drives fr3_arm_controller; the streaming impedance
+    controller claims the same effort interfaces, so exactly one can hold the arm. Failing to hand
+    it back would leave the policy silently commanding nothing after every home.
+    """
+    node = make_node()
+    _stub_plan_ok(node)
+    _capture_execute(node)
+    call_async = _stub_switch(node)
+
+    assert _home(node).success
+
+    assert _switch_pairs(call_async) == [
+        ((mb.MOVEIT_CONTROLLER,), (mb.SERVO_CONTROLLER,)),
+        ((mb.SERVO_CONTROLLER,), (mb.MOVEIT_CONTROLLER,)),
+    ]
+
+
+def test_home_switches_strictly(make_node):
+    """
+    The handover must be STRICT.
+
+    BEST_EFFORT could half-apply, leaving the arm with two controllers claiming its efforts or
+    none — and "none" looks exactly like a working system that has stopped moving.
+    """
+    node = make_node()
+    _stub_plan_ok(node)
+    _capture_execute(node)
+    call_async = _stub_switch(node)
+
+    _home(node)
+
+    request = call_async.call_args_list[0][0][0]
+    assert request.strictness == mb.SwitchController.Request.STRICT
+
+
+def test_home_hands_the_arm_back_even_when_planning_fails(make_node):
+    """A failed home must not strand the servo deactivated — that is a silent dead policy."""
+    node = make_node()
+    node._joint_plan.service_is_ready.return_value = False  # planner unavailable
+    call_async = _stub_switch(node)
+
+    assert not _home(node).success
+
+    assert _switch_pairs(call_async)[-1] == ((mb.SERVO_CONTROLLER,), (mb.MOVEIT_CONTROLLER,))
+
+
+def test_home_reports_failure_if_the_servo_cannot_be_reactivated(make_node):
+    """
+    A successful home must not report success if the hand-back to the servo then fails.
+
+    Otherwise the caller sees `homed: true` while the arm is left on fr3_arm_controller, unable to
+    take a target chunk from the policy — the same silent-dead-policy failure the handover exists
+    to avoid, just arriving one step later than the failure modes above cover.
+    """
+    node = make_node()
+    _stub_plan_ok(node)
+    _capture_execute(node)
+    call_async = _stub_switch_sequence(node, [True, False])  # borrow succeeds, hand-back fails
+
+    response = _home(node)
+
+    assert not response.success
+    assert 'failed to hand the arm back' in response.message
+    assert _switch_pairs(call_async) == [
+        ((mb.MOVEIT_CONTROLLER,), (mb.SERVO_CONTROLLER,)),
+        ((mb.SERVO_CONTROLLER,), (mb.MOVEIT_CONTROLLER,)),
+    ]
+
+
+def test_home_without_the_servo_running_does_not_switch_back(make_node):
+    """
+    A declined handover must not be followed by a switch back.
+
+    Running the MoveIt executor alone is the normal pre-Phase-4 configuration. There the first
+    switch is declined (no such controller), and activating the servo afterwards would be wrong —
+    it was never holding the arm.
+    """
+    node = make_node()
+    _stub_plan_ok(node)
+    _capture_execute(node)
+    call_async = _stub_switch(node, ok=False)
+
+    assert _home(node).success, 'a declined handover must not fail the home itself'
+
+    assert _switch_pairs(call_async) == [((mb.MOVEIT_CONTROLLER,), (mb.SERVO_CONTROLLER,))]

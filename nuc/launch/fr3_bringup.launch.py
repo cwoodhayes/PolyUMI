@@ -79,9 +79,12 @@ def generate_launch_description():
             ),
             # The joint-trajectory controller move_group executes through. franka.launch.py spawns
             # only the two broadcasters, so without this /execute_trajectory has nothing to drive
-            # and the arm never moves. --param-file declares the controller and its gains; -t is
-            # redundant alongside it but is what the known-good `fr3-arm-controller` alias passed,
-            # and this file only ever runs on the Humble NUC, whose spawner still accepts it.
+            # and the arm never moves. The two arguments do DIFFERENT jobs and both are required:
+            # Humble's spawner sets the `type` param only from -t (spawner.py:208), while
+            # --param-file goes through set_controller_parameters_from_param_files, which sets the
+            # controller's `params_file` and never reads a type out of it. Dropping -t fails with
+            # "The 'type' param was not defined for ...", pointing at the controller rather than at
+            # the missing flag.
             Node(
                 package='controller_manager',
                 executable='spawner',

@@ -59,6 +59,7 @@ from polyumi_ros2.camera_preproc import (
     discarded_bar_intensity,
 )
 from polyumi_ros2.gripper_map import policy_to_robot_width, robot_to_policy_width
+from polyumi_ros2.target_chunk import TargetChunkPublisher, Wire, pose_array
 
 # Name used for the single "joint" in the gripper trajectory chunk. Deliberately NOT a real joint
 # name (the FR3's fingers are fr3_finger_joint1/2, each reporting half the aperture): the value we
@@ -139,6 +140,11 @@ class PolicyClientNode(Node):
         # but does NOT publish target poses unless execute_motion is explicitly enabled.
         # Planning params (group, velocity scaling) live on the NUC bridge, not here.
         self.declare_parameter('execute_motion', False)
+        # Which executor the action chunk is aimed at. The two speak different message types on
+        # different topics, so this decides what gets built and where it goes — see target_chunk.py.
+        # Publishing both formats, as this node used to, meant the NUC alone decided which executor
+        # acted, and a stack could drive MoveIt while looking like it was driving the servo.
+        self.declare_parameter('wire', str(Wire.MULTIDOF))
         # Viz-only preview: publish every commanded chunk as a PoseArray on
         # /polyumi/target_poses_preview regardless of execute_motion, so the motion can be seen in
         # Foxglove/RViz without the arm moving (the NUC bridge subscribes only to the execution
@@ -311,10 +317,20 @@ class PolicyClientNode(Node):
         # carry a width, and the Franka Hand is action-only (no ros2_control interface, libfranka
         # offers only blocking move/grasp), so it cannot be driven at the arm's cadence anyway.
         # fr3_gripper_bridge on the NUC deadbands and rate-limits it into Move/Grasp goals.
+        #
+        # The pose chunk goes to exactly ONE executor, chosen by `wire`. The MULTIDOF form carries
+        # per-waypoint absolute times, which is what lets the NUC's 1 kHz interpolator splice chunks
+        # without stopping; the PoseArray form carries no timing and leaves fr3_moveit_bridge to
+        # re-time the chunk from arrival. It goes away with the MoveIt executor.
         self._target_pub = None
         self._gripper_pub = None
         if self._execute_motion:
-            self._target_pub = self.create_publisher(PoseArray, '/polyumi/target_poses', 10)
+            self._target_pub = TargetChunkPublisher(
+                self,
+                wire=self.get_parameter('wire').get_parameter_value().string_value,
+                frame_id=self._base_frame,
+                joint_name=self._eef_frame,
+            )
             self._gripper_pub = self.create_publisher(JointTrajectory, '/polyumi/target_gripper', 10)
 
         # Viz-only preview publisher (always on when publish_preview). Shows every commanded chunk
@@ -371,6 +387,8 @@ class PolicyClientNode(Node):
         self._last_warn_t: rclpy.time.Time | None = None
 
         mode = 'EXECUTE (arm will move)' if self._execute_motion else 'log-only (no motion)'
+        if self._target_pub is not None:
+            mode += f' via {self._target_pub.wire} -> {self._target_pub.topic_name}'
         preview = 'on (/polyumi/target_poses_preview)' if self._publish_preview else 'off'
         self.get_logger().info(f'policy_client_node started — server: {self._url} — mode: {mode} — preview: {preview}')
         stride_interval = self._steps_per_inference * self._action_dt
@@ -942,38 +960,59 @@ class PolicyClientNode(Node):
         # Each is published only if it still has waypoints, so a chunk too stale for the arm can
         # still drive the hand rather than stalling both.
         if self._target_pub is not None and arm_actions:
-            self._target_pub.publish(self._actions_to_pose_array(arm_actions))
+            # Anchored at t_obs minus latency.arm_exec, so every waypoint is commanded that far
+            # ahead of when it should be reached — UMI's per-waypoint `target_time -
+            # robot_action_latency` (exec_actions in bimanual_umi_env.py), folded into the anchor
+            # because the offset is the same for every waypoint. first_index is the index in the
+            # ORIGINAL chunk: numbering the survivors of the stale-drop from zero would slide the
+            # whole timeline earlier. PoseArray ignores both, carrying no timing at all.
+            if self._target_pub.get_subscription_count() == 0:
+                self._warn_throttled(
+                    f'Nothing is subscribed to {self._target_pub.topic_name}; the arm will not '
+                    f'move. Needs: {self._target_pub.wire.consumer}'
+                )
+            self._target_pub.publish(
+                [self._action_to_pose(action) for action in arm_actions],
+                dt=self._action_dt,
+                first_index=n_stale_arm,
+                stamp=(t_obs - Duration(seconds=self._latency_act)).to_msg(),
+            )
         if self._gripper_pub is not None and grip_actions:
             self._gripper_pub.publish(self._actions_to_gripper_trajectory(grip_actions))
 
+    @staticmethod
+    def _action_to_pose(action) -> Pose:
+        """Convert one 8-vector action [x,y,z,qx,qy,qz,qw,grip] to a Pose, dropping the width."""
+        pose = Pose()
+        pose.position.x = float(action[0])
+        pose.position.y = float(action[1])
+        pose.position.z = float(action[2])
+        pose.orientation.x = float(action[3])
+        pose.orientation.y = float(action[4])
+        pose.orientation.z = float(action[5])
+        pose.orientation.w = float(action[6])
+        return pose
+
     def _actions_to_pose_array(self, actions) -> PoseArray:
         """Build a PoseArray in base_frame from a list of 8-vector actions [x,y,z,qx,qy,qz,qw,grip]."""
-        poses = []
-        for action in actions:
-            pose = Pose()
-            pose.position.x = float(action[0])
-            pose.position.y = float(action[1])
-            pose.position.z = float(action[2])
-            pose.orientation.x = float(action[3])
-            pose.orientation.y = float(action[4])
-            pose.orientation.z = float(action[5])
-            pose.orientation.w = float(action[6])
-            poses.append(pose)
-
-        msg = PoseArray()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = self._base_frame
-        msg.poses = poses
-        return msg
+        return pose_array(
+            [self._action_to_pose(action) for action in actions],
+            frame_id=self._base_frame,
+            stamp=self.get_clock().now().to_msg(),
+        )
 
     def _actions_to_gripper_trajectory(self, actions) -> JointTrajectory:
         """
         Build the gripper half of an action chunk as a timed single-DOF trajectory.
 
-        Carries per-point ``time_from_start`` (unlike the pose PoseArray, which has no timing yet)
-        so the NUC bridge can pick a lead waypoint and derive a move speed from it, rather than
-        commanding every width at one fixed speed. The widths are converted to robot jaw aperture
-        here so the bridge stays free of calibration — see polyumi_ros2.gripper_map.
+        Carries per-point ``time_from_start`` so the NUC bridge can pick a lead waypoint and derive
+        a move speed from it, rather than commanding every width at one fixed speed. The widths are
+        converted to robot jaw aperture here so the bridge stays free of calibration — see
+        polyumi_ros2.gripper_map.
+
+        Times run from the SLICE index, deliberately unlike the arm chunk, which is numbered from
+        its pre-slice index: this consumer reads time_from_start as a relative shape to derive a
+        speed, not as an absolute schedule, so shifting it changes nothing.
 
         :param actions: 8-vector actions [x,y,z,qx,qy,qz,qw,grip], grip in policy units.
         """

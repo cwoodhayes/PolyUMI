@@ -15,6 +15,7 @@ import pytest
 import rclpy
 from rclpy.parameter import Parameter
 
+from polyumi_ros2.target_chunk import Wire
 from polyumi_ros2.tcp_pivot_test import (
     TcpPivotTest,
     axis_quat,
@@ -74,6 +75,7 @@ def test_sweep_visits_both_extremes_and_returns_to_start():
     """0 -> +A -> -A -> 0, so the arm ends where it began and the test is repeatable."""
     angles = np.degrees(sweep_angles(20.0, 5.0))
 
+    assert angles[0] == pytest.approx(0.0), 'leading 0 must be a literal element, not implicit'
     assert angles[-1] == pytest.approx(0.0)
     assert angles.max() == pytest.approx(20.0)
     assert angles.min() == pytest.approx(-20.0)
@@ -87,27 +89,72 @@ def test_sweep_steps_never_exceed_the_requested_spacing():
     by the planner — the spacing here IS the interpolation resolution.
     """
     for angle, step in ((20.0, 5.0), (30.0, 7.0), (5.0, 1.0)):
+        # sweep_angles' own first element is now the leading 0, so the list already includes that
+        # first step; no need to prepend one here as well.
         angles = np.degrees(sweep_angles(angle, step))
-        deltas = np.abs(np.diff(np.concatenate([[0.0], angles])))
+        deltas = np.abs(np.diff(angles))
         assert deltas.max() <= step + 1e-9, f'{angle}deg at {step}deg spacing'
+
+
+def _capture_publisher(node):
+    """Swap the chunk publisher for a recorder, returning the list of (poses, kwargs) it sees."""
+    published = []
+
+    class _Recorder:
+        def publish(self, poses, **kwargs):
+            published.append((poses, kwargs))
+
+    node._pub = _Recorder()
+    return published
 
 
 def test_published_sweep_holds_the_position_fixed():
     """Any position variation across the chunk makes it not a pivot; only orientation may change."""
     node = TcpPivotTest(parameter_overrides=[Parameter('angle_deg', value=20.0)])
-    published = []
-    node._pub = type('P', (), {'publish': lambda _self, msg: published.append(msg)})()
+    published = _capture_publisher(node)
     try:
         position = np.array([0.4, -0.1, 0.5])
         n = node._publish_sweep('z', position, axis_quat('x', math.pi / 2))
 
-        assert n == len(published[0].poses) > 1
-        for pose in published[0].poses:
+        poses, _ = published[0]
+        assert n == len(poses) > 1
+        for pose in poses:
             assert (pose.position.x, pose.position.y, pose.position.z) == pytest.approx(position)
-        orientations = {
-            (p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w) for p in published[0].poses
-        }
+        orientations = {(p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w) for p in poses}
         assert len(orientations) > 1, 'the chunk must actually rotate'
+    finally:
+        node.destroy_node()
+
+
+def test_sweep_carries_the_waypoint_spacing():
+    """
+    The timed wire format needs a dt or every waypoint lands at the same instant.
+
+    A chunk whose waypoints all share one timestamp is not a slow pivot — it is a step to the last
+    pose, which is exactly the discontinuity the interpolator exists to prevent.
+    """
+    node = TcpPivotTest(parameter_overrides=[Parameter('waypoint_dt_s', value=0.25)])
+    published = _capture_publisher(node)
+    try:
+        node._publish_sweep('z', np.array([0.4, 0.0, 0.5]), axis_quat('x', 0.0))
+
+        _, kwargs = published[0]
+        assert kwargs['dt'] == pytest.approx(0.25)
+    finally:
+        node.destroy_node()
+
+
+def test_defaults_to_the_streaming_controller():
+    """
+    The streaming controller is the executor this test is for; MoveIt is the legacy path.
+
+    Defaulting the other way would silently drive the wrong executor, and the pivot would report a
+    drift figure for a controller nobody is validating. The wire formats themselves are covered by
+    test_target_chunk.py; what matters here is which one this node picks when told nothing.
+    """
+    node = TcpPivotTest()
+    try:
+        assert node._pub.wire is Wire.MULTIDOF
     finally:
         node.destroy_node()
 

@@ -20,16 +20,31 @@ laptop talk to a Humble NUC. If something here drifts from reality, fix it here 
 Laptop (Kilted, Noble)                        NUC (Humble, Jammy)  [nu-crb]
 RMW=rmw_cyclonedds_cpp, DOMAIN=0  ◄─ DDS over ─►  RMW=rmw_cyclonedds_cpp, DOMAIN=0
 enp0s31f6 = 10.0.0.1/24            10.0.0.x      enx00249b860356 = 10.0.0.2/24
-  - foxglove_bridge                               - fr3_bringup.launch.py (franka_bringup
-  - v4l2_camera (GoPro)                             + fr3_arm_controller spawner)
-  - pi_receiver_node                              - move_group  (nuc/launch/fr3_move_group.launch.py)
-  - policy_client_node ──HTTP──┐                  - fr3_moveit_bridge  (nuc/fr3_moveit_bridge.py)
-  - dummy_server (localhost:8000) ◄┘              - fr3_gripper_bridge (nuc/fr3_gripper_bridge.py)
+  - foxglove_bridge                               - fr3_bringup.launch.py: franka_bringup
+  - v4l2_camera (GoPro)                              (controller_manager + hardware interface)
+  - pi_receiver_node                                 + fr3_arm_controller spawner
+  - policy_client_node ──HTTP──┐                  - fr3_inference.launch.py: move_group,
+  - dummy_server (localhost:8000) ◄┘                 fr3_moveit_bridge, fr3_gripper_bridge, and the
+        │                                           polyumi_cartesian_impedance_controller spawner
+        │                                           (nuc/polyumi_fr3_controllers/, spawned --inactive)
         │                                         - publishes fr3_* TF + joint states
         │                                         - enp89s0 = 192.168.51.10 → robot @ .20
-        ├── /polyumi/target_poses (PoseArray) ─────────► fr3_moveit_bridge ──► move_group
+        │
+        │   `wire` (laptop param) picks ONE of these two — must match `executor` (NUC arg):
+        │
+        ├─ wire=pose_array ── /polyumi/target_poses ────────► fr3_moveit_bridge ─► move_group
+        │                       (PoseArray, untimed)            (plan-then-execute)
+        │
+        ├─ wire=multidof   ── /polyumi/target_poses_traj ─────► polyumi_cartesian_impedance_controller
+        │   (default)          (MultiDOFJointTrajectory,          (1 kHz streaming servo; ACTIVE only
+        │                       absolute per-waypoint times)       when executor:=servo, execute_arm:=true)
+        │
         └── /polyumi/target_gripper ───────────────────► fr3_gripper_bridge ─► /fr3_gripper/{move,grasp}
               (JointTrajectory)
+
+fr3_arm_controller and polyumi_cartesian_impedance_controller claim the same <joint>/effort
+interfaces, so exactly one holds the arm at a time — /polyumi/home (on fr3_moveit_bridge) switches
+between them for homing and hands back to whichever was active.
 ```
 
 The PolyUMI ROS2 nodes use only distro-agnostic APIs (`rclpy`, `sensor_msgs`,
@@ -37,28 +52,71 @@ The PolyUMI ROS2 nodes use only distro-agnostic APIs (`rclpy`, `sensor_msgs`,
 stack is Humble-only and stays on the NUC; the two machines interoperate purely at
 the DDS wire level.
 
-**Motion execution is split deliberately.** The laptop does *not* call MoveIt — it
-publishes the returned inference **action chunk** as a `geometry_msgs/PoseArray` on
-`/polyumi/target_poses` (one waypoint per action step, `n_action_steps` long — see
-[chunk execution](#action-chunk-execution) below), and the NUC-side `fr3_moveit_bridge`
-does all the MoveIt calls against its **local** move_group, planning the whole chunk as
-one multi-waypoint Cartesian path. This is not a style choice: large nested MoveIt
-action goals get corrupted across the laptop/NUC rmw-version gap (see
-[rmw mismatch](#rmw-version-mismatch--what-is-and-isnt-harmless)). Small messages like
-`PoseArray` cross fine, so the pose chunk is the interop boundary.
+**Motion execution is split deliberately.** The laptop does *not* call MoveIt's action
+interface directly — it publishes the returned inference **action chunk** as a small
+pose-chunk message (one waypoint per action step, `n_action_steps` long — see
+[chunk execution](#action-chunk-execution) below) and the NUC-side executor drives the
+arm from there. This is not a style choice: large nested MoveIt action goals get
+corrupted across the laptop/NUC rmw-version gap (see
+[rmw mismatch](#rmw-version-mismatch--what-is-and-isnt-harmless)). Small pose-chunk
+messages cross fine either way, so the chunk is the interop boundary regardless of
+which executor is running.
 
 ### Action-chunk execution
 
-`policy_client_node` requests an `n_action_steps`-long chunk from the inference server
-each tick (param `n_action_steps`, default **8**) and publishes the *whole chunk* as one
-`PoseArray`, rather than just `actions[0]`. This is deliberate, not incidental: at
-10 Hz a single-waypoint target is a discrete ~2 cm hop the arm cannot track in real
-time, and `fr3_moveit_bridge`'s skip-while-busy would drop nearly every tick. Publishing
-the full chunk lets `move_group` plan one smooth multi-waypoint Cartesian path per chunk
-(receding-horizon control, the standard UMI/DP execution pattern) instead of stuttering
-between unreachable single-step goals. The bridge still applies skip-while-busy at the
-*chunk* level — if a chunk is still executing when the next one is published, the new
-one is dropped and picked up on the next available tick.
+`policy_client_node` requests an `n_action_steps`-long chunk from the inference server each tick
+(param `n_action_steps`, default **8**) and publishes the *whole chunk*, not just `actions[0]`. At
+10 Hz a single-waypoint target is a discrete ~2 cm hop the arm cannot track in real time. This is
+receding-horizon control, the standard UMI/DP execution pattern.
+
+`policy_client_node` builds ONE of two wire formats, chosen by its `wire` parameter, and publishes
+it to exactly one topic:
+
+| `wire` | Topic | Type | Consumer |
+|---|---|---|---|
+| `pose_array` | `/polyumi/target_poses` | `PoseArray`, untimed | `fr3_moveit_bridge` — plan-then-execute via move_group |
+| `multidof` (default) | `/polyumi/target_poses_traj` | `MultiDOFJointTrajectory`, absolute per-waypoint times | `polyumi_cartesian_impedance_controller` — 1 kHz streaming servo |
+
+`wire` must MATCH the NUC's `executor` launch argument (`fr3_inference.launch.py`) — the laptop
+decides which format goes out, the NUC decides which controller is active, and the two have to
+agree on which executor is actually driving the arm. A mismatch is loud, not silent: nothing
+subscribes to whichever topic the client publishes, so the arm holds still and the client warns
+every second, naming the topic and the consumer it expected. See `ros2_ws/src/polyumi_ros2/polyumi_ros2/target_chunk.py`'s module
+docstring and `docs/franka-inference-bringup.md` Phase 4 for the full contract.
+
+**The streaming controller is the target design**; the MoveIt path is what it replaces and will be
+deleted once the servo is verified on hardware.
+
+* **MoveIt path**: plans one multi-waypoint Cartesian path per chunk, with skip-while-busy at the
+  *chunk* level — a chunk arriving mid-execution is dropped. Each chunk therefore starts from rest
+  and stops at its end, which is where the 0.62 s `latency.arm_exec` comes from.
+* **Streaming path**: the chunk's waypoints are spliced into a `PoseTrajectoryInterpolator` at
+  their absolute times, and a 1 kHz ros2_control loop evaluates it as the equilibrium pose of a
+  Cartesian impedance law. Nothing stops between chunks, and the arm is compliant. The chunk's
+  `header.stamp` already has `latency.arm_exec` subtracted, so waypoints are commanded early.
+
+#### Handing the arm between them
+
+Both `fr3_arm_controller` (MoveIt's) and `polyumi_cartesian_impedance_controller` claim the same
+`<joint>/effort` interfaces, so **exactly one can hold the arm**. The impedance controller is
+spawned `--inactive` by `fr3_inference.launch.py`; activating it is a deliberate act:
+
+```bash
+# NUC. Arm must be STATIONARY — switching restarts the libfranka control loop.
+ros2 control switch_controllers \
+    --deactivate fr3_arm_controller \
+    --activate polyumi_cartesian_impedance_controller
+```
+
+`/polyumi/home` does this swap itself, in both directions, so homing works with either executor
+running and hands the arm back afterwards.
+
+**First activation should be uneventful**: the controller seeds its equilibrium pose from the arm's
+measured pose, so error is zero and it commands nothing but gravity/Coriolis. If the arm jumps on
+activation, the `polyumi_tcp` lookup or the Jacobian shift is wrong — stop and check, do not tune
+around it. Push the arm by hand afterwards: it should spring back with a force that stops growing
+once you are past the error clip (~20 N at the shipped gains). That single test exercises the whole
+control law and needs no trajectory at all.
 
 ### User PC (i.e. my personal Ubuntu laptop)
 
@@ -612,8 +670,10 @@ than the latency budget, so every action in it had already elapsed. See
 [calibration-instructions.md](calibration-instructions.md), "Latencies", for the budget arithmetic.
 
 The counters are per device: the arm and hand are truncated by their own `latency.*_exec`, so they
-legitimately differ (the hand is currently ~1 step ahead, at `arm_exec` 0.620 vs `gripper_exec`
-0.514 — the gap moves whenever either is re-measured).
+legitimately differ, and the servoed arm is much the cheaper of the two — the hand's discrete,
+rate-limited Move/Grasp goals dominate. The gap moves whenever either is re-measured; read the
+current values from [inference.yaml](../ros2_ws/src/polyumi_ros2/config/inference.yaml) rather than
+from here.
 
 Foxglove plots live only — its buffer is not retention. For anything you want to compare across
 runs, record it:
@@ -860,6 +920,36 @@ Note the counts are now per device (`dropped 13 arm / 12 gripper`) and each uses
 `latency.*_exec`, so a chunk too stale for the arm can still drive the hand. The budget arithmetic
 and how each latency was measured are in
 [calibration-instructions.md](calibration-instructions.md), "Latencies".
+
+### The arm holds still while the gripper works — the streaming controller is not active
+
+Both executors subscribe to their own topic, so a stack where the impedance controller was spawned
+but never activated looks entirely healthy: the policy logs chunks, `n_published_arm` is non-zero,
+and nothing errors. The arm just does not move.
+
+```bash
+ros2 control list_controllers   # on the NUC
+```
+
+Exactly one of `fr3_arm_controller` / `polyumi_cartesian_impedance_controller` must be `active`. If
+the impedance controller is `inactive`, activate it (see [Action-chunk execution](#action-chunk-execution)).
+If *neither* is active, a `/polyumi/home` probably failed midway — it deactivates one before
+activating the other.
+
+Its own log line is the other tell: on activation it prints the pose it is holding and the
+`fr3_hand_tcp -> polyumi_tcp` offset it resolved. No such line, no active controller.
+
+### The arm holds still with the controller active — every waypoint arrived in the past
+
+The controller warns `Whole chunk of N waypoints was already in the past; arm is holding`. Unlike
+the MoveIt path, it does not stall or error; the interpolator clamps at its last waypoint, so the
+arm holds its position indefinitely and everything else keeps running.
+
+Two causes, and they are distinguishable: if `latency.arm_exec` is stale (still a MoveIt planning
+figure, which is an order of magnitude larger than the servo's), the anchor is pushed so far back
+that the whole chunk lands behind `now`. Re-measure it. If the laptop and NUC clocks have drifted,
+the absolute timestamps are meaningless on arrival — check `ssh jailfranka chronyc sources` for
+`^* 10.0.0.1`, same as the TF-extrapolation failure above.
 
 Confirm the loop is live: `policy_client_node` logs one `episode /reset sent` line, then
 `action chunk n=… (dropped … arm / … gripper, inference=…ms) first: x=… y=… z=… grip=…` each tick

@@ -45,13 +45,14 @@ import math
 import threading
 import time
 
-from geometry_msgs.msg import Pose, PoseArray
+from geometry_msgs.msg import Pose
 import numpy as np
 import rclpy
 from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
+from polyumi_ros2.target_chunk import TargetChunkPublisher, Wire
 from tf2_ros import Buffer, TransformListener
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
@@ -107,11 +108,20 @@ def axis_quat(axis: str, angle_rad: float) -> np.ndarray:
 
 
 def sweep_angles(angle_deg: float, step_deg: float) -> list[float]:
-    """Angles for a 0 -> +A -> -A -> 0 sweep, in radians, at roughly step_deg spacing."""
+    """
+    Angles for a 0 -> +A -> -A -> 0 sweep, in radians, at roughly step_deg spacing.
+
+    The leading 0 is a literal first element, not just the implicit starting point: the timed wire
+    stamps waypoint 0 at "now", which is already stale by the time it reaches the NUC, so whichever
+    angle is first in this list is the one silently dropped. Making that angle 0 (the pose the arm
+    already holds) means dropping it costs nothing; without it, the real first step (angle 1) was
+    the one that got dropped, and the sweep's first VISIBLE motion was two steps wide instead of one.
+    """
     # ceil, not round: rounding down would space the waypoints WIDER than asked (30deg at 7deg
     # spacing rounds to 4 steps of 7.5), and that spacing is the interpolation resolution.
     steps = max(math.ceil(abs(angle_deg) / max(step_deg, 1e-6)), 1)
-    out = [angle_deg * i / steps for i in range(1, steps + 1)]  # 0 -> +A
+    out = [0.0]  # the pose already held, so losing it as the stale first waypoint is free
+    out += [angle_deg * i / steps for i in range(1, steps + 1)]  # 0 -> +A
     out += [angle_deg * (1 - 2 * i / (2 * steps)) for i in range(1, 2 * steps + 1)]  # +A -> -A
     out += [-angle_deg * (1 - i / steps) for i in range(1, steps + 1)]  # -A -> 0
     return [math.radians(a) for a in out]
@@ -131,7 +141,15 @@ class TcpPivotTest(Node):
 
         self.declare_parameter('base_frame', 'fr3_link0')
         self.declare_parameter('eef_frame', 'polyumi_tcp')
-        self.declare_parameter('target_topic', '/polyumi/target_poses')
+        # Which executor to drive. The impedance controller and fr3_moveit_bridge take different
+        # message types on different topics, and aiming at the wrong one is SILENT — the other
+        # executor simply never subscribes and the arm sits there. `target_topic` follows the wire
+        # format unless you override it.
+        self.declare_parameter('wire', str(Wire.MULTIDOF))
+        self.declare_parameter('target_topic', '')
+        # Seconds between waypoints, for the timed wire format. Slow on purpose: this test is meant
+        # to be watched, and it also bounds how far the equilibrium point leads the arm.
+        self.declare_parameter('waypoint_dt_s', 0.5)
         self.declare_parameter('angle_deg', 20.0)
         self.declare_parameter('step_deg', DEFAULT_STEP_DEG)
         # Which TCP axes to pivot about, in order. See the module docstring for what each reveals.
@@ -156,7 +174,9 @@ class TcpPivotTest(Node):
 
         self._base = self.get_parameter('base_frame').get_parameter_value().string_value
         self._eef = self.get_parameter('eef_frame').get_parameter_value().string_value
-        topic = self.get_parameter('target_topic').get_parameter_value().string_value
+        wire = self.get_parameter('wire').get_parameter_value().string_value
+        topic = self.get_parameter('target_topic').get_parameter_value().string_value or None
+        self._waypoint_dt = self.get_parameter('waypoint_dt_s').get_parameter_value().double_value
         self._angle_deg = self.get_parameter('angle_deg').get_parameter_value().double_value
         self._step_deg = self.get_parameter('step_deg').get_parameter_value().double_value
         self._axes = self.get_parameter('axes').get_parameter_value().string_value
@@ -175,8 +195,10 @@ class TcpPivotTest(Node):
             raise ValueError(f"axes must be a non-empty string over 'xyz', got {self._axes!r}")
         if self._step_deg <= 0:
             raise ValueError(f'step_deg must be > 0, got {self._step_deg}')
+        if self._waypoint_dt <= 0:
+            raise ValueError(f'waypoint_dt_s must be > 0, got {self._waypoint_dt}')
 
-        self._pub = self.create_publisher(PoseArray, topic, 10)
+        self._pub = TargetChunkPublisher(self, wire=wire, frame_id=self._base, joint_name=self._eef, topic=topic)
         self._gripper_pub = self.create_publisher(JointTrajectory, gripper_topic, 10)
         self._gripper_lock = threading.Lock()
         self._gripper_actual: float | None = None
@@ -249,7 +271,7 @@ class TcpPivotTest(Node):
             time.sleep(0.1)
         return None
 
-    def wait_for_subscriber(self, pub, bridge: str, timeout_s: float = SUBSCRIBER_TIMEOUT_S) -> bool:
+    def wait_for_subscriber(self, pub, consumer: str, timeout_s: float = SUBSCRIBER_TIMEOUT_S) -> bool:
         """
         Block until `pub` has matched a subscriber, so the first message is not silently dropped.
 
@@ -262,17 +284,12 @@ class TcpPivotTest(Node):
             if pub.get_subscription_count() > 0:
                 return True
             time.sleep(0.1)
-        self.get_logger().error(
-            f'Nothing is subscribed to {pub.topic_name} after {timeout_s:.0f}s — is {bridge} '
-            'running on the NUC (ros2 launch nuc/launch/fr3_inference.launch.py)?'
-        )
+        self.get_logger().error(f'Nothing is subscribed to {pub.topic_name} after {timeout_s:.0f}s. Needs: {consumer}')
         return False
 
     def _publish_sweep(self, axis: str, position: np.ndarray, start_quat: np.ndarray) -> int:
-        """Publish one PoseArray holding `position` while rotating about the TCP's own `axis`."""
-        msg = PoseArray()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = self._base
+        """Publish one chunk holding `position` while rotating about the TCP's own `axis`."""
+        poses = []
         for angle in sweep_angles(self._angle_deg, self._step_deg):
             # Right-multiply: the delta is applied in the TCP's OWN frame, which is what makes
             # this a rotation about the TCP's axes rather than about the base frame's.
@@ -280,9 +297,9 @@ class TcpPivotTest(Node):
             pose = Pose()
             pose.position.x, pose.position.y, pose.position.z = (float(v) for v in position)
             pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = (float(v) for v in q)
-            msg.poses.append(pose)
-        self._pub.publish(msg)
-        return len(msg.poses)
+            poses.append(pose)
+        self._pub.publish(poses, dt=self._waypoint_dt)
+        return len(poses)
 
     def _watch(self, position: np.ndarray) -> tuple[float, bool]:
         """
@@ -337,10 +354,13 @@ class TcpPivotTest(Node):
                 'source setup_franka_env.sh?'
             )
             return 1
-        if not self.wait_for_subscriber(self._pub, 'fr3_moveit_bridge'):
+        if not self.wait_for_subscriber(self._pub, self._pub.wire.consumer):
             return 1
         if self._close_gripper:
-            if not self.wait_for_subscriber(self._gripper_pub, 'fr3_gripper_bridge'):
+            if not self.wait_for_subscriber(
+                self._gripper_pub,
+                'fr3_gripper_bridge (ros2 launch nuc/launch/fr3_inference.launch.py on the NUC)',
+            ):
                 return 1
             if not self.close_gripper():
                 return 1
