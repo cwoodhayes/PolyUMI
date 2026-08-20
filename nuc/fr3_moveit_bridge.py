@@ -224,9 +224,21 @@ class Fr3MoveItBridge(Node):
                 return response
             finally:
                 # Hand the arm back only if we took it. Leaving the servo deactivated after a
-                # failed home would look like the policy silently doing nothing.
-                if handed_over:
-                    self._switch_controllers(activate=SERVO_CONTROLLER, deactivate=MOVEIT_CONTROLLER)
+                # failed home would look like the policy silently doing nothing — and that
+                # includes a home that itself SUCCEEDED: this must still turn a true `homed`
+                # response into a false one if the hand-back is what failed. Mutating `response`
+                # here reaches the caller even though `return response` above already fired —
+                # Python evaluates that expression to the object reference first, then runs this
+                # block, then returns the (now possibly-mutated) object.
+                if handed_over and not self._switch_controllers(
+                    activate=SERVO_CONTROLLER, deactivate=MOVEIT_CONTROLLER
+                ):
+                    response.success = False
+                    response.message += (
+                        f' — but failed to hand the arm back to {SERVO_CONTROLLER}; it is still on '
+                        f'{MOVEIT_CONTROLLER} and the policy cannot drive it. Retry the switch '
+                        'manually.'
+                    )
         finally:
             self._busy.release()
 

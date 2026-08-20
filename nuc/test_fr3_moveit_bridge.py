@@ -227,6 +227,20 @@ def _switch_pairs(call_async) -> list:
     ]
 
 
+def _stub_switch_sequence(node, oks: list[bool]):
+    """Like _stub_switch, but each successive switch_controller call answers the next `oks` value."""
+    node._switch.wait_for_service.return_value = True
+    futures = []
+    for ok in oks:
+        result = MagicMock()
+        result.ok = ok
+        future = MagicMock()
+        future.result.return_value = result
+        futures.append(future)
+    node._switch.call_async.side_effect = futures
+    return node._switch.call_async
+
+
 def test_home_borrows_the_arm_from_the_servo_and_gives_it_back(make_node):
     """
     Homing must borrow the arm from the streaming controller and then give it back.
@@ -275,6 +289,29 @@ def test_home_hands_the_arm_back_even_when_planning_fails(make_node):
     assert not _home(node).success
 
     assert _switch_pairs(call_async)[-1] == ((mb.SERVO_CONTROLLER,), (mb.MOVEIT_CONTROLLER,))
+
+
+def test_home_reports_failure_if_the_servo_cannot_be_reactivated(make_node):
+    """
+    A successful home must not report success if the hand-back to the servo then fails.
+
+    Otherwise the caller sees `homed: true` while the arm is left on fr3_arm_controller, unable to
+    take a target chunk from the policy — the same silent-dead-policy failure the handover exists
+    to avoid, just arriving one step later than the failure modes above cover.
+    """
+    node = make_node()
+    _stub_plan_ok(node)
+    _capture_execute(node)
+    call_async = _stub_switch_sequence(node, [True, False])  # borrow succeeds, hand-back fails
+
+    response = _home(node)
+
+    assert not response.success
+    assert 'failed to hand the arm back' in response.message
+    assert _switch_pairs(call_async) == [
+        ((mb.MOVEIT_CONTROLLER,), (mb.SERVO_CONTROLLER,)),
+        ((mb.SERVO_CONTROLLER,), (mb.MOVEIT_CONTROLLER,)),
+    ]
 
 
 def test_home_without_the_servo_running_does_not_switch_back(make_node):
