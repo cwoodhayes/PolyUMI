@@ -328,11 +328,21 @@ Everything below is blocked only on arm/GoPro access.
          …/255 — pillarbox as expected`. An error there means the crop is eating real image.
 - [ ] **Gripper on-arm dry run** (`fr3_gripper_bridge` with `execute:=false`)
 - [ ] **Gripper on-arm execution** (`execute:=true`, arm bridge plan-only)
-- [ ] **Re-measure `latency.gripper_exec`** — `ros2 run polyumi_ros2 latency_probe --ros-args -p
-      mode:=gripper`. The shipped 0.514 predates the bridge decoupling its rate limit from its tick
-      period, so it carries 0-250 ms of quantisation in both the median and its 376-710 spread.
-      Expect ~0.38 s, tighter. Once it lands, re-check whether `n_action_steps: 16` is still
-      needed — the gripper is what forced it up.
+- [x] **Re-measure `latency.gripper_exec`** — done, shipped 0.380. `gripper_timing_probe` then
+      showed 359/386 ms of that is the hand's own firmware, so 0.380 is within ~20 ms of the floor
+      and there is no headroom left to chase. `n_action_steps: 16` stays: the gripper still sets
+      the requirement.
+- [ ] **DECIDE: is the Franka Hand the right gripper for this policy?** — blocking, and a hardware
+      question rather than a software one. A superseding `Move` *stops* the fingers (see the
+      gripper bullets above), so the hand cannot track a continuous width trajectory at all; its
+      useful command rate is ~1-2 Hz against the 30 Hz WSG-50 the UMI policy was trained around.
+      Everything downstream of this is on hold until it is answered, because the three obvious
+      software responses point in different directions:
+      **(a)** direct-libfranka bridge with a run-to-completion policy — buys reliability and state
+      quality, not latency; **(b)** binarise the gripper with hysteresis, as SERL does at the same
+      wall — needs a call on whether the task tolerates a two-state gripper; **(c)** different
+      gripper hardware — the only option that closes the gap with what the policy expects.
+      Re-run `gripper_timing_probe` on any candidate hand before committing to it.
 
 Anything that **moves the arm** now lives in [Phase 4 bringup](#phase-4-bringup-the-on-arm-sequence)
 instead. Arm execution and the continuous 10 Hz loop were listed here against the MoveIt executor,
