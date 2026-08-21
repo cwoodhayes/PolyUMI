@@ -288,36 +288,57 @@ struct MoveHandle {
   /// hand refuses every Move) comes back false with no exception at all. Ignoring this makes a
   /// rejected command indistinguishable from one that ran and moved nothing.
   std::shared_ptr<std::atomic<bool>> ok;
+  /// When move() RETURNED, i.e. when the motion ended or the command was superseded. A second,
+  /// independent measurement from the onset: onset says when the fingers started, this says when
+  /// the command finished. For a superseded Move it is how fast libfranka notices the abort.
+  /// Only read after join() -- the join is the synchronisation, so a plain double suffices.
+  std::shared_ptr<double> returned_at;
 };
+
+/// Seconds move() spent blocked. Valid only after the handle's thread has been joined.
+double blockedS(const MoveHandle& h) { return *h.returned_at - h.sent_at; }
+
+/// Median of `v`, which it reorders. Returns 0 for an empty input.
+double median(std::vector<double> v) {
+  if (v.empty()) {
+    return 0.0;
+  }
+  std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+  return v[v.size() / 2];
+}
 
 MoveHandle sendMove(franka::Gripper& gripper, StateReader& reader, double width, double speed) {
   auto finished = std::make_shared<std::atomic<bool>>(false);
   auto aborted = std::make_shared<std::atomic<bool>>(false);
   auto ok = std::make_shared<std::atomic<bool>>(false);
+  auto returned_at = std::make_shared<double>(0.0);
   const double sent_at = reader.now();
-  std::thread t([&gripper, width, speed, finished, aborted, ok] {
+  std::thread t([&gripper, &reader, width, speed, finished, aborted, ok, returned_at] {
     try {
       *ok = gripper.move(width, speed);
     } catch (const franka::Exception&) {
       *aborted = true;
     }
+    *returned_at = reader.now();
     *finished = true;
   });
-  return {sent_at, std::move(t), finished, aborted, ok};
+  return {sent_at, std::move(t), finished, aborted, ok, returned_at};
 }
 
 void report(const char* label, std::optional<double> onset, const MoveHandle& h) {
+  char onset_text[40];
   if (onset.has_value()) {
-    std::printf("  %-46s %7.1f ms\n", label, (*onset - h.sent_at) * 1e3);
+    std::snprintf(onset_text, sizeof(onset_text), "onset %7.1f ms", (*onset - h.sent_at) * 1e3);
   } else if (*h.aborted) {
-    std::printf("  %-46s   NO MOTION (threw)\n", label);
+    std::snprintf(onset_text, sizeof(onset_text), "NO MOTION (threw)");
   } else if (!*h.ok) {
     // move() returned false: the hand received the command and declined it. Almost always an
     // unhomed hand -- readOnce() works fine unhomed, so the connection looks healthy.
-    std::printf("  %-46s   REFUSED (move() returned false)\n", label);
+    std::snprintf(onset_text, sizeof(onset_text), "REFUSED (returned false)");
   } else {
-    std::printf("  %-46s   NO MOTION (move() succeeded)\n", label);
+    std::snprintf(onset_text, sizeof(onset_text), "NO MOTION (move() ok)");
   }
+  std::printf("  %-38s %-26s blocked %8.1f ms\n", label, onset_text, blockedS(h) * 1e3);
 }
 
 }  // namespace
@@ -388,12 +409,14 @@ int main(int argc, char** argv) {
         rested.push_back(*onset - h.sent_at);
       }
     }
-    double rested_median = 0.0;
-    if (!rested.empty()) {
-      std::nth_element(rested.begin(), rested.begin() + rested.size() / 2, rested.end());
-      rested_median = rested[rested.size() / 2];
-      std::printf("   -> median %.1f ms\n", rested_median * 1e3);
+    const double rested_median = median(rested);
+    if (rested_median > 0.0) {
+      std::printf("   -> median onset %.1f ms. `blocked` is onset + the whole 50 mm stroke, so it\n"
+                  "      is the only place the travel time itself shows up.\n",
+                  rested_median * 1e3);
     }
+    
+    return 0;
 
     // ---- B: abort cost --------------------------------------------------------------------
     // Does superseding re-pay A? fr3_gripper_bridge supersedes every 250 ms, so the 250 ms row is
@@ -417,6 +440,11 @@ int main(int argc, char** argv) {
       std::snprintf(label, sizeof(label), "superseded after %3.0f ms%s", delay_s * 1e3,
                     *first.aborted ? " (first aborted)" : " (first NOT aborted)");
       report(label, onset, second);
+      // blocked - delay = how long libfranka took to notice the supersede and return. The
+      // exception it throws carries "Command aborted!", so this is the abort round trip.
+      std::printf("      first Move returned %.1f ms after being superseded%s\n",
+                  (blockedS(first) - delay_s) * 1e3,
+                  *first.aborted ? "" : " (but did NOT report an abort)");
     }
     if (rested_median > 0.0) {
       std::printf("   -> compare against A's %.1f ms: equal means an abort re-pays the full\n"
@@ -481,11 +509,20 @@ int main(int argc, char** argv) {
       }
       const auto [moving_frac, longest_stall] =
           reader.motionSummary(extend_from, extend_to, kOnsetThresholdM);
+      std::vector<double> blocked;
+      for (const MoveHandle& m : issued) {
+        blocked.push_back(blockedS(m) * 1e3);
+      }
       std::printf("  re-issued every %3.0f ms (%zu moves): onset %.0f ms, then moving %3.0f%% of\n"
                   "      samples, longest stall %.0f ms\n",
                   period_s * 1e3, issued.size(),
                   onset.has_value() ? (*onset - h.sent_at) * 1e3 : -1.0, moving_frac * 100.0,
                   longest_stall * 1e3);
+      if (!blocked.empty()) {
+        std::printf("      superseded moves blocked: median %.0f ms, range %.0f-%.0f ms\n",
+                    median(blocked), *std::min_element(blocked.begin(), blocked.end()),
+                    *std::max_element(blocked.begin(), blocked.end()));
+      }
     }
     std::printf("   -> high moving%% with a short longest stall means a lookahead controller can\n"
                 "      hold the hand in continuous motion, where corrections cost B's ~60 ms rather\n"
