@@ -59,7 +59,7 @@ constexpr double kOnsetThresholdM = 0.0005;
 // still genuinely in flight.
 constexpr double kLowWidthM = 0.02;
 constexpr double kHighWidthM = 0.07;
-constexpr double kSpeedMps = 0.03;
+constexpr double kSpeedMps = 0.1;
 
 // How long to wait for an onset before declaring the hand did not move at all.
 constexpr double kOnsetTimeoutS = 5.0;
@@ -72,6 +72,13 @@ constexpr double kSettleS = 1.5;
 struct Sample {
   double t;
   double width;
+};
+
+/// How far the fingers travelled, over how long, and hence how fast.
+struct MotionSpan {
+  double distance;
+  double duration;
+  double speed;
 };
 
 /**
@@ -212,6 +219,47 @@ class StateReader {
     return {static_cast<double>(moving) / static_cast<double>(in.size() - 1), longest_stall};
   }
 
+  /**
+   * Mean speed of whatever motion happened in [from, to].
+   *
+   * Bounded by the first and last samples that actually changed, so the dead time before the
+   * fingers start and after they stop is excluded -- otherwise every speed would read low by the
+   * ~0.37 s onset. Compare the result against the speed argument passed to move(): they should
+   * agree if the hand honours it.
+   *
+   * Attribution caveat: gripper commands SERIALISE, so for a Move issued while another was still
+   * outstanding this window can contain the predecessor's stroke as well as its own.
+   */
+  std::optional<MotionSpan> motionSpan(double from, double to, double tol) const {
+    std::vector<Sample> in;
+    for (const Sample& s : samples()) {
+      if (s.t >= from && s.t <= to) {
+        in.push_back(s);
+      }
+    }
+    if (in.size() < 2) {
+      return std::nullopt;
+    }
+    std::size_t first = 0;
+    std::size_t last = 0;
+    bool found = false;
+    for (std::size_t i = 1; i < in.size(); ++i) {
+      if (std::fabs(in[i].width - in[i - 1].width) > tol) {
+        if (!found) {
+          first = i - 1;
+          found = true;
+        }
+        last = i;
+      }
+    }
+    const double duration = found ? in[last].t - in[first].t : 0.0;
+    if (!found || duration <= 0.0) {
+      return std::nullopt;
+    }
+    const double distance = std::fabs(in[last].width - in[first].width);
+    return MotionSpan{distance, duration, distance / duration};
+  }
+
   double now() const { return Seconds(Clock::now() - epoch_).count(); }
 
   /// Median interval between samples, i.e. the state rate this probe actually achieved.
@@ -325,7 +373,8 @@ MoveHandle sendMove(franka::Gripper& gripper, StateReader& reader, double width,
   return {sent_at, std::move(t), finished, aborted, ok, returned_at};
 }
 
-void report(const char* label, std::optional<double> onset, const MoveHandle& h) {
+void report(const char* label, std::optional<double> onset, const MoveHandle& h,
+            const StateReader& reader) {
   char onset_text[40];
   if (onset.has_value()) {
     std::snprintf(onset_text, sizeof(onset_text), "onset %7.1f ms", (*onset - h.sent_at) * 1e3);
@@ -338,7 +387,19 @@ void report(const char* label, std::optional<double> onset, const MoveHandle& h)
   } else {
     std::snprintf(onset_text, sizeof(onset_text), "NO MOTION (move() ok)");
   }
-  std::printf("  %-38s %-26s blocked %8.1f ms\n", label, onset_text, blockedS(h) * 1e3);
+
+  // Measured over the window this move() was outstanding, trimmed to the samples that actually
+  // moved. Against the commanded kSpeedMps this says whether the hand honours the speed argument.
+  char motion_text[48];
+  const auto span = reader.motionSpan(h.sent_at, *h.returned_at, kOnsetThresholdM);
+  if (span.has_value()) {
+    std::snprintf(motion_text, sizeof(motion_text), "%5.1f mm in %5.2f s @ %4.1f mm/s",
+                  span->distance * 1e3, span->duration, span->speed * 1e3);
+  } else {
+    std::snprintf(motion_text, sizeof(motion_text), "(no measurable travel)");
+  }
+  std::printf("  %-26s %-26s blocked %7.1f ms  %s\n", label, onset_text, blockedS(h) * 1e3,
+              motion_text);
 }
 
 }  // namespace
@@ -392,7 +453,7 @@ int main(int argc, char** argv) {
 
     // ---- A: rested Move -------------------------------------------------------------------
     // The headline number. Everything else is measured against it.
-    std::printf("A  rested Move: send -> first motion\n");
+    std::printf("A  gripper::Move from rest. Measuring t_command -> t_first_motion.\n");
     std::vector<double> rested;
     for (int rep = 0; rep < 4; ++rep) {
       const double from = (rep % 2 == 0) ? kLowWidthM : kHighWidthM;
@@ -404,20 +465,17 @@ int main(int argc, char** argv) {
       MoveHandle h = sendMove(gripper, reader, to, kSpeedMps);
       const auto onset = reader.waitForOnset(h.sent_at, rest, kOnsetThresholdM, kOnsetTimeoutS);
       h.thread.join();
-      report(rep % 2 == 0 ? "rep (opening)" : "rep (closing)", onset, h);
+      report(rep % 2 == 0 ? "rep (opening)" : "rep (closing)", onset, h, reader);
       if (onset.has_value()) {
         rested.push_back(*onset - h.sent_at);
       }
     }
     const double rested_median = median(rested);
     if (rested_median > 0.0) {
-      std::printf("   -> median onset %.1f ms. `blocked` is onset + the whole 50 mm stroke, so it\n"
-                  "      is the only place the travel time itself shows up.\n",
+      std::printf("   -> median onset of motion %.1f ms. `blocked` is approx onset + the whole 50 mm stroke.\n",
                   rested_median * 1e3);
     }
     
-    return 0;
-
     // ---- B: abort cost --------------------------------------------------------------------
     // Does superseding re-pay A? fr3_gripper_bridge supersedes every 250 ms, so the 250 ms row is
     // the one that describes the shipped configuration.
@@ -437,9 +495,8 @@ int main(int argc, char** argv) {
       first.thread.join();
       second.thread.join();
       char label[64];
-      std::snprintf(label, sizeof(label), "superseded after %3.0f ms%s", delay_s * 1e3,
-                    *first.aborted ? " (first aborted)" : " (first NOT aborted)");
-      report(label, onset, second);
+      std::snprintf(label, sizeof(label), "superseded after %3.0f ms", delay_s * 1e3);
+      report(label, onset, second, reader);
       // blocked - delay = how long libfranka took to notice the supersede and return. The
       // exception it throws carries "Command aborted!", so this is the abort round trip.
       std::printf("      first Move returned %.1f ms after being superseded%s\n",
@@ -452,6 +509,9 @@ int main(int argc, char** argv) {
                   "      in the restart transient.\n",
                   rested_median * 1e3);
     }
+
+    return 0;
+
 
     // ---- C: chained segments --------------------------------------------------------------
     // Whether a piecewise-linear trajectory can be executed as consecutive Moves without the hand
@@ -473,7 +533,7 @@ int main(int argc, char** argv) {
       h.thread.join();  // Runs to completion -- no supersede anywhere in this section.
       char label[64];
       std::snprintf(label, sizeof(label), "segment %d -> %.0f mm", seg, target * 1e3);
-      report(label, onset, h);
+      report(label, onset, h, reader);
     }
     std::printf("   -> move() returns only when the motion ENDS, so each segment here starts from\n"
                 "      rest and this is really A repeated. Section D is the case that matters.\n");
