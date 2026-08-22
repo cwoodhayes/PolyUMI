@@ -107,6 +107,12 @@ int main(int argc, char** argv) {
     std::vector<TrialResult> results;
     GripperWrapper gripper(argv[1]);
 
+    // Read-rate accounting, over every trial including any that get discarded.
+    std::size_t total_samples = 0;
+    std::size_t total_intervals = 0;
+    double total_read_span = 0.0;    // wall seconds spent sampling
+    double total_franka_span = 0.0;  // the hand's own clock over those same samples
+
     printf("Homing gripper...\n");
     auto res = gripper.homing();
     if (!res) {
@@ -143,11 +149,18 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        // Put t_sent on the hand's clock: the first sample back tells us what franka_t was at
-        // its own arrival, so walk that back by however long the sample took to arrive. Good to
-        // about one state period, since that sample's datagram was already in flight by then.
+        // calculate when the command was sent in the franka clock, by grabbing the franka timestamp
+        // of the first read, and then subtracting the PC wall clock time elapsed between the command send
+        // and that first read. 
+        // NOTE -- IT TURNS OUT franka's State.time is actually not a timestamp at all; it is a datagram
+        // sequence number. this is mislabeled in libfranka. so this math isn't actually helpful.
         const Sample& first_sample = gripper_samples.front();
         cmd_record.franka_t_sent = first_sample.franka_t - (first_sample.t - cmd_record.t_sent);
+
+        total_samples += gripper_samples.size();
+        total_intervals += gripper_samples.size() - 1;
+        total_read_span += gripper_samples.back().t - first_sample.t;
+        total_franka_span += gripper_samples.back().franka_t - first_sample.franka_t;
 
         // using the gripper samples we took just now,
         // find when the gripper started moving using the threshold
@@ -163,9 +176,9 @@ int main(int argc, char** argv) {
         if (first == gripper_samples.end() || last == gripper_samples.end()) {
             printf("no motion detected over %zu samples -- DISCARDED\n", gripper_samples.size());
         } else {
-            printf("onset %.1f ms (%.1f ms by franka clock), motion %.3f s, blocked %.1f ms\n",
-                   (first->t - cmd_record.t_sent) * 1e3,
+            printf("onset %.1f ms (%.1f ms by franka clock), motion %.3f s (%.1f ms franka), blocked %.1f ms\n", (first->t - cmd_record.t_sent) * 1e3,
                    (first->franka_t - cmd_record.franka_t_sent) * 1e3, last->t - first->t,
+                   (last->franka_t - first->franka_t),
                    (cmd_record.t_complete - cmd_record.t_sent) * 1e3);
             results.push_back({cmd_record, *first, *last});
         }
@@ -183,6 +196,7 @@ int main(int argc, char** argv) {
 
     // print out a final report of useful numbers.
     double lat_sum = 0.0, lat_min = 1e9, lat_max = 0.0, blocked_sum = 0.0, motion_sum = 0.0;
+    double settle_sum = 0.0;
     for (const auto& r : results) {
         auto latency = r.first_motion_sample.t - r.cmd.t_sent;
         lat_sum += latency;
@@ -190,6 +204,7 @@ int main(int argc, char** argv) {
         lat_max = std::max(lat_max, latency);
         blocked_sum += r.cmd.t_complete - r.cmd.t_sent;
         motion_sum += r.last_motion_sample.t - r.first_motion_sample.t;
+        settle_sum += r.cmd.t_complete - r.last_motion_sample.t;
     }
     auto n = static_cast<double>(results.size());
     printf("\n%zu/%d trials\n", results.size(), N_TRIALS);
@@ -199,6 +214,12 @@ int main(int argc, char** argv) {
     printf("motion duration:         mean %.3f s (commanded %.3f s at %.0f mm/s)\n",
            motion_sum / n, (GRIPPER_OPEN_M - GRIPPER_CLOSED_M) / GRIPPER_MAX_SPEED_M_P_S,
            GRIPPER_MAX_SPEED_M_P_S * 1e3);
+    // Target reached (within the motion threshold) -> move() complete. 
+    printf("motion stop -> return:   mean %.1f ms\n", settle_sum / n * 1e3);
+    printf("gripper read rate:       %.1f Hz (%zu samples over %.1f s)\n",
+           total_intervals / total_read_span, total_samples, total_read_span);
+    printf("hand clock vs PC clock:  %.3f s of GripperState.time per wall second\n",
+           total_franka_span / total_read_span);
 
     return 0;
 }
