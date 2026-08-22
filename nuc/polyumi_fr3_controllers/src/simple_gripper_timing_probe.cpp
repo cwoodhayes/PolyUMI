@@ -32,6 +32,9 @@ double now() { return Seconds(Clock::now() - EPOCH).count(); }
 /// One (instant, width) sample off the gripper's own state stream.
 struct Sample {
   double t;
+  // The hand's own stamp for this state, seconds since robot start. Millisecond resolution
+  // (Duration is integer ms underneath), and on a different origin from t.
+  double franka_t;
   double width;
 };
 
@@ -39,6 +42,8 @@ struct CommandRecord {
     double t_sent;
     double t_complete;
     double width;
+    // t_sent expressed in the hand's clock, inferred from the first sample that came back.
+    double franka_t_sent;
 };
 
 struct TrialResult {
@@ -65,7 +70,7 @@ public:
     /// move() blocks until the motion ENDS, so timing the call from main would measure the stroke.
     std::future<CommandRecord> move_async(double width, double speed) {
         return std::async(std::launch::async, [this, width, speed] {
-            CommandRecord rec{now(), 0.0, width};
+            CommandRecord rec{now(), 0.0, width, 0.0};  // franka_t_sent filled in by main
             try {
                 // A false return is a command the hand DECLINED (an unhomed hand declines every
                 // Move) -- no exception, and readOnce() keeps working, so nothing else shows it.
@@ -81,10 +86,10 @@ public:
     }
 
     /// @brief blocking read
-    /// @return gripper width in m
-    double read_width() {
+    /// @return width in m, with timestamps from both PC clock and franka clock
+    Sample read_sample() {
         auto state = gripper_.readOnce();
-        return state.width;
+        return {now(), state.time.toSec(), state.width};
     }
 
 
@@ -127,12 +132,22 @@ int main(int argc, char** argv) {
         auto run_time = expected_move_duration + 1.0;
         auto complete_time = now() + run_time;
         while (now() < complete_time && gripper_samples.size() < MAX_GRIPPER_READS) {
-            auto width = gripper.read_width();
-            gripper_samples.push_back({now(), width});
+            gripper_samples.push_back(gripper.read_sample());
         }
 
         // wait for the actual call to finish; nominally it already has.
         auto cmd_record = move_future.get();
+
+        if (gripper_samples.empty()) {
+            printf("no state arrived -- DISCARDED\n");
+            continue;
+        }
+
+        // Put t_sent on the hand's clock: the first sample back tells us what franka_t was at
+        // its own arrival, so walk that back by however long the sample took to arrive. Good to
+        // about one state period, since that sample's datagram was already in flight by then.
+        const Sample& first_sample = gripper_samples.front();
+        cmd_record.franka_t_sent = first_sample.franka_t - (first_sample.t - cmd_record.t_sent);
 
         // using the gripper samples we took just now,
         // find when the gripper started moving using the threshold
@@ -148,8 +163,9 @@ int main(int argc, char** argv) {
         if (first == gripper_samples.end() || last == gripper_samples.end()) {
             printf("no motion detected over %zu samples -- DISCARDED\n", gripper_samples.size());
         } else {
-            printf("onset %.1f ms, motion %.3f s, blocked %.1f ms\n",
-                   (first->t - cmd_record.t_sent) * 1e3, last->t - first->t,
+            printf("onset %.1f ms (%.1f ms by franka clock), motion %.3f s, blocked %.1f ms\n",
+                   (first->t - cmd_record.t_sent) * 1e3,
+                   (first->franka_t - cmd_record.franka_t_sent) * 1e3, last->t - first->t,
                    (cmd_record.t_complete - cmd_record.t_sent) * 1e3);
             results.push_back({cmd_record, *first, *last});
         }
