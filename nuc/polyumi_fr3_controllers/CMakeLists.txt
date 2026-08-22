@@ -70,6 +70,8 @@ pluginlib_export_plugin_description_file(controller_interface polyumi_fr3_contro
 # is that nothing else shares its threads. See the file header.
 add_executable(gripper_timing_probe src/gripper_timing_probe.cpp)
 target_link_libraries(gripper_timing_probe Franka::Franka)
+add_executable(simple_gripper_timing_probe src/simple_gripper_timing_probe.cpp)
+target_link_libraries(simple_gripper_timing_probe Franka::Franka)
 
 install(DIRECTORY include/ DESTINATION include)
 install(TARGETS gripper_timing_probe DESTINATION lib/${PROJECT_NAME})
