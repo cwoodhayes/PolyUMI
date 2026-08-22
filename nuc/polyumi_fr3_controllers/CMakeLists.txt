@@ -72,9 +72,12 @@ add_executable(gripper_timing_probe src/gripper_timing_probe.cpp)
 target_link_libraries(gripper_timing_probe Franka::Franka)
 add_executable(simple_gripper_timing_probe src/simple_gripper_timing_probe.cpp)
 target_link_libraries(simple_gripper_timing_probe Franka::Franka)
+add_executable(csv_gripper_timing_probe src/csv_gripper_timing_probe.cpp)
+target_link_libraries(csv_gripper_timing_probe Franka::Franka)
 
 install(DIRECTORY include/ DESTINATION include)
-install(TARGETS gripper_timing_probe simple_gripper_timing_probe DESTINATION lib/${PROJECT_NAME})
+install(TARGETS gripper_timing_probe simple_gripper_timing_probe csv_gripper_timing_probe
+  DESTINATION lib/${PROJECT_NAME})
 
 install(
   TARGETS polyumi_fr3_control_core polyumi_fr3_controllers
