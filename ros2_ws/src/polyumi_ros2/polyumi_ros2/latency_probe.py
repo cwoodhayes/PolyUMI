@@ -118,14 +118,17 @@ COMMAND_HZ = {'arm': 4.0, 'gripper_chirp': 10.0}
 #: Joint name on /polyumi/target_gripper, matching policy_client_node and gripper_range_probe.
 GRIPPER_JOINT_NAME = 'fr3_gripper_width'
 
-#: fr3_gripper_bridge's shipped defaults (nuc/fr3_gripper_bridge.py), mirrored here to size the
-#: chirp excitation — the bridge runs on the NUC under a different distro, so this module cannot
-#: import it. Pass matching -p overrides on both sides if you've changed the bridge's.
+#: franka_hand_node's shipped defaults, mirrored here to size the chirp excitation — it runs on
+#: the NUC under a different distro, so this module cannot import it. Pass matching -p overrides
+#: on both sides if you've changed the node's.
 BRIDGE_DEADBAND_M = 0.005
-BRIDGE_PERIOD_S = 0.25
+#: The Franka Hand's own floor: a Move blocks this long even for zero travel, and the node runs
+#: them to completion (it cannot pre-empt one). Not a configurable rate limit any more — this is
+#: the hardware. Measured in notebooks/gripper_free_running.ipynb.
+BRIDGE_PERIOD_S = 0.363
 BRIDGE_MAX_WIDTH_M = 0.08
 
-#: Highest frequency the bridge can convey at all. It emits at most one goal per BRIDGE_PERIOD_S
+#: Highest frequency the hand can convey at all. It completes at most one Move per BRIDGE_PERIOD_S
 #: however fast the probe publishes, so this — not ``command_hz`` — is the real ceiling on the
 #: sweep.
 BRIDGE_SEND_NYQUIST_HZ = 1 / (2 * BRIDGE_PERIOD_S)
@@ -877,7 +880,7 @@ class LatencyProbe(Node):
                     f'\nFAILED: the hand barely moved — commanded {2 * self._amplitude * 1e3:.1f} mm '
                     f'peak-to-peak, observed {actual_span * 1e3:.2f} mm.\n'
                     '  Nothing acted on the commands. In order of likelihood:\n'
-                    f'  1. no bridge is subscribed to {self._pub.topic_name} — is fr3_gripper_bridge '
+                    f'  1. nothing is subscribed to {self._pub.topic_name} — is franka_hand_node '
                     'running on the NUC,\n'
                     '     with execute_gripper:=true?\n'
                     '  2. the hand is faulted, or something is jammed between the fingers.\n'

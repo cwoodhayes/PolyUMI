@@ -99,11 +99,18 @@ the higher the number the better (this is the number of actions we didn't have t
 ## Architecture on the NUC
 
 `fr3_bringup` owns the hardware: `franka_bringup` (controller_manager + the libfranka hardware
-interface), the `fr3_arm_controller` spawner, `robot_state_publisher`, and a
-`static_transform_publisher` for `polyumi_tcp`.
+interface), the `fr3_arm_controller` spawner, `robot_state_publisher`, and
+`static_transform_publisher`s for `polyumi_tcp` and for `fr3_link8 → fr3_hand`.
+
+That second static TF is load-bearing. `load_gripper` now defaults **false**, because
+`franka_hand_node` owns the libfranka gripper connection and only one process can. But
+`franka.launch.py` feeds that one flag into `xacro hand:=` as well, so turning it off also drops
+`fr3_hand` from `robot_description` — which would orphan `polyumi_tcp` and break the laptop's whole
+observation lookup, with a symptom pointing nowhere near the flag. The static publisher fills the
+hole; the constant lives in `nuc/tcp_calib.py` next to the TCP.
 
 `fr3_inference` adds the three things that sit on top of it — move_group, `fr3_moveit_bridge`,
-`fr3_gripper_bridge` — plus the `polyumi_cartesian_impedance_controller` spawner, spawned
+`franka_hand_node` — plus the `polyumi_cartesian_impedance_controller` spawner, spawned
 `--inactive`. They start, fail and restart together without touching the arm's state.
 
 The laptop publishes an entire inference **action chunk** (`n_action_steps` waypoints, not
@@ -115,7 +122,7 @@ two must agree:
 |---|---|---|
 | `multidof` (default) | `/polyumi/target_poses_traj` | `polyumi_cartesian_impedance_controller` — 1 kHz streaming servo |
 | `pose_array` | `/polyumi/target_poses` | `fr3_moveit_bridge` → move_group, one Cartesian plan per chunk |
-| always | `/polyumi/target_gripper` | `fr3_gripper_bridge` → `/fr3_gripper/{move,grasp}` |
+| always | `/polyumi/target_gripper` | `franka_hand_node` → libfranka `Gripper::move` |
 
 A mismatch is loud rather than silent: nothing subscribes, the arm holds still, and the client
 warns every second naming the topic it expected. The full contract is the module docstring of
@@ -146,8 +153,9 @@ ros2 control switch_controllers --deactivate fr3_arm_controller \
   returns `fraction=0.0` on every request *with* `error_code SUCCESS`, which reads like a
   planning failure and isn't one.
 - **The Franka Hand cannot be servoed.** It is not in ros2_control at all, and libfranka offers
-  only blocking `move`/`grasp`/`stop`. The server accepts every goal and preempts none, with new move commands
-  going into a queue to be executed after each move completes.
+  only blocking `move`/`grasp`/`stop`. `stop()` does not pre-empt — it queues *behind* the running
+  Move and costs the remainder of the stroke plus ~100 ms. So `franka_hand_node` runs one Move to
+  completion at a time and chooses which setpoint to aim at, rather than trying to track them all.
 - **Gripper width is `position[0] + position[1]`** on `/fr3_gripper/joint_states` — each finger
   reports half the aperture, and `velocity`/`effort` are hardcoded zero, so there is no force
   feedback to read.
@@ -196,11 +204,50 @@ Most failures here are one of four things, in rough order of frequency:
 4. **The arm stopped itself** — see Logs above.
 
 ## Gripper problems
-Currently this setup uses the Franka Hand, which is terrible. I've done a bunch of analysis on it, tl;dr it has ~210ms observable command delay, only updates its state at 5Hz, and its move() commands cannot be pre-empted once issued. 
+Currently this setup uses the Franka Hand, which is terrible. I've done a bunch of analysis on it, tl;dr it has ~210ms observable command delay, only updates its state at 5Hz, and its move() commands cannot be pre-empted once issued.
 
-The scripts I used for this analysis are in `nuc/polyumi_fr3_controllers/src/franka_hand_testing`; I have a jupyter notebook to analyze the results as well--reach out to me if you need it for some reason.
+The scripts I used for this analysis are in `nuc/polyumi_fr3_controllers/src/franka_hand_testing`; the notebook that fits the model to them is `notebooks/gripper_free_running.ipynb`, which is the **source of truth** for every constant below — where it and any other document disagree, the notebook wins.
 
-The future of this system is to replace the Franka Hand with a better hand, as other labs have done, but for now I am working around its limitations as best I can with a custom interpolation scheme based on a model of the hand's response after all that testing.
+`franka_hand_node` works around all of this with a custom interpolator built on that model:
+
+```
+blocked = C + duration(dx, v)                  # send -> move() returns
+duration = dx/v + v/a       if dx >= v^2/a     # trapezoidal
+         = 2*sqrt(dx/a)     otherwise          # triangular, never reaches v
+v <- min(v_cmd, V_MAX)                         # the hand clips silently, it never refuses
+```
+
+| constant | value | meaning |
+|---|---|---|
+| `cmd_delay` | 0.208 s | send → fingers start moving, as *observed* |
+| `C` (`fixed_cost`) | 0.363 s | send → `move()` returns, at zero travel |
+| `V_MAX` | 0.1153 m/s | where the hand starts silently clipping |
+| `A_MAX` | 0.360 m/s² | sets the 37 mm triangular crossover |
+| `t_obs_delay` | 0.050 s | **a guess**: how far the reported width lags reality |
+
+The node holds the chunk as a horizon of absolutely-timed widths and, for each Move, picks the
+earliest setpoint it can still reach and the *slowest* speed that lands on time. When nothing is
+reachable it chases full-speed to where the signal will be on arrival, rather than stopping short
+— covering the remainder afterwards would cost another whole `C`.
+
+Things to know before you debug it:
+
+- **It is a decimator, not a tracker.** `blockedDuration(0) = 363 ms`, so the ceiling is 2.75 Hz
+  and realistically 0.7–1.7 Hz against a 10 Hz setpoint stream. Servicing every 4th–15th setpoint
+  is correct behaviour.
+- **Transients shorter than ~1 s are physically unrepresentable.** A close-and-reopen inside 0.7 s
+  cannot be rendered at all; two strokes plus their two `C`s exceed the transient.
+- **`t_obs_delay_s` is the knob if the hand is consistently early or late** under
+  `latency_probe -p mode:=gripper_chirp`. It cannot be measured without a camera on the fingers,
+  which is why it is a parameter and not a constant. Do NOT confuse it with `latency.gripper_exec`
+  on the laptop — that aligns the action chunk, this shifts the node's internal schedule.
+- **`Grasp` is not implemented.** `Move` applies no force and stalls on contact, so **the hand
+  cannot hold an object**. The node warns when a successful Move reports a width the hand did not
+  reach, which is what that failure looks like.
+- **An unhomed hand reports `max_width = 0` and `move()` returns `true` while doing nothing.** The
+  node refuses to execute in that state and says so; `home_on_start:=true` fixes it.
+
+The future of this system is to replace the Franka Hand with a better hand, as other labs have done.
 
 
 Good luck, stranger!

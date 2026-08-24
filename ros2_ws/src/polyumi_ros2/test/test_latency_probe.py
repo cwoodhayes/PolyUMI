@@ -69,7 +69,7 @@ def test_mode_defaults_stay_below_their_own_nyquist():
 
 def test_gripper_step_must_clear_the_bridge_deadband():
     """
-    Below fr3_gripper_bridge's 5 mm deadband the step is discarded and the hand never moves.
+    Below franka_hand_node's 5 mm deadband the step is discarded and the hand never moves.
 
     The run would then time out waiting for an onset, but only after the hardware slot is spent.
     """
@@ -182,7 +182,7 @@ def test_gripper_report_emits_the_measured_latency_unmodified(tmp_path, capsys):
 
     policy_client_node truncates each device's chunk by its own latency, so gripper_exec is a
     standalone number. It briefly was not: while the two devices shared one slice, the value had
-    to be reported as (gripper - arm) / action_dt for fr3_gripper_bridge's gripper_lead_steps,
+    to be reported as (gripper - arm) / action_dt for the old bridge's gripper_lead_steps,
     which silently coupled it to a latency measured in a different run.
     """
     lags = [('open', 0.5), ('close', 0.54), ('open', 0.51)]  # median 0.51
@@ -198,7 +198,7 @@ def test_gripper_chirp_amplitude_must_clear_the_bridge_deadband():
     """
     Too small an amplitude leaves too few deadband-sized steps for the sweep to read as a sinusoid.
 
-    fr3_gripper_bridge suppresses any width within its deadband of the last one it sent, so the
+    franka_hand_node suppresses any width within its deadband of the last one it sent, so the
     hand is only ever offered a staircase. The quantisation is in SPACE, not time — how many steps
     fit in a half stroke depends on amplitude alone, which is why frequency does not appear here.
     """

@@ -359,7 +359,7 @@ class TcpPivotTest(Node):
         if self._close_gripper:
             if not self.wait_for_subscriber(
                 self._gripper_pub,
-                'fr3_gripper_bridge (ros2 launch nuc/launch/fr3_inference.launch.py on the NUC)',
+                'franka_hand_node (ros2 launch nuc/launch/fr3_inference.launch.py on the NUC)',
             ):
                 return 1
             if not self.close_gripper():

@@ -20,6 +20,7 @@ find_package(franka_semantic_components REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(realtime_tools REQUIRED)
 find_package(tf2_eigen REQUIRED)
@@ -34,6 +35,7 @@ set(DEPENDENCIES
   pluginlib
   rclcpp
   rclcpp_lifecycle
+  sensor_msgs
   realtime_tools
   tf2_eigen
   tf2_ros
@@ -46,6 +48,7 @@ set(DEPENDENCIES
 add_library(polyumi_fr3_control_core SHARED
   src/pose_trajectory_interpolator.cpp
   src/cartesian_impedance_law.cpp
+  src/gripper_trajectory_interpolator.cpp
 )
 target_include_directories(polyumi_fr3_control_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -64,6 +67,12 @@ target_link_libraries(polyumi_fr3_controllers PUBLIC polyumi_fr3_control_core)
 ament_target_dependencies(polyumi_fr3_controllers PUBLIC ${DEPENDENCIES})
 
 pluginlib_export_plugin_description_file(controller_interface polyumi_fr3_controllers.xml)
+
+# The production hand driver: owns the libfranka gripper connection outright, so franka_gripper
+# must NOT be running (load_gripper:=false). See the file header for why the action server is gone.
+add_executable(franka_hand_node src/franka_hand_node.cpp)
+target_link_libraries(franka_hand_node polyumi_fr3_control_core Franka::Franka)
+ament_target_dependencies(franka_hand_node rclcpp sensor_msgs trajectory_msgs)
 
 # Phase 0 characterisation of the Franka Hand: what a Move actually costs with no ROS, no
 # action server and no shared executor in the way. Deliberately not a node — the whole point
@@ -84,7 +93,7 @@ add_executable(stroke_gripper_timing_probe src/franka_hand_testing/stroke_grippe
 target_link_libraries(stroke_gripper_timing_probe Franka::Franka)
 
 install(DIRECTORY include/ DESTINATION include)
-install(TARGETS gripper_timing_probe simple_gripper_timing_probe csv_gripper_timing_probe
+install(TARGETS franka_hand_node gripper_timing_probe simple_gripper_timing_probe csv_gripper_timing_probe
   stop_gripper_timing_probe speed_gripper_timing_probe maxspeed_gripper_timing_probe
   stroke_gripper_timing_probe
   DESTINATION lib/${PROJECT_NAME})
@@ -105,6 +114,10 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_cartesian_impedance_law test/test_cartesian_impedance_law.cpp)
   target_link_libraries(test_cartesian_impedance_law polyumi_fr3_control_core)
+
+  ament_add_gtest(test_gripper_trajectory_interpolator
+    test/test_gripper_trajectory_interpolator.cpp)
+  target_link_libraries(test_gripper_trajectory_interpolator polyumi_fr3_control_core)
 endif()
 
 ament_export_include_directories(include)

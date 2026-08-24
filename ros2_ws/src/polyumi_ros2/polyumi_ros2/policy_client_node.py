@@ -16,7 +16,7 @@ At each control tick the node:
   5. Logs the chunk. If execute_motion is set, publishes the remaining chunk on two topics for
      the NUC-side bridges: the pose half as a PoseArray on /polyumi/target_poses (planned and
      executed as one Cartesian path by fr3_moveit_bridge, receding-horizon control), and the
-     gripper half as a JointTrajectory on /polyumi/target_gripper (fr3_gripper_bridge). The two
+     gripper half as a JointTrajectory on /polyumi/target_gripper (franka_hand_node). The two
      ride separate channels because a PoseArray cannot carry a width and because the Franka Hand
      is action-only, so it needs a different execution cadence entirely — see
      docs/crb-fr3-inference.md and docs/franka-inference-bringup.md ("Gripper hardware").
@@ -316,7 +316,7 @@ class PolicyClientNode(Node):
         # The gripper rides a SEPARATE topic, not a field on the pose chunk: a PoseArray cannot
         # carry a width, and the Franka Hand is action-only (no ros2_control interface, libfranka
         # offers only blocking move/grasp), so it cannot be driven at the arm's cadence anyway.
-        # fr3_gripper_bridge on the NUC deadbands and rate-limits it into Move/Grasp goals.
+        # franka_hand_node on the NUC holds it as a horizon and plans Moves against it.
         #
         # The pose chunk goes to exactly ONE executor, chosen by `wire`. The MULTIDOF form carries
         # per-waypoint absolute times, which is what lets the NUC's 1 kHz interpolator splice chunks
@@ -903,7 +903,7 @@ class PolicyClientNode(Node):
         if self._preview_pub is not None:
             self._preview_pub.publish(self._actions_to_pose_array(actions))
         if self._gripper_preview_pub is not None:
-            self._gripper_preview_pub.publish(self._actions_to_gripper_trajectory(actions))
+            self._gripper_preview_pub.publish(self._actions_to_gripper_trajectory(actions, t_obs))
 
         # Drop the leading actions that refer to instants already elapsed by the time each device
         # can act on them, so execution starts from the first still-future waypoint.
@@ -911,11 +911,12 @@ class PolicyClientNode(Node):
         # The two devices are truncated INDEPENDENTLY, because they are genuinely different
         # speeds: the hand starts moving ~190 ms before the arm does. A single shared slice would
         # force the faster device to inherit the slower one's lead and act that much too early,
-        # which is what fr3_gripper_bridge's (now removed) gripper_lead_steps existed to claw
+        # which is what the old gripper bridge's gripper_lead_steps existed to claw
         # back. This is UMI's split — robot_action_latency vs gripper_action_latency, each
         # subtracted per device — reached through slicing rather than absolute waypoint times,
-        # since a PoseArray carries no timing. Note _actions_to_gripper_trajectory recomputes
-        # time_from_start relative to whatever slice it is handed, so the two stay self-consistent.
+        # since a PoseArray carries no timing. Both halves number time_from_start from the
+        # PRE-slice index against their own anchor, so dropping stale actions never shifts what
+        # remains — see _actions_to_gripper_trajectory.
         n_received = len(actions)
         n_stale_arm = self._n_stale_actions(t_obs, self._latency_act)
         n_stale_grip = self._n_stale_actions(t_obs, self._latency_act_gripper)
@@ -978,7 +979,9 @@ class PolicyClientNode(Node):
                 stamp=(t_obs - Duration(seconds=self._latency_act)).to_msg(),
             )
         if self._gripper_pub is not None and grip_actions:
-            self._gripper_pub.publish(self._actions_to_gripper_trajectory(grip_actions))
+            self._gripper_pub.publish(
+                self._actions_to_gripper_trajectory(grip_actions, t_obs, first_index=n_stale_grip)
+            )
 
     @staticmethod
     def _action_to_pose(action) -> Pose:
@@ -1001,23 +1004,26 @@ class PolicyClientNode(Node):
             stamp=self.get_clock().now().to_msg(),
         )
 
-    def _actions_to_gripper_trajectory(self, actions) -> JointTrajectory:
+    def _actions_to_gripper_trajectory(self, actions, t_obs, first_index: int = 0) -> JointTrajectory:
         """
-        Build the gripper half of an action chunk as a timed single-DOF trajectory.
+        Build the gripper half of an action chunk as an absolutely-timed single-DOF trajectory.
 
-        Carries per-point ``time_from_start`` so the NUC bridge can pick a lead waypoint and derive
-        a move speed from it, rather than commanding every width at one fixed speed. The widths are
-        converted to robot jaw aperture here so the bridge stays free of calibration — see
+        ``header.stamp + time_from_start`` is a real schedule, exactly as for the arm chunk:
+        franka_hand_node holds these as a horizon and plans which of them a Move can still reach,
+        which only works if they name instants. The anchor is ``t_obs - latency.gripper_exec``, so
+        every waypoint is commanded that far ahead of when it should be reached, and the index is
+        the PRE-slice one — numbering the survivors of the stale-drop from zero would slide the
+        whole timeline earlier by exactly the amount the drop was meant to remove.
+
+        Widths are converted to robot jaw aperture here so the NUC stays free of calibration — see
         polyumi_ros2.gripper_map.
 
-        Times run from the SLICE index, deliberately unlike the arm chunk, which is numbered from
-        its pre-slice index: this consumer reads time_from_start as a relative shape to derive a
-        speed, not as an absolute schedule, so shifting it changes nothing.
-
         :param actions: 8-vector actions [x,y,z,qx,qy,qz,qw,grip], grip in policy units.
+        :param t_obs: the observation instant the chunk was inferred from.
+        :param first_index: index of ``actions[0]`` within the original, unsliced chunk.
         """
         msg = JointTrajectory()
-        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.stamp = (t_obs - Duration(seconds=self._latency_act_gripper)).to_msg()
         msg.header.frame_id = self._base_frame
         msg.joint_names = [GRIPPER_JOINT_NAME]
         for i, action in enumerate(actions):
@@ -1025,7 +1031,7 @@ class PolicyClientNode(Node):
             point.positions = [
                 policy_to_robot_width(float(action[7]), self._gripper_min_width_m, self._gripper_max_width_m)
             ]
-            point.time_from_start = Duration(seconds=i * self._action_dt).to_msg()
+            point.time_from_start = Duration(seconds=(first_index + i) * self._action_dt).to_msg()
             msg.points.append(point)
         return msg
 

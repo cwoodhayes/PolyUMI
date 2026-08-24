@@ -91,12 +91,13 @@ REPEATABILITY_WARN_M = 0.001
 #: than a real stop.
 CLAMP_MARGIN_M = 0.001
 
-#: The bridge's parameter service. Queried rather than guessed: "did I measure the fingers or the
+#: franka_hand_node's parameter service (it is named `fr3_gripper`, inheriting franka_gripper's
+#: node name so /fr3_gripper/joint_states keeps working). Queried rather than guessed: "did I measure the fingers or the
 #: software limit" is otherwise undecidable from this side, and guessing it from the spread gets it
 #: wrong — a hand that reaches its own maximum every time is just as repeatable as one hitting a
 #: clamp. Service calls DO cross the Humble<->Kilted rmw gap even though the ROS graph does not, so
 #: this works from the laptop; see docs/crb-fr3-inference.md.
-BRIDGE_PARAM_SERVICE = '/fr3_gripper_bridge/get_parameters'
+BRIDGE_PARAM_SERVICE = '/fr3_gripper/get_parameters'
 BRIDGE_PARAM_TIMEOUT_S = 5.0
 
 #: The Franka Hand's own maximum aperture after homing. Once the clamp is here there is nothing
@@ -218,7 +219,7 @@ class GripperRangeProbe(Node):
             time.sleep(0.1)
         self.get_logger().error(
             f'Nothing is subscribed to {self._pub.topic_name} after {timeout_s:.0f}s — is '
-            'fr3_gripper_bridge running on the NUC (ros2 launch nuc/launch/fr3_inference.launch.py)?'
+            'franka_hand_node running on the NUC (ros2 launch nuc/launch/fr3_inference.launch.py)?'
         )
         return False
 

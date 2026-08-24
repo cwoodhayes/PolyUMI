@@ -25,6 +25,7 @@ import sys
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo
+from launch.conditions import UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -61,11 +62,18 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 'arm_id', default_value='fr3', description='Arm type; drives every fr3_* frame and topic name.'
             ),
-            # franka.launch.py defaults this to true as well. Named here because turning it off is
-            # what makes the /fr3_gripper/* action servers vanish — the first thing to check when
-            # the gripper bridge reports "action server NOT found".
+            # NOT "does the hand exist" — it means "franka_gripper owns the hand instead of us".
+            # PolyUMI's franka_hand_node talks to libfranka directly and only one process can hold
+            # that connection, so the default is false. Set it true to hand the fingers back to the
+            # stock /fr3_gripper/* action servers, and then do NOT launch franka_hand_node.
+            #
+            # Beware the side effect: franka.launch.py routes this one flag into `xacro hand:=` as
+            # well, so turning it off also drops fr3_hand from robot_description. The static
+            # publisher below is what keeps polyumi_tcp attached to something.
             DeclareLaunchArgument(
-                'load_gripper', default_value='true', description='Load the Franka Hand (the /fr3_gripper/* servers).'
+                'load_gripper',
+                default_value='false',
+                description='Let franka_gripper own the Franka Hand instead of franka_hand_node.',
             ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -119,6 +127,18 @@ def generate_launch_description():
                 name='polyumi_tcp_static_tf',
                 output='screen',
                 arguments=tcp_calib.static_transform_publisher_args(),
+            ),
+            # With load_gripper false the URDF has no fr3_hand, so robot_state_publisher stops
+            # emitting fr3_link8 -> fr3_hand and polyumi_tcp above becomes an orphan. That breaks
+            # the laptop's base -> polyumi_tcp lookup, and with it every observation — a failure
+            # whose symptom points nowhere near this flag. Republish the joint the URDF lost.
+            Node(
+                package='tf2_ros',
+                executable='static_transform_publisher',
+                name='fr3_hand_static_tf',
+                output='screen',
+                arguments=tcp_calib.hand_transform_publisher_args(),
+                condition=UnlessCondition(load_gripper),
             ),
         ]
     )

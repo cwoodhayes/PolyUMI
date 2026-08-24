@@ -292,8 +292,8 @@ went. **This moves the arm.**
   which the sharpness check rejects with a message about peak width. The probe now detects this
   directly and names the likely causes instead.
 - **The gripper is measured by step response, not cross-correlation, and that is deliberate.**
-  `fr3_gripper_bridge` quantises commands to `min_command_period_s` (0.25 s), supersedes each
-  in-flight `Move` goal with the next, and drops anything inside its 5 mm deadband. Correlation
+  `franka_hand_node` runs each `Move` to completion — a floor of 363 ms even for zero travel, and
+  0.6–1.4 s for a real stroke — and drops anything inside its 5 mm deadband. Correlation
   assumes the response is a delayed *linear echo* of the command, which that is not. Driven at
   0.6 Hz on 2026-08-10 the hand fell most of a cycle behind and the estimator reported the phase
   lag — 1.2 s — as if it were a delay. The tell was that the answer grew with how much of the
@@ -310,8 +310,10 @@ went. **This moves the arm.**
   (`robot_action_latency` vs `gripper_action_latency`), reached by slicing rather than by absolute
   waypoint times, since a `PoseArray` carries no timing. It means you can re-measure one device
   without touching the other, and a chunk too stale for the arm can still drive the hand. A
-  `gripper_lead_steps` parameter on `fr3_gripper_bridge` used to paper over the shared slice by
+  `gripper_lead_steps` parameter on the old gripper bridge used to paper over the shared slice by
   indexing further into the chunk; it is gone, and re-adding a lead there would double-compensate.
+  Both halves now carry an absolute schedule (`header.stamp + time_from_start`) numbered from the
+  pre-slice index, so the drop removes waypoints without moving the ones that survive.
 - **`latency.proprio` is adopted, not measured, on purpose.** It means "true EE pose → the stamp on
   TF", and isolating it needs external ground truth of the true pose. libfranka stamps at read, so
   it is ~1 ms; UMI hit the identical wall and hardcodes `robot_obs_latency: 0.0001`. The `arm_exec`

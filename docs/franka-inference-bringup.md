@@ -326,12 +326,13 @@ Everything below is blocked only on arm/GoPro access.
          smoothly. Wild jumps, NaNs, or off-workspace poses are the finding.
       4. Also confirm the startup line `camera crop: 1920x1080 → 1440x1080, discarded bars mean
          …/255 — pillarbox as expected`. An error there means the crop is eating real image.
-- [ ] **Gripper on-arm dry run** (`fr3_gripper_bridge` with `execute:=false`)
+- [ ] **Gripper on-arm dry run** (`franka_hand_node` with `execute:=false`)
 - [ ] **Gripper on-arm execution** (`execute:=true`, arm bridge plan-only)
 - [x] **Re-measure `latency.gripper_exec`** — done, shipped 0.380. `gripper_timing_probe` then
       showed 359/386 ms of that is the hand's own firmware, so 0.380 is within ~20 ms of the floor
-      and there is no headroom left to chase. `n_action_steps: 16` stays: the gripper still sets
-      the requirement.
+      and there is no headroom left to chase. `n_action_steps` is now 24, not 16: the gripper still
+      sets the requirement, and 16 was too shallow for `franka_hand_node` to schedule a full stroke
+      on time (see the comment in `inference.yaml`).
 - [ ] **DECIDE: is the Franka Hand the right gripper for this policy?** — blocking, and a hardware
       question rather than a software one. A superseding `Move` *stops* the fingers (see the
       gripper bullets above), so the hand cannot track a continuous width trajectory at all; its

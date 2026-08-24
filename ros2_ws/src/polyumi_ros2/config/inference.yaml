@@ -18,12 +18,18 @@
     #   obs age at response ~0.62s (0.31 capture+convert, 0.30 inference) + that device's *_exec
     #
     # against n_action_steps * action_dt. The GRIPPER sets the requirement, at ~1.14s; the arm is
-    # far cheaper. 16 gives 1.6s and leaves both margin.
+    # far cheaper.
     #
-    # 16 is also the model's own action_horizon (the fork's config/task/polyumi.yaml), and
-    # serve_policy returns min(requested, what the model has) — so this cannot over-read, and
-    # raising it further buys nothing. Lower it only for a checkpoint with a shorter horizon.
-    n_action_steps: 16
+    # 24 rather than 16 because of what the hand's own model says (notebooks/gripper_free_running
+    # .ipynb): after the stale-slice, 16 leaves ~0.8-1.2s live, and franka_hand_node can schedule
+    # at most maxDistance(0.8 - 0.158) = 34 mm inside that. Every full 82 mm open/close would fall
+    # through to its chase branch and arrive late by construction — not an algorithm fault, just
+    # too shallow a chunk for the device. Deepening it is free at inference time.
+    #
+    # The ceiling is the model's own action_horizon (the fork's config/task/polyumi.yaml);
+    # serve_policy returns min(requested, what the model has), so this cannot over-read. If the
+    # checkpoint's horizon is 16 this silently stays 16 — retrain deeper to actually get 24.
+    n_action_steps: 24
 
     # --- Per-component latencies, in seconds. ---
     # Measured with `ros2 run polyumi_ros2 latency_probe`, one mode per value. Procedures and what
@@ -83,13 +89,17 @@
       # never inherits the arm's lead; this is UMI's robot_action_latency / gripper_action_latency
       # split.
       #
-      # Roughly 0.34 s of it is the Franka Hand itself — libfranka's Gripper::move sends one TCP
-      # request and everything after that is firmware, so it is a floor, not a tuning target. The
-      # rest is fr3_gripper_bridge's min_command_period_s rate limit plus franka_gripper's own
-      # single-threaded executor, which sits inside a blocking UDP readOnce most of the time.
+      # Almost all of it is the Franka Hand itself: 0.208 s from the TCP request reaching the hand
+      # to the fingers moving, and franka_hand_node's own queueing on top, since a Move runs to
+      # completion and the next one waits. Firmware, not a tuning target. See
+      # notebooks/gripper_free_running.ipynb.
+      #
+      # NOT the same quantity as the node's t_obs_delay_s: this one aligns the ACTION chunk, that
+      # one shifts the node's internal schedule for how late the reported width is. Two numbers
+      # for two effects, feeding different consumers; do not fold them together.
       #
       # The hand is the slower device by a wide margin: the arm is servoed at 1 kHz, while the
-      # hand takes discrete, rate-limited Move/Grasp goals. It therefore truncates several more
+      # hand takes discrete, un-preemptable Moves at under 2 Hz. It therefore truncates several more
       # waypoints than the arm, which is why the two are sliced independently — a shared slice
       # would force the arm to inherit the hand's lead and act that much early.
       #

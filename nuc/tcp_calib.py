@@ -76,6 +76,35 @@ TCP_XYZ = (FINGERTIP_X, 0.0, FINGER_CARRIAGE_Z + CARRIAGE_TO_FINGERTIP_Z)
 # fixes the sign. Confirm it by eye in Foxglove anyway (docs/crb-fr3-inference.md).
 TCP_RPY = (0.0, 0.0, math.pi / 2)
 
+# --------------------------------------------------------------------------------------------
+# fr3_link8 -> fr3_hand, the link ABOVE the TCP.
+#
+# Normally robot_state_publisher publishes this from the URDF, but franka.launch.py feeds its one
+# `load_gripper` flag to both `xacro hand:=` and the franka_gripper include. PolyUMI's own hand
+# driver owns the libfranka connection, so franka_gripper must not run — which takes fr3_hand out
+# of robot_description as a side effect and orphans polyumi_tcp, breaking the laptop's whole
+# observation lookup. fr3_bringup.launch.py republishes it statically to fill that hole.
+#
+# Values are franka_description's own defaults for the joint, read out of
+# end_effectors/franka_hand/franka_hand_arguments.xacro (`xyz` and `rpy`); nothing in the
+# fr3.urdf.xacro chain overrides them. Geometry, not a measurement — the -45 deg yaw is the
+# flange's standard mounting rotation.
+HAND_PARENT = 'fr3_link8'
+HAND_CHILD = 'fr3_hand'
+HAND_XYZ = (0.0, 0.0, 0.0)
+HAND_RPY = (0.0, 0.0, -math.pi / 4)
+
+
+def _stp_args(xyz, rpy, parent, child) -> list[str]:
+    """tf2_ros static_transform_publisher argv for one fixed transform."""
+    x, y, z = xyz
+    roll, pitch, yaw = rpy
+    return [
+        '--x', str(x), '--y', str(y), '--z', str(z),
+        '--roll', str(roll), '--pitch', str(pitch), '--yaw', str(yaw),
+        '--frame-id', parent, '--child-frame-id', child,
+    ]  # fmt: skip
+
 
 def xacro_args() -> list[str]:
     """Build the ``name:=value`` pairs fr3_polyumi.urdf.xacro requires, for a launch Command."""
@@ -87,26 +116,12 @@ def xacro_args() -> list[str]:
 
 def static_transform_publisher_args() -> list[str]:
     """Build the tf2_ros static_transform_publisher argv publishing TCP_PARENT -> TCP_CHILD."""
-    x, y, z = TCP_XYZ
-    roll, pitch, yaw = TCP_RPY
-    return [
-        '--x',
-        str(x),
-        '--y',
-        str(y),
-        '--z',
-        str(z),
-        '--roll',
-        str(roll),
-        '--pitch',
-        str(pitch),
-        '--yaw',
-        str(yaw),
-        '--frame-id',
-        TCP_PARENT,
-        '--child-frame-id',
-        TCP_CHILD,
-    ]
+    return _stp_args(TCP_XYZ, TCP_RPY, TCP_PARENT, TCP_CHILD)
+
+
+def hand_transform_publisher_args() -> list[str]:
+    """Build the argv publishing HAND_PARENT -> HAND_CHILD, for when the URDF has no hand."""
+    return _stp_args(HAND_XYZ, HAND_RPY, HAND_PARENT, HAND_CHILD)
 
 
 def describe() -> str:
