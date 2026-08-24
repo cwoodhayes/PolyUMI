@@ -189,10 +189,35 @@ TEST(WidthTrajectoryTest, SpliceDropsElapsedSetpoints) {
   EXPECT_NEAR(out.firstTime(), 2.0, kTol);
 }
 
-TEST(WidthTrajectoryTest, AnEntirelyPastChunkLeavesNothing) {
-  // The clock-skew case. Empty is the idle state, not an error: the fingers hold position.
+TEST(WidthTrajectoryTest, AnEntirelyPastChunkKeepsItsFinalSetpoint) {
+  // NOT empty, and this is the bug that stopped latency_probe dead on hardware: it publishes a
+  // single point stamped `now` with time_from_start 0, so every chunk it sends is already past by
+  // the time it crosses DDS. Dropping those left an empty horizon and the fingers never moved.
+  // The terminal setpoint still says where the gripper should be, so it survives and the chase
+  // branch runs at it.
   const WidthTrajectory h({1.0}, {0.010});
-  EXPECT_TRUE(h.splice(WidthTrajectory({0.5}, {0.030}), 10.0).empty());
+  const WidthTrajectory out = h.splice(WidthTrajectory({0.5}, {0.030}), 10.0);
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_NEAR(out.lastWidth(), 0.030, kTol);
+}
+
+TEST(WidthTrajectoryTest, ElapsedIntermediateSetpointsAreStillDropped) {
+  // Only the LAST one is privileged. Stale intermediate points would drag branch A backwards.
+  const WidthTrajectory h({1.0, 2.0, 3.0}, {0.010, 0.020, 0.030});
+  const WidthTrajectory out = h.splice(WidthTrajectory(), 2.5);
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_NEAR(out.firstTime(), 3.0, kTol);
+}
+
+TEST(SelectMove, AWhollyPastChunkStillChasesItsTarget) {
+  // latency_probe's exact shape: one setpoint, already elapsed, far outside the deadband. The hand
+  // must run flat out at it rather than sitting idle.
+  const WidthTrajectory h({-0.1}, {0.070});
+  const auto cmd = selectMove(h, 0.010, 0.0, 0.005, 0.001);
+  ASSERT_TRUE(cmd.has_value());
+  EXPECT_NEAR(cmd->width, 0.070, kTol);
+  EXPECT_NEAR(cmd->speed, kL.v_max, kTol);
+  EXPECT_FALSE(cmd->on_time);
 }
 
 TEST(WidthTrajectoryTest, PruneBoundsBothEnds) {

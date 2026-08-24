@@ -9,6 +9,28 @@
 
 namespace polyumi_fr3_controllers {
 
+namespace {
+
+/// Drop setpoints whose instant has passed -- but never the last one.
+///
+/// The terminal setpoint is where the signal is HEADING, and that stays true long after the instant
+/// it was due; an intermediate one does not. Discarding it would freeze the fingers whenever a chunk
+/// lands entirely late, which is not an edge case: latency_probe publishes a single point stamped
+/// `now` with time_from_start 0, so every chunk it sends is already past on arrival. Keeping the last
+/// point lets selectMove's chase branch run flat out at it, which is what "be here now" should mean.
+/// It also degrades sanely under clock skew -- the fingers track the newest commanded width instead
+/// of stopping dead.
+void dropElapsed(std::vector<double>& times, std::vector<double>& widths, double curr_time) {
+  std::size_t keep = 0;
+  while (keep + 1 < times.size() && times[keep] <= curr_time) {
+    ++keep;
+  }
+  times.erase(times.begin(), times.begin() + static_cast<std::ptrdiff_t>(keep));
+  widths.erase(widths.begin(), widths.begin() + static_cast<std::ptrdiff_t>(keep));
+}
+
+}  // namespace
+
 double moveDuration(double dx, double speed, const HandLimits& limits) {
   dx = std::abs(dx);
   if (dx <= 0.0) {
@@ -80,10 +102,8 @@ WidthTrajectory WidthTrajectory::splice(const WidthTrajectory& chunk, double cur
   std::vector<double> times;
   std::vector<double> widths;
   const auto push = [&](double t, double w) {
-    if (t > curr_time) {
-      times.push_back(t);
-      widths.push_back(w);
-    }
+    times.push_back(t);
+    widths.push_back(w);
   };
 
   for (std::size_t i = 0; i < times_.size(); ++i) {
@@ -94,6 +114,7 @@ WidthTrajectory WidthTrajectory::splice(const WidthTrajectory& chunk, double cur
   for (std::size_t i = 0; i < chunk.size(); ++i) {
     push(chunk.times_[i], chunk.widths_[i]);
   }
+  dropElapsed(times, widths, curr_time);
 
   if (times.empty()) {
     return WidthTrajectory();
@@ -105,11 +126,13 @@ WidthTrajectory WidthTrajectory::prune(double curr_time, double horizon) const {
   std::vector<double> times;
   std::vector<double> widths;
   for (std::size_t i = 0; i < times_.size(); ++i) {
-    if (times_[i] > curr_time && times_[i] <= curr_time + horizon) {
+    if (times_[i] <= curr_time + horizon) {
       times.push_back(times_[i]);
       widths.push_back(widths_[i]);
     }
   }
+  dropElapsed(times, widths, curr_time);
+
   if (times.empty()) {
     return WidthTrajectory();
   }
