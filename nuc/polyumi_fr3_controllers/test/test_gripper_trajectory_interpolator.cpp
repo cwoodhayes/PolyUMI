@@ -1,9 +1,9 @@
 // Copyright (c) 2026 PolyUMI. MIT.
 //
-// The model constants under test were measured on the hand and derived in
-// notebooks/gripper_free_running.ipynb, which is the source of truth for all of them. The anchor
-// tests at the bottom of the model section replay rows straight out of notebooks/data/, so editing
-// a constant fails here rather than quietly changing what the fingers do.
+// The model constants under test were fitted in a Jupyter notebook from runs of the
+// franka_hand_testing probes; the notebook is not in the repo, so the measured rows the anchor
+// tests replay are inlined below. Editing a constant therefore fails here rather than quietly
+// changing what the fingers do.
 
 #include <polyumi_fr3_controllers/gripper_trajectory_interpolator.hpp>
 
@@ -118,7 +118,7 @@ TEST(GripperModel, MaxDistanceIsExactlyWhatTheInverseWillStillAccept) {
 }
 
 TEST(GripperModel, MatchesTheMeasuredStrokeSweep) {
-  // Two rows from notebooks/data/stroke_commands.csv: a 60 mm stroke at 100 and at 30 mm/s, each
+  // Two rows from a stroke_gripper_timing_probe run: a 60 mm stroke at 100 and at 30 mm/s, each
   // the mean of three reps. Per-move jitter is ~50 ms, so 100 ms is the honest tolerance.
   EXPECT_NEAR(blockedDuration(0.060, 0.100), 1.2645, 0.1);
   EXPECT_NEAR(blockedDuration(0.060, 0.030), 2.4612, 0.1);

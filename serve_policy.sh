@@ -18,7 +18,6 @@
 #
 # serve_policy.py loads the policy on plain 'cuda', i.e. whatever CUDA_VISIBLE_DEVICES makes
 # device 0. Not defaulted here: which card is quiet changes hour to hour, so check `nvidia-smi`.
-# See docs/crb-fr3-inference.md for what pinning does and does not buy.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

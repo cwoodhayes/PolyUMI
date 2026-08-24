@@ -3,7 +3,7 @@ Tests for the latency probe's parameter guards and signal handling.
 
 The estimator itself is covered in test_latency_util; what is left here is everything that decides
 whether the estimator gets fed something meaningful. Those are the quiet failures: a chirp that
-aliases against the command rate, an amplitude the gripper bridge's deadband swallows whole, or a
+aliases against the command rate, an amplitude the hand node's deadband swallows whole, or a
 QR dedup that biases every offset upward. Each produces a plausible-looking number that then goes
 into a robot config, so each gets a test.
 """
@@ -69,7 +69,7 @@ def test_mode_defaults_stay_below_their_own_nyquist():
         assert 0 < f0 < f1 < COMMAND_HZ[mode] / 2, mode
 
 
-def test_gripper_step_must_clear_the_bridge_deadband():
+def test_gripper_step_must_clear_the_hand_deadband():
     """
     Below franka_hand_node's 5 mm deadband the step is discarded and the hand never moves.
 
@@ -224,7 +224,7 @@ def test_gripper_report_emits_the_measured_latency_unmodified(tmp_path, capsys):
     probe.destroy_node()
 
 
-def test_gripper_chirp_amplitude_must_clear_the_bridge_deadband():
+def test_gripper_chirp_amplitude_must_clear_the_hand_deadband():
     """
     Too small an amplitude leaves too few deadband-sized steps for the sweep to read as a sinusoid.
 
@@ -236,15 +236,15 @@ def test_gripper_chirp_amplitude_must_clear_the_bridge_deadband():
         _probe(mode='gripper_chirp', amplitude_m=0.005)
 
 
-def test_gripper_chirp_is_bounded_by_the_bridge_send_rate_not_the_publish_rate():
+def test_gripper_chirp_is_bounded_by_the_hand_command_floor_not_the_publish_rate():
     """
-    Publishing faster than the bridge sends buys nothing; above its Nyquist the sweep cannot land.
+    Publishing faster than the hand can act buys nothing; above its Nyquist the sweep cannot land.
 
     The guard against command_hz alone would wave this through — 2.5 Hz is well under the 10 Hz
-    publish Nyquist of 5 Hz — while the bridge, emitting one goal per 0.25 s, hands the hand fewer
-    than two goals per cycle. That is a sweep the hand could not reproduce even if it were perfect.
+    publish Nyquist of 5 Hz — while the hand, completing one Move per HAND_PERIOD_S, gets fewer
+    than two per cycle. That is a sweep it could not reproduce even if it were perfect.
     """
-    with pytest.raises(ValueError, match="Nyquist of the bridge's own"):
+    with pytest.raises(ValueError, match="Nyquist of the hand's own"):
         _probe(mode='gripper_chirp', chirp_f1_hz=2.5)
 
 
@@ -296,7 +296,7 @@ def test_gripper_chirp_rejects_a_chunk_that_can_never_be_scheduled():
 
 
 def test_gripper_chirp_cannot_command_past_the_hand_stroke():
-    """An amplitude that would push the sweep past 0 or BRIDGE_MAX_WIDTH_M must be rejected."""
+    """An amplitude that would push the sweep past 0 or HAND_MAX_WIDTH_M must be rejected."""
     with pytest.raises(ValueError, match='must stay within'):
         _probe(mode='gripper_chirp', amplitude_m=0.05)
 

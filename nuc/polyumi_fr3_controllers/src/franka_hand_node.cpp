@@ -14,8 +14,8 @@
 //
 // WHAT IT COSTS. blockedDuration(0) = 363 ms, so the command ceiling is 2.75 Hz and realistically
 // 0.7-1.7 Hz. Against a 10 Hz setpoint stream this node is a DECIMATOR, servicing roughly every
-// 4th-15th setpoint. That is the hardware, not a bug. See notebooks/gripper_free_running.ipynb for
-// where every constant came from, and docs/crb-fr3-inference.md for what the hand cannot do.
+// 4th-15th setpoint. That is the hardware, not a bug. See docs/crb-fr3-inference.md for what the
+// hand cannot do.
 //
 // It also republishes /fr3_gripper/joint_states: with load_gripper:=false nothing else does, and
 // six consumers need it (policy_client_node's agent_pos[7] among them). That stream costs the

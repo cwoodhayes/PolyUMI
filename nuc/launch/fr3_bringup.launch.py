@@ -7,7 +7,7 @@
 #
 # What is deliberately NOT in here: move_group and the two PolyUMI bridges. Those live in
 # fr3_inference.launch.py, so this file can be restarted on its own — which matters, because
-# per docs/crb-fr3-inference.md ("TF lookup fails") this is the component that crashes
+# per docs/crb-fr3-inference.md ("When it doesn't come up") this is the component that crashes
 # mid-session, and it is also the one gated on enabling FCI in the Desk UI by hand.
 
 """
@@ -24,11 +24,11 @@ from pathlib import Path
 import sys
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription, LogInfo
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo
 from launch.conditions import UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import Node, SetRemap
+from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 # ros2 launch loads this file by path without touching sys.path, so a sibling import needs the
@@ -75,37 +75,15 @@ def generate_launch_description():
                 default_value='false',
                 description='Let franka_gripper own the Franka Hand instead of franka_hand_node.',
             ),
-            # franka.launch.py:147 hardcodes joint_state_publisher's
-            # `source_list: [franka/joint_states, franka_gripper/joint_states]`, but the gripper —
-            # ours or franka_gripper — publishes on `fr3_gripper/joint_states`, arm_id-prefixed. So
-            # the aggregator subscribes to a topic nothing publishes, and the fingers never reach
-            # /joint_states. Upstream franka_ros2 v0.1.15 bug.
-            #
-            # A remap is the only lever that reaches it: SetParameter loses, because launch_ros
-            # expands global parameters FIRST precisely so a node's own hardcoded ones win
-            # (launch_ros/actions/node.py:422), while global REMAPS are prepended (node.py:471) and
-            # joint_state_publisher declares none of its own. Scoped so it touches nothing else.
-            #
-            # This only pays off under load_gripper:=true. On the default path the URDF has no hand
-            # at all, so joint_state_publisher drops fr3_finger_joint1/2 as joints it does not know
-            # (joint_state_publisher.py:332) no matter which topic they arrive on — and move_group,
-            # whose own model DOES have the fingers, keeps warning "complete state ... not yet
-            # known". Fixing that needs a hand in robot_description, which is a different problem.
-            GroupAction(
-                scoped=True,
-                actions=[
-                    SetRemap('/franka_gripper/joint_states', '/fr3_gripper/joint_states'),
-                    IncludeLaunchDescription(
-                        PythonLaunchDescriptionSource(
-                            [PathJoinSubstitution([FindPackageShare('franka_bringup'), 'launch', 'franka.launch.py'])]
-                        ),
-                        launch_arguments={
-                            'robot_ip': robot_ip,
-                            'arm_id': arm_id,
-                            'load_gripper': load_gripper,
-                        }.items(),
-                    ),
-                ],
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    [PathJoinSubstitution([FindPackageShare('franka_bringup'), 'launch', 'franka.launch.py'])]
+                ),
+                launch_arguments={
+                    'robot_ip': robot_ip,
+                    'arm_id': arm_id,
+                    'load_gripper': load_gripper,
+                }.items(),
             ),
             # The joint-trajectory controller move_group executes through. franka.launch.py spawns
             # only the two broadcasters, so without this /execute_trajectory has nothing to drive

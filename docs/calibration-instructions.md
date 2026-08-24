@@ -178,9 +178,9 @@ empirically on every tick by `_n_stale_actions`, which runs *after* the response
 
 | Value | Where it comes from |
 |---|---|
-| `latency.gopro` | **measure** — `latency_probe with mode:=camera` |
-| `latency.arm_exec` | **measure** — `latency_probe with mode:=arm` |
-| `latency.gripper_exec` | **measure** — `latency_probe with mode:=gripper` |
+| `latency.gopro` | **measure** — `latency_probe --ros-args -p mode:=camera` |
+| `latency.arm_exec` | **measure** — `latency_probe --ros-args -p mode:=arm` |
+| `latency.gripper_exec` | **measure** — `latency_probe --ros-args -p mode:=gripper` |
 | `latency.gripper` | printed by the gripper run; half the joint-state publish interval |
 | `latency.proprio` | adopted constant, ~0.001 — see below |
 | round trip | nothing to do; measured live |
@@ -258,9 +258,8 @@ went. **This moves the arm.**
 3. This prints **two** numbers, because they are two different quantities:
    - `latency.gripper_exec` — the **action** side, command → the hand actually moving. Goes into
      `config/inference.yaml` exactly as measured; `policy_client_node` truncates the gripper chunk
-     by this value alone. Expect a few hundred ms and a spread of roughly one
-     `min_command_period_s`, most of which is the bridge's own command timer — that quantisation is
-     real delay in service too, so it belongs in the number.
+     by this value alone. Expect a few hundred ms, most of it the hand's own firmware: a `Move`
+     blocks 363 ms even for zero travel, and `franka_hand_node` runs each to completion.
    - `latency.gripper` — the **observation** side, half the `/fr3_gripper/joint_states` publish
      interval. Goes in `config/inference.yaml`.
 

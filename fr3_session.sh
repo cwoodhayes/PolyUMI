@@ -308,7 +308,7 @@ remote_shell() {
 # ---------------------------------------------------------------------------
 # Window 1: the NUC — hardware session and inference stack, one pane each.
 # Split because bringup is the piece that crashes mid-session and needs restarting on its own
-# (docs/crb-fr3-inference.md, "TF lookup fails"), which is also why they are two launch files.
+# (docs/crb-fr3-inference.md, "When it doesn't come up"), which is also why they are two launch files.
 # ---------------------------------------------------------------------------
 read -r NUC_BRINGUP_PANE NUC_WINDOW < <(
   tmux new-session -d -P -F '#{pane_id} #{window_id}' -s "$SESSION" -n nuc -c "$REPO_DIR")

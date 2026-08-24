@@ -18,8 +18,8 @@ Measured 2026-08-09: the closed aperture is **0.0000 m** and the open aperture *
 fingers meet exactly at the mechanism's zero rather than colliding early — which matches how
 ``gripper_calib.yaml`` defines the fingertip frame ("the point where the two fingertips meet" when
 fully closed) — and they do not foul at the open end either, so both limits are the hand's own
-rather than the fingers'. The first run reported 0.0800 because the bridge's default clamp stopped
-it, which is why this probe now *asks* the bridge for its clamp instead of guessing.
+rather than the fingers'. The first run reported 0.0800 because a default clamp stopped it, which
+is why this probe now *asks* the hand node for its clamp instead of guessing.
 
 Cross-check against the ArUco side, which is independent of everything here: the **closed width**
 (``gripper_calib.yaml``'s ``closed_mm``, the tag separation with the fingers touching) is 44.56 mm,
@@ -36,23 +36,23 @@ the negated closed aperture, so it duplicated this measurement.) See polyumi_ros
 
 Why the spread matters as much as the mean: `Move` applies no force and stalls on contact, so the
 closed endpoint is wherever the fingers happened to stop for that speed. If the spread across reps
-is more than about a millimetre, the endpoint is not repeatable and you want it force-defined
-instead — re-run with the bridge's ``use_grasp_below_m`` raised so a stated ``grasp_force_n``
-decides where closed is. Don't reach for that pre-emptively; let the measurement say.
+is more than about a millimetre, the endpoint is not repeatable and wants to be force-defined
+instead, by the hand's ``Grasp`` rather than its ``Move``. ``franka_hand_node`` does not implement
+``Grasp``, so that is a blocker to raise rather than a flag to re-run with.
 
 Usage (laptop, after `source setup_franka_env.sh`):
 
     # 1. NUC: the gripper must be allowed to move, or every command is a silent no-op. The
-    #    bridge's clamp already defaults to 0.0817 m — the Franka Hand's own maximum — so the
-    #    fingers stop the open sweep first if anything does. Pass gripper_max_width only if you
-    #    have deliberately lowered it; a clamp below the hand's maximum measures the software.
+    #    node's clamp defaults to whatever the hand reports as its own maximum, so the fingers
+    #    stop the open sweep first if anything does. Pass gripper_max_width only if you have
+    #    deliberately lowered it; a clamp below the hand's maximum measures the software.
     ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true
 
     # 2. Nothing should be in the way of the fingers
     ros2 run polyumi_ros2 gripper_range_probe
 
 **Do not run this while policy_client_node is running.** It publishes to /polyumi/target_gripper,
-the same topic the policy uses, and the bridge acts on whichever chunk arrives last.
+the same topic the policy uses, and the hand node splices whichever chunk arrives last.
 """
 
 import statistics
@@ -67,18 +67,19 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-#: Joint name the bridge expects on /polyumi/target_gripper (it reads positions, not names, but
+#: Joint name the hand node expects on /polyumi/target_gripper (it reads positions, not names, but
 #: matching policy_client_node keeps the topic self-describing).
 GRIPPER_JOINT_NAME = 'fr3_gripper_width'
 
-#: Give DDS time to match the bridge's subscription. Discovery is asynchronous, so a command
+#: Give DDS time to match the hand node's subscription. Discovery is asynchronous, so a command
 #: published before the endpoints pair goes nowhere, silently.
 SUBSCRIBER_TIMEOUT_S = 10.0
 
 #: Endpoint detection: the aperture is "settled" once it stops changing. Unlike the arm, the hand
 #: makes short discrete moves, so there is no reversal to trip over — but there IS a delay before
-#: the goal goes out (the bridge rate-limits to min_command_period_s) and a stationary hand looks
-#: identical before and after. Hence a minimum wait, then a stability window.
+#: the Move goes out (franka_hand_node runs each to completion, a 363 ms floor even for zero
+#: travel) and a stationary hand looks identical before and after. Hence a minimum wait, then a
+#: stability window.
 COMMAND_LATENCY_S = 1.5
 STABLE_TOL_M = 0.0002
 STABLE_S = 1.0
@@ -87,18 +88,18 @@ SAMPLE_PERIOD_S = 0.05
 #: Spread above which the endpoint is not repeatable enough to calibrate against.
 REPEATABILITY_WARN_M = 0.001
 
-#: How close the open endpoint has to sit to the bridge's clamp before we call it clamped rather
+#: How close the open endpoint has to sit to the node's clamp before we call it clamped rather
 #: than a real stop.
 CLAMP_MARGIN_M = 0.001
 
-#: franka_hand_node's parameter service (it is named `fr3_gripper`, inheriting franka_gripper's
-#: node name so /fr3_gripper/joint_states keeps working). Queried rather than guessed: "did I measure the fingers or the
-#: software limit" is otherwise undecidable from this side, and guessing it from the spread gets it
-#: wrong — a hand that reaches its own maximum every time is just as repeatable as one hitting a
-#: clamp. Service calls DO cross the Humble<->Kilted rmw gap even though the ROS graph does not, so
-#: this works from the laptop; see docs/crb-fr3-inference.md.
-BRIDGE_PARAM_SERVICE = '/fr3_gripper/get_parameters'
-BRIDGE_PARAM_TIMEOUT_S = 5.0
+#: franka_hand_node's parameter service. It is named `fr3_gripper`, inheriting franka_gripper's
+#: node name so /fr3_gripper/joint_states keeps working. Queried rather than guessed: "did I
+#: measure the fingers or the software limit" is otherwise undecidable from this side, and
+#: guessing it from the spread gets it wrong — a hand that reaches its own maximum every time is
+#: just as repeatable as one hitting a clamp. Service calls DO cross the Humble<->Kilted rmw gap
+#: even though the ROS graph does not, so this works from the laptop; see docs/crb-fr3-inference.md.
+HAND_PARAM_SERVICE = '/fr3_gripper/get_parameters'
+HAND_PARAM_TIMEOUT_S = 5.0
 
 #: The Franka Hand's own maximum aperture after homing. Once the clamp is here there is nothing
 #: further to try — franka_gripper ABORTS widths past max_width rather than clamping them — so
@@ -122,7 +123,7 @@ class GripperRangeProbe(Node):
         self.declare_parameter('gripper_topic', '/polyumi/target_gripper')
         self.declare_parameter('gripper_state_topic', '/fr3_gripper/joint_states')
         # Commanded past the hand's maximum on purpose, so the fingers decide where open is. The
-        # bridge clamps it to its own max_width_m, which the inference launch file defaults to the
+        # node clamps it to its own max_width_m, which the inference launch file defaults to the
         # hand's 0.0817 m — if the measured endpoint lands on a clamp *below* that we say so,
         # because then the number is a software limit and not the fingers'.
         self.declare_parameter('open_width_m', 0.09)
@@ -150,31 +151,31 @@ class GripperRangeProbe(Node):
 
         self._state_topic = state_topic
         self._pub = self.create_publisher(JointTrajectory, topic, 10)
-        self._bridge_params = self.create_client(GetParameters, BRIDGE_PARAM_SERVICE)
+        self._hand_params = self.create_client(GetParameters, HAND_PARAM_SERVICE)
         self._lock = threading.Lock()
         self._aperture: float | None = None
         self.create_subscription(JointState, state_topic, self._on_state, 10)
 
-    def bridge_max_width(self) -> float | None:
+    def hand_max_width(self) -> float | None:
         """
-        Ask the bridge what it clamps commanded widths to, or None if it cannot be reached.
+        Ask the hand node what it clamps commanded widths to, or None if it cannot be reached.
 
         Without this the probe cannot distinguish "the fingers stopped here" from "the software
         stopped here", and the two demand opposite responses: one is the number you want, the
         other means re-run with a higher clamp.
         """
-        if not self._bridge_params.wait_for_service(timeout_sec=BRIDGE_PARAM_TIMEOUT_S):
+        if not self._hand_params.wait_for_service(timeout_sec=HAND_PARAM_TIMEOUT_S):
             self.get_logger().warning(
-                f'{BRIDGE_PARAM_SERVICE} did not answer; cannot tell whether the open endpoint is '
-                "the fingers or the bridge's clamp."
+                f'{HAND_PARAM_SERVICE} did not answer; cannot tell whether the open endpoint is '
+                "the fingers or the node's clamp."
             )
             return None
         request = GetParameters.Request()
         request.names = ['max_width_m']
-        future = self._bridge_params.call_async(request)
+        future = self._hand_params.call_async(request)
         done = threading.Event()
         future.add_done_callback(lambda _f: done.set())
-        if not done.wait(timeout=BRIDGE_PARAM_TIMEOUT_S):
+        if not done.wait(timeout=HAND_PARAM_TIMEOUT_S):
             return None
         response = future.result()
         if response is None or not response.values:
@@ -207,7 +208,7 @@ class GripperRangeProbe(Node):
 
     def wait_for_subscriber(self, timeout_s: float = SUBSCRIBER_TIMEOUT_S) -> bool:
         """
-        Block until the bridge has matched our publisher, so the first command is not dropped.
+        Block until the hand node has matched our publisher, so the first command is not dropped.
 
         Publishing into an unmatched topic loses the message with no error anywhere, which would
         surface later as "the gripper never moved" and send you looking at execute_gripper.
@@ -224,13 +225,13 @@ class GripperRangeProbe(Node):
         return False
 
     def command(self, width_m: float) -> None:
-        """Publish a single-waypoint gripper chunk; the bridge turns it into a Move/Grasp goal."""
+        """Publish a single-waypoint gripper chunk; the hand node turns it into a Move."""
         msg = JointTrajectory()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.joint_names = [GRIPPER_JOINT_NAME]
         point = JointTrajectoryPoint()
         point.positions = [width_m]
-        # The bridge derives its move speed from this; ~1 s of allotted travel keeps the approach
+        # The node derives its move speed from this; ~1 s of allotted travel keeps the approach
         # gentle, which matters at the closed end where the fingers stall against each other.
         point.time_from_start = Duration(seconds=1.0).to_msg()
         msg.points.append(point)
@@ -241,7 +242,7 @@ class GripperRangeProbe(Node):
         Wait for the aperture to stop changing and return where it stopped.
 
         Motion is NOT required first: commanding open when the hand is already open legitimately
-        moves nothing, and the bridge's deadband may swallow the goal outright. Requiring movement
+        moves nothing, and the node's deadband may swallow the setpoint outright. Requiring movement
         would hang on exactly that case, so this waits out the command latency and then looks for
         stability.
         """
@@ -292,7 +293,7 @@ class GripperRangeProbe(Node):
             opens.append(measured_open)
             closeds.append(measured_closed)
 
-        return self._report(opens, closeds, clamp_m=self.bridge_max_width())
+        return self._report(opens, closeds, clamp_m=self.hand_max_width())
 
     def _report(self, opens: list[float], closeds: list[float], clamp_m: float | None = None) -> int:
         """Print the endpoints with their spreads, and the config lines they feed."""
@@ -313,8 +314,8 @@ class GripperRangeProbe(Node):
             self.get_logger().error(
                 f'The closed endpoint varies by {spread_closed * 1000:.2f} mm between reps, so it '
                 'is not repeatable enough to calibrate against. Move applies no force and stalls '
-                'wherever it happens to, so make the endpoint force-defined instead: re-run with '
-                'the bridge started at use_grasp_below_m:=0.02 (and a chosen grasp_force_n).'
+                'wherever it happens to. A force-defined endpoint needs Grasp, which '
+                'franka_hand_node does not implement — so this is a blocker, not a re-run.'
             )
         if spread_open > REPEATABILITY_WARN_M:
             ok = False
@@ -326,13 +327,13 @@ class GripperRangeProbe(Node):
             # Not fatal: the endpoints are still measured, they are just unverified against the
             # software limit. Say so rather than inventing a verdict.
             self.get_logger().warning(
-                f"Could not read the bridge's max_width_m, so open aperture = {a_open:.4f} m might be the "
+                f"Could not read the node's max_width_m, so open aperture = {a_open:.4f} m might be the "
                 'software clamp rather than a physical stop. Check it by hand before using this.'
             )
         elif a_open < clamp_m - CLAMP_MARGIN_M:
             self.get_logger().info(
                 f'open aperture = {a_open:.4f} m stopped {(clamp_m - a_open) * 1000:.1f} mm below the '
-                f"bridge's clamp ({clamp_m:.4f} m), so hardware stopped it, not software. This is "
+                f"node's clamp ({clamp_m:.4f} m), so hardware stopped it, not software. This is "
                 'the number you want.'
             )
         elif clamp_m >= HAND_MAX_WIDTH_M - CLAMP_MARGIN_M:
@@ -345,7 +346,7 @@ class GripperRangeProbe(Node):
         else:
             ok = False
             self.get_logger().error(
-                f"open aperture = {a_open:.4f} m is the bridge's max_width_m clamp ({clamp_m:.4f} m), not "
+                f"open aperture = {a_open:.4f} m is the node's max_width_m clamp ({clamp_m:.4f} m), not "
                 'a physical stop — the hand was never allowed to open further, so this measures '
                 'the software limit. Re-run with a higher clamp:\n'
                 '    ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true '

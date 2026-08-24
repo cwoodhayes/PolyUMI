@@ -5,8 +5,8 @@
 // The arm takes a continuous reference at 1 kHz. The hand takes discrete, blocking, un-preemptable
 // Move commands at under 2 Hz, so there is nothing to interpolate *to* — the question is instead
 // which setpoint each Move should aim at, and how fast. That needs a model of what a Move costs,
-// which is what the first half of this header is. notebooks/gripper_free_running.ipynb is the
-// source of truth for every constant; it is where they were measured and where the derivations live.
+// which is what the first half of this header is. Its constants were fitted in a Jupyter notebook
+// from runs of the franka_hand_testing probes (see that directory); the notebook is not in the repo.
 
 #pragma once
 

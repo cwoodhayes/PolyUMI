@@ -11,8 +11,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(ament_cmake REQUIRED)
 find_package(controller_interface REQUIRED)
 find_package(Eigen3 REQUIRED)
-# The gripper executables talk to the hand directly. Franka is a plain CMake package
-# (install/libfranka/lib/cmake/Franka), not an ament one, so it is linked by target rather
+# franka_hand_node (and the gated probes) talk to the hand directly. Franka is a plain CMake
+# package (install/libfranka/lib/cmake/Franka), not an ament one, so it is linked by target rather
 # than carried in DEPENDENCIES via ament_target_dependencies.
 find_package(Franka REQUIRED)
 find_package(franka_msgs REQUIRED)
@@ -74,29 +74,33 @@ add_executable(franka_hand_node src/franka_hand_node.cpp)
 target_link_libraries(franka_hand_node polyumi_fr3_control_core Franka::Franka)
 ament_target_dependencies(franka_hand_node rclcpp sensor_msgs trajectory_msgs)
 
-# Phase 0 characterisation of the Franka Hand: what a Move actually costs with no ROS, no
-# action server and no shared executor in the way. Deliberately not a node — the whole point
-# is that nothing else shares its threads. See the file header.
-add_executable(gripper_timing_probe src/franka_hand_testing/gripper_timing_probe.cpp)
-target_link_libraries(gripper_timing_probe Franka::Franka)
-add_executable(simple_gripper_timing_probe src/franka_hand_testing/simple_gripper_timing_probe.cpp)
-target_link_libraries(simple_gripper_timing_probe Franka::Franka)
-add_executable(csv_gripper_timing_probe src/franka_hand_testing/csv_gripper_timing_probe.cpp)
-target_link_libraries(csv_gripper_timing_probe Franka::Franka)
-add_executable(stop_gripper_timing_probe src/franka_hand_testing/stop_gripper_timing_probe.cpp)
-target_link_libraries(stop_gripper_timing_probe Franka::Franka)
-add_executable(speed_gripper_timing_probe src/franka_hand_testing/speed_gripper_timing_probe.cpp)
-target_link_libraries(speed_gripper_timing_probe Franka::Franka)
-add_executable(maxspeed_gripper_timing_probe src/franka_hand_testing/maxspeed_gripper_timing_probe.cpp)
-target_link_libraries(maxspeed_gripper_timing_probe Franka::Franka)
-add_executable(stroke_gripper_timing_probe src/franka_hand_testing/stroke_gripper_timing_probe.cpp)
-target_link_libraries(stroke_gripper_timing_probe Franka::Franka)
+# Firmware bringup probes: one-off characterisations of what a Move costs with no ROS, no action
+# server and no shared executor in the way. Deliberately not nodes — the point is that nothing
+# else shares their threads. Nothing in service loads them and they have already produced their
+# answer (HandLimits), so they are off by default; turn them on to characterise a different hand.
+#
+#   colcon build --packages-select polyumi_fr3_controllers --cmake-args -DBUILD_HAND_PROBES=ON
+option(BUILD_HAND_PROBES "Build the franka_hand_testing characterisation probes" OFF)
 
 install(DIRECTORY include/ DESTINATION include)
-install(TARGETS franka_hand_node gripper_timing_probe simple_gripper_timing_probe csv_gripper_timing_probe
-  stop_gripper_timing_probe speed_gripper_timing_probe maxspeed_gripper_timing_probe
-  stroke_gripper_timing_probe
-  DESTINATION lib/${PROJECT_NAME})
+install(TARGETS franka_hand_node DESTINATION lib/${PROJECT_NAME})
+
+if(BUILD_HAND_PROBES)
+  set(HAND_PROBES
+    gripper_timing_probe
+    simple_gripper_timing_probe
+    csv_gripper_timing_probe
+    stop_gripper_timing_probe
+    speed_gripper_timing_probe
+    maxspeed_gripper_timing_probe
+    stroke_gripper_timing_probe
+  )
+  foreach(probe ${HAND_PROBES})
+    add_executable(${probe} src/franka_hand_testing/${probe}.cpp)
+    target_link_libraries(${probe} Franka::Franka)
+  endforeach()
+  install(TARGETS ${HAND_PROBES} DESTINATION lib/${PROJECT_NAME})
+endif()
 
 install(
   TARGETS polyumi_fr3_control_core polyumi_fr3_controllers

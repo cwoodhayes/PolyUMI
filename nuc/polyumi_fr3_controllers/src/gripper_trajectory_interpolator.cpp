@@ -13,13 +13,10 @@ namespace {
 
 /// Drop setpoints whose instant has passed -- but never the last one.
 ///
-/// The terminal setpoint is where the signal is HEADING, and that stays true long after the instant
-/// it was due; an intermediate one does not. Discarding it would freeze the fingers whenever a chunk
-/// lands entirely late, which is not an edge case: latency_probe publishes a single point stamped
-/// `now` with time_from_start 0, so every chunk it sends is already past on arrival. Keeping the last
-/// point lets selectMove's chase branch run flat out at it, which is what "be here now" should mean.
-/// It also degrades sanely under clock skew -- the fingers track the newest commanded width instead
-/// of stopping dead.
+/// The terminal setpoint is where the signal is HEADING, and stays true long after the instant it
+/// was due; an intermediate one does not. Keeping it means a chunk that lands entirely late -- a
+/// single "be here now" point, or any chunk under clock skew -- still moves the fingers, via
+/// selectMove's chase branch, rather than freezing them.
 void dropElapsed(std::vector<double>& times, std::vector<double>& widths, double curr_time) {
   std::size_t keep = 0;
   while (keep + 1 < times.size() && times[keep] <= curr_time) {
@@ -95,8 +92,8 @@ WidthTrajectory::WidthTrajectory(std::vector<double> times, std::vector<double> 
 }
 
 WidthTrajectory WidthTrajectory::splice(const WidthTrajectory& chunk, double curr_time) const {
-  // Everything the chunk covers is superseded by it; a chunk that is entirely in the past leaves
-  // nothing at all, which is the right answer when the clocks have skewed.
+  // Everything at or after the chunk's first instant is superseded by it. dropElapsed then trims
+  // what the splice leaves, so a chunk entirely in the past narrows to its own final setpoint.
   const double cut = chunk.empty() ? std::numeric_limits<double>::infinity() : chunk.firstTime();
 
   std::vector<double> times;

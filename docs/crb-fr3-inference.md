@@ -176,13 +176,14 @@ ros2 control switch_controllers --deactivate fr3_arm_controller \
   already elapsed on arrival and *nothing moves at all* while every other indicator looks healthy.
   You can catch this by checking the latency monitor plot in Foxglove. Check [calibration-instructions.md](calibration-instructions.md), "Latencies", for more info on this latency calculation.
 - **Two upstream `franka_ros2` v0.1.15 bugs.** The gripper's params file is silently ignored
-  (wrong node key, so `ros2 param dump /fr3_gripper` disagrees with the YAML) — unfixed. And
+  (wrong node key, so `ros2 param dump /fr3_gripper` disagrees with the YAML). And
   `joint_state_publisher`'s `source_list` names `franka_gripper/joint_states` while the gripper
-  publishes on `fr3_gripper/joint_states`; `fr3_bringup.launch.py` now remaps that, which fixes it
-  under `load_gripper:=true`. On the default path it changes nothing visible: the URDF has no hand,
-  so `joint_state_publisher` discards `fr3_finger_joint1/2` as joints it does not know. **Expect
-  move_group to warn `complete state ... not yet known. Missing fr3_finger_joint1` forever** — it
-  is pre-existing, it is not the gripper node failing, and there is still no finger TF.
+  publishes on `fr3_gripper/joint_states`, so the fingers never reach `/joint_states`. Both are
+  unfixed, and the second is invisible on the default path anyway: with `load_gripper:=false` the
+  URDF has no hand, so `joint_state_publisher` discards `fr3_finger_joint1/2` as joints it does not
+  know, whichever topic they arrive on. **Expect move_group to warn `complete state ... not yet
+  known. Missing fr3_finger_joint1` forever** — it is pre-existing, it is not the gripper node
+  failing, and there is still no finger TF. Fixing it needs a hand in `robot_description`.
 
 ## Logs
 
@@ -223,7 +224,7 @@ Most failures here are one of four things, in rough order of frequency:
 ## Gripper problems
 Currently this setup uses the Franka Hand, which is terrible. I've done a bunch of analysis on it, tl;dr it has ~210ms observable command delay, only updates its state at 5Hz, and its move() commands cannot be pre-empted once issued.
 
-The scripts I used for this analysis are in `nuc/polyumi_fr3_controllers/src/franka_hand_testing`; the notebook that fits the model to them is `notebooks/gripper_free_running.ipynb`, which is the **source of truth** for every constant below — where it and any other document disagree, the notebook wins.
+The scripts I used for this analysis are in `nuc/polyumi_fr3_controllers/src/franka_hand_testing`, gated off the default build behind `-DBUILD_HAND_PROBES=ON`. The constants below were fitted to their output in a Jupyter notebook that is not in the repo; the values as shipped live in `HandLimits` (`gripper_trajectory_interpolator.hpp`), pinned by the anchor tests in `test_gripper_trajectory_interpolator.cpp`. Re-run the probes against any other hand before trusting them.
 
 `franka_hand_node` works around all of this with a custom interpolator built on that model:
 

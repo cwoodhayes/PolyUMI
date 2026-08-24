@@ -185,9 +185,10 @@ class PolicyClientNode(Node):
         self.declare_parameter('latency.arm_exec', 0.0)
         # Delay from publishing a width to the fingers actually starting to move. The gripper's
         # counterpart to arm_exec, and separate from it because the two devices are genuinely
-        # different speeds — the hand beat the arm by ~190 ms on first measurement. Each chunk is
-        # truncated by its own device's value (see _post_and_act), which is UMI's split of
-        # robot_action_latency vs gripper_action_latency.
+        # different speeds. Each chunk is truncated by its own device's value (see _post_and_act),
+        # which is UMI's split of robot_action_latency vs gripper_action_latency. Which device
+        # leads depends entirely on the two measured values; see config/inference.yaml for the
+        # shipped pair and what is currently under test.
         self.declare_parameter('latency.gripper_exec', 0.0)
         # Delay from the hand's true aperture to its measurement appearing on the joint-state
         # topic. Kept separate from latency.proprio because the gripper is a different device on a
@@ -196,7 +197,7 @@ class PolicyClientNode(Node):
         self.declare_parameter('latency.gripper', 0.0)
         # --- Gripper ---
         # Source for agent_pos[7]. The FR3 publishes each finger at HALF the aperture, so the two
-        # positions are summed; see docs/crb-fr3-inference.md ("Gripper interface").
+        # positions are summed; see docs/crb-fr3-inference.md ("The facts you can't deduce by looking").
         self.declare_parameter('gripper_state_topic', '/fr3_gripper/joint_states')
         # If true, a tick with no gripper state is skipped (as a failed TF lookup is). Off by
         # default so setups without a hand — motion_only bringup, a bare arm — still run, feeding
@@ -909,10 +910,10 @@ class PolicyClientNode(Node):
         # can act on them, so execution starts from the first still-future waypoint.
         #
         # The two devices are truncated INDEPENDENTLY, because they are genuinely different
-        # speeds: the hand starts moving ~190 ms before the arm does. A single shared slice would
-        # force the faster device to inherit the slower one's lead and act that much too early,
-        # which is what the old gripper bridge's gripper_lead_steps existed to claw
-        # back. This is UMI's split — robot_action_latency vs gripper_action_latency, each
+        # speeds. A single shared slice would force whichever device leads to inherit the other's
+        # lead and act that much too early — which is what the old gripper bridge's
+        # gripper_lead_steps existed to claw back, and it could add lead but never remove it.
+        # This is UMI's split — robot_action_latency vs gripper_action_latency, each
         # subtracted per device — reached through slicing rather than absolute waypoint times,
         # since a PoseArray carries no timing. Both halves number time_from_start from the
         # PRE-slice index against their own anchor, so dropping stale actions never shifts what

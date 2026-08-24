@@ -104,8 +104,8 @@ MODES = ('camera', 'arm', 'gripper', 'gripper_chirp')
 
 #: Chirp band, in Hz. Bandwidth is what makes the correlation peak sharp (see latency_util). The
 #: arm's sits as high as it can actually follow through MoveIt's plan-then-execute cadence; the
-#: gripper_chirp band is sized in _init_gripper_chirp against the bridge's deadband and tracker,
-#: not listed here as a bare constant.
+#: gripper_chirp band is sized in _init_gripper_chirp against the hand's deadband and command
+#: floor, not listed here as a bare constant.
 CHIRP_BAND_HZ = {'arm': (0.05, 0.4), 'gripper_chirp': (0.1, 0.7)}
 
 #: Arm command rate, deliberately slow: `fr3_moveit_bridge` plans and executes each chunk
@@ -113,8 +113,9 @@ CHIRP_BAND_HZ = {'arm': (0.05, 0.4), 'gripper_chirp': (0.1, 0.7)}
 #: would discard most of them. Dropping *some* is harmless — the arm still traverses the same
 #: smooth chirp, and it is the chirp we correlate against — but it is noise we can avoid.
 #:
-#: The gripper bridge has no such synchronous stage — it just rate-limits sends — so gripper_chirp
-#: commands faster than the bridge's own send rate, to keep it fed a fresh target every window.
+#: franka_hand_node has no such synchronous stage — it splices each chunk into a horizon it
+#: re-plans against — so gripper_chirp publishes faster than the hand can act, to keep the horizon
+#: fed a fresh target every window.
 COMMAND_HZ = {'arm': 4.0, 'gripper_chirp': 10.0}
 
 #: Joint name on /polyumi/target_gripper, matching policy_client_node and gripper_range_probe.
@@ -123,25 +124,27 @@ GRIPPER_JOINT_NAME = 'fr3_gripper_width'
 #: franka_hand_node's shipped defaults, mirrored here to size the chirp excitation — it runs on
 #: the NUC under a different distro, so this module cannot import it. Pass matching -p overrides
 #: on both sides if you've changed the node's.
-BRIDGE_DEADBAND_M = 0.005
+HAND_DEADBAND_M = 0.005
 #: The Franka Hand's own floor: a Move blocks this long even for zero travel, and the node runs
 #: them to completion (it cannot pre-empt one). Not a configurable rate limit any more — this is
-#: the hardware. Measured in notebooks/gripper_free_running.ipynb.
-BRIDGE_PERIOD_S = 0.363
-BRIDGE_MAX_WIDTH_M = 0.08
+#: the hardware. Measured with the franka_hand_testing probes; see docs/crb-fr3-inference.md.
+HAND_PERIOD_S = 0.363
+HAND_MAX_WIDTH_M = 0.08
 
-#: Highest frequency the hand can convey at all. It completes at most one Move per BRIDGE_PERIOD_S
+#: Highest frequency the hand can convey at all. It completes at most one Move per HAND_PERIOD_S
 #: however fast the probe publishes, so this — not ``command_hz`` — is the real ceiling on the
 #: sweep.
-BRIDGE_SEND_NYQUIST_HZ = 1 / (2 * BRIDGE_PERIOD_S)
+HAND_SEND_NYQUIST_HZ = 1 / (2 * HAND_PERIOD_S)
 
 #: How many deadband-sized steps the commanded sweep must have per half stroke to still read as a
 #: sinusoid rather than a square wave. Four is the fewest that gives a rise, a top, and a fall.
 MIN_DEADBAND_LEVELS = 4.0
 
 #: Window the gripper must hold still over before a step is timed, and the spread that counts as
-#: still. Longer than the bridge's 0.25 s command period, so a rep cannot start while the previous
-#: goal is still in flight and be timed against a hand that was already moving.
+#: still. Doubles as the interval between checks, so it must be wide enough to hold at least the
+#: three state samples _wait_until_still needs to judge a spread. That loop is what keeps a rep
+#: from starting while the previous Move is still in flight — it waits for actual stillness, not
+#: for any fixed period.
 GRIPPER_SETTLE_S = 0.5
 GRIPPER_STILL_TOL_M = 0.0005
 
@@ -271,8 +274,9 @@ class LatencyProbe(Node):
         self.declare_parameter('duration_s', 20.0)
         self.declare_parameter('plot', True)
         self.declare_parameter('output_npz', '')
-        # Only used to phrase the arm result against the control period; the gripper result is a
-        # latency in seconds and needs no conversion. Must match policy_client_node's control rate.
+        # Phrases the arm result against the control period, and spaces gripper_chirp's waypoints
+        # — which is why it is declared for every mode. Must match policy_client_node's control
+        # rate, since both uses are only meaningful against the chunk the policy really sends.
         self.declare_parameter('action_dt', 0.1)
 
         self._duration_s = self.get_parameter('duration_s').get_parameter_value().double_value
@@ -379,7 +383,7 @@ class LatencyProbe(Node):
         else:
             self.declare_parameter('target_topic', '/polyumi/target_gripper')
             self.declare_parameter('state_topic', '/fr3_gripper/joint_states')
-            # Step size, comfortably past the bridge's 0.005 m width_deadband_m so the command is
+            # Step size, comfortably past the hand node's 0.005 m width_deadband_m so the command is
             # never swallowed, and centred mid-stroke so neither end hits a hard stop.
             self.declare_parameter('step_m', 0.03)
             self.declare_parameter('center_width_m', 0.04)
@@ -394,8 +398,8 @@ class LatencyProbe(Node):
             self._reps = self.get_parameter('reps').get_parameter_value().integer_value
             self._onset_threshold = self.get_parameter('onset_threshold_m').get_parameter_value().double_value
             self._settle_timeout_s = self.get_parameter('settle_timeout_s').get_parameter_value().double_value
-            if self._step <= BRIDGE_DEADBAND_M:
-                errors.append(f"step_m must exceed the bridge's {BRIDGE_DEADBAND_M} m deadband, got {self._step}")
+            if self._step <= HAND_DEADBAND_M:
+                errors.append(f"step_m must exceed the hand's {HAND_DEADBAND_M} m deadband, got {self._step}")
             if self._center - self._step / 2 < 0:
                 errors.append(
                     f'center_width_m ({self._center}) - step_m/2 ({self._step / 2}) is negative; '
@@ -423,8 +427,8 @@ class LatencyProbe(Node):
         errors = []
         # The band is squeezed from both sides. Below: the correlation peak broadens as 1/chirp_f0_hz,
         # and a peak wider than MAX_PEAK_WIDTH_S cannot localise the lag — so a low f0 costs
-        # sharpness even when the lag itself is recovered correctly. Above: BRIDGE_SEND_NYQUIST_HZ,
-        # since the bridge only emits a goal every BRIDGE_PERIOD_S no matter how fast we publish.
+        # sharpness even when the lag itself is recovered correctly. Above: HAND_SEND_NYQUIST_HZ,
+        # since the hand completes at most one Move every HAND_PERIOD_S no matter how fast we publish.
         f0, f1 = CHIRP_BAND_HZ['gripper_chirp']
         self.declare_parameter('chirp_f0_hz', f0)
         self.declare_parameter('chirp_f1_hz', f1)
@@ -432,7 +436,7 @@ class LatencyProbe(Node):
         self.declare_parameter('target_topic', '/polyumi/target_gripper')
         self.declare_parameter('state_topic', '/fr3_gripper/joint_states')
         self.declare_parameter('center_width_m', 0.04)
-        # Half the peak-to-peak sweep. Sized against BRIDGE_DEADBAND_M and BRIDGE_MAX_WIDTH_M
+        # Half the peak-to-peak sweep. Sized against HAND_DEADBAND_M and HAND_MAX_WIDTH_M
         # below, not against the step mode's step_m — the two are unrelated sweeps.
         self.declare_parameter('amplitude_m', 0.03)
         self.declare_parameter('settle_timeout_s', 10.0)
@@ -442,7 +446,7 @@ class LatencyProbe(Node):
         #
         # Not a tuning knob, and the defaults are not arbitrary. franka_hand_node aims at the
         # earliest setpoint it can still REACH, and reaching anything costs at least
-        # BRIDGE_PERIOD_S. A single waypoint 0.25 s out (the arm's shape) is inside that floor, so
+        # HAND_PERIOD_S. A single waypoint 0.25 s out (the arm's shape) is inside that floor, so
         # every decision would fall through to the node's chase branch and the sweep would measure
         # only how fast the hand runs flat out. n_action_steps matches inference.yaml, which in turn
         # matches the checkpoint's own action_horizon, so the span is the one the policy really
@@ -471,34 +475,34 @@ class LatencyProbe(Node):
                 f'chirp_f1_hz ({self._f1}) must be below the Nyquist of command_hz '
                 f'({self._command_hz / 2}), or the commanded sweep aliases'
             )
-        # The binding limit is not command_hz but the bridge, which emits at most one goal per
-        # BRIDGE_PERIOD_S however fast we publish. Past its Nyquist the hand is handed fewer than
-        # two goals per cycle and cannot reproduce the sweep even in principle.
-        elif self._f1 >= BRIDGE_SEND_NYQUIST_HZ:
+        # The binding limit is not command_hz but the hand, which completes at most one Move per
+        # HAND_PERIOD_S however fast we publish. Past its Nyquist it gets fewer than two Moves per
+        # cycle and cannot reproduce the sweep even in principle.
+        elif self._f1 >= HAND_SEND_NYQUIST_HZ:
             errors.append(
-                f'chirp_f1_hz ({self._f1}) must be below {BRIDGE_SEND_NYQUIST_HZ} Hz, the Nyquist '
-                f"of the bridge's own {BRIDGE_PERIOD_S}s send rate — above it the hand gets fewer "
-                'than two goals per cycle regardless of command_hz'
+                f'chirp_f1_hz ({self._f1}) must be below {HAND_SEND_NYQUIST_HZ} Hz, the Nyquist '
+                f"of the hand's own {HAND_PERIOD_S}s command floor — above it the hand gets fewer "
+                'than two Moves per cycle regardless of command_hz'
             )
         if self._amplitude <= 0:
             errors.append(f'amplitude_m must be > 0, got {self._amplitude}')
         else:
-            if self._center - self._amplitude < 0 or self._center + self._amplitude > BRIDGE_MAX_WIDTH_M:
+            if self._center - self._amplitude < 0 or self._center + self._amplitude > HAND_MAX_WIDTH_M:
                 errors.append(
                     f'center_width_m ({self._center}) +/- amplitude_m ({self._amplitude}) must stay '
-                    f'within [0, {BRIDGE_MAX_WIDTH_M}]; the bridge would clamp the sweep and flatten '
+                    f'within [0, {HAND_MAX_WIDTH_M}]; the hand node would clamp the sweep and flatten '
                     'its peaks into a signal the correlation then locks onto'
                 )
-            # The deadband quantises the commanded sweep in SPACE, not time: the bridge suppresses
-            # anything within BRIDGE_DEADBAND_M of the last width it actually sent, so the hand
-            # sees a staircase of at-least-deadband-sized steps. How many steps fit in a half
+            # The deadband quantises the commanded sweep in SPACE, not time: the node skips any
+            # setpoint within HAND_DEADBAND_M of where the fingers already are, so the hand only
+            # ever traverses a staircase of at-least-deadband-sized steps. How many steps fit in a half
             # stroke is therefore set by amplitude alone — frequency does not enter it. Too few and
             # the "sinusoid" the hand is offered is a square wave.
-            levels = 2 * self._amplitude / BRIDGE_DEADBAND_M
+            levels = 2 * self._amplitude / HAND_DEADBAND_M
             if levels < MIN_DEADBAND_LEVELS:
                 errors.append(
                     f'amplitude_m ({self._amplitude}) gives only {levels:.1f} deadband-sized steps '
-                    f"per half stroke against the bridge's {BRIDGE_DEADBAND_M * 1e3:.0f} mm "
+                    f"per half stroke against the hand node's {HAND_DEADBAND_M * 1e3:.0f} mm "
                     f'deadband, under the {MIN_DEADBAND_LEVELS} needed for the commanded sweep to '
                     'still resemble a sinusoid — raise amplitude_m.'
                 )
@@ -855,8 +859,8 @@ class LatencyProbe(Node):
         far the hand's *width* lags the commanded width — see `_run_gripper_chirp` for why that
         used to be the wrong tool for this plant and no longer is.
 
-        Each rep here settles for GRIPPER_SETTLE_S (0.5 s) before the next command is published —
-        comfortably past the bridge's 0.25 s rate limit — so that limit plays no part in the number.
+        Each rep waits for the fingers to actually stop before the next command is published, so a
+        Move still in flight from the previous rep can never be what a step is timed against.
         """
         low, high = self._center - self._step / 2, self._center + self._step / 2
         self.get_logger().warning(
@@ -885,7 +889,7 @@ class LatencyProbe(Node):
             if onset is None:
                 self.get_logger().error(
                     f'Rep {rep + 1}: commanded {target * 1e3:.0f} mm and the hand never moved. Is '
-                    'the bridge running with execute:=true? Without it every command is a no-op.'
+                    'franka_hand_node running with execute:=true? Without it every command is a no-op.'
                 )
                 return 1
             lags.append(('open' if opening else 'close', onset - t_command))
@@ -917,7 +921,7 @@ class LatencyProbe(Node):
         chunk's scheduled instant, so the answer should be invariant to that as well.
         """
         # The span is what decides whether the node can schedule at all: it aims at the earliest
-        # setpoint it can still reach, and reaching anything costs at least BRIDGE_PERIOD_S.
+        # setpoint it can still reach, and reaching anything costs at least HAND_PERIOD_S.
         span = self._lead + (self._n_action_steps - 1) * self._action_dt
         self.get_logger().warning(
             f'FINGERS WILL MOVE: sweeping the aperture by +/-{self._amplitude * 1e3:.0f} mm about '
@@ -929,8 +933,8 @@ class LatencyProbe(Node):
             f'(lead_s={self._lead:g}, action_dt={self._action_dt:g}).'
             + (
                 ''
-                if span >= BRIDGE_PERIOD_S
-                else f" WARNING: under the hand's own {BRIDGE_PERIOD_S:g}s floor, so every "
+                if span >= HAND_PERIOD_S
+                else f" WARNING: under the hand's own {HAND_PERIOD_S:g}s floor, so every "
                 'decision will fall through to the chase branch and this measures flat-out '
                 'response, not scheduling.'
             )
@@ -952,7 +956,7 @@ class LatencyProbe(Node):
         with self._lock:
             actual = list(self._actual)
 
-        # Park before reporting. The loop just stops publishing, so the bridge is left holding the
+        # Park before reporting. The loop just stops publishing, so the node is left holding the
         # sweep's final width while the hand is still a whole gripper_exec behind it — and that gap
         # is worst-case by construction, since a sweep of a whole number of cycles ends at its
         # maximum while the lagging hand is near its minimum. Left alone the fingers cross most of
@@ -1100,10 +1104,9 @@ class LatencyProbe(Node):
                 '  policy_client_node truncates the gripper chunk by this value alone, independently',
                 '  of latency.arm_exec, so it goes in as measured — no arithmetic against the arm.',
                 '',
-                '  The bridge rate-limits sends to min_command_period_s apart (0.25 s default) but',
-                '  ticks far faster than that, so quantisation from its own timer is sub-20 ms — most',
-                '  of the spread above is the open/close asymmetry and firmware/network jitter, not',
-                '  the bridge.',
+                '  Each rep settles before the next command goes out, so franka_hand_node never has a',
+                '  Move in flight when one is timed — the spread above is the open/close asymmetry and',
+                '  firmware/network jitter, not the node.',
                 '',
             ]
         lines += self._joint_state_interval_lines()
