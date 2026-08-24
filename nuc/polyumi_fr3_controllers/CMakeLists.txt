@@ -74,9 +74,19 @@ add_executable(simple_gripper_timing_probe src/franka_hand_testing/simple_grippe
 target_link_libraries(simple_gripper_timing_probe Franka::Franka)
 add_executable(csv_gripper_timing_probe src/franka_hand_testing/csv_gripper_timing_probe.cpp)
 target_link_libraries(csv_gripper_timing_probe Franka::Franka)
+add_executable(stop_gripper_timing_probe src/franka_hand_testing/stop_gripper_timing_probe.cpp)
+target_link_libraries(stop_gripper_timing_probe Franka::Franka)
+add_executable(speed_gripper_timing_probe src/franka_hand_testing/speed_gripper_timing_probe.cpp)
+target_link_libraries(speed_gripper_timing_probe Franka::Franka)
+add_executable(maxspeed_gripper_timing_probe src/franka_hand_testing/maxspeed_gripper_timing_probe.cpp)
+target_link_libraries(maxspeed_gripper_timing_probe Franka::Franka)
+add_executable(stroke_gripper_timing_probe src/franka_hand_testing/stroke_gripper_timing_probe.cpp)
+target_link_libraries(stroke_gripper_timing_probe Franka::Franka)
 
 install(DIRECTORY include/ DESTINATION include)
 install(TARGETS gripper_timing_probe simple_gripper_timing_probe csv_gripper_timing_probe
+  stop_gripper_timing_probe speed_gripper_timing_probe maxspeed_gripper_timing_probe
+  stroke_gripper_timing_probe
   DESTINATION lib/${PROJECT_NAME})
 
 install(

@@ -195,5 +195,12 @@ Most failures here are one of four things, in rough order of frequency:
 3. **`fr3_bringup` died on the NUC** — `ros2 topic info /tf_static` shows `Publisher count: 0`.
 4. **The arm stopped itself** — see Logs above.
 
+## Gripper problems
+Currently this setup uses the Franka Hand, which is terrible. I've done a bunch of analysis on it, tl;dr it has ~210ms observable command delay, only updates its state at 5Hz, and its move() commands cannot be pre-empted once issued. 
+
+The scripts I used for this analysis are in `nuc/polyumi_fr3_controllers/src/franka_hand_testing`; I have a jupyter notebook to analyze the results as well--reach out to me if you need it for some reason.
+
+The future of this system is to replace the Franka Hand with a better hand, as other labs have done, but for now I am working around its limitations as best I can with a custom interpolation scheme based on a model of the hand's response after all that testing.
+
 
 Good luck, stranger!
