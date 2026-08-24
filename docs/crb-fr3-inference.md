@@ -175,10 +175,14 @@ ros2 control switch_controllers --deactivate fr3_arm_controller \
   `obs age + latency.<device>_exec < n_action_steps * action_dt`. If it doesn't, every action has
   already elapsed on arrival and *nothing moves at all* while every other indicator looks healthy.
   You can catch this by checking the latency monitor plot in Foxglove. Check [calibration-instructions.md](calibration-instructions.md), "Latencies", for more info on this latency calculation.
-- **Two upstream `franka_ros2` v0.1.15 bugs, unfixed**: the gripper's params file is silently
-  ignored (wrong node key, so `ros2 param dump /fr3_gripper` disagrees with the YAML), and there
-  is no finger TF (`joint_state_publisher` subscribes to a topic nothing publishes). Both live in
-  the NUC's `~/franka_ws`, not our submodule.
+- **Two upstream `franka_ros2` v0.1.15 bugs.** The gripper's params file is silently ignored
+  (wrong node key, so `ros2 param dump /fr3_gripper` disagrees with the YAML) — unfixed. And
+  `joint_state_publisher`'s `source_list` names `franka_gripper/joint_states` while the gripper
+  publishes on `fr3_gripper/joint_states`; `fr3_bringup.launch.py` now remaps that, which fixes it
+  under `load_gripper:=true`. On the default path it changes nothing visible: the URDF has no hand,
+  so `joint_state_publisher` discards `fr3_finger_joint1/2` as joints it does not know. **Expect
+  move_group to warn `complete state ... not yet known. Missing fr3_finger_joint1` forever** — it
+  is pre-existing, it is not the gripper node failing, and there is still no finger TF.
 
 ## Logs
 
