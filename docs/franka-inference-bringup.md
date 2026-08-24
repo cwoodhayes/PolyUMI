@@ -330,9 +330,9 @@ Everything below is blocked only on arm/GoPro access.
 - [ ] **Gripper on-arm execution** (`execute:=true`, arm bridge plan-only)
 - [x] **Re-measure `latency.gripper_exec`** — done, shipped 0.380. `gripper_timing_probe` then
       showed 359/386 ms of that is the hand's own firmware, so 0.380 is within ~20 ms of the floor
-      and there is no headroom left to chase. `n_action_steps` is now 24, not 16: the gripper still
-      sets the requirement, and 16 was too shallow for `franka_hand_node` to schedule a full stroke
-      on time (see the comment in `inference.yaml`).
+      and there is no headroom left to chase. `n_action_steps: 16` stays: the gripper still sets the
+      requirement, and raising it alone would buy nothing — `serve_policy` caps the reply at the
+      checkpoint's own `action_horizon`, which is 16.
 - [ ] **DECIDE: is the Franka Hand the right gripper for this policy?** — blocking, and a hardware
       question rather than a software one. A superseding `Move` *stops* the fingers (see the
       gripper bullets above), so the hand cannot track a continuous width trajectory at all; its

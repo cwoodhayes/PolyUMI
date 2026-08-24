@@ -442,10 +442,11 @@ class LatencyProbe(Node):
         # earliest setpoint it can still REACH, and reaching anything costs at least
         # BRIDGE_PERIOD_S. A single waypoint 0.25 s out (the arm's shape) is inside that floor, so
         # every decision would fall through to the node's chase branch and the sweep would measure
-        # only how fast the hand runs flat out. n_action_steps matches inference.yaml so the span
-        # is the one the policy actually offers.
+        # only how fast the hand runs flat out. n_action_steps matches inference.yaml, which in turn
+        # matches the checkpoint's own action_horizon, so the span is the one the policy really
+        # offers -- serve_policy caps every reply at that horizon however many steps are requested.
         self.declare_parameter('lead_s', 0.25)
-        self.declare_parameter('n_action_steps', 24)
+        self.declare_parameter('n_action_steps', 16)
         self._f0 = self.get_parameter('chirp_f0_hz').get_parameter_value().double_value
         self._f1 = self.get_parameter('chirp_f1_hz').get_parameter_value().double_value
         self._command_hz = self.get_parameter('command_hz').get_parameter_value().double_value

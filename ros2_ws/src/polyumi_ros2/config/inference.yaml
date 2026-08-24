@@ -14,22 +14,9 @@
     # How many action steps to request per inference. The chunk must span the whole
     # observation->motion budget for a device, or every action in it is already in the past by the
     # time that device can act, _n_stale_actions drops all of them, and nothing is published:
-    #
-    #   obs age at response ~0.62s (0.31 capture+convert, 0.30 inference) + that device's *_exec
-    #
-    # against n_action_steps * action_dt. The GRIPPER sets the requirement, at ~1.14s; the arm is
-    # far cheaper.
-    #
-    # 24 rather than 16 because of what the hand's own model says (notebooks/gripper_free_running
-    # .ipynb): after the stale-slice, 16 leaves ~0.8-1.2s live, and franka_hand_node can schedule
-    # at most maxDistance(0.8 - 0.158) = 34 mm inside that. Every full 82 mm open/close would fall
-    # through to its chase branch and arrive late by construction — not an algorithm fault, just
-    # too shallow a chunk for the device. Deepening it is free at inference time.
-    #
-    # The ceiling is the model's own action_horizon (the fork's config/task/polyumi.yaml);
-    # serve_policy returns min(requested, what the model has), so this cannot over-read. If the
-    # checkpoint's horizon is 16 this silently stays 16 — retrain deeper to actually get 24.
-    n_action_steps: 24
+    # If this is more than the amount of steps the model is trained to generate, the extra steps
+    # are ignored.
+    n_action_steps: 16
 
     # --- Per-component latencies, in seconds. ---
     # Measured with `ros2 run polyumi_ros2 latency_probe`, one mode per value. Procedures and what
