@@ -52,10 +52,12 @@ which bottoms out at the ~0.34 s libfranka firmware floor. The chirp measures ho
 which action index the hand is handed, so the hand should *be* at that width rather than merely
 starting toward it.
 
-``mode:=gripper`` remains the source of the shipped ``gripper_exec``: as of 2026-08-20 the chirp
-mode **has never cleared its own quality gates on this hardware** — the Franka Hand does not track
-a swept target through discrete ``Move`` goals at all. That null result is the point of keeping it;
-see ``_run_gripper_chirp``.
+The chirp publishes a full ``n_action_steps`` chunk led by ``lead_s``, the shape
+``policy_client_node`` sends, and correlates against each chunk's scheduled instant rather than its
+publication. So it measures lag against a *schedule* — and it is the only thing here that exercises
+``franka_hand_node``'s scheduling branch, since a single already-due waypoint can only ever be
+chased. ``mode:=gripper`` stays a bare "be here now" step, and remains the source of the shipped
+``gripper_exec``.
 
 Usage (laptop, after ``source setup_franka_env.sh``)::
 
@@ -432,12 +434,30 @@ class LatencyProbe(Node):
         # below, not against the step mode's step_m — the two are unrelated sweeps.
         self.declare_parameter('amplitude_m', 0.03)
         self.declare_parameter('settle_timeout_s', 10.0)
+        # How far ahead of publication the chunk's FIRST waypoint is scheduled, and how many
+        # waypoints follow it at action_dt. Together these are the chunk the hand gets to plan
+        # against, exactly as policy_client_node publishes one — see _publish_chirp_chunk.
+        #
+        # Not a tuning knob, and the defaults are not arbitrary. franka_hand_node aims at the
+        # earliest setpoint it can still REACH, and reaching anything costs at least
+        # BRIDGE_PERIOD_S. A single waypoint 0.25 s out (the arm's shape) is inside that floor, so
+        # every decision would fall through to the node's chase branch and the sweep would measure
+        # only how fast the hand runs flat out. n_action_steps matches inference.yaml so the span
+        # is the one the policy actually offers.
+        self.declare_parameter('lead_s', 0.25)
+        self.declare_parameter('n_action_steps', 24)
         self._f0 = self.get_parameter('chirp_f0_hz').get_parameter_value().double_value
         self._f1 = self.get_parameter('chirp_f1_hz').get_parameter_value().double_value
         self._command_hz = self.get_parameter('command_hz').get_parameter_value().double_value
         self._center = self.get_parameter('center_width_m').get_parameter_value().double_value
         self._amplitude = self.get_parameter('amplitude_m').get_parameter_value().double_value
         self._settle_timeout_s = self.get_parameter('settle_timeout_s').get_parameter_value().double_value
+        self._lead = self.get_parameter('lead_s').get_parameter_value().double_value
+        self._n_action_steps = self.get_parameter('n_action_steps').get_parameter_value().integer_value
+        if self._lead <= 0:
+            errors.append(f'lead_s must be > 0, got {self._lead} — the chunk would arrive already due')
+        if self._n_action_steps < 1:
+            errors.append(f'n_action_steps must be >= 1, got {self._n_action_steps}')
         if not 0 < self._f0 < self._f1:
             errors.append(f'need 0 < chirp_f0_hz < chirp_f1_hz, got {self._f0} and {self._f1}')
         if self._command_hz <= 0:
@@ -719,7 +739,15 @@ class LatencyProbe(Node):
         )
 
     def _publish_width(self, width: float) -> float:
-        """Command one aperture, returning the instant it went out."""
+        """
+        Command one aperture as a single-waypoint chunk due immediately, returning that instant.
+
+        "Be here now", which franka_hand_node serves through its chase branch: the waypoint is
+        already past by the time it crosses DDS, and the node keeps a chunk's final setpoint however
+        late it is rather than discarding it. Used for the step mode and for parking, where the
+        question really is "start moving", not "arrive on schedule". The chirp wants the latter and
+        uses _publish_chirp_chunk instead.
+        """
         point = JointTrajectoryPoint()
         point.positions = [width]
         msg = JointTrajectory()
@@ -728,6 +756,38 @@ class LatencyProbe(Node):
         msg.points = [point]
         self._pub.publish(msg)
         return self._now()
+
+    def _publish_chirp_chunk(self, elapsed: float) -> tuple[float, float]:
+        """
+        Publish one action chunk of the swept aperture, and report its first waypoint.
+
+        Mirrors what policy_client_node puts on the wire: ``header.stamp`` anchors the chunk and
+        each point's ``time_from_start`` is its index times ``action_dt``, so every waypoint names
+        an absolute instant rather than a shape. That is what lets franka_hand_node's scheduling
+        branch run at all — with one already-due waypoint it can only ever chase.
+
+        Returns ``(instant the first waypoint is due, its width)``, and the caller correlates
+        against THAT rather than against publication time. Same reasoning as the arm's MultiDOF
+        path: the resulting number is how far the hand lags the schedule it was given, which is the
+        quantity ``gripper_exec`` is used for. The later waypoints are lookahead for the node; they
+        are not recorded, because the sweep is a function of time and re-recording the same instant
+        from every overlapping chunk would just weight it more heavily.
+        """
+        anchor = self.get_clock().now() + Duration(seconds=self._lead)
+        msg = JointTrajectory()
+        msg.header.stamp = anchor.to_msg()
+        msg.joint_names = [GRIPPER_JOINT_NAME]
+        for i in range(self._n_action_steps):
+            point = JointTrajectoryPoint()
+            # Sampled at the instant the waypoint is DUE, so the chunk describes the same sweep the
+            # correlation is scored against. _chirp clamps past duration_s, which flattens the tail
+            # of the last few chunks rather than sweeping off the end of the band.
+            offset = self._lead + i * self._action_dt
+            point.positions = [self._center + self._amplitude * float(self._chirp(elapsed + offset))]
+            point.time_from_start = Duration(seconds=i * self._action_dt).to_msg()
+            msg.points.append(point)
+        self._pub.publish(msg)
+        return anchor.nanoseconds * 1e-9, msg.points[0].positions[0]
 
     def _wait_until_still(self) -> tuple[float, float] | None:
         """
@@ -818,24 +878,42 @@ class LatencyProbe(Node):
         """
         Sweep the commanded aperture and cross-correlate it against the measured one.
 
-        Cross-correlation assumes the response is a delayed *linear echo* of the command. **On this
-        hardware it is not, and this mode has not yet produced a usable number.** Swept 0.3-0.7 Hz
-        at +/-30 mm on 2026-08-20 the hand was stationary for 76% of the state samples, moving in
-        short bursts, and the correlation peaked at 0.096 — no tracking at all. `Move` is a discrete
-        point-to-point goal carrying its own start-up delay, so superseding one every
-        `min_command_period_s` aborts each before it achieves much.
+        Cross-correlation assumes the response is a delayed *linear echo* of the command, and this
+        plant only approximates that. The hand renders a swept target as a staircase of discrete
+        `Move` goals at 0.7-1.7 Hz, so read `peak_corr` before anything else — under MIN_PEAK_CORR
+        the reported lag is meaningless whatever it says. Historically this mode never cleared its
+        own gates: swept 0.3-0.7 Hz at +/-30 mm on 2026-08-20 the hand was stationary for 76% of
+        state samples and the correlation peaked at 0.096.
 
-        The mode is kept because that null result is exactly what it is for: it is the only thing
-        here that measures whether the hand *tracks* rather than merely *starts*, and it is how any
-        replacement command path gets judged. Read `peak_corr` first — under MIN_PEAK_CORR the
-        reported lag is meaningless, whatever it says. Once a run does clear the gates, re-run at a
-        different chirp_f0_hz/chirp_f1_hz and duration_s before pasting: a real delay is invariant
-        to both, a phase lag from a hand that cannot keep up is not.
+        What changed is what the hand is given. Each publication is now a full n_action_steps chunk
+        of absolutely-timed waypoints, so franka_hand_node can pick a setpoint it can still reach
+        and pace itself to arrive on time, instead of being handed one already-due width and
+        sprinting at it. Whether that is enough to make the response a linear echo is exactly the
+        open question this mode answers.
+
+        Once a run does clear the gates, re-run at a different chirp_f0_hz/chirp_f1_hz and
+        duration_s before pasting: a real delay is invariant to both, a phase lag from a hand that
+        cannot keep up is not. Re-run at a different lead_s too — the correlation is against each
+        chunk's scheduled instant, so the answer should be invariant to that as well.
         """
+        # The span is what decides whether the node can schedule at all: it aims at the earliest
+        # setpoint it can still reach, and reaching anything costs at least BRIDGE_PERIOD_S.
+        span = self._lead + (self._n_action_steps - 1) * self._action_dt
         self.get_logger().warning(
             f'FINGERS WILL MOVE: sweeping the aperture by +/-{self._amplitude * 1e3:.0f} mm about '
             f'{self._center * 1e3:.0f} mm for {self._duration_s:g}s. Nothing between the fingers. '
             'Ctrl-C to abort.'
+        )
+        self.get_logger().info(
+            f'Each chunk: {self._n_action_steps} waypoints spanning {span:.2f}s '
+            f'(lead_s={self._lead:g}, action_dt={self._action_dt:g}).'
+            + (
+                ''
+                if span >= BRIDGE_PERIOD_S
+                else f" WARNING: under the hand's own {BRIDGE_PERIOD_S:g}s floor, so every "
+                'decision will fall through to the chase branch and this measures flat-out '
+                'response, not scheduling.'
+            )
         )
         self._publish_width(self._center)
         if self._wait_until_still() is None:
@@ -848,8 +926,7 @@ class LatencyProbe(Node):
         start = self._now()
         period = 1 / self._command_hz
         while (elapsed := self._now() - start) < self._duration_s:
-            width = self._center + self._amplitude * float(self._chirp(elapsed))
-            commanded.append((self._publish_width(width), width))
+            commanded.append(self._publish_chirp_chunk(elapsed))
             time.sleep(period)
 
         with self._lock:
@@ -893,13 +970,13 @@ class LatencyProbe(Node):
             commanded,
             actual,
             note=(
-                'This is the whole command->width loop, not the onset of motion mode:=gripper\n'
-                "  times — it also carries the bridge's rate limit and the tracker its\n"
-                '  speed=|err|/lead_s amounts to, so expect several hundred ms above the step\n'
-                '  figure. That is the right quantity: gripper_exec picks which action index the\n'
-                '  hand is handed, so the hand should BE at that width, not merely starting toward\n'
-                '  it. Re-run at a different chirp_f0_hz/chirp_f1_hz before pasting — see this\n'
-                "  method's docstring for why."
+                'This is lag against the SCHEDULE each chunk carried, not against publication and\n'
+                '  not the onset of motion mode:=gripper times. It includes however long a Move sat\n'
+                '  queued behind the one before it, since franka_hand_node runs each to completion,\n'
+                '  so expect several hundred ms above the step figure. That is the right quantity:\n'
+                '  gripper_exec picks which action index the hand is handed, so the hand should BE\n'
+                '  at that width, not merely starting toward it. Re-run at a different\n'
+                "  chirp_f0_hz/chirp_f1_hz and lead_s before pasting — see this method's docstring."
             ),
             extra_lines=self._joint_state_interval_lines(),
         )

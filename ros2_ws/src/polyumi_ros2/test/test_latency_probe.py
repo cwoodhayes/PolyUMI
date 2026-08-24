@@ -10,6 +10,8 @@ into a robot config, so each gets a test.
 
 from unittest.mock import MagicMock
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import rclpy
@@ -227,6 +229,42 @@ def test_gripper_chirp_defaults_satisfy_their_own_guards():
     """
     probe = _probe(mode='gripper_chirp')
     probe.destroy_node()
+
+
+def test_gripper_chirp_publishes_an_absolutely_timed_chunk():
+    """
+    Each publication is a full n_action_steps chunk whose waypoints name absolute instants.
+
+    A single already-due waypoint is what franka_hand_node can only ever chase — it is the shape
+    that made this mode report 0.00 mm of travel on hardware. The chunk is what lets the node's
+    scheduling branch run, so its depth and its timing are the point of the mode.
+    """
+    probe = _probe(mode='gripper_chirp', n_action_steps=5, lead_s=0.3, action_dt=0.1)
+    published = []
+    probe._pub = SimpleNamespace(publish=published.append, get_subscription_count=lambda: 1)
+
+    due_s, width = probe._publish_chirp_chunk(0.0)
+
+    assert len(published) == 1
+    msg = published[0]
+    assert len(msg.points) == 5
+    stamp_s = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+    # The anchor leads publication, and the reported instant is the first waypoint's, not now.
+    assert due_s == pytest.approx(stamp_s)
+    assert width == pytest.approx(msg.points[0].positions[0])
+    times = [p.time_from_start.sec + p.time_from_start.nanosec * 1e-9 for p in msg.points]
+    assert times == pytest.approx([0.0, 0.1, 0.2, 0.3, 0.4])
+    # Sampled at the instant each waypoint is due, so the chunk describes the swept target.
+    assert msg.points[1].positions[0] == pytest.approx(probe._center + probe._amplitude * float(probe._chirp(0.4)))
+    probe.destroy_node()
+
+
+def test_gripper_chirp_rejects_a_chunk_that_can_never_be_scheduled():
+    """lead_s must be positive, or every chunk is due the moment it is published."""
+    with pytest.raises(ValueError, match='lead_s must be > 0'):
+        _probe(mode='gripper_chirp', lead_s=0.0)
+    with pytest.raises(ValueError, match='n_action_steps must be >= 1'):
+        _probe(mode='gripper_chirp', n_action_steps=0)
 
 
 def test_gripper_chirp_cannot_command_past_the_hand_stroke():
