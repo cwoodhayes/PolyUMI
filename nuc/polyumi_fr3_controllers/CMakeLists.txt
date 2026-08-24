@@ -68,11 +68,11 @@ pluginlib_export_plugin_description_file(controller_interface polyumi_fr3_contro
 # Phase 0 characterisation of the Franka Hand: what a Move actually costs with no ROS, no
 # action server and no shared executor in the way. Deliberately not a node — the whole point
 # is that nothing else shares its threads. See the file header.
-add_executable(gripper_timing_probe src/gripper_timing_probe.cpp)
+add_executable(gripper_timing_probe src/franka_hand_testing/gripper_timing_probe.cpp)
 target_link_libraries(gripper_timing_probe Franka::Franka)
-add_executable(simple_gripper_timing_probe src/simple_gripper_timing_probe.cpp)
+add_executable(simple_gripper_timing_probe src/franka_hand_testing/simple_gripper_timing_probe.cpp)
 target_link_libraries(simple_gripper_timing_probe Franka::Franka)
-add_executable(csv_gripper_timing_probe src/csv_gripper_timing_probe.cpp)
+add_executable(csv_gripper_timing_probe src/franka_hand_testing/csv_gripper_timing_probe.cpp)
 target_link_libraries(csv_gripper_timing_probe Franka::Franka)
 
 install(DIRECTORY include/ DESTINATION include)
