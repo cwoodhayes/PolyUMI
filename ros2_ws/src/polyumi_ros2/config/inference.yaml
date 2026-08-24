@@ -71,28 +71,17 @@
       # Calibrated 2026-08-19 in servo mode; close to UMI's robot_action_latency of 0.1.
       arm_exec: 0.0810
 
-      # Delay from publishing a width to the fingers actually starting to move — the gripper's
-      # counterpart to arm_exec. Each device's chunk is truncated by its OWN value, so the hand
-      # never inherits the arm's lead; this is UMI's robot_action_latency / gripper_action_latency
-      # split.
+      # The gripper's counterpart to arm_exec: how far ahead of intent to command the hand.
       #
-      # Almost all of it is the Franka Hand itself: 0.208 s from the TCP request reaching the hand
-      # to the fingers moving, and franka_hand_node's own queueing on top, since a Move runs to
-      # completion and the next one waits. Firmware, not a tuning target. See
-      # notebooks/gripper_free_running.ipynb.
+      # UNDER TEST, 2026-08-24. Was 0.380 (measured 08-19 via mode:=gripper) back when
+      # fr3_gripper_bridge did no compensation of its own. franka_hand_node does: it plans each
+      # Move to ARRIVE at its waypoint's stated instant, starting from now + (cmd_delay -
+      # t_obs_delay), so a lead here would command the fingers early on top of that. Set to 0 to
+      # try that on the arm; revert to 0.380 if the hand turns out to run late in service.
       #
-      # NOT the same quantity as the node's t_obs_delay_s: this one aligns the ACTION chunk, that
-      # one shifts the node's internal schedule for how late the reported width is. Two numbers
-      # for two effects, feeding different consumers; do not fold them together.
-      #
-      # The hand is the slower device by a wide margin: the arm is servoed at 1 kHz, while the
-      # hand takes discrete, un-preemptable Moves at under 2 Hz. It therefore truncates several more
-      # waypoints than the arm, which is why the two are sliced independently — a shared slice
-      # would force the arm to inherit the hand's lead and act that much early.
-      #
-      # Calibrated on 08-19-2026 via
-      #   ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper
-      gripper_exec: 0.380
+      # If you re-measure: mode:=gripper_chirp reports 370-450 ms, but most of that is the 363 ms
+      # the hand stands still BETWEEN moves, not a feed-forward term. Don't paste it in blind.
+      gripper_exec: 0.0
 
       # Delay from the hand's true aperture to it appearing on /fr3_gripper/joint_states.
       # Kept separate from proprio because the gripper is a different device on its own link and

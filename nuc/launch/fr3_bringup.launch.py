@@ -150,17 +150,21 @@ def generate_launch_description():
                 output='screen',
                 arguments=tcp_calib.static_transform_publisher_args(),
             ),
-            # With load_gripper false the URDF has no fr3_hand, so robot_state_publisher stops
-            # emitting fr3_link8 -> fr3_hand and polyumi_tcp above becomes an orphan. That breaks
-            # the laptop's base -> polyumi_tcp lookup, and with it every observation — a failure
-            # whose symptom points nowhere near this flag. Republish the joint the URDF lost.
-            Node(
-                package='tf2_ros',
-                executable='static_transform_publisher',
-                name='fr3_hand_static_tf',
-                output='screen',
-                arguments=tcp_calib.hand_transform_publisher_args(),
-                condition=UnlessCondition(load_gripper),
-            ),
+            # With load_gripper false the URDF has no hand at all, so robot_state_publisher stops
+            # emitting the whole subtree: polyumi_tcp above is orphaned (no observation on the
+            # laptop) and fr3_hand_tcp disappears (the impedance controller refuses to activate).
+            # Both failures point nowhere near this flag. Republish the fixed joints the URDF lost
+            # — see nuc/tcp_calib.py for which, and why the finger joints are not among them.
+            *[
+                Node(
+                    package='tf2_ros',
+                    executable='static_transform_publisher',
+                    name=name,
+                    output='screen',
+                    arguments=args,
+                    condition=UnlessCondition(load_gripper),
+                )
+                for name, args in tcp_calib.hand_transform_publishers()
+            ],
         ]
     )
