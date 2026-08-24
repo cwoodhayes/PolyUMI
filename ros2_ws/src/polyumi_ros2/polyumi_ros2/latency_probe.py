@@ -412,8 +412,10 @@ class LatencyProbe(Node):
             state_topic = self.get_parameter('state_topic').get_parameter_value().string_value
             self._pub = self.create_publisher(JointTrajectory, topic, 10)
             self.create_subscription(JointState, state_topic, self._on_gripper_state, 10)
-            #: (stamp_s, aperture)
+            #: (arrival_s, aperture) — see _on_gripper_state for why arrival and not the stamp.
             self._actual: list[tuple[float, float]] = []
+            #: The stamps themselves, for _joint_state_interval_lines alone.
+            self._state_stamps: list[float] = []
         return errors
 
     def _init_gripper_chirp(self) -> list[str]:
@@ -505,8 +507,10 @@ class LatencyProbe(Node):
         state_topic = self.get_parameter('state_topic').get_parameter_value().string_value
         self._pub = self.create_publisher(JointTrajectory, topic, 10)
         self.create_subscription(JointState, state_topic, self._on_gripper_state, 10)
-        #: (stamp_s, aperture)
+        #: (arrival_s, aperture) — see _on_gripper_state for why arrival and not the stamp.
         self._actual: list[tuple[float, float]] = []
+        #: The stamps themselves, for _joint_state_interval_lines alone.
+        self._state_stamps: list[float] = []
         return errors
 
     # ------------------------------------------------------------------
@@ -536,12 +540,27 @@ class LatencyProbe(Node):
             return len(self._frames) >= MAX_BUFFERED_FRAMES
 
     def _on_gripper_state(self, msg: JointState) -> None:
-        """Record the aperture against its own stamp; each FR3 finger reports half of it."""
+        """
+        Record the aperture against its ARRIVAL time; each FR3 finger reports half of it.
+
+        Arrival, not ``header.stamp``, because the stamp is the **NUC's** clock — franka_hand_node
+        sets it — while everything it gets correlated against is the laptop's: ``_publish_width``
+        returns ``_now()``, ``_publish_chirp_chunk`` returns a laptop-clock anchor, and
+        ``_wait_until_still`` windows on ``_now()``. Comparing the two admits the whole
+        laptop<->NUC clock offset into the answer, and that offset is unbounded: chrony holds it
+        sub-ms, but it drifts whenever the laptop is down as the NUC boots (see CLAUDE.md), and
+        nothing here would notice. Arrival costs the DDS hop on the wired 10.0.0.x link instead —
+        ~1 ms, and bounded. Same trade ``_on_image`` already makes, for the same reason.
+
+        The stamps are kept separately, since the publish INTERVAL is a property of the NUC-side
+        publisher and measuring it off arrivals would fold in transport jitter.
+        """
         if len(msg.position) < 2:
             return
         stamp_s = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         with self._lock:
-            self._actual.append((stamp_s, float(msg.position[0] + msg.position[1])))
+            self._actual.append((self._now(), float(msg.position[0] + msg.position[1])))
+            self._state_stamps.append(stamp_s)
 
     def _now(self) -> float:
         """
@@ -1021,19 +1040,19 @@ class LatencyProbe(Node):
         """
         Report ``latency.gripper`` from the observed ``/fr3_gripper/joint_states`` publish rate.
 
-        Shared by both gripper modes — each collects its own ``self._actual`` in the same
-        ``(stamp_s, aperture)`` shape, so the topic's own publish interval means the same thing
-        either way. Half the interval is the honest bound: isolating the true value needs ground
-        truth of the aperture, and franka_gripper exposes no measure timestamp (UMI reads the
-        WSG's).
+        Shared by both gripper modes, and off ``self._state_stamps`` rather than ``self._actual``:
+        the interval is a property of the NUC-side publisher, so it wants the publisher's own
+        stamps. ``_actual`` holds arrival times instead, which would fold the DDS hop's jitter in.
+        Half the interval is the honest bound: isolating the true value needs ground truth of the
+        aperture, and the hand exposes no measure timestamp (UMI reads the WSG's).
 
         :returns: printable lines, or ``[]`` if too few samples arrived to trust an interval.
         """
         with self._lock:
-            samples = list(self._actual)
-        if len(samples) < 3:
+            stamps = list(self._state_stamps)
+        if len(stamps) < 3:
             return []
-        interval = float(np.median(np.diff([t for t, _ in samples])))
+        interval = float(np.median(np.diff(stamps)))
         return [
             f'  Separately: /fr3_gripper/joint_states publishes every {interval * 1e3:.1f} ms, so',
             '  the honest bound on the OBSERVATION latency is half of that:',

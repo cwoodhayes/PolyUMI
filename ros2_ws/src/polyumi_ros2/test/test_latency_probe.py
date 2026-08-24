@@ -130,7 +130,33 @@ def test_gripper_state_is_summed_across_both_fingers():
     msg.header.stamp.nanosec = 500_000_000
     msg.position = [0.02, 0.021]
     probe._on_gripper_state(msg)
-    assert probe._actual == [(pytest.approx(7.5), pytest.approx(0.041))]
+    assert [w for _, w in probe._actual] == [pytest.approx(0.041)]
+    probe.destroy_node()
+
+
+def test_gripper_state_is_timed_on_arrival_not_on_the_nuc_stamp():
+    """
+    The correlated series must be on ONE clock, and it is the laptop's.
+
+    header.stamp comes from franka_hand_node on the NUC, while every instant it is compared
+    against — _publish_width's return, _publish_chirp_chunk's anchor, _wait_until_still's window —
+    is _now(). Correlating the two would put the laptop<->NUC clock offset straight into
+    gripper_exec. The stamp is kept, but only for the publish interval.
+    """
+    from sensor_msgs.msg import JointState
+
+    probe = _probe(mode='gripper')
+    msg = JointState()
+    # A stamp decades away from any plausible laptop clock, so using it cannot pass by accident.
+    msg.header.stamp.sec = 7
+    msg.header.stamp.nanosec = 500_000_000
+    msg.position = [0.02, 0.021]
+    before = probe._now()
+    probe._on_gripper_state(msg)
+    after = probe._now()
+
+    assert before <= probe._actual[0][0] <= after
+    assert probe._state_stamps == [pytest.approx(7.5)]
     probe.destroy_node()
 
 
@@ -148,10 +174,12 @@ def test_short_gripper_state_messages_are_ignored():
 
 def test_gripper_onset_is_keyed_on_the_sample_stamp_not_the_polling_loop():
     """
-    The onset must be the moment the hand moved, not the moment this process noticed.
+    The onset must be keyed on a SAMPLE's own instant, not on the poll that happened to see it.
 
     Polling is deliberately faster than the 23 Hz state topic, so binding the answer to poll time
-    would add a random fraction of a sample period to every rep.
+    would add a random fraction of a sample period to every rep. The instant is the sample's
+    arrival rather than its NUC stamp — see _on_gripper_state — so it trails the fingers by the
+    DDS hop, but t_command is on the same clock and the offset between them is not.
     """
     probe = _probe(mode='gripper', onset_threshold_m=0.001)
     probe._actual = [
@@ -285,10 +313,9 @@ def test_gripper_chirp_recovers_a_known_lag_end_to_end(tmp_path, capsys):
     probe = _probe(mode='gripper_chirp', output_npz=str(tmp_path / 'gc.npz'), plot=False)
     commanded = [(float(ti), 0.04 + 0.03 * float(probe._chirp(ti))) for ti in t]
     actual = [(ti + true_lag, w) for ti, w in commanded]
-    # A separate series from `actual` above — this is what _joint_state_interval_lines reads, the
-    # same /fr3_gripper/joint_states samples the correlation itself consumes, just summarised
-    # differently. 50 ms apart, so latency.gripper should come back as half of that.
-    probe._actual = [(float(i) * 0.05, 0.04) for i in range(20)]
+    # A separate series from `actual` above — these are the NUC-side publish stamps, which is what
+    # _joint_state_interval_lines summarises. 50 ms apart, so latency.gripper is half of that.
+    probe._state_stamps = [float(i) * 0.05 for i in range(20)]
 
     assert probe._report_xcorr('gripper_exec', commanded, actual, extra_lines=probe._joint_state_interval_lines()) == 0
     saved = np.load(tmp_path / 'gc.npz')

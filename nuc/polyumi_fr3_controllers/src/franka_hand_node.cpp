@@ -17,8 +17,12 @@
 // 4th-15th setpoint. That is the hardware, not a bug. See notebooks/gripper_free_running.ipynb for
 // where every constant came from, and docs/crb-fr3-inference.md for what the hand cannot do.
 //
-// It also republishes /fr3_gripper/joint_states, which is mandatory: with load_gripper:=false
-// nothing else does, and six consumers need it (policy_client_node's agent_pos[7] among them).
+// It also republishes /fr3_gripper/joint_states: with load_gripper:=false nothing else does, and
+// six consumers need it (policy_client_node's agent_pos[7] among them). That stream costs the
+// libfranka connection, which only one process may hold, so it is tied to `execute`. With
+// execute:=false the node neither connects nor publishes state, and an arm-only session can run
+// with the hand unplugged; policy_client_node then falls back to the closed width unless
+// require_gripper_state is set.
 
 #include <polyumi_fr3_controllers/gripper_trajectory_interpolator.hpp>
 
@@ -54,6 +58,11 @@ using polyumi_fr3_controllers::WidthTrajectory;
 /// 363 ms floor, so it costs nothing; it exists only so a stopped stream does not spin.
 constexpr auto kIdleWait = std::chrono::milliseconds(20);
 
+/// Backoff after a failed read. A read that fails returns immediately rather than waiting for a
+/// datagram, so without this a dropped connection spins a core. Far below the hand's ~180 ms state
+/// interval, so a recovered connection loses nothing.
+constexpr auto kReadRetryWait = std::chrono::milliseconds(20);
+
 /// Divergence between where a successful Move said the fingers are and what they report, past
 /// which the "it never got there" warning fires.
 constexpr double kDivergenceWarn = 0.005;
@@ -88,27 +97,38 @@ class FrankaHandNode : public rclcpp::Node {
           onTarget(*msg);
         });
 
-    gripper_ = std::make_unique<franka::Gripper>(robot_ip);
-    if (home_on_start) {
-      RCLCPP_INFO(get_logger(), "Homing (sweeps the full stroke)...");
-      gripper_->homing();
+    // Connecting is what CLAIMS the hand -- only one process may hold it -- so it is gated on
+    // execute rather than done unconditionally. An arm-only session therefore needs neither a
+    // reachable nor a homed hand, and no state stream is published (see the file header).
+    if (execute_) {
+      gripper_ = std::make_unique<franka::Gripper>(robot_ip);
+      if (home_on_start) {
+        RCLCPP_INFO(get_logger(), "Homing (sweeps the full stroke)...");
+        gripper_->homing();
+      }
+      const franka::GripperState state = gripper_->readOnce();
+      if (state.max_width <= 0.0) {
+        // An unhomed hand reports max_width 0 and move() returns TRUE while doing nothing at all.
+        // Refusing here is the only way that failure is ever visible. The connection stays open so
+        // the state stream keeps running; it is only execution that is refused.
+        RCLCPP_ERROR(get_logger(),
+                     "Hand reports max_width=0: it is NOT HOMED. Refusing to execute. Relaunch with "
+                     "home_on_start:=true, or home it from Desk.");
+        execute_ = false;
+      }
+      if (max_width_ <= 0.0) {
+        max_width_ = state.max_width;
+      }
+      // Write the resolved width back, so the PARAMETER reports the clamp actually in force rather
+      // than the 0.0 "ask the hand" sentinel. gripper_range_probe reads it to tell a physical stop
+      // from a software one, and 0.0 makes every open endpoint look like a clamp.
+      set_parameter(rclcpp::Parameter("max_width_m", max_width_));
+      reader_ = std::thread(&FrankaHandNode::readLoop, this);
     }
-    const franka::GripperState state = gripper_->readOnce();
-    if (state.max_width <= 0.0) {
-      // An unhomed hand reports max_width 0 and move() returns TRUE while doing nothing at all.
-      // Refusing here is the only way that failure is ever visible.
-      RCLCPP_ERROR(get_logger(),
-                   "Hand reports max_width=0: it is NOT HOMED. Refusing to execute. Relaunch with "
-                   "home_on_start:=true, or home it from Desk.");
-      execute_ = false;
-    }
-    if (max_width_ <= 0.0) {
-      max_width_ = state.max_width;
-    }
-    RCLCPP_INFO(get_logger(), "Franka Hand ready: max_width %.4f m, execute=%s", max_width_,
-                execute_ ? "TRUE (MOVES THE FINGERS)" : "false (log only)");
+    RCLCPP_INFO(get_logger(), "Franka Hand %s: max_width %.4f m, execute=%s",
+                gripper_ ? "connected" : "NOT CONNECTED (no /fr3_gripper/joint_states)", max_width_,
+                execute_ ? "TRUE (MOVES THE FINGERS)" : "false (plans and logs only)");
 
-    reader_ = std::thread(&FrankaHandNode::readLoop, this);
     mover_ = std::thread(&FrankaHandNode::moveLoop, this);
   }
 
@@ -133,6 +153,11 @@ class FrankaHandNode : public rclcpp::Node {
     }
     if (deadband_ < 0.0 || min_speed_ <= 0.0 || horizon_s_ <= 0.0) {
       bad("width_deadband_m must be >= 0, min_speed_mps and horizon_s > 0");
+    }
+    // selectMove clamps the planned speed into [min_speed, v_max], and std::clamp is undefined
+    // with the bounds inverted.
+    if (min_speed_ > limits_.v_max) {
+      bad("min_speed_mps must not exceed v_max_mps");
     }
     // t_obs_delay is subtracted from cmd_delay to get the scheduling delay, and a Move can never
     // start moving after it has already returned.
@@ -160,7 +185,8 @@ class FrankaHandNode : public rclcpp::Node {
         state_pub_->publish(msg);
       } catch (const franka::Exception& e) {
         // Reads legitimately fail while a command is in flight. Not fatal, and not rare.
-        RCLCPP_DEBUG(get_logger(), "gripper read: %s", e.what());
+        RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 1000, "gripper read: %s", e.what());
+        std::this_thread::sleep_for(kReadRetryWait);
       }
     }
   }
@@ -176,7 +202,10 @@ class FrankaHandNode : public rclcpp::Node {
         continue;
       }
       times.push_back(stamp + rclcpp::Duration(pt.time_from_start).seconds());
-      widths.push_back(std::clamp(pt.positions[0], 0.0, max_width_));
+      // Upper bound only once the stroke is known: disconnected, max_width_ is the unresolved 0.0
+      // sentinel and clamping to it would flatten every width to zero.
+      const double w = std::max(pt.positions[0], 0.0);
+      widths.push_back(max_width_ > 0.0 ? std::min(w, max_width_) : w);
     }
     if (times.empty()) {
       return;
@@ -228,7 +257,9 @@ class FrankaHandNode : public rclcpp::Node {
 
       if (!execute_) {
         // Sleep the predicted block so the dry run reproduces the real command cadence, which is
-        // the whole point of watching it before letting it move anything.
+        // the whole point of watching it before letting it move anything. Disconnected there is no
+        // measured width to plan from, so every decision comes off selectMove's no-state branch:
+        // the cadence is still real, the targets are open-loop.
         std::this_thread::sleep_for(std::chrono::duration<double>(predicted));
         continue;
       }
@@ -247,13 +278,20 @@ class FrankaHandNode : public rclcpp::Node {
     std::lock_guard<std::mutex> lock(mutex_);
     // A Move that returned true leaves the fingers AT the commanded width and stationary, and
     // nothing can change that for another fixed_cost. That beats the width field, which refreshes
-    // at ~5.5 Hz -- 180 ms, or 8 mm of travel, out of date. A false return means declined or
-    // stalled, and then the measurement is the only truth there is.
-    commanded_ = ok ? std::optional<double>(cmd.width) : std::nullopt;
-    if (ok && measured_.has_value() && std::abs(*measured_ - cmd.width) > kDivergenceWarn) {
+    // at ~5.5 Hz -- 180 ms, or 8 mm of travel, out of date.
+    //
+    // Unless the two disagree by more than that staleness could explain, which is the case the
+    // warning below names. Then the commanded width is a fiction the planner would keep working
+    // from, comparing it against the deadband and concluding it has already arrived. A false
+    // return means declined or stalled. Either way the measurement is the only truth there is.
+    const bool diverged =
+        measured_.has_value() && std::abs(*measured_ - cmd.width) > kDivergenceWarn;
+    commanded_ = (ok && !diverged) ? std::optional<double>(cmd.width) : std::nullopt;
+    if (ok && diverged) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
                            "Move reported success at %.4f m but the hand reads %.4f m -- it may be "
-                           "stalled on an object (Move applies no force; use Grasp to hold).",
+                           "stalled on an object (Move applies no force; use Grasp to hold). "
+                           "Planning from the measurement instead.",
                            cmd.width, *measured_);
     }
   }
