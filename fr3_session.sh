@@ -202,11 +202,12 @@ else
       nuc "${NUC_SSH_HOST}:${NUC_REPO}/"; then
     echo "    done."
 
-    # The bridges are plain scripts and run straight from the synced tree, but
+    # fr3_moveit_bridge is a plain script and runs straight from the synced tree, but
     # polyumi_fr3_controllers is C++: rsync only updates the source that ~/franka_ws/src symlinks
-    # at, so without this the NUC keeps loading the previously built .so. That is the worst kind of
-    # stale — it is a torque controller, and the old build's behaviour includes the old build's
-    # error messages. Sourcing is explicit because `ssh host 'cmd'` gets no ~/.bashrc.
+    # at, so without this the NUC keeps running the previously built artifacts. That is the worst
+    # kind of stale — one is a torque controller and the other drives the hand, and the old build's
+    # behaviour includes the old build's error messages. Sourcing is explicit because
+    # `ssh host 'cmd'` gets no ~/.bashrc.
     echo "==> Rebuilding polyumi_fr3_controllers on $NUC_SSH_HOST ..."
     if ssh -o ConnectTimeout=10 "$NUC_SSH_HOST" \
         "source /opt/ros/humble/setup.bash \
@@ -214,11 +215,14 @@ else
          && cd $NUC_FRANKA_WS \
          && colcon build --packages-select polyumi_fr3_controllers \
               --cmake-args -DCMAKE_BUILD_TYPE=Release"; then
-      echo "    done. NOTE: pluginlib keeps a loaded .so mapped, so a controller_manager that has"
-      echo "    already touched this controller keeps running the OLD build until fr3_bringup is"
-      echo "    restarted. Re-attaching to a live bringup session does not pick this up."
+      echo "    done. NOTE: this build has two consumers and they pick it up at different times."
+      echo "    The impedance controller is a pluginlib .so that controller_manager keeps mapped, so"
+      echo "    it runs the OLD build until fr3_bringup restarts. franka_hand_node is an executable"
+      echo "    fr3_inference spawns, so it needs fr3_inference restarted. Re-attaching to either"
+      echo "    live session picks up neither."
     else
-      echo "WARNING: colcon build on $NUC_SSH_HOST failed — it may run a stale impedance controller." >&2
+      echo "WARNING: colcon build on $NUC_SSH_HOST failed — $NUC_SSH_HOST may run a stale impedance" >&2
+      echo "         controller or a stale franka_hand_node." >&2
     fi
   else
     echo "WARNING: rsync to $NUC_SSH_HOST failed — it may be running stale nuc/ code." >&2
@@ -395,6 +399,13 @@ Session '$SESSION' is up. Order to press Enter in:
 
 Send the arm home (needs pane 2 running; MOVES THE ARM even in plan-only mode):
   ros2 service call /polyumi/home std_srvs/srv/Trigger "{}"
+
+Gripper only, for a first run on the hand — edit pane 2's line down to:
+  ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true
+Then, from the laptop pane, the acceptance test (MOVES THE FINGERS):
+  ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper_chirp
+franka_hand_node logs every move(width, speed) it plans in pane 2, at 0.7-1.7 Hz.
+That ceiling is the hand, not a fault: see docs/crb-fr3-inference.md, "Gripper problems".
 
 tmux, minimum viable:
   C-b n / C-b p    next / previous window        C-b o     next pane
