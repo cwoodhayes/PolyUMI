@@ -206,6 +206,19 @@ Most failures here are one of four things, in rough order of frequency:
    Everything laptop-local keeps working, which is what makes this slow to spot.
 3. **`fr3_bringup` died on the NUC** — `ros2 topic info /tf_static` shows `Publisher count: 0`.
 4. **The arm stopped itself** — see Logs above.
+5. **A wedged `ros2` CLI daemon on the NUC.** Signature is
+   `xmlrpc.client.Fault: <Fault 1: "<class 'RuntimeError'>:!rclpy.ok()">` out of anything using
+   `ros2 node`/`ros2 param`/`ros2 control`. Underneath it is the Humble↔Kilted rmw gap —
+   `ros2 node list --no-daemon` gives the real error, `empty node name returned by the RMW layer` —
+   which poisons the daemon's context, after which *everything* through it fails. Fix:
+   **`ros2 daemon stop`** (it respawns). `ros2 topic list/echo/hz` and service calls are unaffected,
+   which is what makes it slow to spot.
+
+   Worth knowing because it used to break the arm silently: the launch's controller switch shelled
+   out to `ros2 control switch_controllers`, which goes through the daemon, so a poisoned daemon
+   left `fr3_arm_controller` holding the arm and the servo inactive while every pane looked fine —
+   the arm just never moved. That call is now a daemon-free `ros2 service call`, but if you see the
+   fault anywhere else, this is it.
 
 ## Gripper problems
 Currently this setup uses the Franka Hand, which is terrible. I've done a bunch of analysis on it, tl;dr it has ~210ms observable command delay, only updates its state at 5Hz, and its move() commands cannot be pre-empted once issued.

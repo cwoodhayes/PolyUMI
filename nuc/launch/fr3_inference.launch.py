@@ -172,6 +172,14 @@ def generate_launch_description():
             # Hand the arm to the servo, once the spawner has actually loaded it. Ordered on the
             # spawner's exit rather than declared alongside it because launch gives no ordering
             # guarantee, and switching to a controller that is not loaded yet just fails.
+            #
+            # `ros2 service call`, NOT `ros2 control switch_controllers`, and the difference is not
+            # cosmetic. ros2controlcli goes through NodeStrategy (switch_controllers.py:80), i.e.
+            # the ros2cli daemon — and one poisoned daemon takes this down with
+            # `RuntimeError: !rclpy.ok()` while every other pane looks healthy. The arm then simply
+            # never moves, because fr3_arm_controller still holds it and the servo stays inactive.
+            # `ros2 service call` calls rclpy.init() and creates its own node (call.py:82), so it
+            # has no daemon to be poisoned by. If the daemon is wedged, `ros2 daemon stop`.
             RegisterEventHandler(
                 OnProcessExit(
                     target_action=impedance_spawner,
@@ -179,12 +187,14 @@ def generate_launch_description():
                         ExecuteProcess(
                             cmd=[
                                 'ros2',
-                                'control',
-                                'switch_controllers',
-                                '--deactivate',
-                                MOVEIT_CONTROLLER,
-                                '--activate',
-                                SERVO_CONTROLLER,
+                                'service',
+                                'call',
+                                '/controller_manager/switch_controller',
+                                'controller_manager_msgs/srv/SwitchController',
+                                # strictness 2 = STRICT: fail loudly rather than half-switch and
+                                # leave two controllers claiming the same effort interfaces.
+                                f"{{activate_controllers: ['{SERVO_CONTROLLER}'], "
+                                f"deactivate_controllers: ['{MOVEIT_CONTROLLER}'], strictness: 2}}",
                             ],
                             output='screen',
                             condition=IfCondition(activate_servo),
