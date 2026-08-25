@@ -28,8 +28,9 @@ class DatasetBuildError(ValueError):
     """A dataset build was rejected (invalid input) or the underlying export failed."""
 
 
-#: ``export-dp`` (visuomotor only) vs ``export-polyumi`` (adds the contact-mic modality; needs
-#: preprocessing step 6). See ``polyumi_ingest.export.dp``.
+#: ``export-dp`` (visuomotor only) vs ``export-polyumi`` (adds every PolyUMI modality: the
+#: contact mic, which needs preprocessing step 6, and the finger camera, which needs no step of
+#: its own). See ``polyumi_ingest.export.dp``.
 _EXPORTER_TYPES = ('dp', 'polyumi')
 
 
@@ -67,8 +68,9 @@ def build_dataset(
     itself fails (in which case nothing is written and no DB rows are created).
 
     ``exporter_type`` selects which ``polyumi_ingest.export.dp`` entry point runs: ``'dp'`` for
-    the visuomotor-only ReplayBuffer, ``'polyumi'`` to add the contact-mic modality (requires
-    preprocessing step 6 on every member scene).
+    the visuomotor-only ReplayBuffer, ``'polyumi'`` to add every PolyUMI modality — the contact
+    mic (requires preprocessing step 6 on every member scene) and the finger camera (requires
+    none, but is ~13x the bytes of ``camera0_rgb``, so a ``'polyumi'`` buffer is much larger).
     """
     if exporter_type not in _EXPORTER_TYPES:
         raise DatasetBuildError(f'Unknown exporter type {exporter_type!r}; must be one of {_EXPORTER_TYPES}.')

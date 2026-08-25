@@ -62,7 +62,8 @@ class DatasetManifest:
     n_episodes: int | None = None
     polyumi_version: str | None = None
     #: Which ``polyumi_ingest.export.dp`` entry point produced this dataset: ``'dp'``
-    #: (visuomotor only) or ``'polyumi'`` (adds the contact-mic modality). Defaults to ``'dp'``
+    #: (visuomotor only) or ``'polyumi'`` (adds the contact-mic and finger-camera
+    #: modalities). Defaults to ``'dp'``
     #: so manifests written before this field existed still load correctly.
     exporter_type: str = 'dp'
     export_params: dict = field(default_factory=dict)
