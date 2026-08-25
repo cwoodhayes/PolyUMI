@@ -256,10 +256,19 @@ class FrankaHandNode : public rclcpp::Node {
                   execute_ ? "" : " [dry run]");
 
       if (!execute_) {
-        // Sleep the predicted block so the dry run reproduces the real command cadence, which is
-        // the whole point of watching it before letting it move anything. Disconnected there is no
-        // measured width to plan from, so every decision comes off selectMove's no-state branch:
-        // the cadence is still real, the targets are open-loop.
+        // Sleep the predicted block so the dry run reproduces the real command cadence. There is no
+        // real hand to read back, so commanded_ doubles as a SIMULATED position -- set here exactly
+        // as runMove sets it on success -- rather than left at the disconnected nullopt. Without
+        // this, x stays nullopt forever: predicted collapses to a flat fixed_cost (distance zero
+        // every time) and selectMove never leaves its no-state branch, so the log would show the
+        // same first waypoint chosen over and over rather than the sequence a real run produces.
+        // Set before the sleep, not after, and without holding the lock across it -- same reason
+        // runMove doesn't: a chunk arriving mid-"move" must still be able to splice into the
+        // horizon.
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          commanded_ = cmd->width;
+        }
         std::this_thread::sleep_for(std::chrono::duration<double>(predicted));
         continue;
       }

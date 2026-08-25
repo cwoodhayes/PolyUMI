@@ -1120,7 +1120,7 @@ class LatencyProbe(Node):
         )
         return 1 if noisy else 0
 
-    def _report_xcorr(self, key, commanded, actual, note='', extra_lines: tuple[str, ...] = ()) -> int:
+    def _report_xcorr(self, key, commanded, actual, note='', extra_lines: list[str] = ()) -> int:
         """
         Cross-correlate commanded against measured, judge the peak, and print the config line.
 
