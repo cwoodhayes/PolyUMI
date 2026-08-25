@@ -17,7 +17,7 @@
 # `fr3-bringup` on the NUC — it starts ONLY the move_group node (no hardware, no
 # controllers, no robot_state_publisher), so there is no collision.
 #
-# Three changes vs. upstream:
+# Changes vs. upstream:
 #   1. Declare robot_ip / use_fake_hardware / fake_sensor_commands. Upstream references
 #      these LaunchConfigurations without declaring them, so it can't launch at all
 #      ("launch configuration 'fake_sensor_commands' does not exist").
@@ -33,6 +33,15 @@
 #      so move_group's time parameterization falls back to 1 rad/s^2 and every Cartesian chunk
 #      comes back slower than the policy asked for — the bridge then never hits the commanded
 #      timeline and drops most chunks as still-busy.
+#   5. Silence planning_scene_monitor's finger-joint warning. This move_group's OWN model
+#      (fr3_polyumi.urdf.xacro) carries the hand, but fr3_bringup's robot_description does
+#      not (franka.launch.py couples hand: to load_gripper:, and that's false so
+#      franka_hand_node can own the connection instead of franka_gripper) -- so
+#      /joint_states, sourced from THAT model, never reports fr3_finger_joint1/2 and this
+#      monitor repeats "not yet known" at ~1 Hz forever. Harmless: /polyumi/home and
+#      fr3_moveit_bridge only plan the fr3_arm group, which doesn't include the fingers.
+#      Fixing it for real means decoupling hand: from load_gripper: in fr3_bringup's own
+#      robot_description, which is a bigger, riskier change than a log line justifies.
 # See docs/crb-fr3-inference.md for how to run this and the gotchas around it.
 
 """Launch a standalone MoveIt move_group for the FR3, alongside a running fr3-bringup."""
@@ -233,6 +242,14 @@ def generate_launch_description():
             moveit_controllers,
             planning_scene_monitor_parameters,
             joint_limits,
+        ],
+        # See change 5 above: fr3_bringup's robot_description never reports the finger joints
+        # this move_group's own model expects, so this fires at ~1 Hz forever and is pure noise.
+        # Scoped to the one logger so a real planning_scene_monitor problem still surfaces.
+        arguments=[
+            '--ros-args',
+            '--log-level',
+            'moveit_ros.planning_scene_monitor.planning_scene_monitor:=error',
         ],
     )
 

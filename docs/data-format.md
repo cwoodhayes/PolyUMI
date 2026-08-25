@@ -193,7 +193,7 @@ Each `eef/pose_<source>` array records its own `world_frame`, `body_frame` (`han
 
 > **`T_gopro_to_fingertip` in `config/gripper_calib.yaml` is measured from the PolyUMI CAD assembly**, not from a calibration rig: its origin is the centre of the GoPro lens faceplate plus a 5 mm allowance for the sensor plane, and its target is the midpoint of the closed fingertips on the plane of the finger's upper surface. It is on the critical path for every exported pose, so re-derive it from CAD whenever the mount geometry changes.
 
-> **At inference**, the robot must report this same physical point — the policy compares like with like or not at all. On the FR3 that point is the `polyumi_tcp` frame, defined once in `nuc/tcp_calib.py` and named by both `eef_frame` (observation) and the MoveIt bridge's `eef_link` (command); the stock `fr3_hand_tcp` is a different point in a different axis convention. See [franka-inference-bringup.md](franka-inference-bringup.md).
+> **At inference**, the robot must report this same physical point — the policy compares like with like or not at all. On the FR3 that point is the `polyumi_tcp` frame, defined once in `nuc/tcp_calib.py` and named by both `eef_frame` (observation) and the MoveIt bridge's `eef_link` (command); the stock `fr3_hand_tcp` is a different point in a different axis convention. See [crb-fr3-inference.md](crb-fr3-inference.md).
 
 ## Gripper width from fiducials
 

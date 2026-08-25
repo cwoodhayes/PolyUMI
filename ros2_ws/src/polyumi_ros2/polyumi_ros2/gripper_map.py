@@ -68,7 +68,7 @@ def policy_to_robot_width(width_m: float, min_width_m: float, max_width_m: float
     :param min_width_m: the fingers' minimum reachable aperture, i.e. the closed aperture. 0.0 with
         the current fingers, which meet at the mechanism's zero. Fingers whose tips collided first
         would make it non-zero, and commanding below that point makes ``Move`` stall and abort —
-        which is what wedges ``fr3_gripper_bridge``'s deadband, since it records what a goal
+        which is what wedges the hand node's deadband, since it records what a goal
         *accepted* rather than what the hand *reached*.
     :param max_width_m: the fingers' maximum reachable aperture, i.e. the open aperture.
     :returns: jaw aperture in metres, clamped to the fingers' reachable range.

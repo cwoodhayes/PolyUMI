@@ -7,7 +7,7 @@
 #
 # What is deliberately NOT in here: move_group and the two PolyUMI bridges. Those live in
 # fr3_inference.launch.py, so this file can be restarted on its own — which matters, because
-# per docs/crb-fr3-inference.md ("TF lookup fails") this is the component that crashes
+# per docs/crb-fr3-inference.md ("When it doesn't come up") this is the component that crashes
 # mid-session, and it is also the one gated on enabling FCI in the Desk UI by hand.
 
 """
@@ -25,6 +25,7 @@ import sys
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo
+from launch.conditions import UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -61,11 +62,18 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 'arm_id', default_value='fr3', description='Arm type; drives every fr3_* frame and topic name.'
             ),
-            # franka.launch.py defaults this to true as well. Named here because turning it off is
-            # what makes the /fr3_gripper/* action servers vanish — the first thing to check when
-            # the gripper bridge reports "action server NOT found".
+            # NOT "does the hand exist" — it means "franka_gripper owns the hand instead of us".
+            # PolyUMI's franka_hand_node talks to libfranka directly and only one process can hold
+            # that connection, so the default is false. Set it true to hand the fingers back to the
+            # stock /fr3_gripper/* action servers, and then do NOT launch franka_hand_node.
+            #
+            # Beware the side effect: franka.launch.py routes this one flag into `xacro hand:=` as
+            # well, so turning it off also drops fr3_hand from robot_description. The static
+            # publisher below is what keeps polyumi_tcp attached to something.
             DeclareLaunchArgument(
-                'load_gripper', default_value='true', description='Load the Franka Hand (the /fr3_gripper/* servers).'
+                'load_gripper',
+                default_value='false',
+                description='Let franka_gripper own the Franka Hand instead of franka_hand_node.',
             ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -120,5 +128,21 @@ def generate_launch_description():
                 output='screen',
                 arguments=tcp_calib.static_transform_publisher_args(),
             ),
+            # With load_gripper false the URDF has no hand at all, so robot_state_publisher stops
+            # emitting the whole subtree: polyumi_tcp above is orphaned (no observation on the
+            # laptop) and fr3_hand_tcp disappears (the impedance controller refuses to activate).
+            # Both failures point nowhere near this flag. Republish the fixed joints the URDF lost
+            # — see nuc/tcp_calib.py for which, and why the finger joints are not among them.
+            *[
+                Node(
+                    package='tf2_ros',
+                    executable='static_transform_publisher',
+                    name=name,
+                    output='screen',
+                    arguments=args,
+                    condition=UnlessCondition(load_gripper),
+                )
+                for name, args in tcp_calib.hand_transform_publishers()
+            ],
         ]
     )

@@ -3,12 +3,14 @@ Tests for the latency probe's parameter guards and signal handling.
 
 The estimator itself is covered in test_latency_util; what is left here is everything that decides
 whether the estimator gets fed something meaningful. Those are the quiet failures: a chirp that
-aliases against the command rate, an amplitude the gripper bridge's deadband swallows whole, or a
+aliases against the command rate, an amplitude the hand node's deadband swallows whole, or a
 QR dedup that biases every offset upward. Each produces a plausible-looking number that then goes
 into a robot config, so each gets a test.
 """
 
 from unittest.mock import MagicMock
+
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -67,9 +69,9 @@ def test_mode_defaults_stay_below_their_own_nyquist():
         assert 0 < f0 < f1 < COMMAND_HZ[mode] / 2, mode
 
 
-def test_gripper_step_must_clear_the_bridge_deadband():
+def test_gripper_step_must_clear_the_hand_deadband():
     """
-    Below fr3_gripper_bridge's 5 mm deadband the step is discarded and the hand never moves.
+    Below franka_hand_node's 5 mm deadband the step is discarded and the hand never moves.
 
     The run would then time out waiting for an onset, but only after the hardware slot is spent.
     """
@@ -128,7 +130,33 @@ def test_gripper_state_is_summed_across_both_fingers():
     msg.header.stamp.nanosec = 500_000_000
     msg.position = [0.02, 0.021]
     probe._on_gripper_state(msg)
-    assert probe._actual == [(pytest.approx(7.5), pytest.approx(0.041))]
+    assert [w for _, w in probe._actual] == [pytest.approx(0.041)]
+    probe.destroy_node()
+
+
+def test_gripper_state_is_timed_on_arrival_not_on_the_nuc_stamp():
+    """
+    The correlated series must be on ONE clock, and it is the laptop's.
+
+    header.stamp comes from franka_hand_node on the NUC, while every instant it is compared
+    against — _publish_width's return, _publish_chirp_chunk's anchor, _wait_until_still's window —
+    is _now(). Correlating the two would put the laptop<->NUC clock offset straight into
+    gripper_exec. The stamp is kept, but only for the publish interval.
+    """
+    from sensor_msgs.msg import JointState
+
+    probe = _probe(mode='gripper')
+    msg = JointState()
+    # A stamp decades away from any plausible laptop clock, so using it cannot pass by accident.
+    msg.header.stamp.sec = 7
+    msg.header.stamp.nanosec = 500_000_000
+    msg.position = [0.02, 0.021]
+    before = probe._now()
+    probe._on_gripper_state(msg)
+    after = probe._now()
+
+    assert before <= probe._actual[0][0] <= after
+    assert probe._state_stamps == [pytest.approx(7.5)]
     probe.destroy_node()
 
 
@@ -146,10 +174,12 @@ def test_short_gripper_state_messages_are_ignored():
 
 def test_gripper_onset_is_keyed_on_the_sample_stamp_not_the_polling_loop():
     """
-    The onset must be the moment the hand moved, not the moment this process noticed.
+    The onset must be keyed on a SAMPLE's own instant, not on the poll that happened to see it.
 
     Polling is deliberately faster than the 23 Hz state topic, so binding the answer to poll time
-    would add a random fraction of a sample period to every rep.
+    would add a random fraction of a sample period to every rep. The instant is the sample's
+    arrival rather than its NUC stamp — see _on_gripper_state — so it trails the fingers by the
+    DDS hop, but t_command is on the same clock and the offset between them is not.
     """
     probe = _probe(mode='gripper', onset_threshold_m=0.001)
     probe._actual = [
@@ -182,7 +212,7 @@ def test_gripper_report_emits_the_measured_latency_unmodified(tmp_path, capsys):
 
     policy_client_node truncates each device's chunk by its own latency, so gripper_exec is a
     standalone number. It briefly was not: while the two devices shared one slice, the value had
-    to be reported as (gripper - arm) / action_dt for fr3_gripper_bridge's gripper_lead_steps,
+    to be reported as (gripper - arm) / action_dt for the old bridge's gripper_lead_steps,
     which silently coupled it to a latency measured in a different run.
     """
     lags = [('open', 0.5), ('close', 0.54), ('open', 0.51)]  # median 0.51
@@ -191,6 +221,110 @@ def test_gripper_report_emits_the_measured_latency_unmodified(tmp_path, capsys):
     out = capsys.readouterr().out
     assert 'gripper_exec: 0.5100' in out
     assert 'gripper_lead_steps' not in out
+    probe.destroy_node()
+
+
+def test_gripper_chirp_amplitude_must_clear_the_hand_deadband():
+    """
+    Too small an amplitude leaves too few deadband-sized steps for the sweep to read as a sinusoid.
+
+    franka_hand_node suppresses any width within its deadband of the last one it sent, so the
+    hand is only ever offered a staircase. The quantisation is in SPACE, not time — how many steps
+    fit in a half stroke depends on amplitude alone, which is why frequency does not appear here.
+    """
+    with pytest.raises(ValueError, match='deadband-sized steps'):
+        _probe(mode='gripper_chirp', amplitude_m=0.005)
+
+
+def test_gripper_chirp_is_bounded_by_the_hand_command_floor_not_the_publish_rate():
+    """
+    Publishing faster than the hand can act buys nothing; above its Nyquist the sweep cannot land.
+
+    The guard against command_hz alone would wave this through — 2.5 Hz is well under the 10 Hz
+    publish Nyquist of 5 Hz — while the hand, completing one Move per HAND_PERIOD_S, gets fewer
+    than two per cycle. That is a sweep it could not reproduce even if it were perfect.
+    """
+    with pytest.raises(ValueError, match="Nyquist of the hand's own"):
+        _probe(mode='gripper_chirp', chirp_f1_hz=2.5)
+
+
+def test_gripper_chirp_defaults_satisfy_their_own_guards():
+    """
+    The shipped band and amplitude must construct. Guards this file's constants against each other.
+
+    This is the test that catches a hand-tuned CHIRP_BAND_HZ entry that the probe would then refuse
+    to run at all — which is otherwise only discovered with the hardware already booked.
+    """
+    probe = _probe(mode='gripper_chirp')
+    probe.destroy_node()
+
+
+def test_gripper_chirp_publishes_an_absolutely_timed_chunk():
+    """
+    Each publication is a full n_action_steps chunk whose waypoints name absolute instants.
+
+    A single already-due waypoint is what franka_hand_node can only ever chase — it is the shape
+    that made this mode report 0.00 mm of travel on hardware. The chunk is what lets the node's
+    scheduling branch run, so its depth and its timing are the point of the mode.
+    """
+    probe = _probe(mode='gripper_chirp', n_action_steps=5, lead_s=0.3, action_dt=0.1)
+    published = []
+    probe._pub = SimpleNamespace(publish=published.append, get_subscription_count=lambda: 1)
+
+    due_s, width = probe._publish_chirp_chunk(0.0)
+
+    assert len(published) == 1
+    msg = published[0]
+    assert len(msg.points) == 5
+    stamp_s = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+    # The anchor leads publication, and the reported instant is the first waypoint's, not now.
+    assert due_s == pytest.approx(stamp_s)
+    assert width == pytest.approx(msg.points[0].positions[0])
+    times = [p.time_from_start.sec + p.time_from_start.nanosec * 1e-9 for p in msg.points]
+    assert times == pytest.approx([0.0, 0.1, 0.2, 0.3, 0.4])
+    # Sampled at the instant each waypoint is due, so the chunk describes the swept target.
+    assert msg.points[1].positions[0] == pytest.approx(probe._center + probe._amplitude * float(probe._chirp(0.4)))
+    probe.destroy_node()
+
+
+def test_gripper_chirp_rejects_a_chunk_that_can_never_be_scheduled():
+    """lead_s must be positive, or every chunk is due the moment it is published."""
+    with pytest.raises(ValueError, match='lead_s must be > 0'):
+        _probe(mode='gripper_chirp', lead_s=0.0)
+    with pytest.raises(ValueError, match='n_action_steps must be >= 1'):
+        _probe(mode='gripper_chirp', n_action_steps=0)
+
+
+def test_gripper_chirp_cannot_command_past_the_hand_stroke():
+    """An amplitude that would push the sweep past 0 or HAND_MAX_WIDTH_M must be rejected."""
+    with pytest.raises(ValueError, match='must stay within'):
+        _probe(mode='gripper_chirp', amplitude_m=0.05)
+
+
+def test_gripper_chirp_recovers_a_known_lag_end_to_end(tmp_path, capsys):
+    """
+    Feed the xcorr reporter a commanded chirp and a copy delayed by a known lag; check it comes back.
+
+    This is the one check that fails if the new mode's wiring into _report_xcorr is wrong — the
+    estimator itself is already covered by test_latency_util.
+    """
+    true_lag = 0.65
+    t = np.arange(0.0, 20.0, 1 / 50.0)
+    probe = _probe(mode='gripper_chirp', output_npz=str(tmp_path / 'gc.npz'), plot=False)
+    commanded = [(float(ti), 0.04 + 0.03 * float(probe._chirp(ti))) for ti in t]
+    actual = [(ti + true_lag, w) for ti, w in commanded]
+    # A separate series from `actual` above — these are the NUC-side publish stamps, which is what
+    # _joint_state_interval_lines summarises. 50 ms apart, so latency.gripper is half of that.
+    probe._state_stamps = [float(i) * 0.05 for i in range(20)]
+
+    assert probe._report_xcorr('gripper_exec', commanded, actual, extra_lines=probe._joint_state_interval_lines()) == 0
+    saved = np.load(tmp_path / 'gc.npz')
+    assert float(saved['latency_s']) == pytest.approx(true_lag, abs=0.02)
+    out = capsys.readouterr().out
+    # Against the saved value rather than a literal, so re-tuning the shipped band cannot break
+    # this on a rounding difference that says nothing about the wiring.
+    assert f'gripper_exec: {float(saved["latency_s"]):.4f}' in out
+    assert 'latency.gripper: 0.0250' in out
     probe.destroy_node()
 
 

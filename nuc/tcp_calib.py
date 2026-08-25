@@ -76,6 +76,47 @@ TCP_XYZ = (FINGERTIP_X, 0.0, FINGER_CARRIAGE_Z + CARRIAGE_TO_FINGERTIP_Z)
 # fixes the sign. Confirm it by eye in Foxglove anyway (docs/crb-fr3-inference.md).
 TCP_RPY = (0.0, 0.0, math.pi / 2)
 
+# --------------------------------------------------------------------------------------------
+# The hand subtree, which robot_state_publisher normally publishes from the URDF.
+#
+# franka.launch.py feeds its one `load_gripper` flag to both `xacro hand:=` and the franka_gripper
+# include. PolyUMI's own hand driver owns the libfranka connection, so franka_gripper must not run
+# — which takes the whole hand out of robot_description as a side effect. fr3_bringup.launch.py
+# republishes the FIXED joints statically to fill that hole.
+#
+# Two of them, and both have a consumer that fails hard without it:
+#
+#   fr3_link8 -> fr3_hand      polyumi_tcp hangs off fr3_hand, so losing this orphans it and the
+#                              laptop's base -> polyumi_tcp lookup fails — no observation at all.
+#   fr3_hand  -> fr3_hand_tcp  franka's O_T_EE frame. polyumi_cartesian_impedance_controller looks
+#                              up fr3_hand_tcp -> polyumi_tcp once at activation to convert the
+#                              reported EE pose onto the policy's TCP, and refuses to activate
+#                              without it rather than silently controlling the wrist.
+#
+# Values are franka_description's own joint origins, read out of the rendered URDF (`xacro
+# fr3.urdf.xacro hand:=true`) and matching the defaults in
+# end_effectors/franka_hand/franka_hand_arguments.xacro. Geometry, not measurements — the -45 deg
+# yaw is the flange's standard mounting rotation.
+#
+# The two FINGER joints are deliberately absent: fr3_finger_joint1/2 are PRISMATIC, so a static
+# transform would assert an aperture the fingers do not have. That is why there is still no finger
+# TF under load_gripper:=false — see docs/crb-fr3-inference.md.
+HAND_STATIC_TRANSFORMS = (
+    ('fr3_link8', 'fr3_hand', (0.0, 0.0, 0.0), (0.0, 0.0, -math.pi / 4)),
+    ('fr3_hand', 'fr3_hand_tcp', (0.0, 0.0, 0.1034), (0.0, 0.0, 0.0)),
+)
+
+
+def _stp_args(xyz, rpy, parent, child) -> list[str]:
+    """tf2_ros static_transform_publisher argv for one fixed transform."""
+    x, y, z = xyz
+    roll, pitch, yaw = rpy
+    return [
+        '--x', str(x), '--y', str(y), '--z', str(z),
+        '--roll', str(roll), '--pitch', str(pitch), '--yaw', str(yaw),
+        '--frame-id', parent, '--child-frame-id', child,
+    ]  # fmt: skip
+
 
 def xacro_args() -> list[str]:
     """Build the ``name:=value`` pairs fr3_polyumi.urdf.xacro requires, for a launch Command."""
@@ -87,25 +128,17 @@ def xacro_args() -> list[str]:
 
 def static_transform_publisher_args() -> list[str]:
     """Build the tf2_ros static_transform_publisher argv publishing TCP_PARENT -> TCP_CHILD."""
-    x, y, z = TCP_XYZ
-    roll, pitch, yaw = TCP_RPY
+    return _stp_args(TCP_XYZ, TCP_RPY, TCP_PARENT, TCP_CHILD)
+
+
+def hand_transform_publishers() -> list[tuple[str, list[str]]]:
+    """
+    Build ``(node name, argv)`` for every fixed hand joint the URDF loses with load_gripper:=false.
+
+    :returns: one entry per transform in :data:`HAND_STATIC_TRANSFORMS`.
+    """
     return [
-        '--x',
-        str(x),
-        '--y',
-        str(y),
-        '--z',
-        str(z),
-        '--roll',
-        str(roll),
-        '--pitch',
-        str(pitch),
-        '--yaw',
-        str(yaw),
-        '--frame-id',
-        TCP_PARENT,
-        '--child-frame-id',
-        TCP_CHILD,
+        (f'{child}_static_tf', _stp_args(xyz, rpy, parent, child)) for parent, child, xyz, rpy in HAND_STATIC_TRANSFORMS
     ]
 
 

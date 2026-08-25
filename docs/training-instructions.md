@@ -170,7 +170,7 @@ call it makes to the dummy server today, so nothing changes on the ROS side but 
 > (used by `robot0_eef_rot_axis_angle_wrt_start`); absent a reset it falls back to the current
 > pose with a warning. `policy_client_node` is wired to it (image→224, URL, `/reset` at episode
 > start) and unit-tested; what remains is the on-arm dry run — see
-> [franka-inference-bringup.md](franka-inference-bringup.md#next-hardware-session).
+> [franka-inference-bringup.md](franka-inference-bringup.md#the-on-arm-sequence).
 
 ## What is out of scope here
 

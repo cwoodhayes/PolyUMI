@@ -175,7 +175,7 @@ def test_arm_and_gripper_are_truncated_by_their_own_latencies(make_node):
     The whole point of the split: a faster device keeps actions the slower one has to drop.
 
     Both bridges used to share one slice cut with the ARM's latency, so the hand inherited the
-    arm's lead and acted that much too early — fr3_gripper_bridge's gripper_lead_steps existed
+    arm's lead and acted that much too early — the old gripper bridge's gripper_lead_steps existed
     only to index back out of it, and could add lead but never remove it. Measured on hardware the
     hand beat the arm by 188 ms, i.e. about two action steps.
     """
@@ -663,25 +663,43 @@ def test_gripper_trajectory_converts_to_robot_units(make_node):
     """
     node = make_node(control_hz=10.0, gripper_min_width_m=0.005, gripper_max_width_m=0.08)
 
-    msg = node._actions_to_gripper_trajectory(_actions_with_grip([0.005, 0.025, 0.5]))
+    msg = node._actions_to_gripper_trajectory(_actions_with_grip([0.005, 0.025, 0.5]), _t(100.0))
 
     assert [p.positions[0] for p in msg.points] == pytest.approx([0.01, 0.03, 0.08])
 
 
 def test_gripper_trajectory_carries_chunk_timing(make_node):
     """
-    Each point is stamped with its offset into the chunk, spaced by the control period.
+    Each point names an ABSOLUTE instant: header.stamp + time_from_start, anchored at t_obs.
 
-    The bridge uses this to size its move speed, which is the whole reason the gripper chunk is
-    a JointTrajectory rather than a bare array of widths.
+    franka_hand_node holds these as a horizon and asks which are still reachable, so the times
+    have to be a schedule rather than a shape. The anchor leads t_obs by latency.gripper_exec, so
+    each width is commanded that far ahead of when the fingers should be there.
     """
-    node = make_node(control_hz=10.0)
+    node = make_node(control_hz=10.0, **{'latency.gripper_exec': 0.38})
 
-    msg = node._actions_to_gripper_trajectory(_actions_with_grip([0.02] * 3))
+    msg = node._actions_to_gripper_trajectory(_actions_with_grip([0.02] * 3), _t(100.0))
 
+    stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+    assert stamp == pytest.approx(100.0 - 0.38)
     times = [p.time_from_start.sec + p.time_from_start.nanosec * 1e-9 for p in msg.points]
     assert times == pytest.approx([0.0, 0.1, 0.2])
     assert msg.joint_names == ['fr3_gripper_width']
+
+
+def test_gripper_trajectory_numbers_from_the_preslice_index(make_node):
+    """
+    A stale-drop must not slide the surviving waypoints earlier.
+
+    Numbering the survivors from zero would give back exactly the lead the drop removed, so the
+    hand would be commanded to reach each width at the instant the DROPPED one was due.
+    """
+    node = make_node(control_hz=10.0, **{'latency.gripper_exec': 0.0})
+
+    msg = node._actions_to_gripper_trajectory(_actions_with_grip([0.02] * 2), _t(100.0), first_index=3)
+
+    times = [p.time_from_start.sec + p.time_from_start.nanosec * 1e-9 for p in msg.points]
+    assert times == pytest.approx([0.3, 0.4])
 
 
 def test_gripper_and_pose_chunks_stay_index_aligned(make_node):

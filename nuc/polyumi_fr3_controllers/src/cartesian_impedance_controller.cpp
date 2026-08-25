@@ -288,7 +288,7 @@ CallbackReturn CartesianImpedanceController::on_configure(
   if (!applyCollisionBehavior()) {
     RCLCPP_FATAL(node->get_logger(),
                  "Refusing to configure without known collision thresholds. See "
-                 "docs/franka-inference-bringup.md, \"Collision thresholds\".");
+                 "nuc/config/polyumi_controllers.yaml, collision.*");
     return CallbackReturn::ERROR;
   }
 

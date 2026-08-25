@@ -5,7 +5,7 @@
 #
 # The controller is spawned INACTIVE. It claims the same <joint>/effort command interfaces as
 # fr3_arm_controller, so exactly one of the two can run: activating this one deactivates MoveIt's
-# path to the arm. See docs/franka-inference-bringup.md.
+# path to the arm. See docs/crb-fr3-inference.md.
 
 # There is deliberately no `type` here: the spawner only looks for one under the controller's own
 # key, so it is passed with -t instead. See fr3_bringup.launch.py.
