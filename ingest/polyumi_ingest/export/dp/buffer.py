@@ -22,7 +22,9 @@ Deliberately absent:
   would be redundant (and would have to be kept in lock-step with the obs keys).
 * ``robot0_eef_rot_axis_angle_wrt_start`` — ``UmiDataset`` derives it at load time from
   ``demo_start_pose``. It is in ``shape_meta`` but must *not* be in the store.
-* tactile (piezo / finger camera) — out of scope for the visuomotor policy.
+* tactile (piezo / finger camera) — out of scope for the *visuomotor* policy. The contact
+  mic is exported by ``export-polyumi``, which runs this same code with a modality attached;
+  see ``export.dp.modality`` and ``export.dp.polyumi``.
 
 Poses come from one of each episode's ``eef/pose_<source>`` arrays (preprocessing step 5 writes
 one per available source — ``optitrack`` and/or ``slam``), already on the canonical **hand**
@@ -73,6 +75,16 @@ node feeds the policy.
 
 The store is written ``zarr_format=2`` so the (v2-pinned) UMI zarr can read it, then packed
 into a ``.zarr.zip`` because ``UmiDataset`` opens its dataset through ``zarr.ZipStore``.
+
+**Extra observation streams** ride along as ``modalities`` (``export.dp.modality``), which
+contribute additional ``data/<key>`` arrays inside the same segment loop. An export with none
+is byte-identical to one from before that seam existed, down to the provenance sidecar, so
+``export-dp``'s contract is unchanged by anything ``export-polyumi`` adds.
+
+``enforce_preprocessing`` requires only the steps an export actually reads —
+``PreprocessingStep.required_for_export``, plus whatever its modalities declare. Demanding
+every registered step instead would mean each new step stranded the entire existing corpus
+until it was re-run, for an export that never looks at its output.
 """
 
 from __future__ import annotations
@@ -81,6 +93,7 @@ import logging
 import pathlib
 import tempfile
 import zipfile
+from collections.abc import Sequence
 
 import numpy as np
 import zarr
@@ -90,6 +103,7 @@ from scipy.spatial.transform import Rotation
 from polyumi_ingest import quality
 from polyumi_ingest.camera_preproc import CAMERA0_RGB_RESOLUTION, resize_camera0_rgb
 from polyumi_ingest.config import load_closed_width_m, load_open_width_m
+from polyumi_ingest.export.dp.modality import ExportModality
 from polyumi_ingest.manifests import SceneManifest
 from polyumi_ingest.preproc import available_preprocessing_steps, preprocessing_steps_done
 from polyumi_ingest.pzarr.scene_files import SceneFiles
@@ -263,6 +277,7 @@ def _export_episode(
     closed_width_m: float,
     open_width_m: float,
     min_segment_steps: int = MIN_SEGMENT_STEPS,
+    modalities: Sequence[ExportModality] = (),
 ) -> list[tuple[int, dict]]:
     """
     Export one session as one DP episode per contiguous valid segment.
@@ -323,6 +338,11 @@ def _export_episode(
     stride = _episode_frame_stride(ep)
     steps = np.arange(0, n, stride)
 
+    # Before any segment is cut, so a modality missing its inputs fails the export by name
+    # rather than emitting a buffer that is quietly short one observation.
+    for modality in modalities:
+        modality.prepare_episode(ep, episode_key, gopro_ts, stride)
+
     # Mask out the idle prefix before the sync chirp: the operator waits for the chirp, so those
     # frames shouldn't train the policy. Masking (rather than nudging a start index) means the
     # exported span is exactly the span quality.py gates on, and it composes with segmentation.
@@ -382,35 +402,45 @@ def _export_episode(
         rotvec = Rotation.from_quat(pose[gidx, 3:]).as_rotvec().astype(np.float32)
         tcp6 = np.concatenate([pos, rotvec], axis=1)  # (T,6) [pos, rotvec] — UMI's tcp_pose
 
-        _append(
-            data_grp,
-            {
-                _CAMERA: _decode_resized_frames(frames, gidx),
-                f'{_ROBOT}_eef_pos': pos,
-                f'{_ROBOT}_eef_rot_axis_angle': rotvec,
-                f'{_ROBOT}_gripper_width': gripper[gidx, None].astype(np.float32),
-                f'{_ROBOT}_demo_start_pose': np.broadcast_to(tcp6[0], (t, 6)).copy(),
-                f'{_ROBOT}_demo_end_pose': np.broadcast_to(tcp6[-1], (t, 6)).copy(),
-            },
-        )
+        arrays = {
+            _CAMERA: _decode_resized_frames(frames, gidx),
+            f'{_ROBOT}_eef_pos': pos,
+            f'{_ROBOT}_eef_rot_axis_angle': rotvec,
+            f'{_ROBOT}_gripper_width': gripper[gidx, None].astype(np.float32),
+            f'{_ROBOT}_demo_start_pose': np.broadcast_to(tcp6[0], (t, 6)).copy(),
+            f'{_ROBOT}_demo_end_pose': np.broadcast_to(tcp6[-1], (t, 6)).copy(),
+        }
+        for modality in modalities:
+            for key, value in modality.segment_arrays(gidx).items():
+                if key in arrays:
+                    raise RuntimeError(f'{episode_key}: modality {modality.name!r} would overwrite {key!r}')
+                if len(value) != t:
+                    raise RuntimeError(
+                        f'{episode_key}: modality {modality.name!r} returned {len(value)} row(s) '
+                        f'for {key!r}, expected {t}'
+                    )
+                arrays[key] = value
+        # Still one _append for the whole segment, so episode_ends accounting can't drift
+        # between the visuomotor keys and a modality's.
+        _append(data_grp, arrays)
         seg_label = f' segment {seg_i}' if len(segments) > 1 else ''
         log.info(f'  {episode_key}{seg_label}: {t} steps @ {rate:.2f} Hz (pose={pose_source})')
         # 'episode'/'scene'/'session' are filled in by the caller (_append_scene_episodes), which
         # knows the plain episode key ('episode_0') and scene/session names — episode_key here is
         # the combined 'scene_label/episode_0' string used only for log/error messages.
-        results.append(
-            (
-                t,
-                {
-                    'source': pose_source,
-                    'world_frame': pose_attrs.get('world_frame'),
-                    'n_steps': t,
-                    'segment': seg_i,
-                    'frame_range': [int(gidx[0]), int(gidx[-1])],
-                    'frame_stride': stride,
-                },
-            )
-        )
+        ep_provenance = {
+            'source': pose_source,
+            'world_frame': pose_attrs.get('world_frame'),
+            'n_steps': t,
+            'segment': seg_i,
+            'frame_range': [int(gidx[0]), int(gidx[-1])],
+            'frame_stride': stride,
+        }
+        # Absent entirely when nothing extra was exported, so export-dp's sidecar and meta attrs
+        # stay byte-identical to what they were before this seam existed.
+        if modalities:
+            ep_provenance['modalities'] = {m.name: m.segment_provenance(gidx) for m in modalities}
+        results.append((t, ep_provenance))
     return results
 
 
@@ -422,9 +452,24 @@ def _zip_zarr_dir(zarr_dir: pathlib.Path, out_path: pathlib.Path) -> None:
                 zf.write(path, path.relative_to(zarr_dir).as_posix())
 
 
-def _check_preprocessing_complete(root: zarr.Group, scene_label: str) -> None:
+def _required_steps(modalities: Sequence[ExportModality]) -> set[int]:
     """
-    Raise if the scene is missing any registered preprocessing step.
+    Preprocessing steps an export actually depends on.
+
+    Not simply every registered step: one that feeds only an optional modality
+    (``required_for_export = False``) would otherwise strand every scene preprocessed before
+    that step existed, for an export that never reads it. Each modality adds back exactly the
+    steps it needs.
+    """
+    required = {cls.step_number for cls in available_preprocessing_steps() if cls.required_for_export}
+    for modality in modalities:
+        required |= set(modality.required_steps)
+    return required
+
+
+def _check_preprocessing_complete(root: zarr.Group, scene_label: str, required: set[int]) -> None:
+    """
+    Raise if the scene is missing any preprocessing step this export depends on.
 
     The DP export reads the outputs of the whole pipeline (``eef/pose`` from step 5,
     gripper width from step 4, and the chirp-end marker from step 1), so an incompletely
@@ -432,7 +477,6 @@ def _check_preprocessing_complete(root: zarr.Group, scene_label: str) -> None:
     this with ``enforce_preprocessing=False``.
     """
     done = set(preprocessing_steps_done(root))
-    required = {cls.step_number for cls in available_preprocessing_steps()}
     missing = sorted(required - done)
     if missing:
         raise RuntimeError(
@@ -451,6 +495,7 @@ def _append_scene_episodes(
     open_width_m: float,
     enforce_preprocessing: bool = True,
     min_segment_steps: int = MIN_SEGMENT_STEPS,
+    modalities: Sequence[ExportModality] = (),
 ) -> int:
     """Append every EPISODE session of one scene onto ``data_grp``, returning the new running total."""
     zarr_path = SceneFiles.resolve_zarr_path(scene_path)
@@ -473,7 +518,7 @@ def _append_scene_episodes(
 
     root = zarr.open_group(str(zarr_path), mode='r')
     if enforce_preprocessing:
-        _check_preprocessing_complete(root, scene_label)
+        _check_preprocessing_complete(root, scene_label, _required_steps(modalities))
     n_episodes = int(root.attrs.get('n_episodes', 0))
     for i in range(n_episodes):
         ep_key = f'episode_{i}'
@@ -507,6 +552,7 @@ def _append_scene_episodes(
             min_segment_steps=min_segment_steps,
             closed_width_m=closed_width_m,
             open_width_m=open_width_m,
+            modalities=modalities,
         ):
             total += t
             episode_ends.append(total)
@@ -519,6 +565,7 @@ def export_scene_to_dp(
     output_path: pathlib.Path,
     enforce_preprocessing: bool = True,
     min_segment_steps: int = MIN_SEGMENT_STEPS,
+    modalities: Sequence[ExportModality] = (),
 ) -> tuple[int, list[dict]]:
     """
     Export EPISODE sessions of a pzarr scene to a UMI-format ``.zarr.zip`` ReplayBuffer.
@@ -542,6 +589,7 @@ def export_scene_to_dp(
         output_path,
         enforce_preprocessing=enforce_preprocessing,
         min_segment_steps=min_segment_steps,
+        modalities=modalities,
     )
 
 
@@ -550,6 +598,7 @@ def export_scenes_to_dp(
     output_path: pathlib.Path,
     enforce_preprocessing: bool = True,
     min_segment_steps: int = MIN_SEGMENT_STEPS,
+    modalities: Sequence[ExportModality] = (),
 ) -> tuple[int, list[dict]]:
     """
     Export EPISODE sessions from one or more pzarr scenes into a single UMI ``.zarr.zip``.
@@ -599,6 +648,7 @@ def export_scenes_to_dp(
                 min_segment_steps=min_segment_steps,
                 closed_width_m=closed_width_m,
                 open_width_m=open_width_m,
+                modalities=modalities,
             )
 
         # Every episode in one buffer must share a time base: UmiDataset reads a single
@@ -626,6 +676,11 @@ def export_scenes_to_dp(
         # side needs to know which convention a checkpoint was trained under to pick its offset.
         meta.attrs['gripper_closed_width_m'] = float(closed_width_m)
         meta.attrs['gripper_open_width_m'] = float(open_width_m)
+        # Same idea, per modality: the geometry a modality's rows were cut with, carried with the
+        # data so a checkpoint says what it was trained on rather than relying on the config file
+        # still reading the same way months later.
+        for modality in modalities:
+            meta.attrs.update(modality.meta_attrs())
         output_path.parent.mkdir(parents=True, exist_ok=True)
         _zip_zarr_dir(build_dir, output_path)
 

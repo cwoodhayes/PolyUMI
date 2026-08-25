@@ -166,6 +166,8 @@ The **dry-run** pattern (validate commanded motion without moving the arm) is `e
 pingest --help
 pingest fetch --host <hostname> --latest
 pingest process-all --force
+pingest export-dp <scene> -o <name>.zarr.zip        # visuomotor dataset
+pingest export-polyumi <scene> -o <name>.zarr.zip   # + data/mic_0 (contact mic), needs pp 6
 ```
 
 ### Training the diffusion policy (GPU workstation, Docker)

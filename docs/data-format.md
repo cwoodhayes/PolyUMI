@@ -81,19 +81,34 @@ scene.zarr/
 │       │   ├── n_relocalization_events    scalar int
 │       │   ├── orb_slam3_settings_path    scalar str
 │       │   └── atlas_path                 scalar str
-│       └── gripper_width/          populated by step 4
-│           ├── width_m             (N_gopro,) float32 — meters, interpolated across full frame grid
-│           ├── raw_widths_m        (N_detections,) float32 — detections only
-│           ├── raw_timestamps_s    (N_detections,) float64
-│           ├── finger_corners      (N_gopro, 2, 4, 2) float32 — ArUco corner pixel coords per frame
-│           ├── detection_rate      scalar float
-│           ├── n_detected          scalar int
-│           ├── n_frames            scalar int
-│           ├── left_id             scalar int — ArUco marker ID
-│           ├── right_id            scalar int — ArUco marker ID
-│           ├── marker_size_m       scalar float
-│           ├── nominal_z_m         scalar float
-│           └── z_tolerance_m       scalar float
+│       ├── gripper_width/          populated by step 4
+│       │   ├── width_m             (N_gopro,) float32 — meters, interpolated across full frame grid
+│       │   ├── raw_widths_m        (N_detections,) float32 — detections only
+│       │   ├── raw_timestamps_s    (N_detections,) float64
+│       │   ├── finger_corners      (N_gopro, 2, 4, 2) float32 — ArUco corner pixel coords per frame
+│       │   ├── detection_rate      scalar float
+│       │   ├── n_detected          scalar int
+│       │   ├── n_frames            scalar int
+│       │   ├── left_id             scalar int — ArUco marker ID
+│       │   ├── right_id            scalar int — ArUco marker ID
+│       │   ├── marker_size_m       scalar float
+│       │   ├── nominal_z_m         scalar float
+│       │   └── z_tolerance_m       scalar float
+│       └── contact_audio/          populated by step 6
+│           ├── frame_blocks              (N_gopro, B) float32 — piezo samples for each GoPro frame
+│           ├── frame_block_start_idx     (N_gopro,) int64 — each block's start in finger/finger_piezo
+│           ├── logmel                    (N_hops, n_mels) float32 — DIAGNOSTIC ONLY; nothing trains on it
+│           ├── logmel_timestamps         (N_hops,) float64 — UTC seconds, hop centres
+│           ├── sample_rate_hz            scalar int
+│           ├── samples_per_gopro_frame   scalar int — B
+│           ├── block_alignment           scalar str — causal | forward
+│           ├── nominal_samples_per_frame scalar float — median anchor spacing
+│           ├── max_frame_spacing_samples scalar int
+│           ├── n_frames                  scalar int
+│           ├── n_frame_gaps              scalar int — intervals wider than B, i.e. dropped GoPro frames
+│           ├── n_zero_filled_samples     scalar int — blocks reading past the end of the recording
+│           ├── coverage                  scalar float — fraction of the piezo array the blocks span
+│           └── rms                       scalar float — did the mic record anything at all
 └── optitrack/                      scene-level (only if OptiTrack CSVs were found at ingest)
     ├── pose                        (N_optitrack, 7) float64 — [x, y, z, qx, qy, qz, qw]
     └── timestamps                  (N_optitrack,) float64 — UTC seconds
@@ -132,6 +147,7 @@ Steps are tracked in `preprocessing_steps` (list of completed step numbers) in t
 | 3 | `slam-optitrack-align` | gopro/slam_poses, optitrack/pose, timestamps | `optitrack_to_slam_transform` in root `.zattrs` |
 | 4 | `aruco-gripper-width` | gopro frames (from gopro.mp4), timestamps/gopro | `annotations/gripper_width/` |
 | 5 | `eef-pose` | optitrack/pose and/or gopro/slam_poses, timestamps, `gripper_calib.yaml` | `eef/pose_optitrack`, `eef/pose_slam` (whichever the scene has) |
+| 6 | `contact-audio` | finger/finger_piezo, timestamps/finger_piezo, timestamps/gopro, `annotations/time_sync` | `annotations/contact_audio/` |
 
 ## SLAM is a swappable step
 
@@ -185,6 +201,35 @@ The gripper width for each episode is derived from ArUco fiducial markers (IDs 0
 
 > **`width_m` is raw tag separation, not jaw opening.** The tags sit on the fingers, so a fully-closed gripper still measures several millimetres. The pzarr deliberately stores the raw measurement — it is calibration-independent, so re-deriving the calibration costs a re-export rather than re-running step 4's per-frame ArUco pass. The subtraction happens in the DP exporter (see below), matching where UMI applies it. Use `raw_widths_m` (the actual detections) rather than `width_m` (resampled onto the GoPro grid with hold-at-edges extrapolation) for anything that cares about the extremes — `pingest calibrate-gripper` does.
 
+## Contact-mic audio on the frame grid
+
+The finger piezo (`finger/finger_piezo`, the left channel; `finger_air` is the air mic that
+carries the sync chirp) is recorded at 16 kHz on the Pi's clock, while video is stamped on the
+GoPro's. Step 6 reconciles the two and slices the audio into one block per GoPro frame, which
+`pingest export-polyumi` concatenates into the exported `mic_0`.
+
+**Blocks are anchored by timestamp, never by multiplying a rate.** 16000 / 59.94 = 266.93 samples
+per frame is not an integer — ManiWAV's 48000 / 60 = 800 was — so a fixed multiply would walk off
+the audio over an episode. Each frame's block starts at `searchsorted(piezo_ts, gopro_ts_in_finger_clock)`
+for that frame alone, which is also why step 1 is a hard prerequisite: without the chirp offset the
+two clocks are unrelated epochs, and an unshifted anchor is wrong by seconds with nothing
+downstream able to notice.
+
+**The block width is fixed and slightly generous** (`samples_per_gopro_frame` in
+`config/contact_audio.yaml`, currently 268 = `ceil(266.93) + 1`). Because it is at least as large
+as the biggest gap between consecutive anchors, block *k* always reaches block *k+1*'s start — so
+consecutive blocks abut or overlap and **never leave a hole**. That is the property the exporter
+depends on: flattening consecutive `mic_0` rows yields a gapless waveform, which is what ManiWAV's
+audio path assumes when it reassembles the signal before computing its spectrogram. The cost is
+~0.4% of samples appearing in two adjacent blocks. A genuinely dropped GoPro frame does leave a
+hole; `n_frame_gaps` counts them rather than papering over missing audio.
+
+**The `logmel` array is diagnostic only.** It exists so the catalog can show whether the mic
+recorded anything; nothing reads it downstream. The spectrogram the policy sees is computed in the
+training container from the exported waveform, *after* augmentation that only exists in the
+waveform domain — see [maniwav-audio-policy.md](maniwav-audio-policy.md) for why that split is
+deliberate and what the `mic_0` contract is.
+
 ## Scene-level metadata
 
 The scene `.zattrs` contains:
@@ -229,13 +274,15 @@ Training frames come from `gopro.mp4` at **2704x2028 (4:3)**. Inference frames c
 
 So without the crop the inference 224² was **25.4% black pixels** with the real content squeezed into three-quarters of the width — a train/inference domain gap on every policy output, and a silent one, since the policy runs perfectly happily on the wrong pixels. The crop recovers precisely the 1440x1080 the camera framed, so both paths squash the same field of view. It is a no-op on 2704x2028, so **no dataset needs re-exporting for this** and old buffers stay valid.
 
-> **Known residual skew (not a bug):** even after the crop, training frames are downscaled from 2704 px wide and inference frames from 1440 px, so the two 224² results differ slightly in resampling detail. Same FOV, same aspect, different source resolution. Closing that fully is out of scope; it is recorded here so it is not mistaken for a defect. Audio is **not** part of the policy observation, so it has no export-alignment requirement.
+> **Known residual skew (not a bug):** even after the crop, training frames are downscaled from 2704 px wide and inference frames from 1440 px, so the two 224² results differ slightly in resampling detail. Same FOV, same aspect, different source resolution. Closing that fully is out of scope; it is recorded here so it is not mistaken for a defect. (Contact-mic audio has its own alignment requirement — see "Contact-mic audio on the frame grid" — but it is a separate contract from the pixel one, and `export-dp` carries no audio at all.)
 
 ## Export targets
 
 `pzarr` is the source of truth; downstream formats are exports produced on demand.
 
 - **UMI ReplayBuffer** (`pingest export-dp`): a `.zarr.zip` matching `universal_manipulation_interface`'s `ReplayBuffer` so `UmiDataset` reads it directly. `meta/episode_ends` plus `data/` keys `camera0_rgb` (T,224,224,3 uint8, Blosc-zstd; see the camera0_rgb preprocessing contract above), `robot0_eef_pos` (T,3), `robot0_eef_rot_axis_angle` (T,3, rotvec), `robot0_gripper_width` (T,1, **metres of opening from fully closed** — the exporter subtracts `gripper_calib.yaml`'s `closed_mm` from step 4's raw tag separation and clamps the result at 0, following UMI's `get_gripper_calibration_interpolator`, whose `interp1d(..., fill_value=(x[0], x[-1]))` saturates the same way below the calibrated minimum; the clamp matters because `closed_mm` is a percentile, so ~1% of detections fall under it by construction; the value used is recorded as `meta.attrs['gripper_closed_width_m']` so a buffer is self-describing), and `robot0_demo_start_pose`/`robot0_demo_end_pose` (T,6, the episode's first/last `[pos, rotvec]` broadcast). The key *names* are load-bearing — `UmiDataset` name-matches them. Poses are read from `eef/pose_<source>` (so step 5 must have run) and are on the hand frame; the exporter resolves the source per episode (see the `eef/pose_<source>` section above) and records the choice as provenance — in `meta.attrs['pose_provenance']`/`episode_pose_source` inside the `.zarr.zip`, and in a `<output>.provenance.json` sidecar (or the catalog's `DatasetManifest`). The `action` key is deliberately omitted (the sampler synthesises it from `[eef_pos, eef_rot_axis_angle, gripper_width]`). Steps are the frames SLAM was *fed* — every `localization_frame_stride`-th GoPro frame, so ~29.97 Hz at the current stride of 2, not the 59.94 Hz the camera records at — and the training config sets the observation rate from there via `obs_down_sample_steps`. **Those two knobs are coupled:** halving the stored rate must halve `obs_down_sample_steps`, or the policy trains on a different Δt than it runs at. A single buffer may not mix strides; export refuses to write one that does. A session whose pose source drops out mid-demo is split into one episode per contiguous run, discarding runs shorter than `--min-segment-steps`. Only `EPISODE`-typed sessions are exported; `MAPPING` sessions are skipped.
+
+- **PolyUMI ReplayBuffer** (`pingest export-polyumi`): the same buffer as above plus PolyUMI's extra observation streams — today just `data/mic_0` (T, `stride × B`) float32, the contact mic as **raw 16 kHz waveform**, Blosc-zstd like everything else. Each row is the `stride` per-frame blocks belonging to that step, concatenated, so flattening consecutive rows reconstructs the waveform with no gaps (see "Contact-mic audio on the frame grid"). Whether a row holds the audio before or after its observation instant is `block_alignment` in `config/contact_audio.yaml` — **causal by default**, because ManiWAV's forward convention would give the policy 33 ms of look-ahead at our step rate that does not exist at inference. The geometry is recorded in `meta.attrs` (`mic_0_sample_rate_hz`, `mic_0_samples_per_step`, `mic_0_samples_per_gopro_frame`, `mic_0_block_alignment`, `mic_0_source`) so a checkpoint is self-describing. Raw waveform rather than a spectrogram is a deliberate split; see [maniwav-audio-policy.md](maniwav-audio-policy.md). Needs preprocessing step 6; `export-dp` reads none of it and still works on scenes that never ran it.
 
 - **MCAP** (`pingest export-mcap`): one `.mcap` file per episode, with channels for finger image, GoPro image, both audio streams, IMU, GPS, SLAM pose, OptiTrack pose, ArUco annotations, and gripper width. Uses Foxglove JSON schemas; audio is chunked at 4096 samples per message.
 

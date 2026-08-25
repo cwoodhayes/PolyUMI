@@ -1,6 +1,6 @@
 """pzarr version number."""
 
-PZARR_VERSION = 4
+PZARR_VERSION = 5
 """
 pzarr schema version.
 
@@ -20,9 +20,14 @@ v4: SLAM output is forward-only — gopro/slam_poses_{forward,reverse} and the
     the binaries switched from SaveTrajectoryEuRoC, whose inertial branch composes
     mTbc, to SaveTrajectoryCSV, which reports Twc — the frame upstream UMI trains
     against, and the one gripper_calib.yaml's transforms were always written for.
+v5: adds annotations/contact_audio/ (preprocessing step 6) — the piezo contact mic
+    sliced into per-GoPro-frame blocks, plus a diagnostic log-mel spectrogram. The
+    blocks are what ``export-polyumi`` concatenates into the exported ``mic_0``; the
+    spectrogram is for the catalog and is read by nothing else.
 
-Unlike v1-v3, which changed what ``build_pzarr`` writes, v4 changes only the output
-of preprocessing steps 2 and 5 — so migrating a store needs a full ``pingest pp
---force``, not a rebuild. ``run_preprocessing`` restamps the attr once every step has
-actually run; see ``preproc.step_base``.
+Unlike v1-v3, which changed what ``build_pzarr`` writes, v4 and v5 change only the output
+of preprocessing steps — so migrating needs those steps re-run, not a rebuild: a full
+``pingest pp --force`` for v4, and just ``pingest pp 6`` for v5 (nothing earlier changed,
+and step 6 is seconds — no video decode, no SLAM). ``run_preprocessing`` restamps the
+attr once every step has actually run; see ``preproc.step_base``.
 """

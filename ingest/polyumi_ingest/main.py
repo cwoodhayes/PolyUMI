@@ -884,6 +884,64 @@ def export_dataset(
     log.info(f'Exported {n} episode(s) from {len(scene_paths)} scene(s) → {output_path} (provenance: {sidecar_path})')
 
 
+@app.command(name='export-polyumi')
+def export_polyumi(
+    scene_paths: list[pathlib.Path] = typer.Argument(
+        ...,
+        help='Scene directories (each containing scene.zarr) to combine into one dataset.',
+    ),
+    output_path: pathlib.Path = typer.Option(
+        ...,
+        '--output',
+        '-o',
+        help='Output ReplayBuffer path (a .zarr.zip file).',
+    ),
+    enforce_preprocessing: bool = typer.Option(
+        True,
+        '--enforce-preprocessing/--no-enforce-preprocessing',
+        help='Require the preprocessing steps this export depends on to be complete on each '
+        'scene. That is every step the visuomotor export needs, plus step 6 (contact-audio) for '
+        'the mic_0 stream. Disable to export a partially preprocessed scene; export can still '
+        'fail if outputs are missing.',
+    ),
+    min_segment_steps: int = typer.Option(
+        MIN_SEGMENT_STEPS,
+        '--min-segment-steps',
+        help='Shortest run of valid steps exported as its own episode. A session whose pose '
+        'source drops out is split into the runs either side; runs shorter than this are '
+        'discarded rather than emitted as episodes too short to sample a horizon from.',
+    ),
+):
+    """
+    Export scenes to a ReplayBuffer carrying every PolyUMI modality, not just the visuomotor keys.
+
+    Everything `export-dataset` writes, plus `data/mic_0` — the finger contact mic as raw 16 kHz
+    waveform, one row per step. Raw waveform rather than a spectrogram on purpose: the log-mel
+    belongs in the training container, where it can be computed after waveform-domain
+    augmentation. See docs/maniwav-audio-policy.md for the full contract.
+
+    Needs preprocessing step 6 (contact-audio) as well as the steps `export-dp` needs. Use
+    `export-dp` instead for a plain visuomotor dataset; it reads none of step 6's output and
+    works on scenes that never ran it.
+    """
+    from polyumi_ingest.export.dp import export_scenes_to_polyumi
+
+    try:
+        n, provenance = export_scenes_to_polyumi(
+            scene_paths,
+            output_path,
+            enforce_preprocessing=enforce_preprocessing,
+            min_segment_steps=min_segment_steps,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+
+    _log_pose_source_summary(provenance)
+    sidecar_path = _write_provenance_sidecar(output_path, provenance)
+    log.info(f'Exported {n} episode(s) from {len(scene_paths)} scene(s) → {output_path} (provenance: {sidecar_path})')
+
+
 def _step_summary(step_cls: type) -> str:
     """First line of a step class's docstring, with RST inline markup flattened for a terminal."""
     doc = inspect.getdoc(step_cls)

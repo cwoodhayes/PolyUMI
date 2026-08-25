@@ -362,6 +362,12 @@ class PreprocessingStep(ABC):
     step_number: int
     step_name: str
 
+    #: Whether the visuomotor DP export reads this step's output, and so whether an incomplete
+    #: mark should block ``export-dp``. Steps that feed only an optional modality set this False,
+    #: so adding one doesn't strand every scene preprocessed before it existed; the modality
+    #: demands it through its own ``required_steps`` instead. See ``export.dp.buffer``.
+    required_for_export: bool = True
+
     def prepare_scene(self, scene: SceneContext) -> None:
         """
         Scene-level work before any episode: load config, build shared artifacts.

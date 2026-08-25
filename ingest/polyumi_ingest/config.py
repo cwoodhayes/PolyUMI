@@ -15,6 +15,9 @@ QUALITY_THRESHOLDS_YAML = INGEST_ROOT / 'config' / 'quality_thresholds.yaml'
 #: How much data the SLAM step is fed: resolution divisor and localization frame stride.
 #: The camera model itself lives in the ORB-SLAM3 settings YAML, which that file points at.
 SLAM_CONFIG_YAML = INGEST_ROOT / 'config' / 'slam.yaml'
+#: Contact-mic step tunables: the per-frame block geometry that defines the exported
+#: ``mic_0`` contract, and the diagnostic spectrogram's parameters.
+CONTACT_AUDIO_YAML = INGEST_ROOT / 'config' / 'contact_audio.yaml'
 
 
 def load_gripper_calib() -> dict:
@@ -83,4 +86,27 @@ def load_slam_config() -> dict:
         raise FileNotFoundError(
             f'Cannot read {SLAM_CONFIG_YAML}, which is required to run the SLAM step '
             f'(it sets the resolution divisor and localization frame stride): {err}'
+        ) from err
+
+
+def load_contact_audio_config() -> dict:
+    """
+    Load contact-mic step tunables from config/contact_audio.yaml.
+
+    Required, not optional, for the same reason as :func:`load_slam_config`: the ``blocks``
+    section is the ``mic_0`` data contract, so an in-code default disagreeing with the
+    checked-in file is how half a corpus ends up exported at one block width and half at
+    another — with nothing downstream able to tell them apart.
+
+    Raises:
+        FileNotFoundError: if config/contact_audio.yaml is absent or unreadable.
+
+    """
+    try:
+        with CONTACT_AUDIO_YAML.open() as f:
+            return yaml.safe_load(f) or {}
+    except OSError as err:
+        raise FileNotFoundError(
+            f'Cannot read {CONTACT_AUDIO_YAML}, which is required to run the contact-audio step '
+            f'(it sets the per-frame block geometry that defines the exported mic_0 contract): {err}'
         ) from err

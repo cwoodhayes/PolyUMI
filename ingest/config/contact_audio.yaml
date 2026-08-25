@@ -1,0 +1,45 @@
+# Contact-mic (piezo) preprocessing — step 6, `contact-audio`.
+#
+# Two unrelated products are configured here. The `blocks` section defines the TRAINING data
+# contract: the per-GoPro-frame waveform slices that `pingest export-polyumi` concatenates into
+# `mic_0`. The `logmel` section only shapes the diagnostic spectrogram the catalog draws; no
+# policy ever sees it, and changing it is safe. See docs/maniwav-audio-policy.md.
+
+blocks:
+  # Sample rate the Pi records the finger mics at. Asserted against the rate inferred from
+  # timestamps/finger_piezo rather than trusted, because nothing in the pzarr records it and a
+  # mismatch would silently write blocks of the wrong duration.
+  sample_rate_hz: 16000
+
+  # Samples per GoPro frame. 16000 / 59.94 = 266.93 is NOT an integer (ManiWAV's 48000/60 = 800
+  # was), so blocks are anchored per frame by searchsorted on that frame's own timestamp and this
+  # is only their fixed width. It must be >= the largest integer gap between consecutive anchors,
+  # or consecutive blocks would leave a hole; ceil(266.93) + 1 gives a margin for timestamp
+  # jitter, at the cost of ~0.4% of samples appearing in two adjacent blocks.
+  #
+  # Fixed rather than derived per scene: `mic_0` needs one width across a whole multi-scene
+  # dataset. The step logs the observed maximum so a frame-rate change announces itself.
+  samples_per_gopro_frame: 268
+
+  # Which side of the observation instant a step's audio comes from.
+  #
+  #   causal  - the `stride` frames ENDING at the step. Only audio that already exists when the
+  #             policy is asked to act.
+  #   forward - the `stride` frames STARTING at the step, which is what ManiWAV does. At their
+  #             60 fps that is 16.7 ms of look-ahead; at our ~30 Hz step rate it is 33 ms, and
+  #             at inference no such audio exists.
+  #
+  # Default causal for that reason. Recorded in the exported buffer's meta attrs so a checkpoint
+  # says which convention it trained under.
+  block_alignment: causal
+
+logmel:
+  # ManiWAV's parameters, so the diagnostic resembles what the policy is fed: 25 ms frame,
+  # 10 ms hop, 64 HTK mel bins, natural log. fmin 20 Hz is Kaldi's default low edge.
+  n_fft: 400
+  hop_length: 160
+  win_length: 400
+  n_mels: 64
+  fmin: 20.0
+  fmax: 8000.0
+  log_offset: 1.0e-6
