@@ -159,10 +159,14 @@ class FrankaHandNode : public rclcpp::Node {
     if (min_speed_ > limits_.v_max) {
       bad("min_speed_mps must not exceed v_max_mps");
     }
-    // t_obs_delay is subtracted from cmd_delay to get the scheduling delay, and a Move can never
-    // start moving after it has already returned.
-    if (!(limits_.t_obs_delay < limits_.cmd_delay && limits_.cmd_delay <= limits_.fixed_cost)) {
-      bad("need t_obs_delay_s < cmd_delay_s <= fixed_cost_s");
+    // t_obs_delay is a lag correction -- how far the reported width trails reality -- so it is
+    // never negative; a negative value would make commandDelay() exceed cmd_delay, scheduling the
+    // Move to start moving later than a Move can ever return. It is also subtracted from cmd_delay
+    // to get that scheduling delay, and a Move can never start moving after it has already
+    // returned, hence the upper bound against cmd_delay too.
+    if (!(0.0 <= limits_.t_obs_delay && limits_.t_obs_delay < limits_.cmd_delay &&
+          limits_.cmd_delay <= limits_.fixed_cost)) {
+      bad("need 0 <= t_obs_delay_s < cmd_delay_s <= fixed_cost_s");
     }
   }
 
@@ -221,10 +225,12 @@ class FrankaHandNode : public rclcpp::Node {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "bad gripper chunk: %s", e.what());
       return;
     }
-    // Bumped under no lock ordering constraint, but bumped BEFORE the notify: a chunk that arrives
-    // while the mover is inside move() must leave the predicate already true, or the wakeup is lost
-    // and the node stalls until the next chunk.
-    ++chunk_seq_;
+    // Atomic, not merely bumped before the notify: onTarget runs on the ROS callback thread and
+    // moveLoop reads it (both in the wait predicate and, once cmd.has_value(), outside the lock
+    // entirely) on the mover thread. A plain counter touched by both without a shared lock is a
+    // data race regardless of how the ordering reads. Relaxed is enough -- the value only ever
+    // needs to compare unequal, never to synchronize anything else.
+    chunk_seq_.fetch_add(1, std::memory_order_relaxed);
     cv_.notify_one();
   }
 
@@ -243,11 +249,13 @@ class FrankaHandNode : public rclcpp::Node {
 
       if (!cmd.has_value()) {
         std::unique_lock<std::mutex> lock(mutex_);
-        cv_.wait_for(lock, kIdleWait, [&] { return !running_ || chunk_seq_ != seen; });
-        seen = chunk_seq_;
+        cv_.wait_for(lock, kIdleWait, [&] {
+          return !running_ || chunk_seq_.load(std::memory_order_relaxed) != seen;
+        });
+        seen = chunk_seq_.load(std::memory_order_relaxed);
         continue;
       }
-      seen = chunk_seq_;
+      seen = chunk_seq_.load(std::memory_order_relaxed);
 
       const double predicted =
           blockedDuration(std::abs(cmd->width - x.value_or(cmd->width)), cmd->speed, limits_);
@@ -326,7 +334,7 @@ class FrankaHandNode : public rclcpp::Node {
   WidthTrajectory horizon_;
   std::optional<double> measured_;
   std::optional<double> commanded_;
-  std::uint64_t chunk_seq_ = 0;
+  std::atomic<std::uint64_t> chunk_seq_{0};
 
   std::atomic<bool> running_{true};
   std::thread reader_;

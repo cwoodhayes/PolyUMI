@@ -72,12 +72,10 @@
       arm_exec: 0.0810
 
       # The gripper's counterpart to arm_exec: how far ahead of intent to command the hand.
-      #
-      # UNDER TEST, 2026-08-24. Was 0.380 (measured 08-19 via mode:=gripper) back when
-      # fr3_gripper_bridge did no compensation of its own. franka_hand_node does: it plans each
-      # Move to ARRIVE at its waypoint's stated instant, starting from now + (cmd_delay -
-      # t_obs_delay), so a lead here would command the fingers early on top of that. Set to 0 to
-      # try that on the arm; revert to 0.380 if the hand turns out to run late in service.
+      # franka_hand_node already plans each Move to ARRIVE at its waypoint's stated instant
+      # (now + cmd_delay - t_obs_delay), so a lead here would command the fingers early on top of
+      # that -- this is 0.0, under test, for exactly that reason. Revert to 0.380 if the hand runs
+      # late in service.
       #
       # If you re-measure: mode:=gripper_chirp reports 370-450 ms, but most of that is the 363 ms
       # the hand stands still BETWEEN moves, not a feed-forward term. Don't paste it in blind.

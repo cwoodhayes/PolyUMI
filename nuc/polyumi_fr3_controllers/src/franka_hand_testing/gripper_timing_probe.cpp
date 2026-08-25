@@ -509,9 +509,6 @@ int main(int argc, char** argv) {
                   rested_median * 1e3);
     }
 
-    return 0;
-
-
     // ---- C: chained segments --------------------------------------------------------------
     // Whether a piecewise-linear trajectory can be executed as consecutive Moves without the hand
     // stopping at every knot.

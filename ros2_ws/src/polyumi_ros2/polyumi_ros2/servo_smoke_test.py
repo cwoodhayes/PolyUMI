@@ -18,8 +18,8 @@ one.
     ros2 run polyumi_ros2 servo_smoke_test
     ros2 run polyumi_ros2 servo_smoke_test --ros-args -p radius_m:=0.05 -p period_s:=6.0
 
-The plain invocation is the one validated on hardware (2026-08-19) — do not run a bigger or faster
-override as the FIRST pass on a new arm.
+The plain invocation is the one validated on hardware — do not run a bigger or faster override as
+the FIRST pass on a new arm.
 
 Watch for smooth continuous motion, no pause at chunk boundaries, and no ``cartesian_reflex``. A
 stutter at exactly ``chunk_hz`` is the splice going wrong, not the gains.

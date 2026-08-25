@@ -104,14 +104,17 @@ int main(int argc, char** argv) {
     samples.reserve(20000);
     std::vector<CommandRecord> commands;
 
-    // Started before anything is commanded, so every command lands inside a stream already running.
-    std::thread reader(read_loop, std::ref(gripper));
-
     printf("Homing gripper...\n");
     if (!gripper.homing()) {
         printf("Homing failed\n");
         return -1;
     }
+
+    // Started only once homing has succeeded: a `std::thread` that is still joinable when a
+    // function returns calls std::terminate() in its destructor, and homing (which can fail or
+    // throw on an unreachable/faulted hand) is the one failure path before this that had no
+    // thread to clean up.
+    std::thread reader(read_loop, std::ref(gripper));
 
     printf("Moving to start position...\n");
     commands.push_back(move(gripper, "start", GRIPPER_CLOSED_M, GRIPPER_SETUP_SPEED_M_P_S));

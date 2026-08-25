@@ -87,13 +87,15 @@ class WidthTrajectory {
    * Splice `chunk` in, superseding the overlapping tail.
    *
    * Everything at or after the chunk's first instant is discarded and replaced; everything before
-   * it survives; everything at or before `curr_time` is dropped as elapsed. That is the in-place
-   * horizon update -- a fresh chunk overrides the future without disturbing what is already
-   * committed.
+   * it survives; everything at or before `curr_time` is dropped as elapsed -- EXCEPT the very last
+   * point, which survives regardless of its instant. That exception is what lets a wholly-past
+   * chunk still command something: the terminal setpoint is where the signal is heading, so a
+   * fully elapsed splice narrows to a single point rather than emptying out.
    */
   WidthTrajectory splice(const WidthTrajectory& chunk, double curr_time) const;
 
   /// Drop elapsed setpoints and anything past `curr_time + horizon`, bounding a rogue publisher.
+  /// Same never-drop-the-last-point exception as splice().
   WidthTrajectory prune(double curr_time, double horizon) const;
 
   /// Linear interpolation at `t`, clamped to the endpoints. Throws if empty.
