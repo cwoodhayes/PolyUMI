@@ -34,31 +34,37 @@ the training side.
 | Gripper obs + command | **done** — `/fr3_gripper/joint_states` → `agent_pos[7]`; `action[7]` → `/polyumi/target_gripper` → NUC bridge |
 | Gripper width calibration | **done, measured 2026-08-09** — closed width 44.56 mm, closed aperture 0.0 m, open aperture 0.0816 m |
 | Receding-horizon inference stride | **done** — `steps_per_inference` (default 6) |
-| DP export | **works**; UMI schema + tests landed. Still no tactile, and the rework in "What's left" is outstanding |
+| DP export | **works**; UMI schema + tests landed. `export-polyumi` adds the contact mic; finger camera still unexported |
 | Real inference server | **in progress** — `serve_policy.py` green standalone on sheep; client wiring done + unit-tested; on-arm dry run pending hardware |
 
 ---
 
 ## What's left
 
-3. **Finger cam + piezo are unwired.** Params exist and are never consumed. If they become
-   observations, the capture instant becomes the *oldest* across streams — an observation is only
-   as fresh as its slowest signal — and they must be added to the DP export, which carries neither.
+3. **Finger cam + piezo are unwired on the inference side.** Params exist and are never consumed.
+   The piezo is now exported — `pingest export-polyumi` carries it as `data/mic_0`, see
+   [maniwav-audio-policy.md](maniwav-audio-policy.md) — so the export half of this is done and the
+   finger camera is what remains. Consuming either as an observation is still blocked here: the Pi
+   sends camera frames stamped with a monotonic `SensorTimestamp` and audio stamped with epoch
+   time, and `pi_receiver_node` republishes both as if they shared a clock, so neither
+   `latency.finger_cam` nor `latency.piezo_mic` can be given a meaningful value. Note also that
+   once either feeds the policy, the capture instant becomes the *oldest* across streams — an
+   observation is only as fresh as its slowest signal.
 
-4. **DP exporter rework.** Deferred as one chunk rather than patched piecemeal:
-   - **Hard-requires OptiTrack even for SLAM-sourced poses.** `_export_episode` reads
-     `optitrack/timestamps` unconditionally to clip the overlap window, so a SLAM-only scene
-     raises `KeyError` *after* step 5 wrote a perfectly good `eef/pose`. The window should clip to
-     the sources the episode actually uses.
-   - **No tactile.** Piezo audio and finger-camera frames aren't exported; the exporter touches
-     `timestamps/finger` only to compute the window.
-   - **The GoPro→finger clock shift is duplicated** between `buffer.py` (inline) and
-     `eef_pose_step._gopro_ts_in_finger_clock`, and they disagree on strictness: the exporter
-     requires `annotations/time_sync`, the step defaults the offset to `0.0`. Picking one is a
-     behaviour change that belongs with this rework.
+4. **DP exporter: finger-camera frames.** What remains of the old exporter rework item.
+   The exporter carries no finger-camera stream; adding one is a new `ExportModality`
+   (`export/dp/modality.py`) alongside `PiezoMicModality`, not another rewrite.
 
-   `ingest/test/test_dp_export.py` covers the file now (schema, segmentation, pose-source
-   resolution, quality gating, width convention) — extend it as part of the rework.
+   The rest of that item is resolved. The OptiTrack hard-requirement and the duplicated
+   GoPro→finger clock shift were both already gone from `buffer.py` by the time anyone went
+   looking — it reads neither `optitrack/timestamps` nor the offset. The clock shift now has one
+   implementation, `timebase.gopro_ts_in_finger_clock`, whose `require_offset` argument makes the
+   strictness a decision at the call site: step 5 tolerates a missing marker (it resamples
+   slowly-varying poses), step 6 does not (it slices audio sample-exactly).
+
+   `ingest/test/test_dp_export.py` and `test_polyumi_export.py` cover the exporter (schema,
+   segmentation, pose-source resolution, quality gating, width convention, the audio modality) —
+   extend them alongside any new modality.
 
 5. **Phase 4** — the executor redesign, below.
 

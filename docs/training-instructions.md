@@ -3,7 +3,7 @@
 This is the step **after** ingest and preprocessing. The full pipeline is:
 
 ```
-pingest fetch → process-all → pp (preprocessing steps 1–5) → export-dp → TRAIN (this doc)
+pingest fetch → process-all → pp (preprocessing steps 1–6) → export-dp → TRAIN (this doc)
 ```
 
 Training runs a fork of [UMI](https://github.com/real-stanford/universal_manipulation_interface)
@@ -11,6 +11,11 @@ Training runs a fork of [UMI](https://github.com/real-stanford/universal_manipul
 (which fights the ROS install) and is portable to the GPU workstation. The same image serves
 both training and inference — the serving environment must match the training one because
 checkpoints are dill-pickled and unpickle against the exact dependency tree.
+
+This doc covers the **visuomotor** policy — vision plus proprioception, which is what
+`export-dp` produces. For adding the finger contact mic as an observation, the data contract and
+the ManiWAV recipe are in [maniwav-audio-policy.md](maniwav-audio-policy.md); the policy itself
+is not implemented yet.
 
 ## Prerequisites
 
@@ -46,6 +51,10 @@ WANDB_PROJECT=my-project \
 flags and the dataset/output mounts. Any extra arguments pass straight through to `train.py` as
 **Hydra overrides** (`training.num_epochs=...`, `logging.mode=offline`, `task.dataset_path=...`,
 etc). Outputs (checkpoints, hydra logs) land in `data/dp_outputs/` by default (`OUTPUT_DIR`).
+
+`DP_CONFIG` selects which workspace config Hydra runs, for a policy other than the visuomotor
+default; unset, you get the default. It has to be an env var rather than a Hydra override because
+Hydra cannot set `--config-name` that way.
 
 `WANDB_ENTITY`/`WANDB_PROJECT` are forwarded to the container only if set in the calling shell
 (the config resolves them via `${oc.env:WANDB_ENTITY,null}` / `${oc.env:WANDB_PROJECT,polyumi}`),
