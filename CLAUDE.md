@@ -167,7 +167,8 @@ pingest --help
 pingest fetch --host <hostname> --latest
 pingest process-all --force
 pingest export-dp <scene> -o <name>.zarr.zip        # visuomotor dataset
-pingest export-polyumi <scene> -o <name>.zarr.zip   # + data/mic_0 (contact mic), needs pp 6
+pingest export-polyumi <scene> -o <name>.zarr.zip   # + data/mic_0 (contact mic, needs pp 6)
+                                                   #   and data/finger_rgb (finger camera, cropped)
 ```
 
 ### Training the diffusion policy (GPU workstation, Docker)

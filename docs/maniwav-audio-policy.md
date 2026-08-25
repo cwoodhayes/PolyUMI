@@ -1,15 +1,17 @@
 # Adding contact-mic audio to the policy (the ManiWAV recipe)
 
 This is a **handoff document**, not a description of code that exists. PolyUMI's ingest side now
-exports the finger contact mic; nothing yet consumes it. What follows is the data contract you can
-build against, why the spectrogram is deliberately *not* precomputed for you, and — as an
-appendix — a checklist of what to port from [ManiWAV](https://github.com/real-stanford/maniwav)
-if you want to follow their recipe rather than invent your own.
+exports the finger contact mic **and the finger camera**; nothing yet consumes either. What follows
+is the data contract you can build against, why the spectrogram is deliberately *not* precomputed
+for you, and — as an appendix — a checklist of what to port from
+[ManiWAV](https://github.com/real-stanford/maniwav) if you want to follow their recipe rather than
+invent your own. §1.5 covers the finger camera, which has no ManiWAV counterpart and is ours alone.
 
 ```
 pingest fetch → process-all → pp (steps 1–6) → export-polyumi → TRAIN (your container)
                                                     │
-                                                    └── data/mic_0, raw waveform
+                                                    ├── data/mic_0,     raw waveform
+                                                    └── data/finger_rgb, cropped frames
 ```
 
 The visuomotor path is unchanged and still lives in
@@ -64,6 +66,71 @@ match them exactly — it is a re-export, not a re-preprocess. Either way the ch
 
 **Only the contact mic is exported.** ManiWAV carries `mic_0` (contact) and `mic_1` (air); their
 task config uses only `mic_0` anyway. I can add mic_1 if you wish, however.
+
+---
+
+## 1.5. The finger camera: `data/finger_rgb`
+
+No ManiWAV counterpart — this one is ours. `export-polyumi` also writes:
+
+```
+data/finger_rgb    (T, 480, 470, 3) uint8    Blosc-zstd
+```
+
+A downward-looking camera in the gripper, watching the contact point. The gripper mount occludes a
+fixed strip of its view, which the exporter crops away; what you get is the remainder, at native
+resolution.
+
+| `meta.attrs` key | meaning |
+|---|---|
+| `finger_rgb_crop` | the resolved `x_min`/`x_max`/`y_min`/`y_max` bounds |
+| `finger_rgb_output_size` | `null` today — no resize was applied |
+| `finger_rgb_shape` | `[480, 470, 3]` at the shipped crop |
+| `finger_rgb_source_rate_hz` | ~10, the camera's real frame rate. Read this. |
+| `finger_rgb_max_staleness_s` | how far a step's frame may be from it in time |
+| `finger_rgb_source` | `finger/frames` |
+
+Three things about it will shape your config, and the first is the one that bites at import time.
+
+**UMI's encoder assumes every RGB key has the same spatial shape.** In
+`diffusion_policy/model/vision/timm_obs_encoder.py`:
+
+```python
+if type == 'rgb':
+    assert image_shape is None or image_shape == shape[1:]
+    image_shape = shape[1:]
+```
+
+So `finger_rgb` at `[3, 480, 470]` beside `camera0_rgb` at `[3, 224, 224]` fails at encoder
+construction, not at runtime. That single `image_shape` also sets the shared `RandomCrop` size and
+`feature_map_shape`, and is indexed as `image_shape[0]` on the assumption of a square. Two ways out:
+
+- **Resize to 224² in your transform** (or ask us to set `output_size: [224, 224]` in
+  `ingest/config/finger_camera.yaml` and re-export — it is a re-export, not a re-preprocess, and it
+  cuts the dataset ~4.5x). Simplest, and it is why the exporter ships the crop unresized: the
+  encoder's input size is your decision, not ours to bake in.
+- **Make `image_shape` per-key**, if you want the finger camera at its native resolution. More than
+  deleting the assert: the transform build and `feature_map_shape` both have to follow.
+
+Note `share_rgb_model: False` (the default) already gives each RGB key its own deepcopy of the
+backbone, so two cameras at two resolutions is not a problem for the model itself — only for the
+shape bookkeeping above.
+
+**The camera runs at ~10 fps against a ~30 Hz step grid.** Each step gets the frame nearest it in
+time, so roughly three consecutive rows hold the *same* image. Nothing is interpolated — a policy
+should see frames the camera actually produced — but it means a `down_sample_steps` of 1 or 2 on
+this key buys you an observation window of duplicates. Set it from
+`finger_rgb_source_rate_hz`, not from the step rate. The same 10 fps is also why `latency_steps`
+for this key is coarse: one frame period is 100 ms.
+
+**It is ~4.5x the bytes of `camera0_rgb`** (677 kB/step against 151 kB). If dataloading becomes the
+bottleneck before the model does, the `output_size` re-export above is the lever.
+
+**Coverage is enforced, not patched.** If an episode's finger stream doesn't cover the exported
+span — the camera died mid-session, or the chirp time-sync was wrong — the export **fails by name**
+rather than repeating the last frame across the gap. So you can assume every `finger_rgb` row is a
+real observation taken within `finger_rgb_max_staleness_s` of its step; per-segment staleness is in
+the provenance sidecar if you want to weight by it.
 
 ---
 
@@ -180,8 +247,8 @@ passthrough override.
 
 ## 6. Inference is blocked, and not on you
 
-Do not wire `mic_0` into `serve_policy.py` expecting it to run on the arm. Two independent
-blockers:
+Do not wire `mic_0` or `finger_rgb` into `serve_policy.py` expecting it to run on the arm. Two
+independent blockers:
 
 1. **A clock-domain bug on the ROS side.** `pi_receiver_node` republishes camera frames stamped
    with the Pi's monotonic `SensorTimestamp` and audio stamped with epoch time *as if they shared
@@ -190,13 +257,19 @@ blockers:
    declared and deliberately left at 0. An observation is only as fresh as its slowest signal, so
    adding audio also makes the capture instant the oldest across streams.
 
+   The same bug blocks the finger camera: `latency.finger_cam` sits at 0 in that file for exactly
+   this reason.
+
    (this should not be an issue to bring up training, but I need to fix it before we train a real model intended for actual inference)
-2. **The block-alignment convention** (§1) has to be reproduced exactly at serve time, from a live
-   audio stream rather than a stored array.
+2. **The per-stream conventions have to be reproduced exactly at serve time**, from live streams
+   rather than stored arrays — the block alignment for `mic_0` (§1), and the crop for `finger_rgb`
+   (§1.5). The crop half is already done: `ros2_ws/.../polyumi_ros2/camera_preproc.py` carries the
+   same `crop_finger_rgb` the exporter uses, with both test suites asserting the same digests, so
+   wiring the finger camera is a subscription rather than a re-derivation.
 
 Worth doing now regardless: make the server raise at load time if a checkpoint expects a modality
-it cannot supply, so an audio checkpoint fails loudly instead of being served with a missing
-observation.
+it cannot supply, so an audio- or finger-camera checkpoint fails loudly instead of being served with
+a missing observation.
 
 ---
 

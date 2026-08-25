@@ -18,6 +18,9 @@ SLAM_CONFIG_YAML = INGEST_ROOT / 'config' / 'slam.yaml'
 #: Contact-mic step tunables: the per-frame block geometry that defines the exported
 #: ``mic_0`` contract, and the diagnostic spectrogram's parameters.
 CONTACT_AUDIO_YAML = INGEST_ROOT / 'config' / 'contact_audio.yaml'
+#: Finger-camera export tunables: the crop that defines the exported ``finger_rgb`` contract,
+#: an optional resize, and how stale a finger frame may be before an episode is refused.
+FINGER_CAMERA_YAML = INGEST_ROOT / 'config' / 'finger_camera.yaml'
 
 
 def load_gripper_calib() -> dict:
@@ -109,4 +112,27 @@ def load_contact_audio_config() -> dict:
         raise FileNotFoundError(
             f'Cannot read {CONTACT_AUDIO_YAML}, which is required to run the contact-audio step '
             f'(it sets the per-frame block geometry that defines the exported mic_0 contract): {err}'
+        ) from err
+
+
+def load_finger_camera_config() -> dict:
+    """
+    Load finger-camera export tunables from config/finger_camera.yaml.
+
+    Required, not optional, for the same reason as :func:`load_contact_audio_config`: the crop
+    is the ``finger_rgb`` data contract, and a policy trained on one crop cannot be served
+    frames from another. An in-code default disagreeing with the checked-in file is how a
+    dataset ends up half-exported at each geometry, with nothing downstream able to tell.
+
+    Raises:
+        FileNotFoundError: if config/finger_camera.yaml is absent or unreadable.
+
+    """
+    try:
+        with FINGER_CAMERA_YAML.open() as f:
+            return yaml.safe_load(f) or {}
+    except OSError as err:
+        raise FileNotFoundError(
+            f'Cannot read {FINGER_CAMERA_YAML}, which is required to export the finger camera '
+            f'(it sets the crop that defines the exported finger_rgb contract): {err}'
         ) from err

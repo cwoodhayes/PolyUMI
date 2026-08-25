@@ -1,0 +1,51 @@
+# Finger-camera export tunables — the `finger_rgb` stream `pingest export-polyumi` writes.
+#
+# Read at EXPORT time, not by a preprocessing step: `finger/frames` is already in the pzarr at
+# its native 620x480, and everything here is a pure pixel/indexing transform over it. So changing
+# any of these is a re-export (minutes), not a re-preprocess of the corpus. See
+# docs/data-format.md, "Camera preprocessing contracts".
+
+crop:
+  # Pixels to keep, as half-open [min, max) bounds on the stored frame. `null` means the frame's
+  # own edge, so the geometry survives a change of camera resolution instead of silently
+  # cropping to the wrong place.
+  #
+  # x_min 150 drops the left of the 620x480 view, which the mount occludes — no signal there,
+  # and 24% of every stored row if it ships.
+  #
+  # THIS IS THE `finger_rgb` CONTRACT. A policy trained on one crop cannot be served frames from
+  # another, so retuning these invalidates existing checkpoints. The resolved bounds are written
+  # into the exported buffer's meta attrs so a checkpoint says which crop it trained under.
+  x_min: 150
+  x_max: null
+  y_min: 0
+  y_max: null
+
+# Resize applied after the crop: `null` exports the crop at its native size, `[width, height]`
+# squashes to that with cv2.INTER_AREA (the same interpolation camera0_rgb uses).
+#
+# Default null, so the resize happens in the training container where the encoder's input size
+# is decided. Two things to know before switching it on:
+#   - it cuts the exported bytes and the exporter's peak memory by (crop area / output area) —
+#     at [224, 224] that is ~4.5x;
+#   - it turns an exact array slice into a cv2.resize, whose C++ implementation differs between
+#     the ingest and ROS environments. That path IS pinned (FINGER_GOLDEN_VECTORS in
+#     ingest/test/camera_preproc_golden.py, asserted by both test suites) — but re-run both
+#     suites after changing this, not just ingest's.
+output_size: null
+
+# Largest gap tolerated between a step's timestamp and the finger frame chosen for it, in
+# seconds. Above this the export refuses the episode by name.
+#
+# The finger camera runs at 10 fps against a ~29.97 Hz step grid, so no frame lands on a step
+# exactly; each step takes the nearest one, which on a healthy recording is at most half a frame
+# period (50 ms) away. The guard exists because `timebase.nearest_idx` CLAMPS out-of-range
+# queries: a finger stream that stops before the GoPro does — dead camera process, dropped Pi, a
+# wrong chirp offset from step 1 — hands every remaining step the same final frame. That trains
+# the policy on a frozen image against moving proprioception, which no shape or dtype assertion
+# can see and which is near untraceable from a bad checkpoint.
+#
+# 0.15 = 1.5 frame periods: room for one genuinely dropped finger frame plus timestamp jitter,
+# while still catching anything structural. A judgement call rather than a measurement, which is
+# why it is here — a scene with a jittery finger camera may legitimately need it raised.
+max_staleness_s: 0.15

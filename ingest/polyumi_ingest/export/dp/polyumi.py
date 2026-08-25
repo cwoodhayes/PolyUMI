@@ -13,11 +13,12 @@ import pathlib
 
 from polyumi_ingest.export.dp.audio import PiezoMicModality
 from polyumi_ingest.export.dp.buffer import MIN_SEGMENT_STEPS, export_scenes_to_dp
+from polyumi_ingest.export.dp.finger_camera import FingerCameraModality
 from polyumi_ingest.export.dp.modality import ExportModality
 
-#: Modalities ``export-polyumi`` adds on top of the visuomotor keys. The contact mic is the
-#: first; the finger camera and anything later joins this tuple and nothing else changes.
-POLYUMI_MODALITIES: tuple[type[ExportModality], ...] = (PiezoMicModality,)
+#: Modalities ``export-polyumi`` adds on top of the visuomotor keys. Anything later joins this
+#: tuple and nothing else changes.
+POLYUMI_MODALITIES: tuple[type[ExportModality], ...] = (PiezoMicModality, FingerCameraModality)
 
 
 def export_scenes_to_polyumi(

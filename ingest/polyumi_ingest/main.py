@@ -901,8 +901,8 @@ def export_polyumi(
         '--enforce-preprocessing/--no-enforce-preprocessing',
         help='Require the preprocessing steps this export depends on to be complete on each '
         'scene. That is every step the visuomotor export needs, plus step 6 (contact-audio) for '
-        'the mic_0 stream. Disable to export a partially preprocessed scene; export can still '
-        'fail if outputs are missing.',
+        'the mic_0 stream; finger_rgb adds none. Disable to export a partially preprocessed '
+        'scene; export can still fail if outputs are missing.',
     ),
     min_segment_steps: int = typer.Option(
         MIN_SEGMENT_STEPS,
@@ -915,14 +915,16 @@ def export_polyumi(
     """
     Export scenes to a ReplayBuffer carrying every PolyUMI modality, not just the visuomotor keys.
 
-    Everything `export-dataset` writes, plus `data/mic_0` — the finger contact mic as raw 16 kHz
-    waveform, one row per step. Raw waveform rather than a spectrogram on purpose: the log-mel
-    belongs in the training container, where it can be computed after waveform-domain
-    augmentation. See docs/maniwav-audio-policy.md for the full contract.
+    Everything `export-dataset` writes, plus two streams. `data/mic_0` is the finger contact mic
+    as raw 16 kHz waveform, one row per step — raw rather than a spectrogram on purpose, since
+    the log-mel belongs in the training container where it can be computed after waveform-domain
+    augmentation. `data/finger_rgb` is the finger camera, cropped to the region the gripper mount
+    does not occlude and left at that resolution. See docs/maniwav-audio-policy.md for the full
+    contract, including what the finger camera costs in bytes and why it repeats frames.
 
-    Needs preprocessing step 6 (contact-audio) as well as the steps `export-dp` needs. Use
-    `export-dp` instead for a plain visuomotor dataset; it reads none of step 6's output and
-    works on scenes that never ran it.
+    Needs preprocessing step 6 (contact-audio) as well as the steps `export-dp` needs; the finger
+    camera needs no step of its own. Use `export-dp` instead for a plain visuomotor dataset; it
+    reads neither stream and works on scenes that never ran step 6.
     """
     from polyumi_ingest.export.dp import export_scenes_to_polyumi
 
