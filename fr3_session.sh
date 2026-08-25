@@ -165,9 +165,14 @@ fi
 # a powered-off Pi at the same time. Non-fatal, matching how the deploy section below treats an
 # unreachable machine: one box being down should not block bringing the others up.
 PI_HOST="$(ssh -G "$POLYUMI_PI_HOST" 2>/dev/null | awk '/^hostname /{print $2}')" || true
+# Remembered as PI_REACHABLE and reused by the deploy step below, so an unreachable Pi is a single
+# 5s probe rather than also eating whatever rsync's own (unset here) connect timeout turns out to
+# be — that one hangs well past 5s rather than failing fast.
 if ssh -o ConnectTimeout=5 -o BatchMode=yes "$POLYUMI_PI_HOST" true 2>/dev/null; then
+  PI_REACHABLE=1
   echo "Pi resolved to $PI_HOST (ssh alias: $POLYUMI_PI_HOST)"
 else
+  PI_REACHABLE=0
   echo "WARNING: cannot reach the Pi at ssh alias '$POLYUMI_PI_HOST' (resolved: '${PI_HOST:-nothing}')." >&2
   echo "         Either the Pi is off, or the alias is not in your ssh config — in which case" >&2
   echo "         ssh hands back the alias verbatim and pi_host:= below will be wrong." >&2
@@ -180,8 +185,10 @@ fi
 # runs against them — the fix for "I edited a launch file locally and the NUC ran the old one".
 # SKIP_DEPLOY=1 bypasses both for a fast re-launch once you know they're already current.
 # Non-fatal per target: a machine that's unreachable (Pi powered off, say) warns and is
-# skipped rather than blocking the machines that ARE up. Sheep is deliberately not included —
-# it tracks its own training branch, not this one, so force-syncing it would be wrong.
+# skipped rather than blocking the machines that ARE up — the Pi is skipped up front on
+# PI_REACHABLE from the probe above, the NUC by letting rsync/ssh fail and warning after the
+# fact (it has no equivalent cheap up-front probe worth adding). Sheep is deliberately not
+# included — it tracks its own training branch, not this one, so force-syncing it would be wrong.
 # ---------------------------------------------------------------------------
 if [ "${SKIP_DEPLOY:-0}" = 1 ]; then
   echo "SKIP_DEPLOY=1 — leaving the laptop build and the NUC/Pi source trees as they are."
@@ -228,9 +235,13 @@ else
     echo "WARNING: rsync to $NUC_SSH_HOST failed — it may be running stale nuc/ code." >&2
   fi
 
-  echo "==> Deploying pi/ to $POLYUMI_PI_HOST via ./deploy.sh ..."
-  if ! (cd "$REPO_DIR" && ./deploy.sh "$POLYUMI_PI_HOST"); then
-    echo "WARNING: deploy.sh failed (Pi unreachable?) — it may be running stale code." >&2
+  if [ "$PI_REACHABLE" = 1 ]; then
+    echo "==> Deploying pi/ to $POLYUMI_PI_HOST via ./deploy.sh ..."
+    if ! (cd "$REPO_DIR" && ./deploy.sh "$POLYUMI_PI_HOST"); then
+      echo "WARNING: deploy.sh failed — it may be running stale code." >&2
+    fi
+  else
+    echo "==> Skipping Pi deploy — already confirmed unreachable above." >&2
   fi
 fi
 
