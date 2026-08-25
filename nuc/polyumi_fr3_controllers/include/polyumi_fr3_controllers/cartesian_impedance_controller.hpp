@@ -48,6 +48,14 @@ namespace polyumi_fr3_controllers {
  * The control point is `polyumi_tcp`, NOT franka's `O_T_EE` (which is `fr3_hand_tcp`, verified on
  * hardware). Both the measured pose and the Jacobian are moved onto it at activation using a TF
  * lookup, so `nuc/tcp_calib.py` stays the single definition of that frame.
+ *
+ * Torque, and not `franka_hardware`'s native `cartesian_pose` interface, which looks like the
+ * direct analogue of UMI's `update_desired_ee_pose`: under it libfranka hardcodes
+ * `ControllerMode::kJointImpedance` (`robot.cpp`), whose gains are stiffness-only with no damping
+ * knob at all. Contact tasks need a real Cartesian mass-spring-damper. That interface also applies
+ * no continuity safety net (the rate limiter and low-pass filter are hardcoded off), so nothing
+ * downstream will catch a discontinuity for us either way — hence the interpolator is mandatory
+ * and activation MUST seed from the measured pose.
  */
 class CartesianImpedanceController : public controller_interface::ControllerInterface {
  public:

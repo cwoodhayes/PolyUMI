@@ -178,9 +178,9 @@ empirically on every tick by `_n_stale_actions`, which runs *after* the response
 
 | Value | Where it comes from |
 |---|---|
-| `latency.gopro` | **measure** — `latency_probe -p mode:=camera` |
-| `latency.arm_exec` | **measure** — `latency_probe -p mode:=arm` |
-| `latency.gripper_exec` | **measure** — `latency_probe -p mode:=gripper` |
+| `latency.gopro` | **measure** — `latency_probe --ros-args -p mode:=camera` |
+| `latency.arm_exec` | **measure** — `latency_probe --ros-args -p mode:=arm` |
+| `latency.gripper_exec` | **measure** — `latency_probe --ros-args -p mode:=gripper_chirp`, not `mode:=gripper` — see below |
 | `latency.gripper` | printed by the gripper run; half the joint-state publish interval |
 | `latency.proprio` | adopted constant, ~0.001 — see below |
 | round trip | nothing to do; measured live |
@@ -256,13 +256,14 @@ went. **This moves the arm.**
    fingers start moving, and repeats 8 times alternating direction. See the gotcha below for why
    cross-correlation is the wrong tool for this particular plant.
 3. This prints **two** numbers, because they are two different quantities:
-   - `latency.gripper_exec` — the **action** side, command → the hand actually moving. Goes into
-     `config/inference.yaml` exactly as measured; `policy_client_node` truncates the gripper chunk
-     by this value alone. Expect a few hundred ms and a spread of roughly one
-     `min_command_period_s`, most of which is the bridge's own command timer — that quantisation is
-     real delay in service too, so it belongs in the number.
+   - `latency.gripper_exec` — do **not** paste this one in. It is command → the hand actually
+     moving, a few hundred ms, most of it the hand's own firmware (a `Move` blocks 363 ms even for
+     zero travel). `franka_hand_node` already models that internally (`HandLimits.cmd_delay` in
+     `gripper_trajectory_interpolator.hpp`) to decide which setpoint each `Move` can still reach —
+     so feeding the same figure into `config/inference.yaml`'s `gripper_exec` would compensate for
+     it twice. That field is currently `0.0` and should be left that way.
    - `latency.gripper` — the **observation** side, half the `/fr3_gripper/joint_states` publish
-     interval. Goes in `config/inference.yaml`.
+     interval. Goes in `config/inference.yaml`, unaffected by the above.
 
 
 #### Gotchas
@@ -292,8 +293,8 @@ went. **This moves the arm.**
   which the sharpness check rejects with a message about peak width. The probe now detects this
   directly and names the likely causes instead.
 - **The gripper is measured by step response, not cross-correlation, and that is deliberate.**
-  `fr3_gripper_bridge` quantises commands to `min_command_period_s` (0.25 s), supersedes each
-  in-flight `Move` goal with the next, and drops anything inside its 5 mm deadband. Correlation
+  `franka_hand_node` runs each `Move` to completion — a floor of 363 ms even for zero travel, and
+  0.6–1.4 s for a real stroke — and drops anything inside its 5 mm deadband. Correlation
   assumes the response is a delayed *linear echo* of the command, which that is not. Driven at
   0.6 Hz on 2026-08-10 the hand fell most of a cycle behind and the estimator reported the phase
   lag — 1.2 s — as if it were a delay. The tell was that the answer grew with how much of the
@@ -310,8 +311,10 @@ went. **This moves the arm.**
   (`robot_action_latency` vs `gripper_action_latency`), reached by slicing rather than by absolute
   waypoint times, since a `PoseArray` carries no timing. It means you can re-measure one device
   without touching the other, and a chunk too stale for the arm can still drive the hand. A
-  `gripper_lead_steps` parameter on `fr3_gripper_bridge` used to paper over the shared slice by
+  `gripper_lead_steps` parameter on the old gripper bridge used to paper over the shared slice by
   indexing further into the chunk; it is gone, and re-adding a lead there would double-compensate.
+  Both halves now carry an absolute schedule (`header.stamp + time_from_start`) numbered from the
+  pre-slice index, so the drop removes waypoints without moving the ones that survive.
 - **`latency.proprio` is adopted, not measured, on purpose.** It means "true EE pose → the stamp on
   TF", and isolating it needs external ground truth of the true pose. libfranka stamps at read, so
   it is ~1 ms; UMI hit the identical wall and hardcodes `robot_obs_latency: 0.0001`. The `arm_exec`

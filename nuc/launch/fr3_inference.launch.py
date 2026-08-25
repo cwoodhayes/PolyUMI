@@ -46,18 +46,19 @@ from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 SERVO_CONTROLLER = 'polyumi_cartesian_impedance_controller'
 MOVEIT_CONTROLLER = 'fr3_arm_controller'
 
-# The bridges are standalone scripts, not an installed ament package (they run from a plain
-# clone on the NUC, which has no PolyUMI workspace), so they are ExecuteProcess by path rather
-# than Node by package name.
+# fr3_moveit_bridge is a standalone script, not an installed ament package (it runs from a plain
+# clone on the NUC, which has no PolyUMI workspace), so it is ExecuteProcess by path rather than
+# Node by package name. franka_hand_node is C++ and does come from a built package.
 NUC_DIR = Path(__file__).resolve().parent.parent
 
 
 def generate_launch_description():
-    """Include move_group and start the gripper + MoveIt bridges."""
+    """Include move_group and start the hand driver + the MoveIt bridge."""
     robot_ip = LaunchConfiguration('robot_ip')
     execute_arm = LaunchConfiguration('execute_arm')
     execute_gripper = LaunchConfiguration('execute_gripper')
@@ -123,7 +124,8 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 'execute_gripper',
                 default_value='false',
-                description='Let fr3_gripper_bridge send goals (MOVES THE FINGERS).',
+                description='Let franka_hand_node issue Moves (MOVES THE FINGERS). False still '
+                'plans and logs every command at the real cadence.',
             ),
             DeclareLaunchArgument(
                 'max_velocity_scaling',
@@ -140,13 +142,12 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 'gripper_max_width',
-                default_value='0.0817',
-                description='Bridge-side aperture clamp (m). Defaults to the Franka '
-                "Hand's own maximum so nothing software-side narrows the "
-                'range: franka_gripper aborts wider goals anyway, and '
-                'gripper_range_probe needs the full stroke to measure '
-                'open aperture. policy_client_node clamps to its own (measured) '
-                'gripper_max_width_m first, so this is a backstop.',
+                default_value='0.0',
+                description='Node-side aperture clamp (m). 0.0 means ask the hand for its own '
+                'max_width, which is the right answer and needs no constant here; '
+                'gripper_range_probe needs the full stroke to measure open aperture. '
+                'policy_client_node clamps to its own (measured) gripper_max_width_m '
+                'first, so this is only a backstop.',
             ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(str(NUC_DIR / 'launch' / 'fr3_move_group.launch.py')),
@@ -171,6 +172,14 @@ def generate_launch_description():
             # Hand the arm to the servo, once the spawner has actually loaded it. Ordered on the
             # spawner's exit rather than declared alongside it because launch gives no ordering
             # guarantee, and switching to a controller that is not loaded yet just fails.
+            #
+            # `ros2 service call`, NOT `ros2 control switch_controllers`, and the difference is not
+            # cosmetic. ros2controlcli goes through NodeStrategy (switch_controllers.py:80), i.e.
+            # the ros2cli daemon — and one poisoned daemon takes this down with
+            # `RuntimeError: !rclpy.ok()` while every other pane looks healthy. The arm then simply
+            # never moves, because fr3_arm_controller still holds it and the servo stays inactive.
+            # `ros2 service call` calls rclpy.init() and creates its own node (call.py:82), so it
+            # has no daemon to be poisoned by. If the daemon is wedged, `ros2 daemon stop`.
             RegisterEventHandler(
                 OnProcessExit(
                     target_action=impedance_spawner,
@@ -178,12 +187,14 @@ def generate_launch_description():
                         ExecuteProcess(
                             cmd=[
                                 'ros2',
-                                'control',
-                                'switch_controllers',
-                                '--deactivate',
-                                MOVEIT_CONTROLLER,
-                                '--activate',
-                                SERVO_CONTROLLER,
+                                'service',
+                                'call',
+                                '/controller_manager/switch_controller',
+                                'controller_manager_msgs/srv/SwitchController',
+                                # strictness 2 = STRICT: fail loudly rather than half-switch and
+                                # leave two controllers claiming the same effort interfaces.
+                                f"{{activate_controllers: ['{SERVO_CONTROLLER}'], "
+                                f"deactivate_controllers: ['{MOVEIT_CONTROLLER}'], strictness: 2}}",
                             ],
                             output='screen',
                             condition=IfCondition(activate_servo),
@@ -191,17 +202,24 @@ def generate_launch_description():
                     ],
                 )
             ),
-            ExecuteProcess(
-                cmd=[
-                    'python3',
-                    str(NUC_DIR / 'fr3_gripper_bridge.py'),
-                    '--ros-args',
-                    '-p',
-                    ['execute:=', execute_gripper],
-                    '-p',
-                    ['max_width_m:=', gripper_max_width],
-                ],
+            # Owns the libfranka gripper connection outright, so fr3_bringup must run with
+            # load_gripper:=false (its default) or the two fight over the hand. Named fr3_gripper
+            # so ~/joint_states resolves to /fr3_gripper/joint_states, exactly as franka_gripper's
+            # did — every existing consumer of that topic keeps working unchanged.
+            Node(
+                package='polyumi_fr3_controllers',
+                executable='franka_hand_node',
+                name='fr3_gripper',
                 output='screen',
+                parameters=[
+                    {
+                        # value_type is not optional: a LaunchConfiguration resolves to a STRING,
+                        # and declare_parameter's bool/double defaults reject one outright.
+                        'execute': ParameterValue(execute_gripper, value_type=bool),
+                        'robot_ip': ParameterValue(robot_ip, value_type=str),
+                        'max_width_m': ParameterValue(gripper_max_width, value_type=float),
+                    }
+                ],
             ),
         ]
     )

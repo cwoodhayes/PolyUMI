@@ -29,7 +29,7 @@ It combines the [Universal Manipulation Interface (UMI)](https://umi-gripper.git
 ```
 pi/               # RPi client: camera, audio, LED streaming + episode recording
 ingest/           # PC-side CLI: fetch sessions from Pi, encode video
-inference_server/ # GPU-side FastAPI server for diffusion-policy inference (see docs/franka-inference-bringup.md)
+inference_server/ # GPU-side FastAPI server for diffusion-policy inference (see docs/crb-fr3-inference.md)
 ros2_ws/
   src/
     polyumi_pi_msgs/   # Protobuf message definitions (camera frame, audio chunk)
@@ -193,9 +193,8 @@ First, see the [system calibration instructions](/docs/calibration-instructions.
 `policy_client_node` drives a robot arm from a diffusion-policy inference server.
 The arm's control stack typically runs on its own machine and is reached over ROS2;
 how you bring that up, network the two machines, and configure DDS depends on your
-robot and lab. [docs/franka-inference-bringup.md](docs/franka-inference-bringup.md)
-describes the general inference architecture and API contract, and
-[docs/crb-fr3-inference.md](docs/crb-fr3-inference.md) is a worked example for one
+robot and lab. The wire contract lives in [inference_server/](inference_server/) and its tests,
+and [docs/crb-fr3-inference.md](docs/crb-fr3-inference.md) is a worked example for one
 specific Franka FR3 setup that you can adapt.
 
 ## Hardware Notes

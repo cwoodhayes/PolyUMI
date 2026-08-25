@@ -4,8 +4,8 @@ Tests for the FR3 gripper range probe.
 The probe's output goes straight into a robot command, so the failures that matter are the quiet
 ones: reporting an endpoint the hand never actually reached, or calling a non-repeatable stall
 point a calibration. The settle logic is the sharp bit — it must not require motion, because
-commanding open when the hand is already open legitimately moves nothing and the bridge's deadband
-may swallow the goal entirely.
+commanding open when the hand is already open legitimately moves nothing and the hand node's
+deadband may swallow the setpoint entirely.
 """
 
 from unittest.mock import MagicMock
@@ -46,8 +46,8 @@ def _probe(**overrides):
     return node, sent
 
 
-def test_command_publishes_a_single_waypoint_the_bridge_can_read():
-    """The bridge reads points[0].positions[0]; anything else commands the wrong width."""
+def test_command_publishes_a_single_waypoint_the_hand_node_can_read():
+    """The node reads points[0].positions[0]; anything else commands the wrong width."""
     node, sent = _probe()
     try:
         node.command(0.037)
@@ -57,7 +57,7 @@ def test_command_publishes_a_single_waypoint_the_bridge_can_read():
     assert len(sent) == 1
     assert list(sent[0].points[0].positions) == [0.037]
     assert list(sent[0].joint_names) == ['fr3_gripper_width']
-    # A zero would make the bridge derive its maximum move speed, which slams the fingers shut.
+    # A zero would make the node derive its maximum move speed, which slams the fingers shut.
     assert sent[0].points[0].time_from_start.sec == 1
 
 
@@ -115,14 +115,16 @@ def test_report_rejects_a_non_repeatable_closed_endpoint():
     finally:
         node.destroy_node()
 
-    assert 'use_grasp_below_m' in message, 'must name the fix, not just the symptom'
+    # Grasp is the force-defined alternative to Move, and franka_hand_node does not implement it —
+    # so naming the way out means naming Grasp, not a parameter that would make this a re-run.
+    assert 'Grasp' in message, 'must name the way out, not just the symptom'
 
 
 def test_landing_on_the_clamp_is_reported_as_a_software_limit():
     """
     Regression: the first hardware run reported open aperture = 0.0800 against a 0.08 clamp.
 
-    That is the bridge refusing to command wider, not the fingers stopping — a measurement of the
+    That is the node refusing to command wider, not the fingers stopping — a measurement of the
     software, which reads exactly like a measurement of the hardware unless it is called out.
     """
     node, _ = _probe(open_width_m=0.09)
@@ -168,7 +170,7 @@ def test_stopping_clear_of_the_clamp_is_reported_as_a_physical_stop():
     assert 'hardware stopped it' in info
 
 
-def test_an_unreachable_bridge_param_is_admitted_not_guessed():
+def test_an_unreachable_hand_param_is_admitted_not_guessed():
     """
     Without the clamp the verdict is unknowable, and saying so beats inventing one.
 

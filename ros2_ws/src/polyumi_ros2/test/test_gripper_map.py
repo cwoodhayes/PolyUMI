@@ -75,7 +75,7 @@ def test_clamps_at_the_closed_aperture_not_at_zero():
     """
     Commanding below the closed aperture makes Move stall and abort.
 
-    That is what leaves fr3_gripper_bridge's deadband measuring against a width the hand never
+    That is what leaves the hand node's deadband measuring against a width the hand never
     reached, so the floor is the fingers' real minimum rather than a hardcoded 0.
     """
     assert policy_to_robot_width(0.0, CLOSED_APERTURE, MAX_WIDTH) == pytest.approx(CLOSED_APERTURE)

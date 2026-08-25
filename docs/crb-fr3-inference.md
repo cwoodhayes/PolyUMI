@@ -2,960 +2,285 @@
 
 **Note for Northwestern CRB members**: This document describes how to run inference on the CRB lab's Franka FR3 arm (in the student office, connected to the NUC with the skull on it). 
 
-**Note for users outside of Northwestern**: This is specific to our equipment, but is likely still useful as an example to bring up inference on your own equipment. This documents the specific two-machine
-setup used in the CRB lab to drive a **Franka FR3** for PolyUMI inference. The
-distro split, IP plan, DDS choice, and NUC aliases below are particular to this
-hardware — adapt them for your own robot and network rather than copying verbatim.
-For the lab-agnostic inference architecture and API contract, see
-[franka-inference-bringup.md](franka-inference-bringup.md).
+**Note for users outside of Northwestern**: This is specific to our equipment, but is likely still useful as an example to bring up an inference setup on your own arm.
 
-It captures the laptop and NUC environments and the DDS contract that lets a Kilted
-laptop talk to a Humble NUC. If something here drifts from reality, fix it here —
-`setup_franka_env.sh` and `ros2_ws/config/cyclonedds_laptop.xml` assume these values.
+**Everything from here down is for an assumed audience of "people in Northwestern CRB with access to this setup.**
 
-## Setup
-### Topology
+In general, to start exploring yourself, bring up the session as described below, after which the following commands are your friends:
+`ros2 topic list`, `ros2 action list`, `ros2 control list_controllers`, `ros2 param dump <node>`. See also the launch files in [`nuc/launch/`](../nuc/launch/) and
+[`ros2_ws/src/polyumi_ros2/launch/`](../ros2_ws/src/polyumi_ros2/launch/). 
 
-```
-Laptop (Kilted, Noble)                        NUC (Humble, Jammy)  [nu-crb]
-RMW=rmw_cyclonedds_cpp, DOMAIN=0  ◄─ DDS over ─►  RMW=rmw_cyclonedds_cpp, DOMAIN=0
-enp0s31f6 = 10.0.0.1/24            10.0.0.x      enx00249b860356 = 10.0.0.2/24
-  - foxglove_bridge                               - fr3_bringup.launch.py: franka_bringup
-  - v4l2_camera (GoPro)                              (controller_manager + hardware interface)
-  - pi_receiver_node                                 + fr3_arm_controller spawner
-  - policy_client_node ──HTTP──┐                  - fr3_inference.launch.py: move_group,
-  - dummy_server (localhost:8000) ◄┘                 fr3_moveit_bridge, fr3_gripper_bridge, and the
-        │                                           polyumi_cartesian_impedance_controller spawner
-        │                                           (nuc/polyumi_fr3_controllers/, spawned --inactive)
-        │                                         - publishes fr3_* TF + joint states
-        │                                         - enp89s0 = 192.168.51.10 → robot @ .20
-        │
-        │   `wire` (laptop param) picks ONE of these two — must match `executor` (NUC arg):
-        │
-        ├─ wire=pose_array ── /polyumi/target_poses ────────► fr3_moveit_bridge ─► move_group
-        │                       (PoseArray, untimed)            (plan-then-execute)
-        │
-        ├─ wire=multidof   ── /polyumi/target_poses_traj ─────► polyumi_cartesian_impedance_controller
-        │   (default)          (MultiDOFJointTrajectory,          (1 kHz streaming servo; ACTIVE only
-        │                       absolute per-waypoint times)       when executor:=servo, execute_arm:=true)
-        │
-        └── /polyumi/target_gripper ───────────────────► fr3_gripper_bridge ─► /fr3_gripper/{move,grasp}
-              (JointTrajectory)
+One note - my SSH alias for the NUC is "jailfranka", which is referred to sometimes in the docs below. 
 
-fr3_arm_controller and polyumi_cartesian_impedance_controller claim the same <joint>/effort
-interfaces, so exactly one holds the arm at a time — /polyumi/home (on fr3_moveit_bridge) switches
-between them for homing and hands back to whichever was active.
-```
+## Bringing up inference session
 
-The PolyUMI ROS2 nodes use only distro-agnostic APIs (`rclpy`, `sensor_msgs`,
-`tf2_ros`, `foxglove_msgs`), so they run on the laptop under Kilted. The Franka
-stack is Humble-only and stays on the NUC; the two machines interoperate purely at
-the DDS wire level.
+### Convenience session bringup script
 
-**Motion execution is split deliberately.** The laptop does *not* call MoveIt's action
-interface directly — it publishes the returned inference **action chunk** as a small
-pose-chunk message (one waypoint per action step, `n_action_steps` long — see
-[chunk execution](#action-chunk-execution) below) and the NUC-side executor drives the
-arm from there. This is not a style choice: large nested MoveIt action goals get
-corrupted across the laptop/NUC rmw-version gap (see
-[rmw mismatch](#rmw-version-mismatch--what-is-and-isnt-harmless)). Small pose-chunk
-messages cross fine either way, so the chunk is the interop boundary regardless of
-which executor is running.
-
-### Action-chunk execution
-
-`policy_client_node` requests an `n_action_steps`-long chunk from the inference server each tick
-(param `n_action_steps`, default **8**) and publishes the *whole chunk*, not just `actions[0]`. At
-10 Hz a single-waypoint target is a discrete ~2 cm hop the arm cannot track in real time. This is
-receding-horizon control, the standard UMI/DP execution pattern.
-
-`policy_client_node` builds ONE of two wire formats, chosen by its `wire` parameter, and publishes
-it to exactly one topic:
-
-| `wire` | Topic | Type | Consumer |
-|---|---|---|---|
-| `pose_array` | `/polyumi/target_poses` | `PoseArray`, untimed | `fr3_moveit_bridge` — plan-then-execute via move_group |
-| `multidof` (default) | `/polyumi/target_poses_traj` | `MultiDOFJointTrajectory`, absolute per-waypoint times | `polyumi_cartesian_impedance_controller` — 1 kHz streaming servo |
-
-`wire` must MATCH the NUC's `executor` launch argument (`fr3_inference.launch.py`) — the laptop
-decides which format goes out, the NUC decides which controller is active, and the two have to
-agree on which executor is actually driving the arm. A mismatch is loud, not silent: nothing
-subscribes to whichever topic the client publishes, so the arm holds still and the client warns
-every second, naming the topic and the consumer it expected. See `ros2_ws/src/polyumi_ros2/polyumi_ros2/target_chunk.py`'s module
-docstring and `docs/franka-inference-bringup.md` Phase 4 for the full contract.
-
-**The streaming controller is the target design**; the MoveIt path is what it replaces and will be
-deleted once the servo is verified on hardware.
-
-* **MoveIt path**: plans one multi-waypoint Cartesian path per chunk, with skip-while-busy at the
-  *chunk* level — a chunk arriving mid-execution is dropped. Each chunk therefore starts from rest
-  and stops at its end, which is where the 0.62 s `latency.arm_exec` comes from.
-* **Streaming path**: the chunk's waypoints are spliced into a `PoseTrajectoryInterpolator` at
-  their absolute times, and a 1 kHz ros2_control loop evaluates it as the equilibrium pose of a
-  Cartesian impedance law. Nothing stops between chunks, and the arm is compliant. The chunk's
-  `header.stamp` already has `latency.arm_exec` subtracted, so waypoints are commanded early.
-
-#### Handing the arm between them
-
-Both `fr3_arm_controller` (MoveIt's) and `polyumi_cartesian_impedance_controller` claim the same
-`<joint>/effort` interfaces, so **exactly one can hold the arm**. The impedance controller is
-spawned `--inactive` by `fr3_inference.launch.py`; activating it is a deliberate act:
+The following script at the root of the repo enables bringing up all of the functionality described below in a convenient tmux session. I'd recommend just starting there. 
 
 ```bash
-# NUC. Arm must be STATIONARY — switching restarts the libfranka control loop.
-ros2 control switch_controllers \
-    --deactivate fr3_arm_controller \
-    --activate polyumi_cartesian_impedance_controller
+# step 1: power on the arm, unlock it, and enable FCI
+# step 2: run the following:
+./fr3_session.sh
 ```
 
-`/polyumi/home` does this swap itself, in both directions, so homing works with either executor
-running and hands the arm back afterwards.
+Safe commands run themselves; robot-moving ones are pre-typed for you to press Enter on. It
+rsyncs `nuc/` to the NUC and runs `./deploy.sh` for the Pi on every fresh start. 
 
-**First activation should be uneventful**: the controller seeds its equilibrium pose from the arm's
-measured pose, so error is zero and it commands nothing but gravity/Coriolis. If the arm jumps on
-activation, the `polyumi_tcp` lookup or the Jacobian shift is wrong — stop and check, do not tune
-around it. Push the arm by hand afterwards: it should spring back with a force that stops growing
-once you are past the error clip (~20 N at the shipped gains). That single test exercises the whole
-control law and needs no trajectory at all.
+The script is essentially performing the following steps for you:
 
-### User PC (i.e. my personal Ubuntu laptop)
+## 1. NUC — hardware
 
-| | |
-|---|---|
-| OS | Ubuntu 24.04 Noble |
-| ROS2 | Kilted |
-| Wired NIC | `enp0s31f6`, static **`10.0.0.1/24`** via NM profile `fr3-link`, direct cable to the NUC's `enx` |
-| RMW | `rmw_cyclonedds_cpp` — `sudo apt install ros-kilted-rmw-cyclonedds-cpp` |
-| `ROS_DOMAIN_ID` | `0` |
-| `CYCLONEDDS_URI` | `ros2_ws/config/cyclonedds_laptop.xml` |
-| `franka_msgs` | built from the `external/franka_ros2` submodule (see below) |
-| Env | `source setup_franka_env.sh` (repo root) sets all of the above |
-
-**`franka_msgs` (FR3 custom message/service types).** The NUC publishes
-`franka_msgs/msg/FrankaRobotState` and `franka_msgs/srv/*`, which we need to build from source in
-the `frankarobotics/franka_ros2` submodule (pinned to **`v0.1.15`**, matching the
-NUC). It's `rosidl`-only — no libfranka — so it builds cleanly on Kilted:
+Enable FCI in the Desk UI first. Then, in an **interactive** shell (a bare `ssh host 'cmd'` skips
+`~/.bashrc`, so `CYCLONEDDS_URI` goes unset and the node comes up invisible to everything else):
 
 ```bash
-git submodule update --init external/franka_ros2     # after a fresh clone
-# ros2_ws/src/franka_msgs is a symlink into the submodule; build just that package:
-unset VIRTUAL_ENV; bash -c 'cd ros2_ws && source /opt/ros/kilted/setup.bash && colcon build --packages-select franka_msgs'
+ros2 launch nuc/launch/fr3_bringup.launch.py     # franka_bringup + fr3_arm_controller spawner
 ```
 
-(`VIRTUAL_ENV` must be unset so the build uses system `python3`, which has `empy`;
-`pi/.venv` does not — see CLAUDE.md.)
+Kept separate from step 2 because this is the piece that crashes mid-session (the arm's own
+safety stops kill `ros2_control_node`, which is `required`) and the one gated on FCI, so it has
+to be restartable alone.
 
-`setup_franka_env.sh` also brings up the static IP via a **toggleable
-NetworkManager profile** (`fr3-link`, created on first run with `autoconnect no`).
-The wired port still does normal DHCP for other uses; the static IP is active only
-while the profile is up. To revert manually: `nmcli connection down fr3-link`.
-Override `FR3_IFACE` / `FR3_LAPTOP_IP` / `FR3_NM_PROFILE` before sourcing if the
-hardware differs.
-
-**Seeing the arm in Foxglove (`FRANKA_DESCRIPTION_WS`).** The NUC's `robot_state_publisher`
-latches `/robot_description`, which reaches the laptop over DDS, so Foxglove's 3D panel can draw
-the arm: add a **URDF** custom layer sourced from the `/robot_description` *topic*, then enable
-the `polyumi_tcp` and `fr3_hand_tcp` TF frames on top of it. This is the fastest way to check the
-TCP calibration — the `polyumi_tcp` frame must sit between the fingertips with z out along the
-approach axis and x along the finger-opening axis. If this looks wrong, you need
-to fix the polyumi_tcp constants in `nuc/tcp_calib.py`.
-
-The meshes are `package://franka_description/...` URIs that `foxglove_bridge` resolves on **this**
-machine (it is launched with the `assets` capability), and `franka_description` is not in
-`/opt/ros/kilted`. `setup_franka_env.sh` therefore prepends `FRANKA_DESCRIPTION_WS` (default
-`~/ws/franka/install`) to `AMENT_PREFIX_PATH`; export it before sourcing if yours lives elsewhere.
-Missing workspace = frames but no meshes, and a warning — nothing else breaks.
-
-Known limitation: the finger joints never reach `robot_state_publisher` (see *Known upstream
-`franka_ros2` bugs* below), so the fingers render static while the arm links animate.
-
-### NUC (`nu-crb`)
-
-| | |
-|---|---|
-| OS | Ubuntu 22.04 Jammy |
-| ROS2 | Humble |
-| Laptop link | `enx00249b860356` = `10.0.0.2/24` |
-| Robot link | `enp89s0` = `192.168.51.10/24`; FR3 at `192.168.51.20` |
-| RMW | `rmw_cyclonedds_cpp` |
-| `ROS_DOMAIN_ID` | unset → defaults to **0** |
-| `CYCLONEDDS_URI` | `/home/franka/franka_ws/config/cyclonedds.xml` |
-
-Bringup aliases (already configured on the NUC):
+## 2. NUC — inference stack
 
 ```bash
-fr3-bringup        # ros2 launch franka_bringup franka.launch.py robot_ip:=192.168.51.20 arm_id:=fr3
-fr3-arm-controller # ros2 run controller_manager spawner fr3_arm_controller \
-                   #   -t joint_trajectory_controller/JointTrajectoryController \
-                   #   --param-file .../franka_fr3_moveit_config/config/fr3_ros_controllers.yaml
-```
-
-### Shared DDS contract
-
-Both machines must agree on all of:
-
-- **RMW** `rmw_cyclonedds_cpp`.
-- **`ROS_DOMAIN_ID` = 0** (the NUC leaves it unset, which is 0; the laptop sets it
-  explicitly).
-- **Unicast discovery only.** The NUC's `cyclonedds.xml` disables multicast and
-  hardcodes the peer list `10.0.0.1` (laptop) and `10.0.0.2` (NUC). Therefore the
-  **laptop must actually hold `10.0.0.1`** — there is no multicast fallback. If you
-  use a different laptop IP, you must also edit the NUC's peer list.
-- **Interface pinning.** Each side pins CycloneDDS to its NUC-link NIC
-  (`enp0s31f6` on the laptop, `enx00249b860356` on the NUC) so discovery traffic
-  doesn't leak onto WiFi or, later, the inference-server NIC.
-
-`ros2_ws/config/cyclonedds_laptop.xml` is the laptop-side mirror of the NUC file.
-
-### FR3 specifics
-
-- **TF tree:** `base → fr3_link0 → … → fr3_link7 → fr3_link8 → fr3_hand → {fr3_hand_tcp, polyumi_tcp}`.
-  - Base frame: **`fr3_link0`**
-  - EEF / tool frame: **`polyumi_tcp`** — the *policy's* frame: the closed-fingertip midpoint in
-    GoPro-optical axes, a fixed child of `fr3_hand` defined in `nuc/tcp_calib.py` and published
-    by a `static_transform_publisher` in `fr3_bringup.launch.py`. The stock **`fr3_hand_tcp`**
-    (0.1034 m past `fr3_hand`, Franka's axis convention) is a *different physical point* and is
-    no longer used by anything in PolyUMI.
-  - `policy_client_node` reads `base_frame` / `eef_frame` params (defaults above).
-- **Gripper (Franka Hand):** see [Gripper interface](#gripper-interface-franka-hand) below — it
-  behaves quite differently from the arm and has several traps.
-- **Robot state:** `/franka_robot_state_broadcaster/current_pose` exposes the EEF
-  pose as an alternative to the TF lookup, plus joint states / wrenches.
-- **⚠ MoveIt planning group: use `fr3_arm`, NOT `fr3_manipulator`.** The SRDF defines
-  both (`fr3_manipulator` tip = `fr3_hand_tcp`, `fr3_arm` tip = `fr3_link8`), and
-  `fr3_manipulator` looks like the obvious choice since its tip is the TCP. But only
-  `fr3_arm` has a kinematics solver entry in `franka_fr3_moveit_config/config/kinematics.yaml`,
-  and Humble's `computeCartesianPath` needs one — with `fr3_manipulator` **every**
-  Cartesian request returns `fraction=0.0` (error_code SUCCESS, 1 trajectory point).
-  Verified on hardware: `fr3_arm` → `fraction=1.000`. `fr3_arm` still accepts an arbitrary
-  target `link_name`, so we plan for `polyumi_tcp` either way — which is why
-  `fr3_move_group.launch.py` must feed move_group `nuc/description/fr3_polyumi.urdf.xacro`
-  rather than the stock `fr3.urdf.xacro`, or planning fails with "Link 'polyumi_tcp' not found".
-- **Humble `GetCartesianPath` has no velocity scaling.** `max_velocity_scaling_factor` /
-  `max_acceleration_scaling_factor` don't exist on the request in Humble (added later);
-  setting them raises `AttributeError`. `fr3_moveit_bridge` instead scales the planned
-  trajectory in time (`_slow_trajectory`) before execution.
-
-### Gripper interface (Franka Hand)
-
-Launched by `fr3-bringup` automatically — `franka.launch.py`'s `load_gripper` defaults to `true`.
-
-**It is action-only. There is no way to servo it.** `ros2 control list_hardware_interfaces` shows
-**zero** finger/gripper interfaces: the hand is not in ros2_control at all, so the native
-`cartesian_pose` command interface the arm exposes has no gripper counterpart. Nor is this a ROS
-wrapper limitation — libfranka's `franka::Gripper` (`~/franka_ws/src/libfranka/include/franka/gripper.h`)
-offers only `homing()`, `grasp()`, `move()`, `stop()`, `readOnce()`, all blocking and discrete.
-This is why PolyUMI's gripper commander is deadbanded and rate-limited rather than a streaming
-servo like UMI's — see
-[franka-inference-bringup.md](franka-inference-bringup.md#gripper-hardware) ("Gripper hardware").
-
-| Interface | Type | Notes |
-|---|---|---|
-| `/fr3_gripper/move` | `franka_msgs/action/Move` | `width` (m, **full aperture**), `speed` (m/s). Position only — applies no force, stalls on contact. |
-| `/fr3_gripper/grasp` | `franka_msgs/action/Grasp` | `width`, `speed`, `force` (N), `epsilon.inner/outer`. The only action that actually **holds**: succeeds and keeps applying force if the final width lands in `[width-inner, width+outer]`. |
-| `/fr3_gripper/gripper_action` | `control_msgs/action/GripperCommand` | Convenience wrapper: auto-dispatches `move()` when opening, `grasp()` when closing. **⚠ `position` is PER-FINGER** (the node does `width = 2 * position`), unlike Move/Grasp. Speed is fixed at `default_speed_` (0.1 m/s) and epsilon at 0.005 — both unsettable through this action. Out-of-range targets `abort()` rather than clamping. |
-| `/fr3_gripper/homing` | `franka_msgs/action/Homing` | Empty goal; re-estimates max width. Needed after changing fingers. |
-| `/fr3_gripper/stop` | `std_srvs/srv/Trigger` | The sanctioned way to interrupt; action `cancel` also calls `gripper_->stop()`. |
-
-**No goal is ever rejected.** `gripper_action_server.cpp` returns `ACCEPT_AND_EXECUTE`
-unconditionally and spawns a detached `std::thread` per goal — no queue, no preemption. libfranka
-aborts the superseded command, surfacing as `goal_handle->abort()` with
-`libfranka gripper: Command aborted!`. So "latest wins" holds, but every superseded goal reports a
-failure. **Do not stream goals at the control rate.**
-
-**State:** `/fr3_gripper/joint_states`, `name: [fr3_finger_joint1, fr3_finger_joint2]`. Each finger
-reports **half** the aperture, so `width = position[0] + position[1]`. `velocity` and `effort` are
-hardcoded `0.0` — there is no real force feedback. Measured rate **~17 Hz**, not the configured 30:
-`publishGripperState()` calls the blocking `readOnce()` inside its timer callback, so the hand's UDP
-stream is the real bound. Reachable from the laptop over DDS (verified). `max_width` (~0.0817 m
-after homing) is **not published anywhere** — it exists only inside the node.
-
-### Known upstream `franka_ros2` bugs (not fixed)
-
-Both are real defects in `franka_ros2` v0.1.15, confirmed on this NUC. Neither is fixed here:
-they live in the NUC's `~/franka_ws/src/franka_ros2` checkout — **not** in our
-`external/franka_ros2` submodule, which is built for `franka_msgs` only, so patching this repo
-would change nothing at runtime. A fix means editing NUC machine state plus
-`colcon build --packages-select franka_gripper franka_bringup` and an `fr3-bringup` restart.
-Recorded so nobody re-diagnoses them.
-
-**1. The gripper's params file is silently ignored.**
-`franka_gripper/config/franka_gripper_node.yaml` is keyed `franka_gripper:`, but
-`gripper.launch.py` names the node `[arm_id, '_gripper']` = `fr3_gripper`, so the key never
-matches. Verify with `ros2 param dump /fr3_gripper`: `state_publish_rate` reads **30** (the C++
-default) rather than the YAML's 50, and `feedback_publish_rate` reads 10 rather than 30. Only
-`robot_ip` / `joint_names` take effect, because those are passed as an inline dict.
-Impact on us is small — `Move`/`Grasp` take speed and epsilon per goal, so our bridge sets what it
-needs. And fixing it would **not** raise the observed ~17 Hz state rate, which is bounded by the
-blocking `readOnce()`, not by the timer.
-
-**2. There is no finger TF.** `franka.launch.py:147` points `joint_state_publisher` at
-`franka_gripper/joint_states`, while the node actually publishes `/fr3_gripper/joint_states`
-(`ros2 topic info -v /franka_gripper/joint_states` → `Publisher count: 0`). Finger joints therefore
-never reach `robot_state_publisher`, so `fr3_leftfinger` / `fr3_rightfinger` do not resolve in TF.
-Root cause is one level up: `franka.launch.py` forwards only `robot_ip` and `use_fake_hardware` to
-`gripper.launch.py`, never `arm_id` — the gripper's own default happens to be `fr3`, so our topic
-names line up by coincidence and would break for any other `arm_id`.
-Harmless for PolyUMI because `policy_client_node` subscribes to `/fr3_gripper/joint_states`
-directly, but it will bite anyone expecting finger frames in TF.
-
-### Quick checks
-
-```bash
-# laptop, after `source setup_franka_env.sh` and with `fr3-bringup` up on the NUC:
-ping 10.0.0.2
-ros2 topic list                                  # NUC topics appear (nodes will NOT — see below)
-ros2 run tf2_ros tf2_echo fr3_link0 polyumi_tcp  # live transform (the policy's frame)
-ros2 run tf2_ros tf2_echo fr3_hand polyumi_tcp   # must equal nuc/tcp_calib.py exactly
-
-# Send the arm back to the SRDF `ready` pose (needs fr3_inference up). MOVES THE ARM — it is an
-# explicit request, so it runs even when execute_arm:=false. Override the target with the
-# fr3_moveit_bridge `home_joints` param.
-ros2 service call /polyumi/home std_srvs/srv/Trigger "{}"
-
-# Verify polyumi_tcp is physically at the fingertips: pure rotation about the TCP, gripper
-# closed, watch whether the fingertips hold still or trace an arc. MOVES THE ARM; needs
-# execute_arm:=true and policy_client_node NOT running (it shares /polyumi/target_poses).
-# Re-run after any change to the mount, the fingers, or nuc/tcp_calib.py.
-ros2 run polyumi_ros2 tcp_pivot_test --ros-args -p angle_deg:=20.0
-```
-
-**`ros2 node list` and `ros2 param get <nuc node>` come back empty from the laptop, and that is
-expected.** The ROS *graph* does not cross the Humble↔Kilted rmw boundary — the
-`Failed to parse type hash ... from USER_DATA '(null)'` warnings are exactly this. Topics, TF and
-service *calls* all work regardless, because DDS matches them on endpoints rather than on the
-graph; a service call just has to name its type explicitly, as `/polyumi/home` does above.
-Verified live: `ros2 service call /franka_robot_state_broadcaster/get_parameters
-rcl_interfaces/srv/GetParameters "{names: []}"` answers from the laptop while `ros2 service list`
-reports nothing at all. So don't debug a "missing" NUC node — check its topics instead.
-
-### rmw version mismatch — what is and isn't harmless
-
-The two sides run different `rmw_cyclonedds_cpp` majors — **NUC 1.3.4** (Humble) vs
-**laptop 4.0.2** (Kilted) — though the CycloneDDS core is the same (0.10.5). rmw 4.x
-encodes a **type hash** into DDS discovery `USER_DATA`; rmw 1.3.x predates that and
-can't parse it. This surfaces as two loud messages:
-
-- On the **laptop**, once per discovered remote topic:
-  `[WARN] [rmw_cyclonedds_cpp]: Failed to parse type hash for topic '...' from USER_DATA '(null)'.`
-- On the **NUC**, when a laptop `ros2` node appears:
-  repeated `'invalid data size'` / `'string data is not null-terminated', at .../serdata.cpp`.
-
-**Harmless for small/simple messages.** Verified: `ros2 topic hz /joint_states` gives a
-real rate on the laptop, TF crosses fine, and a `geometry_msgs/PoseStamped` published
-laptop→NUC arrives byte-for-byte intact. `trajectory_msgs/JointTrajectory` (the gripper chunk on
-`/polyumi/target_gripper`) was checked the same way and also **crosses intact** — the NUC received
-`frame_id`, `joint_names`, and every point's `positions` + `time_from_start` exactly as published,
-with the `serdata.cpp:384` noise appearing alongside but not corrupting the payload. The inference
-loop's observation path is unaffected. rmw_cyclonedds 4.0.2 has no switch to suppress the type-hash
-emission (it only reads `CYCLONEDDS_URI`), so we accept this noise.
-
-**⚠ NOT harmless for large nested messages.** A `MoveGroup.Goal` sent from the **laptop**
-to the NUC's move_group fails: move_group logs `Catastrophic failure` right next to those
-same `serdata.cpp:384` errors, and the client gets `error_code=99999` (not a real
-MoveItErrorCode). The goal is arriving corrupted. Small service calls (`/compute_fk`,
-`/check_state_validity`, `/get_planning_scene`) cross fine and return real data, so the
-boundary is roughly message size/nesting — which makes this confusing to diagnose.
-
-**This is why `fr3_moveit_bridge` runs on the NUC** rather than the laptop calling
-move_group directly: keeping the MoveIt calls same-rmw (NUC-local) sidesteps the question
-entirely, and is known-good (that's the configuration that actually moves the arm).
-
-Scope of what was actually tested, so nobody over-reads this: the `MoveGroup.Goal`
-corruption is confirmed. Whether a laptop-side `GetCartesianPath` call would survive is
-**untested** — we hit the separate `fr3_manipulator` planning-group bug (below) first,
-which produces its own `fraction=0.0` *both* laptop-side and NUC-local, then moved the
-MoveIt calls to the NUC and never retried Cartesian from the laptop. Don't assume the
-laptop path is fine for Cartesian just because the group bug explains that symptom.
-
-If `ros2 topic hz` ever hangs, it's almost certainly **not** this — check whether the
-publisher is actually running (e.g. the Pi stream for `/pi/*`).
-
-## Running Demos & Inference
-
-TODO describe setup & connection of devices.
-
-This brings up the inference loop: the FR3 stack on the NUC, the PolyUMI nodes +
-`policy_client_node` on the laptop, and an inference server. The server is either the **real**
-trained policy (`serve_policy.sh` on the GPU box — step 2) or the **dummy** oscillator
-(`dummy-server` on the laptop — step 2, alternative). The client pulls the live EEF pose from the
-NUC's TF over DDS, POSTs observations to the server, logs the returned 8-vector action chunk, and
-publishes it to `/polyumi/target_poses_preview` for Foxglove (always) and — only with
-`execute_motion:=true` — to `/polyumi/target_poses` for the NUC bridge to execute.
-
-Start the pieces in separate terminals, in this order.
-
-> **Shortcut: `./fr3_session.sh`** builds this entire wall as one tmux session — NUC, Pi, GPU
-> box, and laptop — with the safe commands already running and the robot-moving ones typed at
-> the prompt for you to confirm. The steps below are what it automates, and remain the
-> reference for doing it by hand or debugging a pane that misbehaves. See
-> [Session launcher](#session-launcher-fr3_sessionsh).
-
-### **1. NUC — bring up the FR3** (enable FCI on the Desk UI first):
-
-```bash
-ros2 launch nuc/launch/fr3_bringup.launch.py   # franka_bringup + fr3_arm_controller spawner
-```
-
-This is the **hardware session**: `franka_bringup` plus the joint-trajectory controller
-move_group executes through. It replaces the old two-terminal `fr3-bringup` +
-`fr3-arm-controller` pair — those were only ever split because the controller spawner has to
-run *after* `controller_manager` exists, not because they are independent. (The spawner exits
-once the controller is active; it never needed a terminal of its own.) The aliases still work
-if you want the pieces separately.
-
-Kept deliberately separate from step 1b so it can be **restarted on its own** — this is the
-component that crashes mid-session (see [TF lookup fails](#tf-lookup-fails-fr3_link0--does-not-exist--no-tf-at-all--fr3-bringup-crashed)),
-and the one gated on enabling FCI by hand.
-
-Step **1b** is **only needed to actually move the arm** (the Phase 2
-`execute_motion:=true` path). The log-only inference loop skips it.
-
-Both launch files run on the NUC from a clone of this repo, in their own terminals. Each needs
-the NUC's ROS + DDS env — a non-interactive shell does **not** source `~/.bashrc`, and
-without `CYCLONEDDS_URI` the node comes up on the wrong RMW and is invisible to
-everything else (this is one reason `fr3_session.sh` opens a *tmux* on the NUC rather than
-running commands over a bare `ssh`):
-
-```bash
-source /opt/ros/humble/setup.bash
-source ~/franka_ws/install/setup.bash
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-export CYCLONEDDS_URI=file://$HOME/franka_ws/config/cyclonedds.xml
-```
-
-#### **1b. NUC — start the inference stack** (second NUC terminal):
-
-```bash
-ros2 launch nuc/launch/fr3_inference.launch.py                        # dry run, nothing moves
+ros2 launch nuc/launch/fr3_inference.launch.py                        # nothing moves
 ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true  # fingers only
 ros2 launch nuc/launch/fr3_inference.launch.py \
     execute_arm:=true execute_gripper:=true max_velocity_scaling:=0.2
 ```
 
-Starts **move_group + both PolyUMI bridges** — the three things that sit on top of the
-hardware session. They start, fail, and restart together without touching the arm's state,
-which is why they share one launch file where step 1 gets its own.
+**Both execute flags default false** — launching alone never moves the robot. 
 
-**Two execute flags, not one**, and both default false: launching this file never moves the
-robot on its own. Keeping them separate is what makes the first-run-on-hardware sequence below
-possible (gripper executing, arm planning-only). The three components are described next.
+Velocity scaling is only applicable if the arm is being controlled by moveit, which is deprecated aside from the homing functionality.
 
-**move_group** adds **only** the planner (exposing `/move_action`,
-`/execute_trajectory`, `/compute_cartesian_path`) — no controllers or
-robot_state_publisher — so it runs alongside the already-up `fr3-bringup` without
-collision. Expect a harmless `No 3D sensor plugin(s) defined for octomap updates` error
-(we have no depth camera, so no environment collision geometry).
-
-We ship our own copy in [`nuc/`](../nuc/) rather than using
-`franka_fr3_moveit_config`'s, because upstream's `move_group.launch.py` is unusable:
-it references `robot_ip` / `use_fake_hardware` / `fake_sensor_commands` without
-declaring them (`launch configuration 'fake_sensor_commands' does not exist`), and it
-omits the params move_group needs to be functional — the OMPL pipeline, the controller
-list, and the planning-scene monitor. Ours declares the args and passes those params
-(copied from that package's own `moveit.launch.py`). Without them move_group defaults to
-CHOMP, logs `No controller_names specified`, and cannot execute. Sanity-check the log for:
-
-```
-Using planning interface 'OMPL'
-Added FollowJointTrajectory controller for fr3_arm_controller
-Trajectory execution is managing controllers
-```
-
-(Do **not** use upstream `moveit.launch.py` — it starts a *second* controller_manager +
-robot_state_publisher and collides with `fr3-bringup`.)
-
-**`fr3_moveit_bridge`** (`execute_arm`) subscribes `/polyumi/target_poses` (a `PoseArray` — one
-action chunk) and drives the local
-move_group, planning the whole chunk as a single multi-waypoint Cartesian path.
-`max_velocity_scaling` (default `0.1`, max `1.0` = the full speed
-move_group already planned at) time-scales the trajectory; **start low** (e.g. `0.1`–`0.3`)
-with a hand on the e-stop, then raise it once you trust the motion. It logs
-`move_group found (compute_cartesian_path ready).` at
-startup — if it instead says `NOT found after 10s`, move_group failed to come up (check the
-same launch file's output).
-
-**`fr3_gripper_bridge`** (`execute_gripper`) subscribes `/polyumi/target_gripper` (a
-`trajectory_msgs/JointTrajectory` — the width half of the
-action chunk) and drives `/fr3_gripper/{move,grasp}`. With its flag false it logs the goal it
-would send and commands nothing. Independent of `move_group`, so it works even if move_group
-failed to start.
-
-Because the hand cannot be servoed (see [Gripper interface](#gripper-interface-franka-hand)), this
-node deliberately does **not** track every chunk: it deadbands (`width_deadband_m`, default 5 mm)
-and rate-limits (`min_command_period_s`, default 0.25 s), sending only the latest desired width.
-A quiet log with occasional goals is correct; a stream of `Command aborted!` is not.
-
-The deadband is measured against the width the hand actually **accepted**, not the last one
-attempted — so a goal that never lands (action server gone, goal rejected) is retried on the next
-tick rather than being deadbanded away, which would otherwise park the fingers at a width they
-never received. Parameters are validated at startup and the node refuses to start on a bad one;
-`min_command_period_s: 0` in particular used to divide by zero inside the timer callback.
-
-**First time on hardware, launch with `execute_gripper:=true execute_arm:=false`**, so a bad
-width command moves fingers and nothing else. Keep the hand clear of objects and of the table.
-`fr3_session.sh` pre-types this line for you but with `execute_arm:=true` — it is pre-typed,
-not run, precisely so you can edit the flags before pressing Enter.
-
-### **2. Inference server — real (GPU box) or dummy (laptop).**
-
-*Real policy* — on the GPU workstation (`sheep`), serve a trained checkpoint. `serve_policy.sh`
-builds the image and wires the rootless-Docker flags + checkpoint/HF-cache mounts (see
-[training-instructions.md](training-instructions.md)):
+## 3. Inference server
 
 ```bash
-# on the GPU box:
-CKPT=/abs/path/to/epoch=0070-train_loss=0.021.ckpt ./serve_policy.sh
-# from the laptop, confirm it's reachable:
-curl http://<gpu-host>:8000/health           # -> {"status":"ready", ...}
+# real policy, on the GPU box (see training-instructions.md):
+CKPT=/abs/path/to/<name>.ckpt ./serve_policy.sh
+curl http://<gpu-host>:8000/health            # from the laptop
+
+# or the dummy oscillator — no GPU, no checkpoint:
+cd inference_server && uv run dummy-server    # :8000
 ```
 
-The laptop reaches it over LAN; pass its URL to the launch in step 4
-(`inference_server_url:=http://<gpu-host>:8000/predict_cartesian/`). Do **not** run
-`external/polyumi_diffusion_policy/docker/serve.sh` on the host — it is the in-container
-entrypoint and fails with `exec: uvicorn: not found`.
+`external/polyumi_diffusion_policy/docker/serve.sh` is the *in-container* entrypoint; you should not run this directly.
 
-*Dummy oscillator* — alternative for wiring/CI with no GPU or checkpoint (its own laptop terminal):
+## 4. Pi
+
+SSH into the raspberry pi and run:
 
 ```bash
-cd inference_server
-uv run dummy-server   # FastAPI on 0.0.0.0:8000; oscillates X around HOME_POSE
+polyumi-pi stream
 ```
 
-`inference_server` is its own isolated uv project (not part of the repo
-workspace), so `uv run` here creates/uses a standalone `inference_server/.venv`
-with only fastapi/uvicorn/numpy — no need to source anything. The command is
-`dummy-server` (hyphen), the `[project.scripts]` entry point. Leave
-`inference_server_url` at its default (`http://localhost:8000/predict_cartesian/`) in step 4.
-
-### **3. Pi — start the camera/audio stream** (ssh into the Pi):
+## 5. Laptop
 
 ```bash
-polyumi-pi stream   # ZMQ PUSH: video on :5555, audio on :5556
+source setup_franka_env.sh          # RMW, domain 0, CYCLONEDDS_URI, the fr3-link static IP
+cd ros2_ws && source install/setup.bash
+ros2 launch polyumi_ros2 inference_demo.launch.xml pi_host:=<pi IP>
 ```
 
-`pi_receiver_node` (started by the launch in step 4) pulls these over ZMQ and
-republishes them as `/pi/*`. Without this running, Foxglove shows no Pi feed, and `pi_receiver_node`
-logs a warning. (The FR3 inference loop itself doesn't depend on the Pi, but the full
-demo does.)
+Default is **log-only** — actions are logged and previewed on `/polyumi/target_poses_preview`,
+the arm does not move. `execute_motion:=true` publishes the chunk for the NUC to execute.
+`ros2 launch ... --show-args` lists the rest; `motion_only:=true` (skip waiting for/using the Pi) is also useful.
 
-### **4. Laptop — PolyUMI ROS2 nodes + policy client** (another terminal):
+Recommended first pass on the arm: real server, `execute_motion` false, watch the preview poses
+in Foxglove (`ws://localhost:8765`, layout in `ros2_ws/src/polyumi_ros2/foxglove/layouts/`).
+Sane output sits near the current EEF with small step-to-step deltas.
 
-```bash
-source setup_franka_env.sh          # CycloneDDS + domain 0 + bring up the fr3-link NM profile
-cd ros2_ws
-source install/setup.bash           # (build first if needed: colcon build)
-ros2 launch polyumi_ros2 inference_demo.launch.xml pi_host:=<raspberry pi IP address>
-# default inference_server_url is http://localhost:8000/predict_cartesian/
-# To MOVE the arm (Phase 2), add: execute_motion:=true
-#   -> publishes each action chunk on /polyumi/target_poses; needs step 1b on the NUC with
-#      execute_arm:=true. Speed is set there (max_velocity_scaling), not here.
-#   Chunk size is n_action_steps (default 8) -- see "Action-chunk execution" above.
-# Default is log-only: actions are logged, no pose published, arm does not move.
-# To iterate on FR3 motion alone without the Pi running, add: motion_only:=true
-#   -> skips pi_receiver_node (no ZMQ connection attempt to the Pi). GoPro + foxglove
-#   still run (policy_client_node needs the GoPro image to fill its observation buffer).
-```
+Health and latency scalars are published one-per-topic under `/polyumi/diag/*` for Foxglove's
+Plot panel — `ros2 topic list | grep diag` for the set. **`n_published_arm` is the one to watch**:
+the higher the number the better (this is the number of actions we didn't have to discard due to latency in each chunk).
 
-**Real-policy dry run (recommended first pass on the arm — no motion, just watch the commanded
-chunk in Foxglove):**
+## Architecture on the NUC
 
-```bash
-ros2 launch polyumi_ros2 inference_demo.launch.xml motion_only:=true \
-    inference_server_url:=http://<gpu-host>:8000/predict_cartesian/ \
-    max_image_age_s:=0.3 \      # tolerate the Elgato's ~200 ms 1080p convert latency
-    tf_use_latest:=true         # ONLY if the laptop<->NUC clocks are skewed; static arm only
-```
+`fr3_bringup` owns the hardware: `franka_bringup` (controller_manager + the libfranka hardware
+interface), the `fr3_arm_controller` spawner, `robot_state_publisher`, and
+`static_transform_publisher`s for `polyumi_tcp` and for `fr3_link8 → fr3_hand`.
 
-`execute_motion` stays false, so nothing moves; the commanded chunk is published to
-`/polyumi/target_poses_preview` (add it in Foxglove — pose arrows in `fr3_link0`). Sane output sits
-near the current EEF with small step-to-step deltas. `tf_use_latest` and `max_image_age_s` are
-workarounds — see [Troubleshooting](#troubleshooting); drop them once the clock is synced and a
-faster camera path is in place, which are prerequisites for `execute_motion:=true`.
+That second static TF is load-bearing. `load_gripper` now defaults **false**, because
+`franka_hand_node` owns the libfranka gripper connection and only one process can. But
+`franka.launch.py` feeds that one flag into `xacro hand:=` as well, so turning it off also drops
+`fr3_hand` from `robot_description` — which would orphan `polyumi_tcp` and break the laptop's whole
+observation lookup, with a symptom pointing nowhere near the flag. The static publisher fills the
+hole; the constant lives in `nuc/tcp_calib.py` next to the TCP.
 
-**Testing motion without the full loop.** To move the arm through one chunk by hand
-(rather than the 10 Hz dummy oscillation), skip step 4 and publish a `PoseArray` directly
-from the laptop — read the current pose, then target a small offset. A single-pose array
-is a valid (trivial) chunk:
+`fr3_inference` adds the three things that sit on top of it — move_group, `fr3_moveit_bridge`,
+`franka_hand_node` — plus the `polyumi_cartesian_impedance_controller` spawner, spawned
+`--inactive`. They start, fail and restart together without touching the arm's state.
 
-```bash
-ros2 run tf2_ros tf2_echo fr3_link0 polyumi_tcp      # note x,y,z + quat, then Ctrl-C
-ros2 topic pub -1 /polyumi/target_poses geometry_msgs/msg/PoseArray \
-  "{header: {frame_id: fr3_link0}, poses: [{position: {x: 0.322, y: -0.001, z: 0.446}, \
-    orientation: {x: -1, y: 0, z: 0, w: 0}}]}"
-```
+The laptop publishes an entire inference **action chunk** (`n_action_steps` waypoints, not
+`actions[0]`) and a NUC-side executor drives the arm from it. Two executors exist; the laptop's
+`wire` param picks the message format and the NUC's `executor` arg picks the consumer, and the
+two must agree:
 
-Use your measured pose with ~2 cm added to one axis (`-1` publishes once). The bridge
-should log `Executed chunk (1 waypoints).` and the arm should creep to it.
-
-### Session launcher (`fr3_session.sh`)
-
-Steps 1–4 as one tmux session, from the repo root:
-
-```bash
-./fr3_session.sh                # create, or re-attach if it is already up
-SKIP_DEPLOY=1 ./fr3_session.sh  # ...without re-syncing the NUC/Pi source trees first
-./fr3_session.sh --kill-local   # tear down the LOCAL session only (remote ones survive)
-./fr3_session.sh --kill         # --kill-local, plus stop the remote sessions too
-```
-
-Three windows: `nuc` (bringup | inference stack), `polyumi-pi` (Pi | GPU box), `laptop`.
-
-**Every fresh start (not a re-attach) deploys first.** `nuc/` is rsynced to the NUC, and
-`./deploy.sh` (see CLAUDE.md / README.md, also runnable standalone: `./deploy.sh <pi_ssh_host>`)
-is called for the Pi — so what runs on both machines matches this working copy, not whatever
-they last had checked out. Sheep is deliberately excluded: it tracks its own training branch,
-and force-syncing it would silently swap out the checkpoint code from under you.
-Skip both with `SKIP_DEPLOY=1` once you know they're already current — useful for a fast
-re-launch while iterating on the tmux layout itself rather than on NUC/Pi code. Each target is
-independent and non-fatal: an unreachable Pi (powered off, say) warns and is skipped rather
-than blocking the NUC and laptop panes from coming up.
-
-**Safe commands run; robot-moving ones are typed at the prompt and left for you to press
-Enter on.** So bringup and the Pi stream start themselves, while the inference stack (carries
-the execute flags), the policy server (carries the checkpoint path), and the laptop client
-(depends on everything above, and there is no readiness gate) wait for you. Nothing in the
-script can move the robot on its own.
-
-**The NUC and GPU-box panes run tmux on the remote host**, not a bare ssh — so a laptop sleep
-or wifi blip costs nothing (re-run the script to re-attach, everything is still running), and
-the interactive shell means `CYCLONEDDS_URI` and the `fr3-*` aliases are actually set, which a
-bare `ssh host 'cmd'` would silently skip. The Pi is a plain ssh: stateless, cheap to restart.
-Consequences worth knowing:
-
-- `--kill-local` only kills the **local** session — the NUC and GPU-box sessions survive by
-  design, for the re-attach case. `--kill` also stops those specific remote sessions
-  (`tmux kill-session`, not `kill-server`, so any unrelated session on that host is left alone).
-- Those panes are **nested tmux**, so `C-b` goes to the outer one. `C-b C-b` sends a prefix
-  through to the inner session.
-- **Re-attaching never types into a live remote pane.** The script probes each remote session
-  first and leaves the ones already running completely alone — a shell mid-bringup, or holding
-  a pre-typed line you have not pressed Enter on, is handed back untouched. (`send-keys`
-  *appends* to a readline buffer rather than replacing it, so a second pass would otherwise
-  concatenate two commands and submit the result.)
-- A host with no tmux installed, or one that is not answering, degrades to a plain `ssh` with
-  a warning rather than failing — one machine being down should not block the others. That
-  pane just will not survive a disconnect.
-
-The Pi's address is resolved from your ssh config (`ssh -G $POLYUMI_PI_HOST`) at launch rather than
-hardcoded, since it is on DHCP and does move. `POLYUMI_PI_HOST` defaults to `polyumi-pi` — the alias
-other users are expected to set up — so if yours is named differently, override it:
-`POLYUMI_PI_HOST=conorpi ./fr3_session.sh`. Repo paths and URLs are further environment overrides at
-the top of the script: `NUC_REPO`, `SHEEP_REPO`, `INFERENCE_URL`, `MAX_IMAGE_AGE_S`,
-`SHELL_SETTLE_S` (raise the last one if pre-typed lines land mangled — typing races the
-remote shell's startup).
-
-## Live diagnostics (`/polyumi/diag/*`)
-
-`policy_client_node` publishes its health and latency scalars as `std_msgs/Float32`, one topic per
-metric, so they can be watched as **live timeseries in Foxglove's Plot panel** — drag in e.g.
-`/polyumi/diag/n_published_arm.data`. The bridge is already up on `:8765`, so there is nothing to
-start. Everything here was previously computed only for a log line, which is the wrong shape for a
-number that matters as a trend.
-
-| topic | what it tells you | healthy |
+| `wire` / `executor` | topic | consumer |
 |---|---|---|
-| `n_published_arm` | waypoints actually sent to the arm this chunk | **> 0** |
-| `n_published_gripper` | same, for the hand | **> 0** |
-| `n_stale_arm` / `n_stale_gripper` | leading actions discarded as already-elapsed | well under `n_action_steps` |
-| `obs_age_s` | capture → server response, the whole measured span | ~0.6 s today |
-| `inference_latency_s` | the POST round trip alone | ~0.3 s |
-| `image_age_s` | frame stamp → tick; the Elgato's YUYV convert | ~0.2 s, under `max_image_age_s` |
-| `gripper_state_age_s` | how stale the newest `/fr3_gripper/joint_states` sample is | ~0.04 s |
+| `multidof` (default) | `/polyumi/target_poses_traj` | `polyumi_cartesian_impedance_controller` — 1 kHz streaming servo |
+| `pose_array` | `/polyumi/target_poses` | `fr3_moveit_bridge` → move_group, one Cartesian plan per chunk |
+| always | `/polyumi/target_gripper` | `franka_hand_node` → libfranka `Gripper::move` |
 
-**Watch `n_published_arm` first.** It is the difference between the arm moving and not, and it is
-published *before* the all-stale early return specifically so the zero shows up. It sat silently at
-0 for an entire session on 2026-08-10 while everything else looked fine — the chunk was shorter
-than the latency budget, so every action in it had already elapsed. See
-[calibration-instructions.md](calibration-instructions.md), "Latencies", for the budget arithmetic.
+A mismatch is loud rather than silent: nothing subscribes, the arm holds still, and the client
+warns every second naming the topic it expected. The full contract is the module docstring of
+`ros2_ws/src/polyumi_ros2/polyumi_ros2/target_chunk.py`.
 
-The counters are per device: the arm and hand are truncated by their own `latency.*_exec`, so they
-legitimately differ, and the servoed arm is much the cheaper of the two — the hand's discrete,
-rate-limited Move/Grasp goals dominate. The gap moves whenever either is re-measured; read the
-current values from [inference.yaml](../ros2_ws/src/polyumi_ros2/config/inference.yaml) rather than
-from here.
+Both controllers claim the same `<joint>/effort` interfaces, so **exactly one holds the arm** —
+`ros2 control list_controllers` tells you which:
 
-Foxglove plots live only — its buffer is not retention. For anything you want to compare across
-runs, record it:
+The moveit (pose_array) executor is deprecated and no longer intended for use.
 
 ```bash
-ros2 bag record -o diag_$(date +%F_%H-%M-%S) /polyumi/diag/n_published_arm \
-  /polyumi/diag/obs_age_s /polyumi/diag/inference_latency_s /polyumi/diag/image_age_s
+# Arm must be STATIONARY: switching restarts the libfranka control loop.
+ros2 control switch_controllers --deactivate fr3_arm_controller \
+    --activate polyumi_cartesian_impedance_controller
 ```
 
-## Where the launch logs are
+`/polyumi/home` does this swap itself, both directions, and hands the arm back afterwards.
 
-`fr3_session.sh` tees the three crash-prone launches to disk, on whichever machine ran them:
+## The facts you can't deduce by looking
 
-| launch | machine | file |
+- **`polyumi_tcp`, not `fr3_hand_tcp`**, is the policy's frame: the closed-fingertip midpoint in
+  GoPro-optical axes. Defined once in [`nuc/tcp_calib.py`](../nuc/tcp_calib.py) and reaching TF
+  and move_group's RobotModel from there. The stock `fr3_hand_tcp` is a different physical point.
+  Verify on hardware with `ros2 run polyumi_ros2 tcp_pivot_test` (pivots about the TCP with the
+  gripper closed — the fingertips should hold still). **Moves the arm.**
+- **The MoveIt planning group is `fr3_arm`, not `fr3_manipulator`.** Only `fr3_arm` has a
+  kinematics solver entry, which Humble's `computeCartesianPath` needs — `fr3_manipulator`
+  returns `fraction=0.0` on every request *with* `error_code SUCCESS`, which reads like a
+  planning failure and isn't one.
+- **The Franka Hand cannot be servoed.** It is not in ros2_control at all, and libfranka offers
+  only blocking `move`/`grasp`/`stop`. `stop()` does not pre-empt — it queues *behind* the running
+  Move and costs the remainder of the stroke plus ~100 ms. So `franka_hand_node` runs one Move to
+  completion at a time and chooses which setpoint to aim at, rather than trying to track them all.
+- **Gripper width is `position[0] + position[1]`** on `/fr3_gripper/joint_states` — each finger
+  reports half the aperture, and `velocity`/`effort` are hardcoded zero, so there is no force
+  feedback to read.
+- **The laptop and NUC run different rmw majors** (Humble 1.3.4 vs Kilted 4.0.2). Consequences:
+  the `Failed to parse type hash` / `serdata.cpp` log noise is expected and unsuppressable;
+  `ros2 node list` and `ros2 param get`/`param set` come back **empty from the laptop** even
+  though topics, TF and service calls all work, so never conclude a NUC node is missing from
+  that (to set a live parameter, call its `<node>/set_parameters` service directly); and large nested messages (a `MoveGroup.Goal`) arrive **corrupted**, which is why the
+  MoveIt calls live on the NUC rather than on the laptop.
+- **Discovery is unicast-only**, peers hardcoded to `10.0.0.1` / `10.0.0.2`. If the laptop is not
+  actually on `10.0.0.1`, nothing finds anything and there is no multicast fallback.
+- **The clocks must agree** or NUC-stamped TF lands outside the laptop's buffer
+  ("extrapolation into the past"). The NUC's VLAN blocks outbound NTP, so its chrony syncs to the
+  laptop over the arm link; check with `ssh jailfranka chronyc sources` → `^* 10.0.0.1`.
+  `tf_use_latest:=true` is a stationary-dry-run crutch, never a fix.
+- **The chunk has to outlast the latency budget**:
+  `obs age + latency.<device>_exec < n_action_steps * action_dt`. If it doesn't, every action has
+  already elapsed on arrival and *nothing moves at all* while every other indicator looks healthy.
+  You can catch this by checking the latency monitor plot in Foxglove. Check [calibration-instructions.md](calibration-instructions.md), "Latencies", for more info on this latency calculation.
+- **Two upstream `franka_ros2` v0.1.15 bugs.** The gripper's params file is silently ignored
+  (wrong node key, so `ros2 param dump /fr3_gripper` disagrees with the YAML). And
+  `joint_state_publisher`'s `source_list` names `franka_gripper/joint_states` while the gripper
+  publishes on `fr3_gripper/joint_states`, so the fingers never reach `/joint_states`. Both are
+  unfixed, and the second is invisible on the default path anyway: with `load_gripper:=false` the
+  URDF has no hand, so `joint_state_publisher` discards `fr3_finger_joint1/2` as joints it does not
+  know, whichever topic they arrive on. **Expect move_group to warn `complete state ... not yet
+  known. Missing fr3_finger_joint1` forever** — it is pre-existing, it is not the gripper node
+  failing, and there is still no finger TF. Fixing it needs a hand in `robot_description`.
+
+## Logs
+
+`fr3_session.sh` tees the crash-prone launches to
+`~/.local/state/polyumi/{fr3_bringup,fr3_inference,policy_client}_<date>.log` on whichever
+machine ran them, since **`~/.ros/log/` will not have the lines you want after a crash** — `franka_bringup`
+uses `output='screen'`, and a libfranka fault surfaces as raw stderr from `std::terminate`, not
+rcl logging. The reflex name (`cartesian_reflex`, `joint_velocity_violation`, …) is in the Franka
+Desk error log, which you must clear before bringup will come back.
+
+
+## When it doesn't come up
+
+Most failures here are one of four things, in rough order of frequency:
+
+1. **A leftover launch** holding port 8765 and `/dev/video2` — `pkill -f "ros2 launch"`, then
+   confirm a single stack before relaunching.
+2. **The launching shell's DDS env** — an interactive rc that exports its own `ROS_DOMAIN_ID`
+   overrides what tmux handed the pane. Check the live process, not your shell:
+   `tr '\0' '\n' < /proc/$(pgrep -f policy_client_node)/environ | grep -E 'ROS_DOMAIN_ID|RMW_|CYCLONEDDS'`.
+   Everything laptop-local keeps working, which is what makes this slow to spot.
+3. **`fr3_bringup` died on the NUC** — `ros2 topic info /tf_static` shows `Publisher count: 0`.
+4. **The arm stopped itself** — see Logs above.
+5. **A wedged `ros2` CLI daemon on the NUC.** Signature is
+   `xmlrpc.client.Fault: <Fault 1: "<class 'RuntimeError'>:!rclpy.ok()">` out of anything using
+   `ros2 node`/`ros2 param`/`ros2 control`. Underneath it is the Humble↔Kilted rmw gap —
+   `ros2 node list --no-daemon` gives the real error, `empty node name returned by the RMW layer` —
+   which poisons the daemon's context, after which *everything* through it fails. Fix:
+   **`ros2 daemon stop`** (it respawns). `ros2 topic list/echo/hz` and service calls are unaffected,
+   which is what makes it slow to spot.
+
+   Worth knowing because it used to break the arm silently: the launch's controller switch shelled
+   out to `ros2 control switch_controllers`, which goes through the daemon, so a poisoned daemon
+   left `fr3_arm_controller` holding the arm and the servo inactive while every pane looked fine —
+   the arm just never moved. That call is now a daemon-free `ros2 service call`, but if you see the
+   fault anywhere else, this is it.
+
+## Gripper problems
+Currently this setup uses the Franka Hand, which is terrible. I've done a bunch of analysis on it, tl;dr it has ~210ms observable command delay, only updates its state at 5Hz, and its move() commands cannot be pre-empted once issued.
+
+The scripts I used for this analysis are in `nuc/polyumi_fr3_controllers/src/franka_hand_testing`, gated off the default build behind `-DBUILD_HAND_PROBES=ON`. The constants below were fitted to their output in a Jupyter notebook that is not in the repo; the values as shipped live in `HandLimits` (`gripper_trajectory_interpolator.hpp`), pinned by the anchor tests in `test_gripper_trajectory_interpolator.cpp`. Re-run the probes against any other hand before trusting them.
+
+`franka_hand_node` works around all of this with a custom interpolator built on that model:
+
+```
+blocked = C + duration(dx, v)                  # send -> move() returns
+duration = dx/v + v/a       if dx >= v^2/a     # trapezoidal
+         = 2*sqrt(dx/a)     otherwise          # triangular, never reaches v
+v <- min(v_cmd, V_MAX)                         # the hand clips silently, it never refuses
+```
+
+| constant | value | meaning |
 |---|---|---|
-| `fr3_bringup.launch.py` | NUC | `~/.local/state/polyumi/fr3_bringup_<date>.log` |
-| `fr3_inference.launch.py` | NUC | `~/.local/state/polyumi/fr3_inference_<date>.log` |
-| `inference_demo.launch.xml` | laptop | `~/.local/state/polyumi/policy_client_<date>.log` |
+| `cmd_delay` | 0.208 s | send → fingers start moving, as *observed* |
+| `C` (`fixed_cost`) | 0.363 s | send → `move()` returns, at zero travel |
+| `V_MAX` | 0.1153 m/s | where the hand starts silently clipping |
+| `A_MAX` | 0.360 m/s² | sets the 37 mm triangular crossover |
+| `t_obs_delay` | 0.050 s | **a guess**: how far the reported width lags reality |
 
-(`$XDG_STATE_HOME` if you set it. Files older than 14 days are pruned on each fresh start;
-`REMOTE_LOG_KEEP_DAYS=30 ./fr3_session.sh` to change that.)
+The node holds the chunk as a horizon of absolutely-timed widths and, for each Move, picks the
+earliest setpoint it can still reach and the *slowest* speed that lands on time. When nothing is
+reachable it chases full-speed to where the signal will be on arrival, rather than stopping short
+— covering the remainder afterwards would cost another whole `C`.
 
-**`~/.ros/log/` will not have the thing you want after a crash.** `franka_bringup` launches with
-`output='screen'`, so process output goes to the console only — and a C++ crash message is raw
-stderr from the runtime hitting `std::terminate`, not rcl logging, so it would not be captured even
-if it were. On 2026-08-11 `launch.log` jumped straight from a routine gripper INFO line to
-`process has died ... exit code -6`, and the libfranka exception naming the fault existed solely in
-the tmux scrollback, where it scrolled off. Hence the tee.
+Things to know before you debug it:
 
-## Troubleshooting
+- **It is a decimator, not a tracker.** `blockedDuration(0) = 363 ms`, so the ceiling is 2.75 Hz
+  and realistically 0.7–1.7 Hz against a 10 Hz setpoint stream. Servicing every 4th–15th setpoint
+  is correct behaviour.
+- **Transients shorter than ~1 s are physically unrepresentable.** A close-and-reopen inside 0.7 s
+  cannot be rendered at all; two strokes plus their two `C`s exceed the transient.
+- **`t_obs_delay_s` is the knob if the hand is consistently early or late** under
+  `latency_probe -p mode:=gripper_chirp`. It cannot be measured without a camera on the fingers,
+  which is why it is a parameter and not a constant. Do NOT confuse it with `latency.gripper_exec`
+  on the laptop — that aligns the action chunk, this shifts the node's internal schedule.
+- **`Grasp` is not implemented.** `Move` applies no force and stalls on contact, so **the hand
+  cannot hold an object**. The node warns when a successful Move reports a width the hand did not
+  reach, which is what that failure looks like.
+- **An unhomed hand reports `max_width = 0` and `move()` returns `true` while doing nothing.** The
+  node refuses to execute in that state and says so; `home_on_start:=true` fixes it.
 
-### `ros2_control_node` dies with exit code -6 — the robot stopped itself
-A backtrace through `franka::Robot::Impl::throwOnMotionError()` → `__cxa_throw` → `std::terminate`
-→ `abort` means **libfranka detected a motion error and the robot refused to continue.** It is a
-robot-side safety stop, not a crash in PolyUMI code — `franka_hardware::Robot::readOnce()` simply
-does not catch the exception. `ros2_control_node` is a `required` process, so its death tears down
-the whole bringup launch.
+The future of this system is to replace the Franka Hand with a better hand, as other labs have
+done. `franka_hand_node` is the stopgap until then, and it has not yet been run on the arm:
 
-Expect a confusing cascade about 30 s later: the MoveIt bridge's in-flight execute goal runs out
-`EXECUTE_TIMEOUT_S` (30 s), cancels, and logs *"Cancel did not take effect — the arm may still be
-moving"*. That is a **downstream artifact** — the controller died half a minute earlier and the arm
-stopped with it. Read the timestamps before chasing it.
+- [ ] **On-arm dry run.** `execute_gripper:=false` (the default) plans and logs every
+      `move(width, speed)` at the real cadence without connecting to the hand.
+- [ ] **On-arm execution.** `execute_gripper:=true`, arm plan-only. Acceptance test is
+      `ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper_chirp`.
+- [ ] **Confirm or replace `latency.gripper_exec`.** Shipped at **0.0, under test** — the node now
+      schedules each Move to arrive on time by itself, so a lead here would double-compensate.
+      Revert to 0.380 if the hand runs late in service.
+- [ ] **`Grasp`**, if the closed endpoint has to be force-defined. See `gripper_range_probe`, which
+      fails when the fingers do not stall repeatably.
 
-To find the actual fault: the exact reflex name (`cartesian_reflex`, `joint_velocity_violation`, …)
-is in the **Franka Desk UI error log**, and in `fr3_bringup_<date>.log` above for anything after
-2026-08-11. You have to clear the error in Desk before bringup will come back regardless.
+Re-run the probes (`-DBUILD_HAND_PROBES=ON`) against any candidate replacement before committing to
+it — the constants above are this hand's, and nothing else in the stack will notice if they are
+wrong.
 
-Suspect the motion first. Short trajectories stitched end to end at speed produce velocity
-discontinuities at the seams, and the receding-horizon loop makes exactly that shape: a few
-waypoints per chunk, replanned from the arm's current state every ~0.6 s, with
-`max_velocity_scaling:=1.0`. Lower the scaling as the immediate mitigation. The durable fix is the
-Phase 4 streaming controller, which interpolates continuously instead of stitching plans — see
-[franka-inference-bringup.md](franka-inference-bringup.md).
 
-### Nothing publishes / Foxglove shows nothing — a duplicate or leftover launch (most common)
-Symptoms: `foxglove_bridge` aborts at startup with
-`terminate called ... Couldn't initialize websocket server: Bind Error`, and/or the GoPro frames
-stall a few seconds in — `Dropped control tick: newest camera frame is N ms old` with **N climbing
-without bound** — so `policy_client_node` stops posting and the preview topic goes quiet. Cause:
-another (or leftover) launch already holds port **8765** (foxglove) and **`/dev/video2`** (the
-camera); two processes can't share either, so the second foxglove aborts and the two camera nodes
-starve each other. Clear leftovers and confirm a single stack before relaunching:
-
-```bash
-pkill -f "ros2 launch"; pkill -f foxglove_bridge; pkill -f v4l2_camera
-ros2 node list      # expect only NUC nodes (or nothing) on the laptop before you launch
-```
-
-### TF lookup fails: "extrapolation into the past" — laptop↔NUC clock skew
-`policy_client_node` logs `TF lookup failed: Lookup would require extrapolation into the past`, with
-the "earliest data" time far *ahead* of the requested time. The NUC's wall clock is ahead of the
-laptop's, so NUC-stamped TF lands outside the buffer. (This is the first path that reads NUC TF *on
-the laptop* — Phase 2 execution runs entirely in the NUC's own time domain, so it never exposed the
-skew.) Two fixes:
-- **Proper (required before execution):** sync the clocks. The NUC is on the isolated `10.0.0.x`
-  link, usually with no internet NTP — point its chrony at the laptop (`server 10.0.0.1 iburst`,
-  with `allow 10.0.0.0/24` on the laptop's chrony) or set it manually.
-- **Dry run only:** `tf_use_latest:=true` looks up the latest EEF transform (tf2 time=0) instead of
-  the latency-aligned instant. Valid only while the arm is **stationary** (`execute_motion:=false`);
-  do NOT use it for execution — a moving arm needs the time-aligned pose.
-
-### TF lookup fails: "fr3_link0 ... does not exist" / no TF at all
-Two causes, and they need opposite fixes. Tell them apart from **another** terminal, one that has
-freshly sourced `setup_franka_env.sh`:
-
-```bash
-source setup_franka_env.sh
-ros2 run tf2_ros tf2_echo fr3_link0 polyumi_tcp
-```
-
-**If that second terminal DOES see the transform,** the NUC is fine and the problem is the
-*launching shell's DDS env* — the node is on a different ROS domain (or RMW) and never reached the
-NUC at all. Confirm on the running process:
-
-```bash
-tr '\0' '\n' < /proc/$(pgrep -f policy_client_node)/environ | grep -E 'ROS_DOMAIN_ID|RMW_|CYCLONEDDS'
-```
-
-Anything other than `ROS_DOMAIN_ID=0` is the bug. This bites because **an interactive shell rc that
-exports its own `ROS_DOMAIN_ID` silently overrides the environment tmux hands a new pane** — mine
-sets 63 in `~/.oh-my-zsh/custom/hosts/conorbot.zsh`. `fr3_session.sh` sources
-`setup_franka_env.sh` into the laptop pane it creates, so the pane it made is correct; a pane you
-open *by hand* (or one you open after the original died) is not, and it inherits
-`RMW_IMPLEMENTATION` and `CYCLONEDDS_URI` from tmux while the rc resets the domain — a
-half-configured state that looks right in every way except the one that matters. The fix is just
-`source setup_franka_env.sh` before launching, which is why the pre-typed launch line carries it
-inline. Everything laptop-local — camera, Pi stream, Foxglove — works throughout, which is what
-makes this slow to spot; the arm is the only thing coming over the wire, so it is the only thing
-missing. Since 2026-08-17 `policy_client_node` logs an ERROR naming this on the first tick when no
-`fr3_link0` transform has *ever* arrived, so check the log before doing any of the above.
-
-**If the second terminal does NOT see it either,** the NUC's `fr3-bringup` has died (it can crash
-mid-session) — `ros2 topic info /tf_static` will show `Publisher count: 0`. Restart `fr3-bringup`
-on the NUC; TF returns within a second or two.
-
-### The finger LED goes dark mid-run (streaming keeps working)
-Two processes are driving the same PWM pin. `polyumi-pi.service` runs `start-scene` on boot, and
-both `start-scene` and `stream` construct an `LEDManager`; whichever constructs one *last* wins,
-because `HardwarePWM.start(0)` sets the duty cycle to 0. The loser keeps running and goes on
-believing its LED is lit — it holds no lock and gets no error.
-
-What makes it intermittent is `Restart=on-failure`: the service keeps failing while `stream` holds
-the camera, and every retry re-runs the constructor and re-darkens the LED. Observed 2026-08-17
-with `NRestarts=18` against a `stream` that had been up 46 minutes.
-
-Confirm it from the hardware rather than guessing — the two failure modes look identical from the
-outside but leave different sysfs state:
-
-```bash
-ssh <pi> 'cat /sys/class/pwm/pwmchip0/pwm0/{enable,duty_cycle}'
-```
-
-`enable=1, duty_cycle=0` is this bug — something re-zeroed the duty cycle. `enable=0` instead means
-a `close()`/`stop()` ran, i.e. an `LEDManager` was garbage-collected or a command exited.
-
-`fr3_session.sh` now runs `sudo systemctl stop polyumi-pi` before `polyumi-pi stream`, so a session
-brought up through it is immune. If you start `stream` by hand, stop the service yourself first —
-and note that stopping it *after* the LED has gone dark is not enough, since nothing re-sets the
-brightness; restart `stream` too.
-
-### Inference latency: the observation payload costs more than the policy
-`policy_client_node` reports its own round trip as `inference=NNNms`, and the server logs
-`-> 200 in NNN ms, model NNms` per request (the `model` figure is GPU time, measured through the
-`.cpu()` copy so async kernel launches can't hide in it). Read them together before tuning
-anything.
-
-Measured 2026-08-17, checkpoint `2026.08.16/04.56.45`, laptop on WiFi:
-
-| | |
-|---|---|
-| model (GPU) | 92-95 ms, and it does not vary |
-| server total | 190-380 ms |
-| client round trip | 180-330 ms |
-| network | 4 ms ping, ~40-70 ms for the body |
-
-So `total - model` — base64 decode plus JSON parse of the request — is **100-285 ms, more than the
-diffusion pass it feeds**. The client sends `n_obs_steps x 224 x 224 x 3` as **float32**, which
-base64s to **1.61 MB** per request at the default `n_obs_steps: 2`.
-
-The obvious lever is sending `uint8` instead: 4x smaller, and the client already holds the frame
-as uint8 before it converts. It is deliberately **not** done yet — it changes the wire contract on
-both sides at once, and float32→uint8 is a real fidelity question next to the resize
-interpolation skew already known to exist between training and inference. Measure before assuming
-it is free.
-
-What is *not* the problem, despite looking like it: GPU contention. sheep is shared and GPU 0 is
-where everyone lands, but the `model` figure holds at 93 ms regardless. Pin the server to a quiet
-card with `CUDA_VISIBLE_DEVICES=1 ./serve_policy.sh` if you like — it is one env var — but do not
-expect it to buy the second back. There is no multi-GPU path and no point adding one: single-sample
-inference cannot be split across cards.
-
-> Beware of measuring during a restart. Uvicorn holds the port while `lifespan` loads the
-> checkpoint, so every request that arrives during the load blocks for the whole load and the
-> client reports seconds. That backlog is what produced a bogus "1.4-1.8 s" reading on 2026-08-17.
-> Let it settle before trusting a number.
-
-### Every tick dropped: "capture pipeline stalled" — camera latency, not a stall
-The Elgato HD60 X presents the GoPro feed as **1080p YUYV**, and `v4l2_camera` does a *software*
-YUYV→RGB conversion (it logs "possibly slow conversion") into a ~6 MB `rgb8` message — adding
-~200 ms of stamp-to-usable latency, past the default ~50 ms freshness limit. Raise it with
-`max_image_age_s:=0.3`. This only tolerates older frames; image and pose stay aligned to the
-frame's capture stamp, so it's safe for the dry run. For **execution**, prefer a genuinely faster
-camera path (lower published resolution, or the compressed transport) so the policy isn't acting on
-200 ms-old vision.
-
-### `gripper_state_age_s` spikes to seconds while the topic itself looks fine
-Check the topic before blaming it: if `ros2 topic hz /fr3_gripper/joint_states` reports a healthy
-~20 Hz and `arrival - header.stamp` is sub-millisecond, the transport and the clocks are fine and
-the *subscriber* is starved.
-
-Found 2026-08-11: `policy_client_node`'s gripper subscription shared the node's default
-`MutuallyExclusiveCallbackGroup` with the image subscription, and 60 Hz of 6 MB `rgb8`
-deserialization monopolised it — gripper callbacks gapped up to **1.4 s** and ~20% of samples were
-dropped (14.6 Hz delivered against a 17.9 Hz topic). Giving the subscription its own callback group
-brought the worst gap to 122 ms, matching the topic's own worst interval.
-
-This is worth recognising because it does **not** announce itself as an error. `_gripper_width_at`
-holds its nearest endpoint outside the buffer span, so a starved buffer feeds the policy a stale
-`agent_pos[7]` that looks like a plausible width. The tells are `gripper_state_age_s` far above the
-topic's publish interval, and `max_gripper_age_s` warnings on most ticks.
-
-Any *new* high-rate subscription added to this node needs the same treatment — put it in its own
-callback group, or it will starve whatever shares one with it.
-
-### Gripper: a stream of `Command aborted!` / "Gripper move failed"
-`franka_gripper` accepts every goal and never preempts; libfranka aborts whichever command a new
-one supersedes, so each superseded goal ends ABORTED. A steady stream of these means
-`fr3_gripper_bridge` is sending goals far too fast — check that `min_command_period_s` and
-`width_deadband_m` are actually applied (a deadband of 0 with a noisy commanded width will fire
-every period). Occasional aborts when the width changes quickly are expected and logged at info.
-
-### Gripper never moves
-In order: is `fr3_gripper_bridge` running with `execute:=true` (it defaults to false)? Does
-`ros2 action list | grep fr3_gripper` show the four servers — if not, `fr3-bringup` was started with
-`load_gripper:=false`. Is anything arriving on `/polyumi/target_gripper` (`ros2 topic hz`)? If the
-laptop publishes but the NUC sees nothing, suspect the `JointTrajectory` message crossing the
-rmw-version gap — compare against `/polyumi/target_poses`, which is known to cross fine. Finally,
-a commanded width inside `width_deadband_m` of the current one is *intentionally* not sent.
-(The `JointTrajectory` message itself is known to cross the laptop↔NUC rmw gap intact — that has
-been verified, so it is not the likely culprit.)
-
-### First inference times out, then recovers
-The first `/predict_cartesian/` after the server starts includes GPU/model warmup and can exceed
-the POST timeout (`POST ... failed: timed out`). It self-recovers next tick; raise `post_timeout_s`
-if it persists.
-
-### "Whole action chunk stale for both devices" — nothing moves at all
-Not a warmup blip and not survivable: when this fires, **neither bridge is published to**, so the
-arm and the hand both sit still while everything else looks healthy. Watch
-`/polyumi/diag/n_published_arm` — it is pinned at 0.
-
-The cause is arithmetic, not a fault. The chunk has to span the entire observation→motion budget:
-
-```
-obs age at response  +  latency.<device>_exec   <   n_action_steps * action_dt
-```
-
-Measured 2026-08-10 that was `0.59 + 0.70 = 1.30 s` against a chunk of `8 × 0.1 = 0.8 s`, so every
-action had already elapsed and all 8 were dropped, every tick. `n_action_steps: 16` (the model's
-full `action_horizon`) gives 1.6 s and clears it. The warning prints all the terms, so read them off
-it rather than guessing which one grew.
-
-Note the counts are now per device (`dropped 13 arm / 12 gripper`) and each uses its own
-`latency.*_exec`, so a chunk too stale for the arm can still drive the hand. The budget arithmetic
-and how each latency was measured are in
-[calibration-instructions.md](calibration-instructions.md), "Latencies".
-
-### The arm holds still while the gripper works — the streaming controller is not active
-
-Both executors subscribe to their own topic, so a stack where the impedance controller was spawned
-but never activated looks entirely healthy: the policy logs chunks, `n_published_arm` is non-zero,
-and nothing errors. The arm just does not move.
-
-```bash
-ros2 control list_controllers   # on the NUC
-```
-
-Exactly one of `fr3_arm_controller` / `polyumi_cartesian_impedance_controller` must be `active`. If
-the impedance controller is `inactive`, activate it (see [Action-chunk execution](#action-chunk-execution)).
-If *neither* is active, a `/polyumi/home` probably failed midway — it deactivates one before
-activating the other.
-
-Its own log line is the other tell: on activation it prints the pose it is holding and the
-`fr3_hand_tcp -> polyumi_tcp` offset it resolved. No such line, no active controller.
-
-### The arm holds still with the controller active — every waypoint arrived in the past
-
-The controller warns `Whole chunk of N waypoints was already in the past; arm is holding`. Unlike
-the MoveIt path, it does not stall or error; the interpolator clamps at its last waypoint, so the
-arm holds its position indefinitely and everything else keeps running.
-
-Two causes, and they are distinguishable: if `latency.arm_exec` is stale (still a MoveIt planning
-figure, which is an order of magnitude larger than the servo's), the anchor is pushed so far back
-that the whole chunk lands behind `now`. Re-measure it. If the laptop and NUC clocks have drifted,
-the absolute timestamps are meaningless on arrival — check `ssh jailfranka chronyc sources` for
-`^* 10.0.0.1`, same as the TF-extrapolation failure above.
-
-Confirm the loop is live: `policy_client_node` logs one `episode /reset sent` line, then
-`action chunk n=… (dropped … arm / … gripper, inference=…ms) first: x=… y=… z=… grip=…` each tick
-(or watch `/polyumi/diag/*` as a plot instead — see [Live diagnostics](#live-diagnostics-polyumidiag)), and
-Foxglove (`ws://localhost:8765`, using the config in `ros2_ws/src/polyumi_ros2/foxglove/layouts/stream_demo.json`)
-shows the GoPro, the Pi camera/audio, FR3 TF, and the commanded chunk on
-`/polyumi/target_poses_preview`. If the client warns about TF lookups, re-check the
-[Quick checks](#quick-checks) above — the NUC must be reachable and `fr3-bringup`
-running — and see [Troubleshooting](#troubleshooting).
+Good luck, stranger!

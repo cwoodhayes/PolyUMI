@@ -34,7 +34,7 @@
   <!-- Phase 2.5: the gripper half of the action chunk goes out separately, as a
        trajectory_msgs/JointTrajectory on /polyumi/target_gripper. A PoseArray cannot carry a
        width, and the Franka Hand is action-only (no ros2_control interface), so it needs its
-       own channel and its own cadence. Consumed by nuc/fr3_gripper_bridge.py — the franka_msgs
+       own channel and its own cadence. Consumed by franka_hand_node on the NUC — the franka_msgs
        gripper actions are called from the NUC, not here. -->
   <depend>trajectory_msgs</depend>
   <!-- On the inference path: camera_preproc's resize/crop and policy_client_node's use of it, plus

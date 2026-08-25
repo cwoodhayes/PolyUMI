@@ -152,7 +152,7 @@ place, `tf_use_latest` is no longer needed for real runs — it was only a stati
 crutch for the old skew.
 
 **When debugging FR3 inference on the arm — read [docs/crb-fr3-inference.md](docs/crb-fr3-inference.md)
-FIRST, especially its Troubleshooting section, before re-diagnosing.** The common failure modes and
+FIRST, especially "When it doesn't come up" and "Gripper problems", before re-diagnosing.** The common failure modes and
 their fixes are documented there: nothing publishing / Foxglove blank (a duplicate or leftover
 launch grabbing port 8765 + `/dev/video2` — `pkill` leftovers and confirm a single stack); TF
 "extrapolation into the past" (laptop↔NUC clock skew — should be fixed durably by the chrony
