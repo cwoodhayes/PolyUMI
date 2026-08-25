@@ -52,28 +52,3 @@ gripper obs + width calibration, and the receding-horizon stride.
    `latency.finger_cam` nor `latency.piezo_mic` can be given a meaningful value. Note also that
    once either feeds the policy, the capture instant becomes the *oldest* across streams — an
    observation is only as fresh as its slowest signal.
-
-2. **The on-arm sequence**, below.
-
----
-
-## The on-arm sequence
-
-**This is the live worklist.** Steps 1–8 passed on hardware 2026-08-19 and have been
-deleted; what they established now lives in the controller and in
-[polyumi_controllers.yaml](../nuc/config/polyumi_controllers.yaml).
-
-Steps are ordered so each leaves exactly one new thing unproven. This is a **torque controller**:
-no firmware guarantees stability, so a step that looks boring is a step doing its job.
-
-`fr3_bringup` is required for every step — it owns the `controller_manager` and publishes the
-`polyumi_tcp` static TF the controller looks up on activation. Steps 4 onward also need
-`fr3_inference execute_arm:=true`. Enable FCI in the Desk UI first.
-
-- [ ] **9. Configure the end-effector load.** Nothing in this repo sets it, and the firmware's
-      gravity compensation is only as good as the payload model behind it. An unmodelled
-      end-effector shows up as a **steady-state position offset under load**, which is easy to
-      misread as needing the integral term — it is not. Do it programmatically
-      (`franka_msgs/srv/SetLoad`) so the value lives in the repo next to the gains. For scale,
-      `touch_in_the_wild` configures 1.8 kg at a CoM of (0.064, -0.06, 0.03) m for a comparable
-      UMI gripper.
