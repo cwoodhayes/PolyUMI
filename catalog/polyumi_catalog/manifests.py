@@ -61,6 +61,10 @@ class DatasetManifest:
     output: str | None = None
     n_episodes: int | None = None
     polyumi_version: str | None = None
+    #: Which ``polyumi_ingest.export.dp`` entry point produced this dataset: ``'dp'``
+    #: (visuomotor only) or ``'polyumi'`` (adds the contact-mic modality). Defaults to ``'dp'``
+    #: so manifests written before this field existed still load correctly.
+    exporter_type: str = 'dp'
     export_params: dict = field(default_factory=dict)
     members: list[DatasetMemberSpec] = field(default_factory=list)
     #: Per-episode pose-source provenance from the export (scene, session, episode, source,
@@ -84,6 +88,7 @@ class DatasetManifest:
             output=data.get('output'),
             n_episodes=data.get('n_episodes'),
             polyumi_version=data.get('polyumi_version'),
+            exporter_type=data.get('exporter_type', 'dp'),
             export_params=data.get('export_params', {}),
             members=[DatasetMemberSpec.from_dict(m) for m in data.get('members', [])],
             pose_provenance=data.get('pose_provenance', []),
@@ -98,6 +103,7 @@ class DatasetManifest:
             'task': self.task,
             'created_at': self.created_at.isoformat(),
             'polyumi_version': self.polyumi_version,
+            'exporter_type': self.exporter_type,
             'export_params': self.export_params,
             'members': [m.to_dict() for m in self.members],
             'pose_provenance': self.pose_provenance,

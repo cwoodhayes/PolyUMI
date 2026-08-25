@@ -825,6 +825,36 @@ def test_post_build_dataset_with_task_id_persists_it(tmp_path: pathlib.Path, mon
     assert 'fold_towel_v1' in task_resp.text
 
 
+def test_post_build_dataset_with_exporter_type_polyumi(tmp_path: pathlib.Path, monkeypatch):
+    """Picking the 'polyumi' exporter in the builder form runs export_scenes_to_polyumi and persists it."""
+
+    def fake_export_scenes_to_polyumi(scene_paths, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b'fake-zip')
+        return 2, []
+
+    monkeypatch.setattr('polyumi_ingest.export.dp.export_scenes_to_polyumi', fake_export_scenes_to_polyumi)
+
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec), follow_redirects=False)
+    resp = client.post('/datasets', data={'name': 'with_mic', 'scene_ids': ['scene-1'], 'exporter_type': 'polyumi'})
+    assert resp.status_code == 303
+
+    with DBSession(engine) as db:
+        from polyumi_catalog.models import Dataset
+
+        dataset = db.exec(select(Dataset).where(Dataset.name == 'with_mic')).first()
+        assert dataset.exporter_type == 'polyumi'
+
+
+def test_post_build_dataset_rejects_unknown_exporter_type(tmp_path: pathlib.Path):
+    """An unrecognized exporter_type is rejected with a 400, not a silent fallback."""
+    rec, engine = _seed(tmp_path)
+    client = TestClient(create_app(engine, recordings_dir=rec), follow_redirects=False)
+    resp = client.post('/datasets', data={'name': 'x', 'scene_ids': ['scene-1'], 'exporter_type': 'bogus'})
+    assert resp.status_code == 400
+
+
 def test_post_build_dataset_without_recordings_dir_returns_400(tmp_path: pathlib.Path):
     """Building a dataset with no recordings_dir configured is rejected, not a crash."""
     rec, engine = _seed(tmp_path)

@@ -28,6 +28,11 @@ class DatasetBuildError(ValueError):
     """A dataset build was rejected (invalid input) or the underlying export failed."""
 
 
+#: ``export-dp`` (visuomotor only) vs ``export-polyumi`` (adds the contact-mic modality; needs
+#: preprocessing step 6). See ``polyumi_ingest.export.dp``.
+_EXPORTER_TYPES = ('dp', 'polyumi')
+
+
 def _repo_git_hash() -> str | None:
     """Best-effort short-circuit git hash of this checkout, for the manifest's provenance field."""
     repo_root = pathlib.Path(__file__).resolve().parents[2]
@@ -51,6 +56,7 @@ def build_dataset(
     task_id: int | None,
     scene_ids: list[str],
     output_dir: pathlib.Path,
+    exporter_type: str,
 ) -> Dataset:
     """
     Export ``scene_ids`` into one UMI ReplayBuffer named ``name`` and record it as a Dataset.
@@ -59,8 +65,17 @@ def build_dataset(
     ``<output_dir>/<name>.dataset.json`` before touching the DB, then upserts the Dataset +
     DatasetMember rows. Raises :class:`DatasetBuildError` for invalid input or if the export
     itself fails (in which case nothing is written and no DB rows are created).
+
+    ``exporter_type`` selects which ``polyumi_ingest.export.dp`` entry point runs: ``'dp'`` for
+    the visuomotor-only ReplayBuffer, ``'polyumi'`` to add the contact-mic modality (requires
+    preprocessing step 6 on every member scene).
     """
-    from polyumi_ingest.export.dp import export_scenes_to_dp
+    if exporter_type not in _EXPORTER_TYPES:
+        raise DatasetBuildError(f'Unknown exporter type {exporter_type!r}; must be one of {_EXPORTER_TYPES}.')
+    if exporter_type == 'polyumi':
+        from polyumi_ingest.export.dp import export_scenes_to_polyumi as export_fn
+    else:
+        from polyumi_ingest.export.dp import export_scenes_to_dp as export_fn
 
     name = name.strip()
     if not name:
@@ -88,7 +103,7 @@ def build_dataset(
     manifest_path = output_dir / f'{name}.dataset.json'
 
     try:
-        n_episodes, pose_provenance = export_scenes_to_dp([pathlib.Path(s.dir) for s in scenes], output_path)
+        n_episodes, pose_provenance = export_fn([pathlib.Path(s.dir) for s in scenes], output_path)
     except (FileNotFoundError, ValueError, RuntimeError) as err:
         raise DatasetBuildError(str(err)) from err
 
@@ -100,6 +115,7 @@ def build_dataset(
         polyumi_version=_repo_git_hash(),
         members=[DatasetMemberSpec(scene_id=s.scene_id, scene_dir=s.dir, episodes='all') for s in scenes],
         pose_provenance=pose_provenance,
+        exporter_type=exporter_type,
     )
     manifest.to_file(manifest_path)
 
@@ -110,6 +126,7 @@ def build_dataset(
         output_path=str(output_path),
         n_episodes=n_episodes,
         polyumi_version=manifest.polyumi_version,
+        exporter_type=exporter_type,
     )
     db.add(dataset)
     db.flush()  # assign dataset.id
