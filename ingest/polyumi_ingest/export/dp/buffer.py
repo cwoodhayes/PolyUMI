@@ -79,9 +79,9 @@ into a ``.zarr.zip`` because ``UmiDataset`` opens its dataset through ``zarr.Zip
 **Extra observation streams** ride along as ``modalities`` (``export.dp.modality``), which
 contribute additional ``data/<key>`` arrays inside the same segment loop, and may narrow the
 validity mask where they have no observation — so a stream that stops before the others is
-trimmed around like a pose dropout rather than failing the episode. An export with none is
-byte-identical to one from before that seam existed, down to the provenance sidecar, so
-the default ``--type dp``'s contract is unchanged by anything ``--type polyumi`` adds.
+trimmed around like a pose dropout rather than failing the episode. With zero modalities
+attached, this function's output — data keys, provenance sidecar, meta attrs — *is* the default
+``--type dp`` contract; ``--type polyumi`` only ever adds to that output, never changes it.
 
 ``enforce_preprocessing`` requires only the steps an export actually reads —
 ``PreprocessingStep.required_for_export``, plus whatever its modalities declare. Demanding

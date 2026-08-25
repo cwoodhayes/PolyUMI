@@ -1,15 +1,13 @@
 """
-The seam by which an exporter contributes extra ``data/<key>`` arrays to a ReplayBuffer.
+``ExportModality``: the interface a ``--type polyumi`` stream implements to ride along.
 
-``pingest export`` (``--type dp``, the default) emits the visuomotor keys and nothing else.
-``--type polyumi`` emits those plus whatever modalities it is configured with — audio today, the
-finger camera later. Both run the *same* ``_export_episode``: the segmentation, chirp trim, pose
-resolution and provenance are hard enough to get right once, and a second copy would drift.
+Ride along in ``export.dp.buffer``'s exported ReplayBuffer, specifically — see that module's
+docstring for how the seam fits into the exporter as a whole (why it's the same code path as the
+default ``--type dp``, and what attaching zero modalities guarantees); this module is just the
+contract itself.
 
 A modality is one instance per export run, so ``prepare_episode`` may stash on ``self`` whatever
-``segment_arrays`` needs — the same shape as ``PreprocessingStep.prepare_scene``. An export with
-no modalities is byte-identical to one from before this seam existed, down to the provenance
-sidecar, which is what lets ``--type dp`` keep its contract unchanged.
+``segment_arrays`` needs — the same shape as ``PreprocessingStep.prepare_scene``.
 """
 
 from __future__ import annotations

@@ -27,8 +27,8 @@
       {% endfor %}
     </select>
     <select name="exporter_type">
-      <option value="dp">Visuomotor (export-dp)</option>
-      <option value="polyumi">+ Contact mic &amp; finger camera (export-polyumi)</option>
+      <option value="dp">Visuomotor (--type dp)</option>
+      <option value="polyumi">+ Contact mic &amp; finger camera (--type polyumi)</option>
     </select>
     {% for s in pending_scenes %}
     <input type="hidden" name="scene_ids" value="{{ s.scene_id }}" />
