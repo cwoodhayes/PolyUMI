@@ -59,53 +59,16 @@ gripper obs + width calibration, and the receding-horizon stride.
 
 ## The on-arm sequence
 
-**This is the live worklist.** Steps 1–3 (activate, push by hand, synthetic overlapping-chunk
-trajectory) and 8 (`latency.arm_exec`, 0.0810 s) passed on hardware 2026-08-19 and have been
+**This is the live worklist.** Steps 1–8 passed on hardware 2026-08-19 and have been
 deleted; what they established now lives in the controller and in
 [polyumi_controllers.yaml](../nuc/config/polyumi_controllers.yaml).
 
 Steps are ordered so each leaves exactly one new thing unproven. This is a **torque controller**:
-no firmware guarantees stability, so a step that looks boring is a step doing its job. Do not skip
-ahead to the policy.
+no firmware guarantees stability, so a step that looks boring is a step doing its job.
 
 `fr3_bringup` is required for every step — it owns the `controller_manager` and publishes the
 `polyumi_tcp` static TF the controller looks up on activation. Steps 4 onward also need
 `fr3_inference execute_arm:=true`. Enable FCI in the Desk UI first.
-
-- [ ] **4. `/polyumi/home` round trip.** `ros2 service call /polyumi/home std_srvs/srv/Trigger "{}"`.
-      **Pass:** it switches out, homes, switches back, and the arm holds still afterwards.
-      `ros2 control list_controllers` should show the impedance controller `active` again.
-
-- [ ] **5. `tcp_pivot_test` through the impedance controller.** Defaults to the timed wire format;
-      `-p wire:=pose_array` still drives the MoveIt path.
-      **Pass:** closed fingertips stay visibly still. Same check that validated the TCP under
-      MoveIt; here it additionally validates the Jacobian shift, which nothing else does in the
-      room.
-
-- [ ] **6. Arm dry run with the policy, no execution** (`execute_motion:=false`, the default).
-      1. Server on sheep: `CKPT=/abs/path/to/<name>.ckpt ./serve_policy.sh`; from the laptop
-         `curl http://<sheep-ip>:8000/health` → `ready`.
-      2. Laptop: `source setup_franka_env.sh`, NUC publishing `fr3_*` TF, GoPro streaming, then
-         `ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=http://<sheep-ip>:8000/predict_cartesian/`
-      3. Watch: node logs `mode: log-only (no motion)`, one `/reset`, then per-tick chunk logs;
-         `/health` shows `episode_start_set: true`. In Foxglove (`:8765`) add
-         `/polyumi/target_poses_preview` — the chunk should sit near the current EEF and step
-         smoothly. Wild jumps, NaNs, or off-workspace poses are the finding.
-      4. Also confirm the startup line `camera crop: 1920x1080 → 1440x1080, discarded bars mean
-         …/255 — pillarbox as expected`. An error there means the crop is eating real image.
-
-- [ ] **7. End-to-end with the policy, executing.** The finding to watch for is not accuracy, it is
-      **continuity across chunk boundaries** — no stop-and-go at 10 Hz. Compare the motion against
-      `/polyumi/target_poses_preview` in Foxglove. If the arm holds still while everything else
-      looks healthy, see [crb-fr3-inference.md](crb-fr3-inference.md), "When it doesn't come up".
-
-- [ ] **8. Deliberate contact.** Drive into a fixed surface.
-      **Pass:** the arm complies and does not trip Franka's collision monitor. If it does, raise
-      `collision.*` in [polyumi_controllers.yaml](../nuc/config/polyumi_controllers.yaml) — the
-      controller applies those itself and refuses to configure if they do not take, so a fault
-      here means the values are still too low for this task, not that nothing is applying them.
-      **Do step 9 first if this behaves oddly** — a mis-modelled payload and a real contact force
-      are hard to tell apart, and the payload is the cheaper of the two to rule out.
 
 - [ ] **9. Configure the end-effector load.** Nothing in this repo sets it, and the firmware's
       gravity compensation is only as good as the payload model behind it. An unmodelled
