@@ -1,11 +1,11 @@
 """
-Golden vectors for the camera0_rgb preprocessing contract — the single copy, read by both sides.
+Golden vectors for the camera preprocessing contracts — the single copy, read by both sides.
 
 The contract itself is implemented twice, once per Python environment
 (``polyumi_ingest.camera_preproc`` and ``polyumi_ros2.camera_preproc``), because the two cannot
 share an import: ``polyumi_ingest`` requires Python >= 3.13 while the ROS node runs Ubuntu 24.04's
 ``/usr/bin/python3`` (3.12), and it would drag ``polyumi_pi``/zarr/scipy into the inference
-process. See ``docs/data-format.md`` ("camera0_rgb preprocessing contract").
+process. See ``docs/data-format.md`` ("Camera preprocessing contracts").
 
 Identical *source* is not the guarantee that matters, though — identical *output* is. The two
 environments run different library majors (measured 2026-08-09: ROS ``cv2 4.6.0`` /
@@ -16,7 +16,8 @@ bytes is the only check that covers that.
 So the expectations live here, once, and both test suites read *this file*: the ingest suite
 imports it (pytest puts ``ingest/test`` on ``sys.path``), and
 ``ros2_ws/src/polyumi_ros2/test/test_camera_preproc.py`` loads it **by path**. Two copies of the
-digests could drift apart silently and would then be asserting nothing; one copy cannot.
+digests could drift apart silently and would then be asserting nothing; one copy cannot. Both
+contracts live here for that reason, sharing the one :func:`golden_frame`.
 
 **Moving or renaming this file breaks the ROS-side test** — it hardcodes the path. Grep first.
 
@@ -31,10 +32,28 @@ import numpy as np
 #: and a ``gopro.mp4`` training frame, where it is a no-op. A changed digest means checkpoints
 #: already trained are on a transform the inference node no longer reproduces — regenerate these
 #: only when that is the intent, never to turn a red test green.
-GOLDEN_VECTORS = [
+CAMERA0_GOLDEN_VECTORS = [
     (1080, 1920, 'a9500a802012045302349f98f6390de6860bc74333765d1331715d4f89ea468f'),
     (2028, 2704, 'a4db72e016d56270136acb705af7d4d08d5899e9aeb0ae55c6b73576dc31a301'),
 ]
+
+#: ``(height, width, output_size, crop kwargs, sha256 of crop_finger_rgb(golden_frame(h, w), ...))``.
+#:
+#: 620x480 is the finger camera's real resolution, and ``x_min=150`` the crop shipped in
+#: ``ingest/config/finger_camera.yaml``. Two entries because the two paths have different
+#: exposure: ``output_size=None`` is a pure array slice, exact in any numpy, and pins the two
+#: *sources* against each other; the resized entry pins ``cv2.INTER_AREA``, whose C++
+#: implementation differs between the environments' library majors, so ``output_size`` can be
+#: switched on later without anything silently skewing.
+FINGER_GOLDEN_VECTORS = [
+    (480, 620, None, 'b90ea714033629d70bfa9b4e1c773bc2b7c4e7cc528c3cff56f7802a6770645b'),
+    (480, 620, (224, 224), '5e598bd5d142c2334106e6afaef33dfd9c271278d0029d8c988ba3db2e09cd83'),
+]
+
+#: Crop bounds the finger golden vectors are taken at — the shipped configuration, so a change to
+#: ``finger_camera.yaml`` that these digests do not reflect is visible as a mismatch of intent
+#: rather than passing silently.
+FINGER_GOLDEN_CROP = {'x_min': 150, 'x_max': None, 'y_min': 0, 'y_max': None}
 
 
 def golden_frame(h: int, w: int) -> np.ndarray:

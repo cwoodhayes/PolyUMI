@@ -110,7 +110,7 @@ class PolicyClientNode(Node):
         # 224 matches the model's shape_meta (camera0_rgb [3,224,224]). The resize below MUST
         # match the DP exporter's camera0_rgb contract exactly (RGB, 224x224, INTER_AREA, no
         # crop) — same pixels at train and inference. See ingest camera_preproc.resize_camera0_rgb
-        # and docs/data-format.md ("camera0_rgb preprocessing contract").
+        # and docs/data-format.md ("Camera preprocessing contracts").
         self.declare_parameter('image_width', 224)
         self.declare_parameter('image_height', 224)
         # Max age (s) of the newest cached camera frame before a tick is dropped as a stalled
