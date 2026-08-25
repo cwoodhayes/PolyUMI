@@ -77,9 +77,3 @@ no firmware guarantees stability, so a step that looks boring is a step doing it
       (`franka_msgs/srv/SetLoad`) so the value lives in the repo next to the gains. For scale,
       `touch_in_the_wild` configures 1.8 kg at a CoM of (0.064, -0.06, 0.03) m for a comparable
       UMI gripper.
-
-- [ ] **10. Retire the MoveIt executor from the inference path.** Only after 7 passes. Delete
-      `_on_target`, `_plan_cartesian`, `_run_execute` and the `PoseArray` subscription from
-      `nuc/fr3_moveit_bridge.py`, and the `PoseArray` command publisher (not the preview) from
-      `policy_client_node.py`. The node stays for `/polyumi/home`. `target_chunk.Wire` then
-      collapses to one member and the `wire`/`executor` flags come out with it.

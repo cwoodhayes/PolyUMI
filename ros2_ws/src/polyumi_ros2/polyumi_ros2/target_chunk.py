@@ -1,18 +1,13 @@
 """
-Wire formats for a chunk of target EEF poses, and one publisher that speaks either.
+The wire format for a chunk of target EEF poses, and one publisher that speaks it.
 
-Two executors consume target poses and they disagree about time:
+The streaming Cartesian impedance controller takes a ``MultiDOFJointTrajectory``, where every
+waypoint has an absolute instant (``header.stamp + time_from_start``) that its interpolator
+splices on. Every producer of target poses — the policy client and both on-arm probes — builds
+this same message via ``TargetChunkPublisher``.
 
-* ``fr3_moveit_bridge`` takes a ``PoseArray``. It carries no timing at all — the bridge re-times
-  the chunk from whenever it happens to arrive.
-* the streaming Cartesian impedance controller takes a ``MultiDOFJointTrajectory``, where every
-  waypoint has an absolute instant (``header.stamp + time_from_start``) that its interpolator
-  splices on.
-
-Every producer of target poses — the policy client and both on-arm probes — therefore has to build
-one of two messages from the same list of poses, and has to be switchable between them while both
-executors exist. That is this module. It goes away with the ``PoseArray`` half once the MoveIt path
-is retired, at which point ``TargetChunkPublisher`` collapses to the trajectory builder.
+``Wire`` is a single-member enum rather than a bare constant because ``.default_topic``/
+``.consumer`` are still useful for logging, and ``Wire(value)`` still validates a caller's string.
 """
 
 from enum import StrEnum
@@ -24,36 +19,27 @@ from trajectory_msgs.msg import MultiDOFJointTrajectory, MultiDOFJointTrajectory
 
 class Wire(StrEnum):
     """
-    Which executor a chunk is aimed at, and therefore how it is encoded.
+    Which wire format a chunk is encoded as.
 
     A StrEnum so it drops straight into a ROS string parameter and compares equal to the literal,
     while ``Wire(value)`` does the validation — a typo raises rather than silently publishing to a
     topic nobody is subscribed to.
     """
 
-    #: Untimed poses, consumed by fr3_moveit_bridge.
-    POSE_ARRAY = 'pose_array'
     #: Absolutely-timed poses, consumed by the streaming impedance controller.
     MULTIDOF = 'multidof'
 
     @property
     def default_topic(self) -> str:
-        """One topic per format, so neither executor is ever handed a message it cannot parse."""
+        """Topic this format publishes on."""
         return {
-            Wire.POSE_ARRAY: '/polyumi/target_poses',
             Wire.MULTIDOF: '/polyumi/target_poses_traj',
         }[self]
 
     @property
     def consumer(self) -> str:
-        """
-        What must be running for this format to reach the arm, for 'nobody is listening' errors.
-
-        The two fail differently: the bridge is a process that is either up or not, while the
-        controller can be loaded and still not subscribed because it was never activated.
-        """
+        """What must be running for this format to reach the arm, for 'nobody is listening' errors."""
         return {
-            Wire.POSE_ARRAY: ('fr3_moveit_bridge (ros2 launch nuc/launch/fr3_inference.launch.py on the NUC)'),
             Wire.MULTIDOF: (
                 'polyumi_cartesian_impedance_controller, ACTIVE — being loaded is not enough; '
                 'check `ros2 control list_controllers` on the NUC'
@@ -110,11 +96,11 @@ def multidof_trajectory(
 
 class TargetChunkPublisher:
     """
-    Publishes pose chunks in whichever wire format the running executor speaks.
+    Publishes pose chunks as a timed MultiDOFJointTrajectory for the streaming controller.
 
     Wraps a plain publisher rather than replacing it, so callers keep ``topic_name`` and
-    ``get_subscription_count()`` — aiming at the wrong executor is otherwise silent, since the
-    other one simply never subscribes and nothing moves with no error anywhere.
+    ``get_subscription_count()`` — aiming at a topic nobody subscribes to is otherwise silent,
+    since nothing moves and there is no error anywhere.
     """
 
     def __init__(
@@ -136,8 +122,7 @@ class TargetChunkPublisher:
         self._frame_id = frame_id
         self._joint_name = joint_name
         self._node = node
-        msg_type = PoseArray if self._wire is Wire.POSE_ARRAY else MultiDOFJointTrajectory
-        self._pub = node.create_publisher(msg_type, topic or self._wire.default_topic, qos)
+        self._pub = node.create_publisher(MultiDOFJointTrajectory, topic or self._wire.default_topic, qos)
 
     @property
     def wire(self) -> Wire:
@@ -150,28 +135,24 @@ class TargetChunkPublisher:
         return self._pub.topic_name
 
     def get_subscription_count(self) -> int:
-        """How many subscribers the topic has — i.e. whether an executor is listening."""
+        """How many subscribers the topic has — i.e. whether the controller is listening."""
         return self._pub.get_subscription_count()
 
     def publish(self, poses: list[Pose], *, dt: float = 0.0, first_index: int = 0, stamp=None) -> None:
         """
-        Publish `poses` in this publisher's wire format.
+        Publish `poses` as a MultiDOFJointTrajectory.
 
-        `dt` and `first_index` are ignored for PoseArray, which carries no timing. `stamp` defaults
-        to now; pass an earlier instant to command ahead of time, which is how action latency is
-        compensated. See multidof_trajectory for what first_index indexes into.
+        `stamp` defaults to now; pass an earlier instant to command ahead of time, which is how
+        action latency is compensated. See multidof_trajectory for what first_index indexes into.
         """
         stamp = stamp if stamp is not None else self._node.get_clock().now().to_msg()
-        if self._wire is Wire.POSE_ARRAY:
-            self._pub.publish(pose_array(poses, frame_id=self._frame_id, stamp=stamp))
-        else:
-            self._pub.publish(
-                multidof_trajectory(
-                    poses,
-                    frame_id=self._frame_id,
-                    joint_name=self._joint_name,
-                    stamp=stamp,
-                    dt=dt,
-                    first_index=first_index,
-                )
+        self._pub.publish(
+            multidof_trajectory(
+                poses,
+                frame_id=self._frame_id,
+                joint_name=self._joint_name,
+                stamp=stamp,
+                dt=dt,
+                first_index=first_index,
             )
+        )

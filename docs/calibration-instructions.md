@@ -227,7 +227,7 @@ Chirps the commanded EEF pose sideways and cross-correlates it against where `po
 went. **This moves the arm.**
 
 1. **Bring up the arm with execution on**, and get it somewhere roomy — edge poses fail to plan.
-   `executor` defaults to `servo`, so this activates the impedance controller:
+   `execute_arm:=true` activates the streaming impedance controller:
    ```bash
    # NUC
    ros2 launch nuc/launch/fr3_inference.launch.py execute_arm:=true
@@ -279,9 +279,6 @@ went. **This moves the arm.**
   published waypoint lands at ~now regardless — but not in *phase*: overstating it skips
   `arm_exec / action_dt` steps ahead in the policy's intended trajectory. Carrying the old MoveIt
   planning figure over to the servo would be several steps of skip.
-- **`-p wire:=pose_array` measures a different quantity**, not the same one less well: it drives
-  `fr3_moveit_bridge`, and returns a planning time dominated by `max_velocity_scaling`. Only use it
-  while the MoveIt executor still exists.
 - **The old ±20 ms bound was MoveIt's fault and is gone.** Correlation accuracy is set by excitation
   bandwidth, and the planner's cadence used to cap how fast the arm could be swept. The servo
   removes that cap, so expect a far sharper peak. A result still in the hundreds of milliseconds

@@ -15,7 +15,6 @@ import pytest
 import rclpy
 from rclpy.parameter import Parameter
 
-from polyumi_ros2.target_chunk import Wire
 from polyumi_ros2.tcp_pivot_test import (
     TcpPivotTest,
     axis_quat,
@@ -140,21 +139,6 @@ def test_sweep_carries_the_waypoint_spacing():
 
         _, kwargs = published[0]
         assert kwargs['dt'] == pytest.approx(0.25)
-    finally:
-        node.destroy_node()
-
-
-def test_defaults_to_the_streaming_controller():
-    """
-    The streaming controller is the executor this test is for; MoveIt is the legacy path.
-
-    Defaulting the other way would silently drive the wrong executor, and the pivot would report a
-    drift figure for a controller nobody is validating. The wire formats themselves are covered by
-    test_target_chunk.py; what matters here is which one this node picks when told nothing.
-    """
-    node = TcpPivotTest()
-    try:
-        assert node._pub.wire is Wire.MULTIDOF
     finally:
         node.destroy_node()
 

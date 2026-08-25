@@ -129,7 +129,7 @@ def test_home_uses_the_long_execute_timeout(make_node):
 
 
 def test_home_refused_while_a_chunk_is_in_flight(make_node):
-    """The busy lock is shared with _on_target, so homing must not cut in on a running plan."""
+    """A concurrent /polyumi/home call must not cut in on one already planning/executing."""
     node = make_node()
     _stub_plan_ok(node)
     executed = _capture_execute(node)

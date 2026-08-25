@@ -1,15 +1,14 @@
 """
-Tests for the two chunk wire formats and the publisher that picks between them.
+Tests for the chunk wire format and the publisher that builds it.
 
 Three producers build these messages — the policy client and both on-arm probes — so the format
-rules are tested once here rather than through each of them. What the individual nodes still test
-is their own DEFAULT, since aiming a probe at the wrong executor is silent.
+rules are tested once here rather than through each of them.
 """
 
 import pytest
 import rclpy
 from builtin_interfaces.msg import Time
-from geometry_msgs.msg import Pose, PoseArray
+from geometry_msgs.msg import Pose
 from rclpy.node import Node
 from trajectory_msgs.msg import MultiDOFJointTrajectory
 
@@ -48,25 +47,13 @@ def _stamp(seconds: float):
     return Time(sec=int(seconds), nanosec=int((seconds % 1) * 1e9))
 
 
-@pytest.mark.parametrize(
-    ('wire', 'topic', 'msg_type'),
-    [
-        (Wire.MULTIDOF, '/polyumi/target_poses_traj', MultiDOFJointTrajectory),
-        (Wire.POSE_ARRAY, '/polyumi/target_poses', PoseArray),
-    ],
-)
-def test_each_wire_gets_its_own_topic_and_type(node, wire, topic, msg_type):
-    """
-    Separate topics per format, so both executors can run and neither sees a message it cannot parse.
+def test_multidof_gets_its_own_topic_and_type(node):
+    """The publisher resolves the default topic and builds the right message type."""
+    pub = TargetChunkPublisher(node, wire=Wire.MULTIDOF, frame_id='fr3_link0', joint_name='polyumi_tcp')
 
-    Publishing the wrong type at the right topic is silent — the other executor simply never
-    subscribes, and nothing moves with no error anywhere.
-    """
-    pub = TargetChunkPublisher(node, wire=wire, frame_id='fr3_link0', joint_name='polyumi_tcp')
-
-    assert pub.wire is wire
-    assert pub.topic_name == topic
-    assert pub._pub.msg_type is msg_type
+    assert pub.wire is Wire.MULTIDOF
+    assert pub.topic_name == '/polyumi/target_poses_traj'
+    assert pub._pub.msg_type is MultiDOFJointTrajectory
 
 
 def test_unknown_wire_fails_fast(node):
