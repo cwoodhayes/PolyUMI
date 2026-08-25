@@ -1,5 +1,7 @@
 """
-The one definition of PolyUMI's TCP frame on the FR3 — where the *policy* thinks the EEF is.
+The measured constants of what PolyUMI bolts to the FR3's flange: the TCP frame, and the payload.
+
+The TCP frame is where the *policy* thinks the EEF is; the payload is what that assembly weighs.
 
 The policy is trained on poses expressed at the closed-fingertip midpoint, in GoPro **optical**
 axes (x right, y down, z forward). See ``T_gopro_to_fingertip`` in ingest/config/gripper_calib.yaml
@@ -107,6 +109,54 @@ HAND_STATIC_TRANSFORMS = (
 )
 
 
+# --------------------------------------------------------------------------------------------
+# The payload — everything past the flange, as libfranka's gravity compensation needs to know it.
+#
+# The FCI cancels gravity for the mass it knows about (m_ee + m_load) and nothing else. Whatever is
+# unmodelled is a constant force the cartesian impedance spring has to fight, and it settles at
+# dz = m * g / K_trans — a steady-state droop the moment the controller activates. Pushed once at
+# bringup via franka_msgs/srv/SetLoad; see fr3_bringup.launch.py.
+#
+# MASS is the *residual*, not the whole assembly: Desk's end-effector config already supplies m_ee
+# (the Franka Hand, 0.73 kg), so this covers only the GoPro, its mount and the PolyUMI fingers. If
+# Desk's end effector is set to "None" it has to carry the hand too. Check which before touching
+# the number:
+#
+#     ros2 topic echo /franka_robot_state_broadcaster/robot_state --field inertia_ee --once
+#
+# Note franka_hardware reads no payload from the URDF (only robot_ip and arm_id), so an <inertial>
+# block in fr3_polyumi.urdf.xacro would change nothing here — setLoad or Desk are the only levers.
+PAYLOAD_MASS = 0.5  # kg
+
+# In fr3_hand, which uses the same frame orientation as TCP_XYZ, so the two are directly comparable
+# (see the linear offset in TCP_XYZ above, positioned at the fingertips). setLoad wants it in the FLANGE,
+# which is a 45 deg yaw away — payload_com_flange() does
+# that conversion off HAND_STATIC_TRANSFORMS. Do not write flange coordinates here.
+
+# guesswork; I'd say CoM is about 1/3 of the way along the fingers due to GoPro being far back.
+# and then about 40mm up (which is neg. in this frame) from the finger surface, again due to the gopro
+# and the x is a bit to the right, looking out from the camera, due to the shape of the gopro.
+PAYLOAD_COM_HAND = (0.01, TCP_XYZ[1] - 0.04, TCP_XYZ[2] / 3)  # m
+
+# The FR3 firmware validates the tensor before it looks at anything else, and a nonzero mass with a
+# zero inertia is a physical impossibility it rejects outright:
+#
+#     libfranka: Set Load command rejected: invalid argument!
+#
+# So this cannot be left at zero the way UMI, SERL and polymetis leave it — they all reach the load
+# through Desk, which derives a tensor for them. It is approximated as a uniform solid box, which is
+# both good enough (inertia only enters the acceleration terms, and we move slowly) and self-
+# consistent by construction: the principal moments of a real box always satisfy the triangle
+# inequality the firmware checks, at whatever mass.
+#
+# Bounding box of the whole assembly past the flange, metres, ordered (x, y, z) in fr3_hand
+# fr3_hand frame is at the flange. z is approach axis out through the fingers, x is up (ie out from
+# the ArUco tag face of the fingers), and y is to the right (along the finger travel axis)
+# Can estimate this from the CAD. These numbers generate a symmetrical bounding box.
+# it is then shifted to be centered at the center of mass above.
+PAYLOAD_EXTENTS = (0.12, 0.16, 0.27)
+
+
 def _stp_args(xyz, rpy, parent, child) -> list[str]:
     """tf2_ros static_transform_publisher argv for one fixed transform."""
     x, y, z = xyz
@@ -142,6 +192,50 @@ def hand_transform_publishers() -> list[tuple[str, list[str]]]:
     ]
 
 
+def payload_com_flange() -> tuple[float, float, float]:
+    """
+    Convert :data:`PAYLOAD_COM_HAND` into ``fr3_link8``, which is the frame setLoad's F_x_Cload is in.
+
+    The rotation is read out of :data:`HAND_STATIC_TRANSFORMS` rather than re-typed, so the flange's
+    mounting yaw stays defined once. That entry's translation is (0, 0, 0) — the two origins
+    coincide — so this is a pure rotation.
+    """
+    (_, _, _, (_, _, yaw)) = next(t for t in HAND_STATIC_TRANSFORMS if t[1] == TCP_PARENT)
+    x, y, z = PAYLOAD_COM_HAND
+    return (
+        x * math.cos(yaw) - y * math.sin(yaw),
+        x * math.sin(yaw) + y * math.cos(yaw),
+        z,
+    )
+
+
+def payload_inertia() -> tuple[float, ...]:
+    """
+    Approximate the payload's inertia tensor as a uniform solid box, column-major about its CoM.
+
+    Computed rather than written down so it stays consistent with :data:`PAYLOAD_MASS`: the FR3
+    rejects a nonzero mass carrying a zero tensor, and a stale hand-typed tensor is the easy way
+    back into that. Off-diagonal terms are zero — the box is taken as axis-aligned.
+    """
+    w, d, h = PAYLOAD_EXTENTS
+    k = PAYLOAD_MASS / 12.0
+    ixx, iyy, izz = k * (d**2 + h**2), k * (w**2 + h**2), k * (w**2 + d**2)
+    return (ixx, 0.0, 0.0, 0.0, iyy, 0.0, 0.0, 0.0, izz)
+
+
+def set_load_request() -> str:
+    """Build the franka_msgs/srv/SetLoad request literal for a `ros2 service call`."""
+    com = ', '.join(str(v) for v in payload_com_flange())
+    inertia = ', '.join(str(v) for v in payload_inertia())
+    return f'{{mass: {PAYLOAD_MASS}, center_of_mass: [{com}], load_inertia: [{inertia}]}}'
+
+
 def describe() -> str:
     """One-line summary of the TCP in force, logged at bringup so it is never a mystery."""
     return f'{TCP_PARENT} -> {TCP_CHILD}: xyz={TCP_XYZ} rpy={TCP_RPY} (nuc/tcp_calib.py)'
+
+
+def describe_payload() -> str:
+    """One-line summary of the payload pushed to the FCI, for the same reason as :func:`describe`."""
+    com = tuple(round(v, 4) for v in payload_com_flange())
+    return f'payload: {PAYLOAD_MASS} kg, CoM {com} in fr3_link8 (nuc/tcp_calib.py)'
