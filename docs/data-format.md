@@ -81,19 +81,34 @@ scene.zarr/
 │       │   ├── n_relocalization_events    scalar int
 │       │   ├── orb_slam3_settings_path    scalar str
 │       │   └── atlas_path                 scalar str
-│       └── gripper_width/          populated by step 4
-│           ├── width_m             (N_gopro,) float32 — meters, interpolated across full frame grid
-│           ├── raw_widths_m        (N_detections,) float32 — detections only
-│           ├── raw_timestamps_s    (N_detections,) float64
-│           ├── finger_corners      (N_gopro, 2, 4, 2) float32 — ArUco corner pixel coords per frame
-│           ├── detection_rate      scalar float
-│           ├── n_detected          scalar int
-│           ├── n_frames            scalar int
-│           ├── left_id             scalar int — ArUco marker ID
-│           ├── right_id            scalar int — ArUco marker ID
-│           ├── marker_size_m       scalar float
-│           ├── nominal_z_m         scalar float
-│           └── z_tolerance_m       scalar float
+│       ├── gripper_width/          populated by step 4
+│       │   ├── width_m             (N_gopro,) float32 — meters, interpolated across full frame grid
+│       │   ├── raw_widths_m        (N_detections,) float32 — detections only
+│       │   ├── raw_timestamps_s    (N_detections,) float64
+│       │   ├── finger_corners      (N_gopro, 2, 4, 2) float32 — ArUco corner pixel coords per frame
+│       │   ├── detection_rate      scalar float
+│       │   ├── n_detected          scalar int
+│       │   ├── n_frames            scalar int
+│       │   ├── left_id             scalar int — ArUco marker ID
+│       │   ├── right_id            scalar int — ArUco marker ID
+│       │   ├── marker_size_m       scalar float
+│       │   ├── nominal_z_m         scalar float
+│       │   └── z_tolerance_m       scalar float
+│       └── contact_audio/          populated by step 6
+│           ├── frame_blocks              (N_gopro, B) float32 — piezo samples for each GoPro frame
+│           ├── frame_block_start_idx     (N_gopro,) int64 — each block's start in finger/finger_piezo
+│           ├── logmel                    (N_hops, n_mels) float32 — DIAGNOSTIC ONLY; nothing trains on it
+│           ├── logmel_timestamps         (N_hops,) float64 — UTC seconds, hop centres
+│           ├── sample_rate_hz            scalar int
+│           ├── samples_per_gopro_frame   scalar int — B
+│           ├── block_alignment           scalar str — causal | forward
+│           ├── nominal_samples_per_frame scalar float — median anchor spacing
+│           ├── max_frame_spacing_samples scalar int
+│           ├── n_frames                  scalar int
+│           ├── n_frame_gaps              scalar int — intervals wider than B, i.e. dropped GoPro frames
+│           ├── n_zero_filled_samples     scalar int — blocks reading past the end of the recording
+│           ├── coverage                  scalar float — fraction of the piezo array the blocks span
+│           └── rms                       scalar float — did the mic record anything at all
 └── optitrack/                      scene-level (only if OptiTrack CSVs were found at ingest)
     ├── pose                        (N_optitrack, 7) float64 — [x, y, z, qx, qy, qz, qw]
     └── timestamps                  (N_optitrack,) float64 — UTC seconds
@@ -132,6 +147,7 @@ Steps are tracked in `preprocessing_steps` (list of completed step numbers) in t
 | 3 | `slam-optitrack-align` | gopro/slam_poses, optitrack/pose, timestamps | `optitrack_to_slam_transform` in root `.zattrs` |
 | 4 | `aruco-gripper-width` | gopro frames (from gopro.mp4), timestamps/gopro | `annotations/gripper_width/` |
 | 5 | `eef-pose` | optitrack/pose and/or gopro/slam_poses, timestamps, `gripper_calib.yaml` | `eef/pose_optitrack`, `eef/pose_slam` (whichever the scene has) |
+| 6 | `contact-audio` | finger/finger_piezo, timestamps/finger_piezo, timestamps/gopro, `annotations/time_sync` | `annotations/contact_audio/` |
 
 ## SLAM is a swappable step
 
@@ -185,6 +201,35 @@ The gripper width for each episode is derived from ArUco fiducial markers (IDs 0
 
 > **`width_m` is raw tag separation, not jaw opening.** The tags sit on the fingers, so a fully-closed gripper still measures several millimetres. The pzarr deliberately stores the raw measurement — it is calibration-independent, so re-deriving the calibration costs a re-export rather than re-running step 4's per-frame ArUco pass. The subtraction happens in the DP exporter (see below), matching where UMI applies it. Use `raw_widths_m` (the actual detections) rather than `width_m` (resampled onto the GoPro grid with hold-at-edges extrapolation) for anything that cares about the extremes — `pingest calibrate-gripper` does.
 
+## Contact-mic audio on the frame grid
+
+The finger piezo (`finger/finger_piezo`, the left channel; `finger_air` is the air mic that
+carries the sync chirp) is recorded at 16 kHz on the Pi's clock, while video is stamped on the
+GoPro's. Step 6 reconciles the two and slices the audio into one block per GoPro frame, which
+`pingest export --type polyumi` concatenates into the exported `mic_0`.
+
+**Blocks are anchored by timestamp, never by multiplying a rate.** 16000 / 59.94 = 266.93 samples
+per frame is not an integer — ManiWAV's 48000 / 60 = 800 was — so a fixed multiply would walk off
+the audio over an episode. Each frame's block starts at `searchsorted(piezo_ts, gopro_ts_in_finger_clock)`
+for that frame alone, which is also why step 1 is a hard prerequisite: without the chirp offset the
+two clocks are unrelated epochs, and an unshifted anchor is wrong by seconds with nothing
+downstream able to notice.
+
+**The block width is fixed and slightly generous** (`samples_per_gopro_frame` in
+`config/contact_audio.yaml`, currently 268 = `ceil(266.93) + 1`). Because it is at least as large
+as the biggest gap between consecutive anchors, block *k* always reaches block *k+1*'s start — so
+consecutive blocks abut or overlap and **never leave a hole**. That is the property the exporter
+depends on: flattening consecutive `mic_0` rows yields a gapless waveform, which is what ManiWAV's
+audio path assumes when it reassembles the signal before computing its spectrogram. The cost is
+~0.4% of samples appearing in two adjacent blocks. A genuinely dropped GoPro frame does leave a
+hole; `n_frame_gaps` counts them rather than papering over missing audio.
+
+**The `logmel` array is diagnostic only.** It exists so the catalog can show whether the mic
+recorded anything; nothing reads it downstream. The spectrogram the policy sees is computed in the
+training container from the exported waveform, *after* augmentation that only exists in the
+waveform domain — see [maniwav-audio-policy.md](maniwav-audio-policy.md) for why that split is
+deliberate and what the `mic_0` contract is.
+
 ## Scene-level metadata
 
 The scene `.zattrs` contains:
@@ -208,34 +253,58 @@ These live alongside the zarr, not inside it:
 
 `pingest archive-scene` produces a **self-contained** `scene.zarr.zip` that bundles `scene.zarr` **plus** each `session_*/gopro.mp4` and the atlas sidecar, with paths relative to the scene directory (so an unzip reproduces `<scene>/scene.zarr` + `<scene>/session_*/gopro.mp4`, exactly what the frame reader resolves against). Because the GoPro video now lives only in the mp4, the mp4s must travel with the archive for it to remain replayable/exportable. `ZIP_STORED` (no re-compress): zarr chunks and the mp4 are already compressed.
 
-## camera0_rgb preprocessing contract
+## Camera preprocessing contracts
 
-The policy only compares like with like, so the frame the DP exporter bakes into `camera0_rgb` at training time and the frame the ROS inference node feeds the policy must go through the **same** pixel transform. That transform is a single contract:
+The policy only compares like with like, so the frames the DP exporter bakes into the dataset at training time and the frames the ROS inference node feeds the policy must go through the **same** pixel transforms. Two cameras, two contracts.
+
+### `camera0_rgb` (the GoPro)
 
 - input is an **RGB** `(H, W, 3)` uint8 frame;
 - it is **centre-cropped to 4:3**, the GoPro's recording aspect (`crop_to_source_aspect`) — a no-op on a frame already at that aspect;
 - output is `(224, 224, 3)` uint8, resized with **`cv2.INTER_AREA`** (the anti-aliased choice for downscaling), squashed to the target;
 - any `float32/255` normalization is applied downstream (the training loader / the inference node), not baked into the stored uint8.
 
-It is implemented once per side because the two live in separate Python environments and can't share an import: `ingest/polyumi_ingest/camera_preproc.py` (`resize_camera0_rgb`, used by `export/dp/buffer.py`) and `ros2_ws/src/polyumi_ros2/polyumi_ros2/camera_preproc.py` (used by `policy_client_node.py`). **Keep them byte-identical.**
+### `finger_rgb` (the finger camera)
+
+The gripper mount occludes a fixed strip of the finger camera's view, so this contract is a **crop to given bounds** rather than one derived from the frame:
+
+- input is an **RGB** `(H, W, 3)` uint8 frame — `finger/frames` is already RGB in the pzarr, converted at ingest;
+- half-open `[min, max)` bounds from `ingest/config/finger_camera.yaml`, where `null` means the frame's own edge, so the geometry survives a change of camera resolution instead of landing somewhere else. The shipped crop is `x_min: 170` on the **1152x648** recorded frame, giving **982x648**. (1152x648 is the resolution the Pi *stores*; `cam_streamer.py`'s `VIEW_WIDTH`/`VIEW_HEIGHT` of 620x480 size the live preview stream and are not what lands in the pzarr.) 170 is measured rather than guessed: averaged over 9 episodes in 3 scenes, columns 0-130 are saturated blue with frame-to-frame variation ~3 (static hardware), 130-170 is the lens blur across that edge with variation climbing 4→11, and past 170 it plateaus at ~12, which is scene;
+- an optional `output_size` resize with `cv2.INTER_AREA`. **Default `null`** — the crop ships at native size and the choice of encoder input size stays with whoever builds the policy;
+- bounds that don't fit the frame **raise**. Silently clipping would produce a plausible-looking image that isn't the one the contract names.
+
+The crop **is** the `finger_rgb` contract: a policy trained on one crop cannot be served frames from another, so retuning it invalidates existing checkpoints. The resolved bounds go into the buffer's `meta.attrs` so a checkpoint says which crop it trained under. Nothing on the inference side calls this yet — `policy_client_node` has no finger-camera subscription and cannot gain one until the clock-domain issue in `ros2_ws/.../config/inference.yaml` is resolved — but the transform is mirrored now so that wiring is a subscription rather than a second derivation.
+
+### Why it's implemented twice
+
+Once per side, because the two live in separate Python environments and can't share an import: `ingest/polyumi_ingest/camera_preproc.py` (used by `export/dp/`) and `ros2_ws/src/polyumi_ros2/polyumi_ros2/camera_preproc.py` (used by `policy_client_node.py`). **Keep them byte-identical** — the whole file, both contracts.
 
 The split is not incidental and is unlikely to go away. Making `polyumi_ingest` a dependency of the ROS package does not work: it declares `requires-python = ">=3.13"` while the ROS node runs Ubuntu 24.04's `/usr/bin/python3` (3.12), and it would drag `polyumi_pi` (→ `lgpio`), zarr, imagecodecs, mcap and scipy into the inference process for the sake of ~30 lines of numpy and cv2. A third minimal package depending on nothing but numpy+cv2 is the option if more shared contract code ever accumulates.
 
-**Identical source is not the guarantee that matters, though — identical output is.** The two environments run different library majors (measured 2026-08-09: ROS `cv2 4.6.0` / `numpy 1.26.4`, uv workspace `cv2 4.13.0` / `numpy 2.4.3`), so `cv2.resize` is a different C++ implementation on each side no matter how the Python is shared. Both test suites therefore pin **the same sha256 digests** for the same two inputs — a synthetic 1920×1080 frame (crop active) and a synthetic 2704×2028 one (crop a no-op) — in `test_golden_vector_is_stable_across_environments`. That catches source drift *and* a library upgrade that changes `INTER_AREA` under one side. The inputs are built with plain uint8 arithmetic rather than a seeded RNG, since numpy guarantees nothing about `default_rng`'s stream across versions. A changed digest means checkpoints already trained are on a transform the inference node no longer reproduces; regenerate the constants only when that is the intent.
+**Identical source is not the guarantee that matters, though — identical output is.** The two environments run different library majors (measured 2026-08-09: ROS `cv2 4.6.0` / `numpy 1.26.4`, uv workspace `cv2 4.13.0` / `numpy 2.4.3`), so `cv2.resize` is a different C++ implementation on each side no matter how the Python is shared. Both test suites therefore pin **the same sha256 digests**, from the single shared `ingest/test/camera_preproc_golden.py` (the ROS suite loads it by path), in `test_golden_vector_is_stable_across_environments`. For `camera0_rgb` the inputs are a synthetic 1920×1080 frame (crop active) and a synthetic 2704×2028 one (crop a no-op). For `finger_rgb` they are a synthetic 1152×648 frame at the shipped crop, once with `output_size=None` and once resized: the crop-only digest is a pure array slice and so really checks that the two *implementations* still agree, while the resized one pins `INTER_AREA` so `output_size` can be switched on later without anything silently skewing. That catches source drift *and* a library upgrade that changes `INTER_AREA` under one side. The inputs are built with plain uint8 arithmetic rather than a seeded RNG, since numpy guarantees nothing about `default_rng`'s stream across versions. A changed digest means checkpoints already trained are on a transform the inference node no longer reproduces; regenerate the constants only when that is the intent.
 
-### Why the crop exists
+### Why the camera0 crop exists
 
 Training frames come from `gopro.mp4` at **2704x2028 (4:3)**. Inference frames come off the Elgato at **1920x1080 (16:9)**. Measured on hardware (2026-08-09): the GoPro's clean-HDMI output **pillarboxes** — the image occupies columns 240..1679 of the 1080p frame, exactly 1440x1080, with pure black bars either side, and the fisheye image circle sits at the same fraction of frame width as in the recording. **The field of view is identical; only the framing differs.**
 
 So without the crop the inference 224² was **25.4% black pixels** with the real content squeezed into three-quarters of the width — a train/inference domain gap on every policy output, and a silent one, since the policy runs perfectly happily on the wrong pixels. The crop recovers precisely the 1440x1080 the camera framed, so both paths squash the same field of view. It is a no-op on 2704x2028, so **no dataset needs re-exporting for this** and old buffers stay valid.
 
-> **Known residual skew (not a bug):** even after the crop, training frames are downscaled from 2704 px wide and inference frames from 1440 px, so the two 224² results differ slightly in resampling detail. Same FOV, same aspect, different source resolution. Closing that fully is out of scope; it is recorded here so it is not mistaken for a defect. Audio is **not** part of the policy observation, so it has no export-alignment requirement.
+> **Known residual skew (not a bug):** even after the crop, training frames are downscaled from 2704 px wide and inference frames from 1440 px, so the two 224² results differ slightly in resampling detail. Same FOV, same aspect, different source resolution. Closing that fully is out of scope; it is recorded here so it is not mistaken for a defect. (Contact-mic audio has its own alignment requirement — see "Contact-mic audio on the frame grid" — but it is a separate contract from the pixel one, and the default `export --type dp` carries no audio at all.)
 
 ## Export targets
 
 `pzarr` is the source of truth; downstream formats are exports produced on demand.
 
-- **UMI ReplayBuffer** (`pingest export-dp`): a `.zarr.zip` matching `universal_manipulation_interface`'s `ReplayBuffer` so `UmiDataset` reads it directly. `meta/episode_ends` plus `data/` keys `camera0_rgb` (T,224,224,3 uint8, Blosc-zstd; see the camera0_rgb preprocessing contract above), `robot0_eef_pos` (T,3), `robot0_eef_rot_axis_angle` (T,3, rotvec), `robot0_gripper_width` (T,1, **metres of opening from fully closed** — the exporter subtracts `gripper_calib.yaml`'s `closed_mm` from step 4's raw tag separation and clamps the result at 0, following UMI's `get_gripper_calibration_interpolator`, whose `interp1d(..., fill_value=(x[0], x[-1]))` saturates the same way below the calibrated minimum; the clamp matters because `closed_mm` is a percentile, so ~1% of detections fall under it by construction; the value used is recorded as `meta.attrs['gripper_closed_width_m']` so a buffer is self-describing), and `robot0_demo_start_pose`/`robot0_demo_end_pose` (T,6, the episode's first/last `[pos, rotvec]` broadcast). The key *names* are load-bearing — `UmiDataset` name-matches them. Poses are read from `eef/pose_<source>` (so step 5 must have run) and are on the hand frame; the exporter resolves the source per episode (see the `eef/pose_<source>` section above) and records the choice as provenance — in `meta.attrs['pose_provenance']`/`episode_pose_source` inside the `.zarr.zip`, and in a `<output>.provenance.json` sidecar (or the catalog's `DatasetManifest`). The `action` key is deliberately omitted (the sampler synthesises it from `[eef_pos, eef_rot_axis_angle, gripper_width]`). Steps are the frames SLAM was *fed* — every `localization_frame_stride`-th GoPro frame, so ~29.97 Hz at the current stride of 2, not the 59.94 Hz the camera records at — and the training config sets the observation rate from there via `obs_down_sample_steps`. **Those two knobs are coupled:** halving the stored rate must halve `obs_down_sample_steps`, or the policy trains on a different Δt than it runs at. A single buffer may not mix strides; export refuses to write one that does. A session whose pose source drops out mid-demo is split into one episode per contiguous run, discarding runs shorter than `--min-segment-steps`. Only `EPISODE`-typed sessions are exported; `MAPPING` sessions are skipped.
+- **UMI ReplayBuffer** (`pingest export`, `--type dp` — the default): a `.zarr.zip` matching `universal_manipulation_interface`'s `ReplayBuffer` so `UmiDataset` reads it directly. `meta/episode_ends` plus `data/` keys `camera0_rgb` (T,224,224,3 uint8, Blosc-zstd; see "Camera preprocessing contracts" above), `robot0_eef_pos` (T,3), `robot0_eef_rot_axis_angle` (T,3, rotvec), `robot0_gripper_width` (T,1, **metres of opening from fully closed** — the exporter subtracts `gripper_calib.yaml`'s `closed_mm` from step 4's raw tag separation and clamps the result at 0, following UMI's `get_gripper_calibration_interpolator`, whose `interp1d(..., fill_value=(x[0], x[-1]))` saturates the same way below the calibrated minimum; the clamp matters because `closed_mm` is a percentile, so ~1% of detections fall under it by construction; the value used is recorded as `meta.attrs['gripper_closed_width_m']` so a buffer is self-describing), and `robot0_demo_start_pose`/`robot0_demo_end_pose` (T,6, the episode's first/last `[pos, rotvec]` broadcast). The key *names* are load-bearing — `UmiDataset` name-matches them. Poses are read from `eef/pose_<source>` (so step 5 must have run) and are on the hand frame; the exporter resolves the source per episode (see the `eef/pose_<source>` section above) and records the choice as provenance — in `meta.attrs['pose_provenance']`/`episode_pose_source` inside the `.zarr.zip`, and in a `<output>.provenance.json` sidecar (or the catalog's `DatasetManifest`). The `action` key is deliberately omitted (the sampler synthesises it from `[eef_pos, eef_rot_axis_angle, gripper_width]`). Steps are the frames SLAM was *fed* — every `localization_frame_stride`-th GoPro frame, so ~29.97 Hz at the current stride of 2, not the 59.94 Hz the camera records at — and the training config sets the observation rate from there via `obs_down_sample_steps`. **Those two knobs are coupled:** halving the stored rate must halve `obs_down_sample_steps`, or the policy trains on a different Δt than it runs at. A single buffer may not mix strides; export refuses to write one that does. A session whose pose source drops out mid-demo is split into one episode per contiguous run, discarding runs shorter than `--min-segment-steps`. Only `EPISODE`-typed sessions are exported; `MAPPING` sessions are skipped.
+
+- **PolyUMI ReplayBuffer** (`pingest export --type polyumi`): the same buffer as above plus PolyUMI's extra observation streams. First, `data/mic_0` (T, `stride × B`) float32, the contact mic as **raw 16 kHz waveform**, Blosc-zstd like everything else. Each row is the `stride` per-frame blocks belonging to that step, concatenated, so flattening consecutive rows reconstructs the waveform with no gaps (see "Contact-mic audio on the frame grid"). Whether a row holds the audio before or after its observation instant is `block_alignment` in `config/contact_audio.yaml` — **causal by default**, because ManiWAV's forward convention would give the policy 33 ms of look-ahead at our step rate that does not exist at inference. The geometry is recorded in `meta.attrs` (`mic_0_sample_rate_hz`, `mic_0_samples_per_step`, `mic_0_samples_per_gopro_frame`, `mic_0_block_alignment`, `mic_0_source`) so a checkpoint is self-describing. Raw waveform rather than a spectrogram is a deliberate split; see [maniwav-audio-policy.md](maniwav-audio-policy.md). Needs preprocessing step 6; the default `--type dp` reads none of it and still works on scenes that never ran it.
+
+  Second, `data/finger_rgb` (T, 648, 982, 3) uint8, the gripper's finger camera cropped to the region the mount doesn't occlude (see "Camera preprocessing contracts"). Cropped but **not resized**: the exported frame is the native crop, and choosing the encoder's input size stays with whoever builds the policy. Two properties a training config has to account for:
+
+  - **It is ~13x the bytes of `camera0_rgb`** — 1.91 MB/step against 151 kB (measured on a real scene: 1.23 MB/step after Blosc-zstd, so ~1.55x compression). A 62-episode scene runs to ~18 GB raw for this one key. Setting `output_size` in `config/finger_camera.yaml` cuts it by the area ratio — ~38x at 224².
+  - **The camera records at 10 fps against a ~30 Hz step grid** (confirmed on real scenes: 3.05 steps per source frame), so roughly three consecutive rows hold the *same* source frame. Each step takes the frame nearest it in time — nothing is interpolated, because a policy must see images the camera actually produced — and the measured rate is recorded as `meta.attrs['finger_rgb_source_rate_hz']`. A `down_sample_steps` that ignores it makes an observation window fetch the same image twice.
+
+  Geometry and coverage go into `meta.attrs` (`finger_rgb_crop`, `finger_rgb_output_size`, `finger_rgb_shape`, `finger_rgb_source_rate_hz`, `finger_rgb_max_staleness_s`, `finger_rgb_source`), and per-segment staleness into the provenance. Steps the finger stream doesn't cover are **excluded from the export** — trimmed, or split around, exactly as a pose dropout is; `max_staleness_s` is the threshold. This is not a rare path: measured across 111 episodes in 3 scenes, the finger camera stops recording ~0.65 s before the GoPro *every time* (and starts ~1 s after, which the chirp trim already removes), so the last ~10% of steps have no coverage while the median staleness over the rest is a healthy 0.02-0.03 s. Rejecting those episodes would reject the whole corpus; exporting them would pair one frozen frame with moving proprioception, which `nearest_idx`'s clamping makes the default outcome and no shape assertion would catch. An episode left with fewer than `--min-segment-steps` after trimming is skipped, as it already is for pose dropouts. Needs no preprocessing step of its own beyond what the default `--type dp` already requires.
 
 - **MCAP** (`pingest export-mcap`): one `.mcap` file per episode, with channels for finger image, GoPro image, both audio streams, IMU, GPS, SLAM pose, OptiTrack pose, ArUco annotations, and gripper width. Uses Foxglove JSON schemas; audio is chunked at 4096 samples per message.
 

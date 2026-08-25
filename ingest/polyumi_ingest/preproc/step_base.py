@@ -362,6 +362,13 @@ class PreprocessingStep(ABC):
     step_number: int
     step_name: str
 
+    #: Whether the visuomotor DP export reads this step's output, and so whether an incomplete
+    #: mark should block the default ``--type dp`` export. Steps that feed only an optional
+    #: modality set this False, so adding one doesn't strand every scene preprocessed before it
+    #: existed; the modality demands it through its own ``required_steps`` instead. See
+    #: ``export.dp.buffer``.
+    required_for_export: bool = True
+
     def prepare_scene(self, scene: SceneContext) -> None:
         """
         Scene-level work before any episode: load config, build shared artifacts.
@@ -521,6 +528,10 @@ def run_preprocessing(
     # what the store now holds regardless of what the corrupt attr claimed.
     if ran == set(PREPROCESSING_STEPS) and _stored_pzarr_version(root) != PZARR_VERSION:
         log.info(f'{scene_zarr.parent.name}: whole pipeline re-run; restamping as pzarr v{PZARR_VERSION}')
+        root.attrs['pzarr_version'] = PZARR_VERSION
+    # v5 is just v4 with the results of this extra preprocessing step tacked on, so `pingest pp
+    # 6` alone is enough to bring a v4 store current — no other version gets this shortcut.
+    elif ran == {6} and _stored_pzarr_version(root) == 4:
         root.attrs['pzarr_version'] = PZARR_VERSION
 
     return SceneFiles.resolve_zarr_path(current_path)

@@ -265,6 +265,7 @@
     <dt>Output</dt><dd class="mono">{{ detail.output_path or '—' }}</dd>
     <dt>Manifest</dt><dd class="mono">{{ detail.manifest_path or '—' }}</dd>
     <dt>PolyUMI version</dt><dd class="mono">{{ detail.polyumi_version or '—' }}</dd>
+    <dt>Exporter</dt><dd>{{ detail.exporter_type or '—' }}</dd>
     <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
   </dl>
   <button hx-post="/dataset-draft/from-dataset/{{ detail.id }}" hx-swap="none">Duplicate into builder</button>

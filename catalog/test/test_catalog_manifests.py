@@ -70,6 +70,7 @@ def test_dataset_manifest_round_trip(tmp_path: pathlib.Path):
         output='fold_towel_v3.zarr.zip',
         n_episodes=42,
         polyumi_version='deadbeef',
+        exporter_type='polyumi',
         export_params={'obs_down_sample_steps': None},
         members=[
             DatasetMemberSpec('s1', 'scene_a/', 'all'),
@@ -83,6 +84,7 @@ def test_dataset_manifest_round_trip(tmp_path: pathlib.Path):
     assert loaded.name == 'fold_towel_v3'
     assert loaded.n_episodes == 42
     assert loaded.polyumi_version == 'deadbeef'
+    assert loaded.exporter_type == 'polyumi'
     assert len(loaded.members) == 2
     assert loaded.members[1].episodes == [0, 2, 3]
 
@@ -104,3 +106,11 @@ def test_dataset_manifest_pose_provenance_defaults_to_empty(tmp_path: pathlib.Pa
     path.write_text('{"name": "ds", "created_at": "2026-01-01T00:00:00+00:00", "file_version": 1}')
     loaded = DatasetManifest.from_file(path)
     assert loaded.pose_provenance == []
+
+
+def test_dataset_manifest_exporter_type_defaults_to_dp(tmp_path: pathlib.Path):
+    """A dataset manifest written before this field existed loads as 'dp', not a crash."""
+    path = tmp_path / 'ds.dataset.json'
+    path.write_text('{"name": "ds", "created_at": "2026-01-01T00:00:00+00:00", "file_version": 1}')
+    loaded = DatasetManifest.from_file(path)
+    assert loaded.exporter_type == 'dp'

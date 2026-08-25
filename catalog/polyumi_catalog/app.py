@@ -425,7 +425,12 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
         return RedirectResponse('/', status_code=303)
 
     @app.post('/datasets')
-    def post_build_dataset(name: str = Form(...), task_id: str = Form(''), scene_ids: list[str] = Form([])):
+    def post_build_dataset(
+        name: str = Form(...),
+        task_id: str = Form(''),
+        scene_ids: list[str] = Form([]),
+        exporter_type: str = Form('dp'),
+    ):
         if recordings_dir is None:
             return PlainTextResponse('Dataset export requires a recordings directory.', status_code=400)
 
@@ -437,6 +442,7 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
                     task_id=int(task_id) if task_id else None,
                     scene_ids=scene_ids,
                     output_dir=default_datasets_dir(recordings_dir),
+                    exporter_type=exporter_type,
                 )
             except DatasetBuildError as err:
                 return PlainTextResponse(str(err), status_code=400)

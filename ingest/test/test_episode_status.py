@@ -397,4 +397,31 @@ def test_full_run_restamps_over_an_unparseable_version(tmp_path: pathlib.Path, o
 
     run_preprocessing(scene_zarr)  # no step_number => the whole pipeline
 
+
+class _Step6(_DemoStep):
+    """Stands in for contact-audio: the one step whose lone run can restamp v4 to v5."""
+
+    step_number = 6
+    step_name = 'stand-in-for-contact-audio'
+
+
+def test_targeted_step_6_restamps_a_v4_store_to_v5(tmp_path: pathlib.Path, monkeypatch) -> None:
+    """v5 adds nothing but step 6's output, so running step 6 alone is enough to bring a v4 store current."""
+    monkeypatch.setattr(step_base, 'PREPROCESSING_STEPS', {_DemoStep.step_number: _DemoStep, 6: _Step6})
+    scene_zarr = _make_scene(tmp_path)
+    zarr.open_group(str(scene_zarr), mode='a').attrs['pzarr_version'] = 4
+
+    run_preprocessing(scene_zarr, step_number=6)  # _DemoStep never runs
+
     assert int(zarr.open_group(str(scene_zarr), mode='r').attrs['pzarr_version']) == PZARR_VERSION
+
+
+def test_targeted_step_6_does_not_restamp_an_older_store(tmp_path: pathlib.Path, monkeypatch) -> None:
+    """The v4->v5 shortcut is specific to v4; an even older store still needs a full re-run."""
+    monkeypatch.setattr(step_base, 'PREPROCESSING_STEPS', {_DemoStep.step_number: _DemoStep, 6: _Step6})
+    scene_zarr = _make_scene(tmp_path)
+    zarr.open_group(str(scene_zarr), mode='a').attrs['pzarr_version'] = 3
+
+    run_preprocessing(scene_zarr, step_number=6)
+
+    assert int(zarr.open_group(str(scene_zarr), mode='r').attrs['pzarr_version']) == 3

@@ -1,0 +1,63 @@
+# Finger-camera export tunables — the `finger_rgb` stream `pingest export --type polyumi` writes.
+#
+# Read at EXPORT time, not by a preprocessing step: `finger/frames` is already in the pzarr at
+# its native 1152x648, and everything here is a pure pixel/indexing transform over it. So changing
+# any of these is a re-export (minutes), not a re-preprocess of the corpus. See
+# docs/data-format.md, "Camera preprocessing contracts".
+
+crop:
+  # Pixels to keep, as half-open [min, max) bounds on the stored frame. `null` means the frame's
+  # own edge, so the geometry survives a change of camera resolution instead of silently
+  # cropping to the wrong place.
+  #
+  # x_min 170 drops the left of the 1152x648 view, which the mount occludes. Measured, not
+  # guessed: averaged over 9 episodes in 3 scenes, columns 0-130 are saturated blue with a
+  # frame-to-frame variation of ~3 (static hardware), 130-170 is the lens blur across that edge
+  # with variation climbing 4 -> 11, and past 170 it plateaus at ~12, which is scene. 170 is
+  # therefore the first column that is entirely image. Stopping at 130 would keep the whole blur
+  # transition; the extra 40 columns cost 3.5% of the width.
+  #
+  # THIS IS THE `finger_rgb` CONTRACT. A policy trained on one crop cannot be served frames from
+  # another, so retuning these invalidates existing checkpoints. The resolved bounds are written
+  # into the exported buffer's meta attrs so a checkpoint says which crop it trained under.
+  x_min: 170
+  x_max: null
+  y_min: 0
+  y_max: null
+
+# Resize applied after the crop: `null` exports the crop at its native size, `[width, height]`
+# squashes to that with cv2.INTER_AREA (the same interpolation camera0_rgb uses).
+#
+# Default null, so the resize happens in the training container where the encoder's input size
+# is decided. Two things to know before switching it on:
+#   - it cuts the exported bytes and the exporter's peak memory by (crop area / output area).
+#     This matters more than it sounds: the crop is 982x648, so one step is 1.91 MB against
+#     camera0_rgb's 151 kB — about 13x — and a 62-episode scene runs to ~18 GB for this key
+#     alone. At [224, 224] that falls ~38x;
+#   - it turns an exact array slice into a cv2.resize, whose C++ implementation differs between
+#     the ingest and ROS environments. That path IS pinned (FINGER_GOLDEN_VECTORS in
+#     ingest/test/camera_preproc_golden.py, asserted by both test suites) — but re-run both
+#     suites after changing this, not just ingest's.
+output_size: null
+
+# Largest gap tolerated between a step's timestamp and the finger frame chosen for it, in
+# seconds. Steps beyond it are EXCLUDED from the export — trimmed, or split around, exactly as a
+# pose dropout is — not exported and not fatal.
+#
+# The finger camera runs at 10 fps against a ~29.97 Hz step grid, so no frame lands on a step
+# exactly; each step takes the nearest one, which on a healthy recording is at most half a frame
+# period (50 ms) away. The guard exists because `timebase.nearest_idx` CLAMPS out-of-range
+# queries: past the end of the stream every remaining step gets the same final frame, training
+# the policy on a frozen image against moving proprioception — which no shape or dtype assertion
+# can see and which is near untraceable from a bad checkpoint.
+#
+# That is not a rare fault. Measured across 111 episodes in 3 scenes, the finger camera stops
+# ~0.65 s BEFORE the GoPro every time (and starts ~1 s after, which the chirp trim already
+# removes), so the last ~10% of steps have no coverage at all while the median staleness over the
+# rest is a healthy 0.02-0.03 s. Rejecting those episodes would reject the entire corpus, which is
+# why this trims rather than raises.
+#
+# 0.15 = 1.5 frame periods: room for one genuinely dropped finger frame plus timestamp jitter,
+# while still well under the ~0.6 s the uncovered tail reaches. Lowering it trims more
+# aggressively; raising it past ~0.6 starts admitting frozen frames.
+max_staleness_s: 0.15

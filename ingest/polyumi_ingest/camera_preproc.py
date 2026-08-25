@@ -1,19 +1,27 @@
 """
-The camera0_rgb preprocessing contract, shared by export and inference.
+The camera preprocessing contracts, shared by export and inference.
 
-A policy compares like with like or not at all: the frame the DP exporter bakes into
-``camera0_rgb`` at training time and the frame the inference node feeds the policy must go
-through the *same* pixel transform, or we introduce train/inference skew. This module is the
-single source of truth for that transform on the ingest side; the ROS inference node
-(``ros2_ws/.../policy_client_node.py``) reimplements the identical contract because the two
-packages cannot share a Python import (uv workspace vs. ROS venv). Keep them in lock-step —
-see ``docs/data-format.md`` ("camera0_rgb preprocessing contract").
+A policy compares like with like or not at all: the frames the DP exporter bakes into the
+dataset and the frames the inference node feeds the policy must go through the *same* pixel
+transforms, or we introduce train/inference skew. This module is the single source of truth for
+them on the ingest side; the ROS inference node (``ros2_ws/.../camera_preproc.py``)
+reimplements the identical contracts because the two packages cannot share a Python import (uv
+workspace vs. ROS venv). **Keep the whole file in lock-step with that copy** — see
+``docs/data-format.md`` ("Camera preprocessing contracts").
 
-Contract: input is an **RGB** ``(H,W,3)`` uint8 frame; it is centre-cropped to the GoPro's 4:3
-recording aspect (a no-op on a frame already at that aspect) and then squashed to
-``(224,224,3)`` uint8 with ``cv2.INTER_AREA`` (the correct anti-aliased choice for
-downscaling). Any ``float32/255`` normalization is applied downstream (the training loader /
-inference node), not here — the exported store stays uint8 per the UMI convention.
+Two contracts live here, both taking an **RGB** ``(H,W,3)`` uint8 frame and returning uint8.
+Any ``float32/255`` normalization is applied downstream (the training loader / inference node),
+not here — the exported store stays uint8 per the UMI convention.
+
+* ``camera0_rgb`` (:func:`resize_camera0_rgb`) — the GoPro. Centre-cropped to the 4:3 recording
+  aspect (a no-op on a frame already at that aspect), then squashed to ``(224,224,3)`` with
+  ``cv2.INTER_AREA``, the correct anti-aliased choice for downscaling.
+* ``finger_rgb`` (:func:`crop_finger_rgb`) — the finger camera. Cropped to given bounds, since
+  the mount occludes a fixed strip of its view, with an optional resize. Its geometry comes from
+  ``ingest/config/finger_camera.yaml``; the ROS side has no consumer for it yet (the node grows
+  a finger-camera subscription only once the clock-domain issue in
+  ``ros2_ws/.../config/inference.yaml`` is resolved), and it is mirrored now so that wiring is a
+  subscription rather than a second derivation of the transform.
 """
 
 import cv2
@@ -88,4 +96,60 @@ def resize_camera0_rgb(frame_rgb: np.ndarray) -> np.ndarray:
         crop_to_source_aspect(frame_rgb),
         (CAMERA0_RGB_RESOLUTION, CAMERA0_RGB_RESOLUTION),
         interpolation=CAMERA0_RGB_INTERPOLATION,
+    )
+
+
+#: Interpolation for the optional finger-camera resize — INTER_AREA, as ``camera0_rgb`` uses.
+FINGER_RGB_INTERPOLATION = cv2.INTER_AREA
+
+
+def crop_finger_rgb(
+    frame_rgb: np.ndarray,
+    *,
+    x_min: int = 0,
+    x_max: int | None = None,
+    y_min: int = 0,
+    y_max: int | None = None,
+    output_size: tuple[int, int] | None = None,
+) -> np.ndarray:
+    """
+    Crop a finger-camera frame to its useful region, optionally resizing the result.
+
+    Unlike :func:`crop_to_source_aspect`, whose geometry is derived from the frame's aspect, this
+    crop is *given* — the gripper mount occludes a fixed strip of the finger camera's view, and
+    which strip is a property of the hardware, not of the image. The bounds are half-open
+    ``[min, max)``; ``None`` means the frame's own edge, so the geometry survives a change of
+    camera resolution rather than silently landing somewhere else.
+
+    ``output_size`` is ``(width, height)``, or ``None`` to keep the crop at its native size. The
+    exporter's default is ``None``: the crop is then an exact array slice, identical in any numpy,
+    and the choice of encoder input size stays with whoever builds the policy.
+
+    Returns a contiguous copy, never a view onto ``frame_rgb`` — the inference side reads frames
+    out of buffers that get recycled underneath it.
+
+    Raises:
+        ValueError: if a bound is negative, inverted, or past the edge of the frame. A crop
+            configured for a different camera resolution would otherwise export a sliver of the
+            intended region, which looks like a plausible image and is not one.
+
+    """
+    h, w = frame_rgb.shape[:2]
+    x1 = w if x_max is None else int(x_max)
+    y1 = h if y_max is None else int(y_max)
+    x0, y0 = int(x_min), int(y_min)
+    for axis, lo, hi, limit in (('x', x0, x1, w), ('y', y0, y1, h)):
+        if not 0 <= lo < hi <= limit:
+            raise ValueError(
+                f'finger crop {axis}=[{lo}, {hi}) is not a non-empty range within [0, {limit}) '
+                f'for a {w}x{h} frame — check the crop bounds in config/finger_camera.yaml '
+                f'against the camera resolution that recorded it.'
+            )
+    cropped = np.ascontiguousarray(frame_rgb[y0:y1, x0:x1])
+    if output_size is None:
+        return cropped
+    return cv2.resize(
+        cropped,
+        (int(output_size[0]), int(output_size[1])),
+        interpolation=FINGER_RGB_INTERPOLATION,
     )

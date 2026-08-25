@@ -15,6 +15,12 @@ QUALITY_THRESHOLDS_YAML = INGEST_ROOT / 'config' / 'quality_thresholds.yaml'
 #: How much data the SLAM step is fed: resolution divisor and localization frame stride.
 #: The camera model itself lives in the ORB-SLAM3 settings YAML, which that file points at.
 SLAM_CONFIG_YAML = INGEST_ROOT / 'config' / 'slam.yaml'
+#: Contact-mic step tunables: the per-frame block geometry that defines the exported
+#: ``mic_0`` contract, and the diagnostic spectrogram's parameters.
+CONTACT_AUDIO_YAML = INGEST_ROOT / 'config' / 'contact_audio.yaml'
+#: Finger-camera export tunables: the crop that defines the exported ``finger_rgb`` contract,
+#: an optional resize, and how stale a finger frame may be before an episode is refused.
+FINGER_CAMERA_YAML = INGEST_ROOT / 'config' / 'finger_camera.yaml'
 
 
 def load_gripper_calib() -> dict:
@@ -63,24 +69,37 @@ def load_open_width_m() -> float:
     return float(load_gripper_calib()['gripper_fingers']['open_mm']) / 1000.0
 
 
-def load_slam_config() -> dict:
+def _load_required_yaml(path: pathlib.Path, purpose: str) -> dict:
     """
-    Load SLAM step tunables from config/slam.yaml.
+    Load a checked-in YAML config, raising rather than falling back to an in-code default.
 
-    Required, not optional: these values decide how much of each video ORB-SLAM3 ever
-    sees, and an in-code default silently disagreeing with the checked-in file is how a
-    corpus ends up half-processed at one stride and half at another. The file ships with
-    the repo, so a missing one means a broken checkout, not a configuration choice.
+    Every caller here loads a data contract (block geometry, a crop, a resolution divisor) that
+    every scene in a corpus must agree on — an in-code default silently disagreeing with the
+    checked-in file is how a corpus ends up half-processed under one value and half under
+    another, with nothing downstream able to tell. The file ships with the repo, so a missing
+    one means a broken checkout, not a configuration choice.
 
     Raises:
-        FileNotFoundError: if config/slam.yaml is absent or unreadable.
+        FileNotFoundError: if ``path`` is absent or unreadable.
 
     """
     try:
-        with SLAM_CONFIG_YAML.open() as f:
+        with path.open() as f:
             return yaml.safe_load(f) or {}
     except OSError as err:
-        raise FileNotFoundError(
-            f'Cannot read {SLAM_CONFIG_YAML}, which is required to run the SLAM step '
-            f'(it sets the resolution divisor and localization frame stride): {err}'
-        ) from err
+        raise FileNotFoundError(f'Cannot read {path}, which is required to {purpose}: {err}') from err
+
+
+def load_slam_config() -> dict:
+    """Load SLAM step tunables (resolution divisor, localization frame stride) from config/slam.yaml."""
+    return _load_required_yaml(SLAM_CONFIG_YAML, 'run the SLAM step')
+
+
+def load_contact_audio_config() -> dict:
+    """Load contact-mic step tunables (the mic_0 block geometry, log-mel params) from config/contact_audio.yaml."""
+    return _load_required_yaml(CONTACT_AUDIO_YAML, 'run the contact-audio step')
+
+
+def load_finger_camera_config() -> dict:
+    """Load finger-camera export tunables (the finger_rgb crop, resize, staleness limit) from finger_camera.yaml."""
+    return _load_required_yaml(FINGER_CAMERA_YAML, 'export the finger camera')
