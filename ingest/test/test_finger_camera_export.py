@@ -57,32 +57,37 @@ def test_finger_rgb_rides_alongside_the_other_keys(tmp_path: pathlib.Path) -> No
     """export-polyumi emits everything export-dp does, plus both PolyUMI modalities."""
     scene = _build_scene(tmp_path, n=60)
     _add_contact_audio(scene)
-    _add_finger_camera(scene, width=200, height=60)
+    _add_finger_camera(scene, width=400, height=120)
 
     data = _export(tmp_path, scene)['data']
 
     assert set(data.keys()) == set(EXPECTED_KEYS) | {'mic_0', 'finger_rgb'}
     finger = data['finger_rgb']
-    assert finger.shape == (60, 60, 200 - X_MIN, 3)
+    assert finger.shape == (60, 120, 400 - X_MIN, 3)
     assert finger.dtype == np.uint8
 
 
 def test_shape_at_the_real_finger_resolution(tmp_path: pathlib.Path) -> None:
-    """620x480 with the shipped crop is (480, 470) — the shape a policy config has to name."""
+    """
+    1152x648 with the shipped crop is (648, 982) — the shape a policy config has to name.
+
+    The real recorded resolution, which is NOT ``cam_streamer``'s ``VIEW_WIDTH``/``VIEW_HEIGHT``
+    (620x480) — those size the preview stream, not the stored JPEGs.
+    """
     scene = _build_scene(tmp_path, n=30)
     _add_contact_audio(scene)
-    _add_finger_camera(scene, width=620, height=480)
+    _add_finger_camera(scene, width=1152, height=648)
 
     finger = _export(tmp_path, scene)['data/finger_rgb']
 
-    assert finger.shape == (30, 480, 470, 3)
+    assert finger.shape == (30, 648, 1152 - X_MIN, 3)
 
 
 def test_exported_pixels_are_the_cropped_source(tmp_path: pathlib.Path) -> None:
     """The kept columns are exactly the source minus the occluded strip, unresampled."""
     scene = _build_scene(tmp_path, n=30)
     _add_contact_audio(scene)
-    _add_finger_camera(scene, width=200, height=60)
+    _add_finger_camera(scene, width=400, height=120)
     source = np.asarray(zarr.open_group(str(scene), mode='r')['episode_0/finger/frames'][:])
 
     finger = np.asarray(_export(tmp_path, scene)['data/finger_rgb'][:])
@@ -138,36 +143,56 @@ def test_stride_2_still_pairs_every_step_with_its_own_frame(tmp_path: pathlib.Pa
     assert np.array_equal(_row_values(finger), _expected_source_frames(scene, stride=2))
 
 
-def test_a_finger_stream_that_stops_early_fails_the_export(tmp_path: pathlib.Path) -> None:
+def test_a_finger_stream_that_stops_early_is_trimmed_not_rejected(tmp_path: pathlib.Path) -> None:
     """
-    The failure the staleness guard exists for: `nearest_idx` clamps, so the tail would freeze.
+    The real recording pattern: the finger camera stops ~0.65 s before the GoPro, every episode.
 
-    Exporting it would train the policy on one still image against moving proprioception —
-    invisible to every shape and dtype assertion.
+    Measured over 111 episodes in three scenes. Rejecting on it would reject the entire corpus,
+    so the uncovered tail is excluded from the export the way a pose dropout is. What must NOT
+    happen is exporting it: `nearest_idx` clamps, so those steps would all carry the same frozen
+    frame against moving proprioception — invisible to every shape and dtype assertion.
     """
     scene = _build_scene(tmp_path, n=60)
     _add_contact_audio(scene)
     _add_finger_camera(scene, truncate_s=0.6)
 
-    with pytest.raises(RuntimeError, match='nearest finger frame'):
-        export_scenes_to_polyumi([scene], tmp_path / 'buf.zarr.zip')
+    finger = np.asarray(_export(tmp_path, scene)['data/finger_rgb'][:])
+
+    assert 24 <= finger.shape[0] < 60, 'the uncovered tail should be trimmed, not kept or fatal'
+    values = _row_values(finger)
+    # The give-away for a frozen tail: the last source frame repeated far more than the ~3 rows
+    # a 10 fps camera legitimately occupies on a ~60 Hz grid.
+    assert (values == values[-1]).sum() <= 12
 
 
-def test_the_staleness_message_names_the_episode_and_the_limit(tmp_path: pathlib.Path) -> None:
-    """An operator has to know which episode to exclude and which knob to reconsider."""
+def test_trimming_keeps_every_surviving_step_within_tolerance(tmp_path: pathlib.Path) -> None:
+    """Whatever survives the trim is a real observation, which is the property policies rely on."""
     scene = _build_scene(tmp_path, n=60)
     _add_contact_audio(scene)
     _add_finger_camera(scene, truncate_s=0.6)
 
-    with pytest.raises(RuntimeError) as err:
+    _, provenance = export_scenes_to_polyumi([scene], tmp_path / 'buf.zarr.zip')
+
+    assert provenance[0]['modalities']['finger_rgb']['max_staleness_s'] <= float(CFG['max_staleness_s'])
+
+
+def test_an_episode_with_no_usable_coverage_is_dropped(tmp_path: pathlib.Path) -> None:
+    """
+    Trimming past MIN_SEGMENT_STEPS leaves nothing to export, and that has to be a clean skip.
+
+    The existing segmentation already handles this for pose dropouts; the finger camera reuses
+    it rather than inventing a second way for an episode to be unusable.
+    """
+    scene = _build_scene(tmp_path, n=60)
+    _add_contact_audio(scene)
+    _add_finger_camera(scene, truncate_s=0.8)
+
+    with pytest.raises(RuntimeError, match='no EPISODE sessions to export'):
         export_scenes_to_polyumi([scene], tmp_path / 'buf.zarr.zip')
 
-    assert 'episode_0' in str(err.value)
-    assert 'finger_camera.yaml' in str(err.value)
 
-
-def test_a_gap_inside_tolerance_still_exports(tmp_path: pathlib.Path) -> None:
-    """The guard must not reject the ordinary case — half a frame period is normal at 10 fps."""
+def test_a_gap_inside_tolerance_trims_nothing(tmp_path: pathlib.Path) -> None:
+    """The guard must not bite on the ordinary case — half a frame period is normal at 10 fps."""
     scene = _build_scene(tmp_path, n=60)
     _add_contact_audio(scene)
     _add_finger_camera(scene, truncate_s=0.05)
@@ -208,13 +233,13 @@ def test_meta_attrs_describe_the_crop_contract(tmp_path: pathlib.Path) -> None:
     """A checkpoint has to be able to say which crop it trained under."""
     scene = _build_scene(tmp_path, n=60)
     _add_contact_audio(scene)
-    _add_finger_camera(scene, width=200, height=60)
+    _add_finger_camera(scene, width=400, height=120)
 
     attrs = dict(_export(tmp_path, scene)['meta'].attrs)
 
     assert attrs['finger_rgb_crop'] == {k: CROP[k] for k in ('x_min', 'x_max', 'y_min', 'y_max')}
     assert attrs['finger_rgb_output_size'] == (list(CFG['output_size']) if CFG['output_size'] else None)
-    assert attrs['finger_rgb_shape'] == [60, 200 - X_MIN, 3]
+    assert attrs['finger_rgb_shape'] == [120, 400 - X_MIN, 3]
     assert attrs['finger_rgb_source'] == 'finger/frames'
     assert attrs['finger_rgb_source_rate_hz'] == pytest.approx(FINGER_FPS)
     assert attrs['finger_rgb_max_staleness_s'] == pytest.approx(float(CFG['max_staleness_s']))

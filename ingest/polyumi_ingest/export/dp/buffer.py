@@ -77,8 +77,10 @@ The store is written ``zarr_format=2`` so the (v2-pinned) UMI zarr can read it, 
 into a ``.zarr.zip`` because ``UmiDataset`` opens its dataset through ``zarr.ZipStore``.
 
 **Extra observation streams** ride along as ``modalities`` (``export.dp.modality``), which
-contribute additional ``data/<key>`` arrays inside the same segment loop. An export with none
-is byte-identical to one from before that seam existed, down to the provenance sidecar, so
+contribute additional ``data/<key>`` arrays inside the same segment loop, and may narrow the
+validity mask where they have no observation — so a stream that stops before the others is
+trimmed around like a pose dropout rather than failing the episode. An export with none is
+byte-identical to one from before that seam existed, down to the provenance sidecar, so
 ``export-dp``'s contract is unchanged by anything ``export-polyumi`` adds.
 
 ``enforce_preprocessing`` requires only the steps an export actually reads —
@@ -371,6 +373,20 @@ def _export_episode(
             steps = trimmed
 
     valid = ~np.isnan(pose[steps]).any(axis=1) & ~np.isnan(gripper[steps])
+    # A modality that cannot cover part of the span narrows the same mask, so an uncovered
+    # stretch is trimmed or split around exactly as a pose dropout is. Excluding those steps is
+    # what stops a sensor which stops early from being exported as a frozen observation.
+    for modality in modalities:
+        mask = modality.valid_steps(steps)
+        if mask is None:
+            continue
+        n_uncovered = int((~mask).sum())
+        if n_uncovered:
+            log.info(
+                f'  {episode_key}: {modality.name} covers {len(steps) - n_uncovered} of '
+                f'{len(steps)} step(s); excluding the rest.'
+            )
+        valid &= mask
     segments = _valid_segments(valid, min_segment_steps)
     if not segments:
         log.warning(

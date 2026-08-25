@@ -40,6 +40,13 @@ class FingerCameraModality(ExportModality):
     ``down_sample_steps`` set accordingly, or an observation window fetches the same image twice.
     The measured source rate is recorded in the buffer's meta attrs so this is visible from the
     dataset alone.
+
+    It also stops recording before the GoPro does — measured at ~0.65 s across 111 episodes, with
+    a further ~1 s of GoPro lead at the start that the chirp trim already removes. Steps past the
+    end of the stream are excluded via :meth:`valid_steps` rather than exported: ``nearest_idx``
+    clamps, so exporting them would pair one frozen frame with moving proprioception, and failing
+    the episode outright would fail every episode. Median staleness over the steps that survive is
+    ~0.03 s, comfortably inside the half-frame-period floor.
     """
 
     name = FINGER_KEY
@@ -106,22 +113,25 @@ class FingerCameraModality(ExportModality):
             )
         self._shape = shape
 
+    def valid_steps(self, steps: np.ndarray) -> np.ndarray:
+        """Mark the steps whose nearest finger frame is close enough in time to be that step."""
+        assert self._staleness is not None, 'prepare_episode must run before valid_steps'
+        return self._staleness[steps] <= self.max_staleness_s
+
     def segment_arrays(self, gidx: np.ndarray) -> dict[str, np.ndarray]:
         """Crop the finger frame belonging to each exported step."""
         assert self._frames is not None and self._idx is not None and self._staleness is not None
-        # Enforced over gidx rather than the whole grid because gidx is the steps that actually
-        # ship: the chirp trim and pose-dropout segmentation cut afterwards, so checking the full
-        # grid would reject an episode over an idle prefix nobody exports.
+        # Backstop, not the enforcement path: valid_steps already removed anything this stale
+        # before segmentation. It fires only if that mask were bypassed, and a frozen frame is
+        # worth an exception rather than a silently plausible observation.
         stale = self._staleness[gidx]
         worst = int(np.argmax(stale))
         if stale[worst] > self.max_staleness_s:
             raise RuntimeError(
                 f'{self._episode_key}: step at GoPro frame {int(gidx[worst])} is '
                 f'{stale[worst]:.3f}s from its nearest finger frame, over the '
-                f'{self.max_staleness_s:.3f}s limit in config/finger_camera.yaml. The finger '
-                f'stream does not cover this span — the camera stopped early, or step 1 measured '
-                f'the wrong chirp offset. Exporting anyway would repeat one frozen frame across '
-                f'the uncovered steps.'
+                f'{self.max_staleness_s:.3f}s limit in config/finger_camera.yaml, yet reached '
+                f'segmentation — the validity mask was bypassed.'
             )
 
         # Each finger frame lands in ~3 consecutive steps at 10 fps against a ~30 Hz grid, so

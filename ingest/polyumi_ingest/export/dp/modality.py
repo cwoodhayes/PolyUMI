@@ -39,6 +39,22 @@ class ExportModality(ABC):
         quietly missing this modality.
         """
 
+    def valid_steps(self, steps: np.ndarray) -> np.ndarray | None:
+        """
+        Which of ``steps`` this modality actually has an observation for; ``None`` means all.
+
+        Folded into the same validity mask as missing poses, so a stretch this modality cannot
+        cover is *trimmed or split out* by ``_valid_segments`` rather than failing the episode.
+        That is the right shape for a sensor that simply stops before the others do — the finger
+        camera reliably stops recording ~0.65 s before the GoPro, so rejecting the episode would
+        reject every episode, while exporting the span anyway would pair a frozen frame with
+        moving proprioception.
+
+        ``steps`` indexes the GoPro frame grid, ascending and stride-spaced, already trimmed to
+        the post-chirp span. Return a boolean mask of the same length.
+        """
+        return None
+
     @abstractmethod
     def segment_arrays(self, gidx: np.ndarray) -> dict[str, np.ndarray]:
         """

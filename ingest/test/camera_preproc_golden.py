@@ -39,21 +39,22 @@ CAMERA0_GOLDEN_VECTORS = [
 
 #: ``(height, width, output_size, crop kwargs, sha256 of crop_finger_rgb(golden_frame(h, w), ...))``.
 #:
-#: 620x480 is the finger camera's real resolution, and ``x_min=150`` the crop shipped in
-#: ``ingest/config/finger_camera.yaml``. Two entries because the two paths have different
+#: 1152x648 is the finger camera's real recorded resolution (NOT ``cam_streamer``'s
+#: ``VIEW_WIDTH``/``VIEW_HEIGHT``, which size the preview stream), and ``x_min=170`` the crop
+#: shipped in ``ingest/config/finger_camera.yaml``. Two entries because the two paths have different
 #: exposure: ``output_size=None`` is a pure array slice, exact in any numpy, and pins the two
 #: *sources* against each other; the resized entry pins ``cv2.INTER_AREA``, whose C++
 #: implementation differs between the environments' library majors, so ``output_size`` can be
 #: switched on later without anything silently skewing.
 FINGER_GOLDEN_VECTORS = [
-    (480, 620, None, 'b90ea714033629d70bfa9b4e1c773bc2b7c4e7cc528c3cff56f7802a6770645b'),
-    (480, 620, (224, 224), '5e598bd5d142c2334106e6afaef33dfd9c271278d0029d8c988ba3db2e09cd83'),
+    (648, 1152, None, 'adc7dfd082627fef68ecb095aa6249fb7fd2bd77b5f2a87ac2bc4c8b54dd3f1f'),
+    (648, 1152, (224, 224), '29c5ab770d083d86185aafaa133991e642c4b3cfb5353ee73748b7c30f0b9e5d'),
 ]
 
 #: Crop bounds the finger golden vectors are taken at — the shipped configuration, so a change to
 #: ``finger_camera.yaml`` that these digests do not reflect is visible as a mismatch of intent
 #: rather than passing silently.
-FINGER_GOLDEN_CROP = {'x_min': 150, 'x_max': None, 'y_min': 0, 'y_max': None}
+FINGER_GOLDEN_CROP = {'x_min': 170, 'x_max': None, 'y_min': 0, 'y_max': None}
 
 
 def golden_frame(h: int, w: int) -> np.ndarray:

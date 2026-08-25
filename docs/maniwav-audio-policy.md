@@ -74,7 +74,7 @@ task config uses only `mic_0` anyway. I can add mic_1 if you wish, however.
 No ManiWAV counterpart — this one is ours. `export-polyumi` also writes:
 
 ```
-data/finger_rgb    (T, 480, 470, 3) uint8    Blosc-zstd
+data/finger_rgb    (T, 648, 982, 3) uint8    Blosc-zstd
 ```
 
 A downward-looking camera in the gripper, watching the contact point. The gripper mount occludes a
@@ -85,7 +85,7 @@ resolution.
 |---|---|
 | `finger_rgb_crop` | the resolved `x_min`/`x_max`/`y_min`/`y_max` bounds |
 | `finger_rgb_output_size` | `null` today — no resize was applied |
-| `finger_rgb_shape` | `[480, 470, 3]` at the shipped crop |
+| `finger_rgb_shape` | `[648, 982, 3]` at the shipped crop (`x_min: 170` on a 1152x648 frame) |
 | `finger_rgb_source_rate_hz` | ~10, the camera's real frame rate. Read this. |
 | `finger_rgb_max_staleness_s` | how far a step's frame may be from it in time |
 | `finger_rgb_source` | `finger/frames` |
@@ -101,13 +101,13 @@ if type == 'rgb':
     image_shape = shape[1:]
 ```
 
-So `finger_rgb` at `[3, 480, 470]` beside `camera0_rgb` at `[3, 224, 224]` fails at encoder
+So `finger_rgb` at `[3, 648, 982]` beside `camera0_rgb` at `[3, 224, 224]` fails at encoder
 construction, not at runtime. That single `image_shape` also sets the shared `RandomCrop` size and
 `feature_map_shape`, and is indexed as `image_shape[0]` on the assumption of a square. Two ways out:
 
 - **Resize to 224² in your transform** (or ask us to set `output_size: [224, 224]` in
   `ingest/config/finger_camera.yaml` and re-export — it is a re-export, not a re-preprocess, and it
-  cuts the dataset ~4.5x). Simplest, and it is why the exporter ships the crop unresized: the
+  cuts the dataset ~38x). Simplest, and it is why the exporter ships the crop unresized: the
   encoder's input size is your decision, not ours to bake in.
 - **Make `image_shape` per-key**, if you want the finger camera at its native resolution. More than
   deleting the assert: the transform build and `feature_map_shape` both have to follow.
@@ -123,14 +123,18 @@ this key buys you an observation window of duplicates. Set it from
 `finger_rgb_source_rate_hz`, not from the step rate. The same 10 fps is also why `latency_steps`
 for this key is coarse: one frame period is 100 ms.
 
-**It is ~4.5x the bytes of `camera0_rgb`** (677 kB/step against 151 kB). If dataloading becomes the
-bottleneck before the model does, the `output_size` re-export above is the lever.
+**It is ~13x the bytes of `camera0_rgb`** — 1.91 MB/step against 151 kB, measured at 1.23 MB/step
+after compression, which puts a 62-episode scene around 18 GB for this key alone. If dataloading
+becomes the bottleneck before the model does, the `output_size` re-export above is the lever.
 
-**Coverage is enforced, not patched.** If an episode's finger stream doesn't cover the exported
-span — the camera died mid-session, or the chirp time-sync was wrong — the export **fails by name**
-rather than repeating the last frame across the gap. So you can assume every `finger_rgb` row is a
-real observation taken within `finger_rgb_max_staleness_s` of its step; per-segment staleness is in
-the provenance sidecar if you want to weight by it.
+**Coverage is trimmed, not patched.** The finger camera stops recording ~0.65 s before the GoPro in
+every episode we have (measured over 111 of them), so the last ~10% of steps have no frame to pair
+with. Those steps are excluded from the export — the same mechanism that splits an episode around a
+pose dropout — rather than being filled with the last frame repeated. **So you can assume every
+`finger_rgb` row is a real observation taken within `finger_rgb_max_staleness_s` of its step**, and
+that episodes are a little shorter than the visuomotor keys alone would give. Per-segment staleness
+is in the provenance sidecar if you want to weight by it; on real scenes it runs to a median of
+0.03 s and a max of 0.14 s.
 
 ---
 

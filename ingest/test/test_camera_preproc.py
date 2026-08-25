@@ -134,14 +134,14 @@ def test_golden_vector_is_stable_across_environments(h: int, w: int, expected: s
 
 
 def test_finger_crop_drops_the_occluded_strip() -> None:
-    """The shipped crop takes 620x480 down to 470x480, keeping exactly the right-hand columns."""
-    frame = golden_frame(480, 620)
+    """The shipped crop takes the real 1152x648 view down to 982x648, keeping the right-hand columns."""
+    frame = golden_frame(648, 1152)
 
     out = crop_finger_rgb(frame, **FINGER_GOLDEN_CROP)
 
-    assert out.shape == (480, 470, 3)
+    assert out.shape == (648, 982, 3)
     assert out.dtype == np.uint8
-    assert np.array_equal(out, frame[:, 150:])
+    assert np.array_equal(out, frame[:, 170:])
 
 
 def test_finger_crop_none_bounds_mean_the_frame_edge() -> None:
@@ -199,18 +199,18 @@ def test_finger_crop_resizes_after_cropping() -> None:
 
     Deliberately non-square, so a width/height transposition cannot pass.
     """
-    frame = golden_frame(480, 620)
+    frame = golden_frame(648, 1152)
 
     out = crop_finger_rgb(frame, output_size=(200, 100), **FINGER_GOLDEN_CROP)
 
     assert out.shape == (100, 200, 3)
-    expected = cv2.resize(frame[:, 150:], (200, 100), interpolation=cv2.INTER_AREA)
+    expected = cv2.resize(frame[:, 170:], (200, 100), interpolation=cv2.INTER_AREA)
     assert np.array_equal(out, expected)
 
 
 def test_finger_crop_preserves_channel_order() -> None:
     """A pure-red RGB frame stays red — a BGR slip here would swap it in every exported frame."""
-    frame = np.zeros((480, 620, 3), dtype=np.uint8)
+    frame = np.zeros((648, 1152, 3), dtype=np.uint8)
     frame[..., 0] = 255  # R
 
     out = crop_finger_rgb(frame, output_size=(224, 224), **FINGER_GOLDEN_CROP)

@@ -55,8 +55,8 @@ def _add_finger_camera(
     *,
     fps: float = FINGER_FPS,
     offset_s: float = FINGER_OFFSET_S,
-    width: int = 200,
-    height: int = 60,
+    width: int = 400,
+    height: int = 120,
     truncate_s: float = 0.0,
 ) -> None:
     """
