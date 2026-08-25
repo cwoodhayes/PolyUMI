@@ -161,9 +161,9 @@ ros2 control switch_controllers --deactivate fr3_arm_controller \
   feedback to read.
 - **The laptop and NUC run different rmw majors** (Humble 1.3.4 vs Kilted 4.0.2). Consequences:
   the `Failed to parse type hash` / `serdata.cpp` log noise is expected and unsuppressable;
-  `ros2 node list` and `ros2 param get <nuc node>` come back **empty from the laptop** even
+  `ros2 node list` and `ros2 param get`/`param set` come back **empty from the laptop** even
   though topics, TF and service calls all work, so never conclude a NUC node is missing from
-  that; and large nested messages (a `MoveGroup.Goal`) arrive **corrupted**, which is why the
+  that (to set a live parameter, call its `<node>/set_parameters` service directly); and large nested messages (a `MoveGroup.Goal`) arrive **corrupted**, which is why the
   MoveIt calls live on the NUC rather than on the laptop.
 - **Discovery is unicast-only**, peers hardcoded to `10.0.0.1` / `10.0.0.2`. If the laptop is not
   actually on `10.0.0.1`, nothing finds anything and there is no multicast fallback.
@@ -265,7 +265,22 @@ Things to know before you debug it:
 - **An unhomed hand reports `max_width = 0` and `move()` returns `true` while doing nothing.** The
   node refuses to execute in that state and says so; `home_on_start:=true` fixes it.
 
-The future of this system is to replace the Franka Hand with a better hand, as other labs have done.
+The future of this system is to replace the Franka Hand with a better hand, as other labs have
+done. `franka_hand_node` is the stopgap until then, and it has not yet been run on the arm:
+
+- [ ] **On-arm dry run.** `execute_gripper:=false` (the default) plans and logs every
+      `move(width, speed)` at the real cadence without connecting to the hand.
+- [ ] **On-arm execution.** `execute_gripper:=true`, arm plan-only. Acceptance test is
+      `ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper_chirp`.
+- [ ] **Confirm or replace `latency.gripper_exec`.** Shipped at **0.0, under test** — the node now
+      schedules each Move to arrive on time by itself, so a lead here would double-compensate.
+      Revert to 0.380 if the hand runs late in service.
+- [ ] **`Grasp`**, if the closed endpoint has to be force-defined. See `gripper_range_probe`, which
+      fails when the fingers do not stall repeatably.
+
+Re-run the probes (`-DBUILD_HAND_PROBES=ON`) against any candidate replacement before committing to
+it — the constants above are this hand's, and nothing else in the stack will notice if they are
+wrong.
 
 
 Good luck, stranger!

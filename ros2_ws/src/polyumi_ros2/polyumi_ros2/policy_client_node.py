@@ -19,7 +19,7 @@ At each control tick the node:
      gripper half as a JointTrajectory on /polyumi/target_gripper (franka_hand_node). The two
      ride separate channels because a PoseArray cannot carry a width and because the Franka Hand
      is action-only, so it needs a different execution cadence entirely — see
-     docs/crb-fr3-inference.md and docs/franka-inference-bringup.md ("Gripper hardware").
+     docs/crb-fr3-inference.md ("Gripper problems").
 
 Usage:
     ros2 run polyumi_ros2 policy_client_node

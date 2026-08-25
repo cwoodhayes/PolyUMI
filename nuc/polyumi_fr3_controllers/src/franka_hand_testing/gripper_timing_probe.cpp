@@ -2,12 +2,11 @@
 //
 // What does a Franka Hand Move actually cost, with nothing in the way?
 //
-// docs/franka-inference-bringup.md asserts "~0.34 s of latency.gripper_exec is the hand itself",
-// but every measurement behind that number was taken through franka_gripper, which the same doc
-// records as worth 40-85 ms on its own (a detached std::thread per goal, and a state timer that
-// calls the blocking readOnce() while holding the state mutex). So the split between firmware and
-// middleware has never actually been observed. This measures it with no ROS, no action server and
-// no executor: one franka::Gripper, one read thread, one command thread.
+// The ~0.34 s then attributed to latency.gripper_exec was measured entirely THROUGH
+// franka_gripper, whose own overhead was estimated at 40-85 ms (a detached std::thread per goal,
+// and a state timer calling the blocking readOnce() while holding the state mutex). So the split
+// between firmware and middleware had never actually been observed. This measures it with no ROS,
+// no action server and no executor: one franka::Gripper, one read thread, one command thread.
 //
 // Three numbers, because three different things are conflated in the 0.34 s:
 //

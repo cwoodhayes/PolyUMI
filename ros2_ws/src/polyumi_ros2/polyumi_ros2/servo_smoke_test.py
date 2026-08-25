@@ -14,12 +14,12 @@ The path is a circle traced around wherever the TCP already is, at a speed you c
 Orientation is held: a wrong orientation would be a second variable in a test that exists to isolate
 one.
 
-    # NUC: fr3_bringup up, impedance controller ACTIVE (docs/franka-inference-bringup.md)
+    # NUC: fr3_bringup up, impedance controller ACTIVE (docs/crb-fr3-inference.md)
     ros2 run polyumi_ros2 servo_smoke_test
     ros2 run polyumi_ros2 servo_smoke_test --ros-args -p radius_m:=0.05 -p period_s:=6.0
 
-The plain invocation is the one validated on hardware (docs/franka-inference-bringup.md, "Phase 4
-bringup" step 3) — do not run a bigger or faster override as the FIRST pass on a new arm.
+The plain invocation is the one validated on hardware (2026-08-19) — do not run a bigger or faster
+override as the FIRST pass on a new arm.
 
 Watch for smooth continuous motion, no pause at chunk boundaries, and no ``cartesian_reflex``. A
 stutter at exactly ``chunk_hz`` is the splice going wrong, not the gains.
