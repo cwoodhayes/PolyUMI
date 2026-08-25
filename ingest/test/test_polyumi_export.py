@@ -1,4 +1,4 @@
-"""Tests for `export-polyumi`: the visuomotor buffer plus PolyUMI's extra modalities."""
+"""Tests for `export_scenes_to_polyumi`: the visuomotor buffer plus PolyUMI's extra modalities."""
 
 import pathlib
 
@@ -88,7 +88,7 @@ def _add_finger_camera(
 
 
 def test_mic_0_rides_alongside_the_visuomotor_keys(tmp_path: pathlib.Path) -> None:
-    """export-polyumi emits everything export-dp does, plus mic_0."""
+    """export_scenes_to_polyumi emits everything the plain visuomotor export does, plus mic_0."""
     scene = _build_scene(tmp_path, n=60)
     _add_contact_audio(scene)
     _add_finger_camera(scene)
@@ -134,11 +134,12 @@ def test_consecutive_rows_form_a_gapless_waveform(tmp_path: pathlib.Path) -> Non
     export_scenes_to_polyumi([scene], out)
 
     mic = np.asarray(_open_zip(out)['data/mic_0'][:]).astype(np.int64)
-    # Every step after the first is fully covered by real blocks, and they abut exactly.
-    stream = mic[1:].reshape(-1)
+    # Step 0 is real from the start under forward alignment, but under causal it is all silence
+    # (see test_first_causal_step_is_padded_with_silence) — start the continuity check at the
+    # first row every alignment fills with real audio.
+    first_real = 0 if ALIGNMENT == 'forward' else 1
+    stream = mic[first_real:].reshape(-1)
     assert np.array_equal(stream, np.arange(stream[0], stream[0] + len(stream)))
-    # ...and the first row runs straight into the second, so the join is seamless too.
-    assert mic[0, -1] + 1 == mic[1, 0]
 
 
 def test_first_causal_step_is_padded_with_silence(tmp_path: pathlib.Path) -> None:
@@ -158,13 +159,13 @@ def test_first_causal_step_is_padded_with_silence(tmp_path: pathlib.Path) -> Non
     export_scenes_to_polyumi([scene], out)
 
     mic = np.asarray(_open_zip(out)['data/mic_0'][:])
-    assert (mic[0, :BLOCK_WIDTH] == 0.0).all()
-    assert (mic[0, BLOCK_WIDTH:] != 0.0).any()
-    assert (mic[1:] != 0.0).any()
+    # Step 0 (gidx=0, stride=2) draws on blocks -2 and -1, both before the episode starts.
+    assert (mic[0] == 0.0).all()
+    assert (mic[1] != 0.0).any()
 
 
 def test_causal_alignment_never_reads_ahead_of_the_step(tmp_path: pathlib.Path) -> None:
-    """Causal rows end at their step: no audio the policy could not have heard yet."""
+    """Causal rows end just before their step: no audio the policy could not have heard yet."""
     if ALIGNMENT != 'causal':
         pytest.skip(f'block_alignment is {ALIGNMENT!r}; this pins the causal contract')
     scene = _build_scene(tmp_path, n=60)
@@ -175,10 +176,12 @@ def test_causal_alignment_never_reads_ahead_of_the_step(tmp_path: pathlib.Path) 
     export_scenes_to_polyumi([scene], out)
 
     mic = np.asarray(_open_zip(out)['data/mic_0'][:]).astype(np.int64)
-    # Step k is GoPro frame 2k, whose block ends at (2k+1)*W - 1. A forward-aligned row would
-    # end a full stride later, i.e. at (2k+2)*W - 1.
-    steps = np.arange(mic.shape[0])
-    assert np.array_equal(mic[:, -1], (2 * steps + 1) * BLOCK_WIDTH - 1)
+    # Step k>=1 is GoPro frame 2k, whose own block starts AT that timestamp and runs forward, so
+    # a causal row must stop at block 2k-1's last sample, (2k)*W - 1, one block short of it. A
+    # forward-aligned row would instead reach into block 2k, ending a full stride later at
+    # (2k+2)*W - 1. Step 0 is excluded — it is entirely padding (see the test above).
+    steps = np.arange(1, mic.shape[0])
+    assert np.array_equal(mic[steps, -1], 2 * steps * BLOCK_WIDTH - 1)
 
 
 def test_meta_attrs_describe_the_audio_contract(tmp_path: pathlib.Path) -> None:
@@ -199,7 +202,7 @@ def test_meta_attrs_describe_the_audio_contract(tmp_path: pathlib.Path) -> None:
 
 
 def test_provenance_records_the_modality(tmp_path: pathlib.Path) -> None:
-    """Per-episode provenance gains a modalities entry; export-dp's must stay without one."""
+    """Per-episode provenance gains a modalities entry; the plain visuomotor export's must stay without one."""
     scene = _build_scene(tmp_path, n=60)
     _add_contact_audio(scene, frame_stride=2)
     _add_finger_camera(scene)

@@ -51,8 +51,8 @@ class FingerCameraModality(ExportModality):
 
     name = FINGER_KEY
     #: Nothing beyond what the visuomotor export already needs. The frames are written at ingest
-    #: and the only annotation read is step 1's chirp offset, which ``export-dp`` requires anyway
-    #: for its start trim.
+    #: and the only annotation read is step 1's chirp offset, which the default ``--type dp``
+    #: requires anyway for its start trim.
     required_steps = frozenset()
 
     def __init__(self) -> None:
@@ -82,8 +82,9 @@ class FingerCameraModality(ExportModality):
             if path not in ep:
                 raise RuntimeError(
                     f'{episode_key}: no {path} — this session has no finger camera, so it cannot '
-                    f'be exported with export-polyumi. Use export-dp for a visuomotor dataset, or '
-                    f'mark the episode unusable in the catalog.'
+                    f'be exported with `pingest export --type polyumi`. Use the default '
+                    f'`--type dp` for a visuomotor dataset, or mark the episode unusable in the '
+                    f'catalog.'
                 )
         frames = arr(ep, _FRAMES_PATH)
         finger_ts = np.asarray(arr(ep, _TS_PATH)[:], dtype=np.float64)

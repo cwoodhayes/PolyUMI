@@ -26,7 +26,7 @@ X_MIN = int(CROP['x_min'])
 
 
 def _export(tmp_path: pathlib.Path, scene: pathlib.Path, name: str = 'buf.zarr.zip') -> zarr.Group:
-    """Run export-polyumi and open the result the way UmiDataset would."""
+    """Run export_scenes_to_polyumi and open the result the way UmiDataset would."""
     out = tmp_path / name
     export_scenes_to_polyumi([scene], out)
     return _open_zip(out)
@@ -54,7 +54,7 @@ def _row_values(finger: np.ndarray) -> np.ndarray:
 
 
 def test_finger_rgb_rides_alongside_the_other_keys(tmp_path: pathlib.Path) -> None:
-    """export-polyumi emits everything export-dp does, plus both PolyUMI modalities."""
+    """export_scenes_to_polyumi emits everything the plain visuomotor export does, plus both PolyUMI modalities."""
     scene = _build_scene(tmp_path, n=60)
     _add_contact_audio(scene)
     _add_finger_camera(scene, width=400, height=120)
@@ -261,7 +261,7 @@ def test_provenance_records_the_coverage_it_actually_got(tmp_path: pathlib.Path)
 
 def test_export_dp_on_the_same_scene_carries_no_finger_rgb(tmp_path: pathlib.Path) -> None:
     """
-    export-dp's contract is frozen: the same scene exports the six visuomotor keys and nothing else.
+    The plain visuomotor export's contract is frozen: the same scene exports the six visuomotor keys and nothing else.
 
     This is the invariant the modality seam exists to protect — an export with no modalities has
     to be byte-identical to one from before any of them existed.

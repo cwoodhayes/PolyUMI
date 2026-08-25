@@ -94,3 +94,21 @@ def test_short_audio_returns_empty_not_error() -> None:
     """A truncated episode is a real case; it has no frames, which is not a failure."""
     spec = log_mel_spectrogram(np.zeros(N_FFT - 1, dtype=np.float32), SR, **_PARAMS)
     assert spec.shape == (0, N_MELS)
+
+
+def test_first_frame_covers_the_whole_window_not_half_zero_padding() -> None:
+    """
+    The first hop is centred so its window is exactly audio[:n_fft] — snip_edges=True.
+
+    A window centred on sample 0 instead would zero-pad the first half, so the first hop would
+    be blind to whatever the second half of audio[:n_fft] contains. Two signals differing only
+    there must then produce different first hops.
+    """
+    audio_silent_tail = np.zeros(N_FFT * 3, dtype=np.float32)
+    audio_loud_tail = audio_silent_tail.copy()
+    audio_loud_tail[N_FFT // 2 : N_FFT] = _tone(1000.0, (N_FFT - N_FFT // 2) / SR)[: N_FFT - N_FFT // 2]
+
+    spec_silent = log_mel_spectrogram(audio_silent_tail, SR, **_PARAMS)
+    spec_loud = log_mel_spectrogram(audio_loud_tail, SR, **_PARAMS)
+
+    assert not np.allclose(spec_silent[0], spec_loud[0])

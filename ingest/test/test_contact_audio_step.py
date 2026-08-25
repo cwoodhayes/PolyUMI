@@ -182,6 +182,27 @@ def test_sample_rate_mismatch_is_fatal(tmp_path: pathlib.Path) -> None:
     assert '48000' in failure['error'] or '48000.0' in failure['error']
 
 
+def test_backward_timestamps_are_fatal_even_if_the_rate_would_infer_correctly(tmp_path: pathlib.Path) -> None:
+    """
+    A duplicate or backward sample must not slip through just because most deltas look right.
+
+    `_gather_blocks` anchors every block with `searchsorted`, which assumes `piezo_ts` is fully
+    sorted — a single non-positive delta buried among otherwise-correct ones would silently mis-
+    anchor the block(s) around it rather than fail loudly.
+    """
+    scene_zarr = _build_scene(tmp_path)
+    root = zarr.open_group(str(scene_zarr), mode='a')
+    piezo_ts = np.asarray(root['episode_0/timestamps/finger_piezo'][:])  # type: ignore[index,union-attr]
+    piezo_ts[len(piezo_ts) // 2] = piezo_ts[len(piezo_ts) // 2 - 1]  # one duplicated sample
+    del root['episode_0/timestamps/finger_piezo']
+    root['episode_0/timestamps'].create_array('finger_piezo', data=piezo_ts)  # type: ignore[union-attr]
+
+    ContactAudioStep().run(scene_zarr)
+
+    failure = zarr.open_group(str(scene_zarr), mode='r')['episode_0'].attrs['failure']  # type: ignore[index]
+    assert 'strictly increasing' in failure['error']
+
+
 def test_diagnostic_logmel_is_written(tmp_path: pathlib.Path) -> None:
     """The mel is a by-product for the catalog; it still has to be well-formed."""
     scene_zarr = _build_scene(tmp_path)

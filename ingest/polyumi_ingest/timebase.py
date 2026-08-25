@@ -59,13 +59,16 @@ def gopro_ts_in_finger_clock(ep: zarr.Group, *, require_offset: bool) -> np.ndar
 
     """
     ts = np.asarray(arr(ep, 'timestamps/gopro')[:], dtype=np.float64)
-    if 'annotations/time_sync' not in ep:
+    offset_attr = None
+    if 'annotations/time_sync' in ep:
+        offset_attr = grp(ep, 'annotations/time_sync').attrs.get('gopro_to_finger_offset_s')
+    if offset_attr is None:
         if require_offset:
             raise RuntimeError(
-                'no annotations/time_sync — run preprocessing step 1 (chirp-time-sync) first. '
-                'Without it the GoPro and finger clocks are unrelated epochs, so any '
-                'sample-exact alignment against finger audio would be silently wrong.'
+                'no annotations/time_sync (or it has no gopro_to_finger_offset_s) — run '
+                'preprocessing step 1 (chirp-time-sync) first. Without it the GoPro and finger '
+                'clocks are unrelated epochs, so any sample-exact alignment against finger audio '
+                'would be silently wrong.'
             )
         return ts
-    offset = float(grp(ep, 'annotations/time_sync').attrs.get('gopro_to_finger_offset_s', 0.0))
-    return ts - offset
+    return ts - float(offset_attr)

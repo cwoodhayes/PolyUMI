@@ -1,7 +1,7 @@
 # Contact-mic (piezo) preprocessing — step 6, `contact-audio`.
 #
 # Two unrelated products are configured here. The `blocks` section defines the TRAINING data
-# contract: the per-GoPro-frame waveform slices that `pingest export-polyumi` concatenates into
+# contract: the per-GoPro-frame waveform slices that `pingest export --type polyumi` concatenates into
 # `mic_0`. The `logmel` section only shapes the diagnostic spectrogram the catalog draws; no
 # policy ever sees it, and changing it is safe. See docs/maniwav-audio-policy.md.
 

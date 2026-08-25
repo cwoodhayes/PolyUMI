@@ -3,7 +3,7 @@
 This is the step **after** ingest and preprocessing. The full pipeline is:
 
 ```
-pingest fetch → process-all → pp (preprocessing steps 1–6) → export-dp → TRAIN (this doc)
+pingest fetch → process-all → pp (preprocessing steps 1–5) → export → TRAIN (this doc)
 ```
 
 Training runs a fork of [UMI](https://github.com/real-stanford/universal_manipulation_interface)
@@ -13,9 +13,9 @@ both training and inference — the serving environment must match the training 
 checkpoints are dill-pickled and unpickle against the exact dependency tree.
 
 This doc covers the **visuomotor** policy — vision plus proprioception, which is what
-`export-dp` produces. For adding the finger contact mic as an observation, the data contract and
-the ManiWAV recipe are in [maniwav-audio-policy.md](maniwav-audio-policy.md); the policy itself
-is not implemented yet.
+`export --type dp` (the default) produces. For adding the finger contact mic as an observation,
+the data contract and the ManiWAV recipe are in
+[maniwav-audio-policy.md](maniwav-audio-policy.md); the policy itself is not implemented yet.
 
 ## Prerequisites
 
@@ -23,7 +23,7 @@ is not implemented yet.
   encoder wants meaningfully more than the laptop's ~4 GB.)
 - **Docker** with the NVIDIA container toolkit. Ours runs **rootless** (no sudo) — see the
   gotchas below.
-- An **exported dataset**: `pingest export-dp <scene> --output <name>.zarr.zip`. Copy the
+- An **exported dataset**: `pingest export <scene> --output <name>.zarr.zip`. Copy the
   `.zarr.zip` to the workstation.
 - A **Weights & Biases** API key (`WANDB_API_KEY`) if you want online logging. `WANDB_ENTITY`
   and `WANDB_PROJECT` are optional — unset, they default to your wandb login's default entity
@@ -52,9 +52,12 @@ flags and the dataset/output mounts. Any extra arguments pass straight through t
 **Hydra overrides** (`training.num_epochs=...`, `logging.mode=offline`, `task.dataset_path=...`,
 etc). Outputs (checkpoints, hydra logs) land in `data/dp_outputs/` by default (`OUTPUT_DIR`).
 
-`DP_CONFIG` selects which workspace config Hydra runs, for a policy other than the visuomotor
-default; unset, you get the default. It has to be an env var rather than a Hydra override because
-Hydra cannot set `--config-name` that way.
+`DP_CONFIG` is forwarded into the container as an env var, meant to select which workspace config
+Hydra runs for a policy other than the visuomotor default (an env var rather than a Hydra
+override because Hydra cannot set `--config-name` that way) — but it is currently an **inert
+hook**: the fork's `docker/train.sh` does not yet read it into `--config-name`, so today's
+visuomotor default always runs regardless of the value. See
+[maniwav-audio-policy.md](maniwav-audio-policy.md) §5.
 
 `WANDB_ENTITY`/`WANDB_PROJECT` are forwarded to the container only if set in the calling shell
 (the config resolves them via `${oc.env:WANDB_ENTITY,null}` / `${oc.env:WANDB_PROJECT,polyumi}`),

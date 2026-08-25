@@ -13,17 +13,17 @@
 #   # DP_CONFIG picks the workspace config, for a policy other than the default visuomotor one:
 #   DP_CONFIG=<workspace_config_name> DATASET=... ./train_policy.sh
 #
-# DP_CONFIG is forwarded to the container, where docker/train.sh passes it to Hydra as
-# --config-name. An env var rather than a passthrough override because Hydra cannot set
-# --config-name that way. Unset, the fork keeps its visuomotor default. See
-# docs/maniwav-audio-policy.md.
+# DP_CONFIG is forwarded to the container as an env var (rather than a passthrough override,
+# because Hydra cannot set --config-name that way). It is currently an INERT hook: the fork's
+# docker/train.sh does not yet read it into --config-name, so the visuomotor default always
+# runs regardless of the value. See docs/maniwav-audio-policy.md §5.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FORK_DIR="${REPO_ROOT}/external/polyumi_diffusion_policy"
 
 IMAGE="${IMAGE:-polyumi-dp}"
-DATASET="${DATASET:?set DATASET=/abs/path/to/exported.zarr.zip (produced by 'pingest export-dp', or 'pingest export-polyumi' for a dataset carrying audio)}"
+DATASET="${DATASET:?set DATASET=/abs/path/to/exported.zarr.zip (produced by 'pingest export', or 'pingest export --type polyumi' for a dataset carrying audio)}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/data/dp_outputs}"
 
 # GPU flag. --gpus all works on most setups; if it fails under rootless Docker, set

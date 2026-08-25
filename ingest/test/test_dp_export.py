@@ -29,7 +29,7 @@ RATE = 59.94
 #: The full registered pipeline.
 ALL_STEPS = sorted(cls.step_number for cls in available_preprocessing_steps())
 #: The subset the visuomotor export actually reads, and so the only steps whose absence makes
-#: ``export-dp`` refuse. Steps feeding an optional modality (contact-audio) are excluded, which
+#: the plain visuomotor export refuse. Steps feeding an optional modality (contact-audio) are excluded, which
 #: is what keeps scenes preprocessed before those steps existed exportable.
 DP_REQUIRED_STEPS = sorted(cls.step_number for cls in available_preprocessing_steps() if cls.required_for_export)
 
@@ -493,12 +493,7 @@ def test_enforce_preprocessing_raises_when_step_incomplete(tmp_path: pathlib.Pat
 
 
 def test_export_dp_ignores_steps_it_does_not_read(tmp_path: pathlib.Path) -> None:
-    """
-    A scene preprocessed before contact-audio existed still exports a visuomotor dataset.
-
-    The exporter used to demand every registered step, so adding one stranded the whole corpus
-    until it was re-run. Only the steps this export reads may block it.
-    """
+    """A scene missing a step the visuomotor export never reads (e.g. contact-audio) still exports fine."""
     audio_only = sorted(set(ALL_STEPS) - set(DP_REQUIRED_STEPS))
     assert audio_only, 'expected at least one step marked required_for_export = False'
     scene = _build_scene(tmp_path, n=30, preprocessing_steps=DP_REQUIRED_STEPS)

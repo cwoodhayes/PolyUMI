@@ -1,4 +1,4 @@
-# Finger-camera export tunables — the `finger_rgb` stream `pingest export-polyumi` writes.
+# Finger-camera export tunables — the `finger_rgb` stream `pingest export --type polyumi` writes.
 #
 # Read at EXPORT time, not by a preprocessing step: `finger/frames` is already in the pzarr at
 # its native 1152x648, and everything here is a pure pixel/indexing transform over it. So changing

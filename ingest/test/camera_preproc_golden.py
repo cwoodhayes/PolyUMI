@@ -37,7 +37,8 @@ CAMERA0_GOLDEN_VECTORS = [
     (2028, 2704, 'a4db72e016d56270136acb705af7d4d08d5899e9aeb0ae55c6b73576dc31a301'),
 ]
 
-#: ``(height, width, output_size, crop kwargs, sha256 of crop_finger_rgb(golden_frame(h, w), ...))``.
+#: ``(height, width, output_size, sha256 of crop_finger_rgb(golden_frame(h, w), ...))``. Crop
+#: bounds aren't part of the tuple — every vector is taken at the fixed ``FINGER_GOLDEN_CROP``.
 #:
 #: 1152x648 is the finger camera's real recorded resolution (NOT ``cam_streamer``'s
 #: ``VIEW_WIDTH``/``VIEW_HEIGHT``, which size the preview stream), and ``x_min=170`` the crop

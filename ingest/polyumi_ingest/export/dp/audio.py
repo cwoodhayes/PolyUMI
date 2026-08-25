@@ -55,7 +55,7 @@ class PiezoMicModality(ExportModality):
         if _BLOCKS_PATH not in ep:
             raise RuntimeError(
                 f'{episode_key}: no {_BLOCKS_PATH} — run `pingest pp 6` (contact-audio) before '
-                f'exporting with export-polyumi.'
+                f'exporting with `pingest export --type polyumi`.'
             )
         blocks_arr = arr(ep, _BLOCKS_PATH)
         n, width = blocks_arr.shape
@@ -83,9 +83,10 @@ class PiezoMicModality(ExportModality):
         assert self._blocks is not None, 'prepare_episode must run before segment_arrays'
         stride = self._stride
         if self.alignment == 'causal':
-            # The stride frames ENDING at the step: only audio that exists by the time the policy
-            # is asked to act.
-            rows = gidx[:, None] - stride + 1 + np.arange(stride)[None, :]
+            # The stride frames ENDING just before the step: block gidx itself starts AT the
+            # step's own timestamp and runs forward, so including it would leak audio from after
+            # the instant the policy is asked to act. Only blocks gidx-stride..gidx-1 qualify.
+            rows = gidx[:, None] - stride + np.arange(stride)[None, :]
         else:
             # ManiWAV's convention: the stride frames STARTING at the step, i.e. look-ahead.
             rows = gidx[:, None] + np.arange(stride)[None, :]

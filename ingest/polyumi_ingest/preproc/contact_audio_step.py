@@ -29,7 +29,7 @@ class ContactAudioStep(PreprocessingStep):
     """
     Slice the piezo contact mic into per-GoPro-frame blocks, and draw a diagnostic spectrogram.
 
-    The blocks are the training product: ``pingest export-polyumi`` concatenates the ``stride``
+    The blocks are the training product: ``pingest export --type polyumi`` concatenates the ``stride``
     of them belonging to each exported step into that step's ``mic_0`` row. Slicing here rather
     than in the exporter is what keeps the two clocks' reconciliation in one place — the GoPro
     and the Pi stamp against unrelated epochs, and step 1's chirp offset is the only bridge.
@@ -46,7 +46,7 @@ class ContactAudioStep(PreprocessingStep):
     """
 
     #: The visuomotor export reads none of this step's output, so requiring it would strand every
-    #: scene preprocessed before this step existed. ``export-polyumi`` demands it via its
+    #: scene preprocessed before this step existed. ``--type polyumi`` demands it via its
     #: modality's ``required_steps`` instead.
     required_for_export = False
 
@@ -132,11 +132,16 @@ class ContactAudioStep(PreprocessingStep):
         )
 
     def _check_sample_rate(self, episode_key: str, piezo_ts: np.ndarray) -> None:
-        """Raise if the timestamps disagree with the configured rate."""
+        """Raise if the timestamps disagree with the configured rate, or are not sorted."""
         diffs = np.diff(piezo_ts)
-        diffs = diffs[diffs > 0]
-        if len(diffs) == 0:
-            raise RuntimeError(f'{episode_key}: piezo timestamps are not increasing; cannot infer sample rate.')
+        # Dropping non-positive deltas instead of rejecting them would let duplicate or
+        # backward timestamps through whenever the remaining positive ones still imply the
+        # right rate — and `_gather_blocks`' searchsorted assumes piezo_ts is fully sorted, so
+        # such input would silently anchor blocks at the wrong samples.
+        if len(diffs) == 0 or (diffs <= 0).any():
+            raise RuntimeError(
+                f'{episode_key}: piezo timestamps are not strictly increasing; cannot infer sample rate.'
+            )
         inferred = 1.0 / float(np.median(diffs))
         if abs(inferred - self.sample_rate_hz) > self.sample_rate_hz * _SAMPLE_RATE_TOLERANCE:
             raise RuntimeError(

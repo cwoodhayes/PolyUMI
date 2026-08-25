@@ -8,21 +8,22 @@ for you, and — as an appendix — a checklist of what to port from
 invent your own. §1.5 covers the finger camera, which has no ManiWAV counterpart and is ours alone.
 
 ```
-pingest fetch → process-all → pp (steps 1–6) → export-polyumi → TRAIN (your container)
+pingest fetch → process-all → pp (steps 1–6) → export --type polyumi → TRAIN (your container)
                                                     │
                                                     ├── data/mic_0,     raw waveform
                                                     └── data/finger_rgb, cropped frames
 ```
 
 The visuomotor path is unchanged and still lives in
-[training-instructions.md](training-instructions.md). `pingest export-dp` produces exactly what it
-always did; `export-polyumi` is a second command that adds modalities on top.
+[training-instructions.md](training-instructions.md). `pingest export` (`--type dp`, the default)
+produces exactly what it always did; `--type polyumi` adds modalities on top.
 
 ---
 
-## 1. The contract: what `export-polyumi` gives you
+## 1. The contract: what `export --type polyumi` gives you
 
-A `.zarr.zip` identical to `export-dp`'s, plus one key:
+A `.zarr.zip` identical to the default `--type dp` export's, plus two keys: `data/mic_0` (this
+section) and `data/finger_rgb` (§1.5) — both are always present, not an either/or choice.
 
 ```
 data/mic_0    (T, samples_per_step) float32    Blosc-zstd
@@ -71,7 +72,7 @@ task config uses only `mic_0` anyway. I can add mic_1 if you wish, however.
 
 ## 1.5. The finger camera: `data/finger_rgb`
 
-No ManiWAV counterpart — this one is ours. `export-polyumi` also writes:
+No ManiWAV counterpart — this one is ours. `export --type polyumi` also writes:
 
 ```
 data/finger_rgb    (T, 648, 982, 3) uint8    Blosc-zstd

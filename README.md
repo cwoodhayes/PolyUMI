@@ -137,7 +137,7 @@ pingest pp <scene_directory>
 # in ingest/foxglove)
 pingest export-mcap <scene_directory> <session_number>
 # export a scene's EPISODE sessions to a UMI-format ReplayBuffer (.zarr.zip) for training:
-pingest export-dp <scene_directory> --output <output.zarr.zip>
+pingest export <scene_directory> --output <output.zarr.zip>
 ```
 
 The at-rest data format used during the preprocessing stage managed by `pingest` is a
@@ -159,7 +159,7 @@ Run the server with: `uv run polyumi-catalog serve --recordings <path-to-your-re
 
 ## Training
 
-Once a scene is preprocessed and exported (`pingest export-dp`, above), train the visuomotor
+Once a scene is preprocessed and exported (`pingest export`, above), train the visuomotor
 diffusion policy in Docker on a GPU workstation. See
 [docs/training-instructions.md](docs/training-instructions.md) for the build/run walkthrough,
 the rootless-Docker notes, and how the trained policy is served back to the ROS inference node.

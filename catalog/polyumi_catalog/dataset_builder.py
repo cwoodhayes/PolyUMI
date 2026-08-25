@@ -28,9 +28,9 @@ class DatasetBuildError(ValueError):
     """A dataset build was rejected (invalid input) or the underlying export failed."""
 
 
-#: ``export-dp`` (visuomotor only) vs ``export-polyumi`` (adds every PolyUMI modality: the
-#: contact mic, which needs preprocessing step 6, and the finger camera, which needs no step of
-#: its own). See ``polyumi_ingest.export.dp``.
+#: Matches ``pingest export --type``'s values: ``'dp'`` (visuomotor only) vs ``'polyumi'`` (adds
+#: every PolyUMI modality — the contact mic, which needs preprocessing step 6, and the finger
+#: camera, which needs no step of its own). See ``polyumi_ingest.export.dp``.
 _EXPORTER_TYPES = ('dp', 'polyumi')
 
 

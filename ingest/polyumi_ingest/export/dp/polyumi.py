@@ -1,10 +1,10 @@
 """
-``export-polyumi``: the visuomotor ReplayBuffer plus PolyUMI's extra observation streams.
+``pingest export --type polyumi``: the visuomotor ReplayBuffer plus PolyUMI's extra streams.
 
 A thin frontend over :func:`export_scenes_to_dp`, not a second exporter. Everything hard —
 episode segmentation around pose dropouts, the post-chirp start trim, pose-source resolution,
-provenance — is the same code path ``export-dp`` runs; this module only decides which
-modalities ride along. A new stream is one more entry in :data:`POLYUMI_MODALITIES`.
+provenance — is the same code path the default ``--type dp`` runs; this module only decides
+which modalities ride along. A new stream is one more entry in :data:`POLYUMI_MODALITIES`.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from polyumi_ingest.export.dp.buffer import MIN_SEGMENT_STEPS, export_scenes_to_
 from polyumi_ingest.export.dp.finger_camera import FingerCameraModality
 from polyumi_ingest.export.dp.modality import ExportModality
 
-#: Modalities ``export-polyumi`` adds on top of the visuomotor keys. Anything later joins this
+#: Modalities ``--type polyumi`` adds on top of the visuomotor keys. Anything later joins this
 #: tuple and nothing else changes.
 POLYUMI_MODALITIES: tuple[type[ExportModality], ...] = (PiezoMicModality, FingerCameraModality)
 

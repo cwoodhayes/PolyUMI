@@ -23,7 +23,7 @@ Deliberately absent:
 * ``robot0_eef_rot_axis_angle_wrt_start`` — ``UmiDataset`` derives it at load time from
   ``demo_start_pose``. It is in ``shape_meta`` but must *not* be in the store.
 * tactile (piezo / finger camera) — out of scope for the *visuomotor* policy. The contact
-  mic is exported by ``export-polyumi``, which runs this same code with a modality attached;
+  mic is exported by ``--type polyumi``, which runs this same code with a modality attached;
   see ``export.dp.modality`` and ``export.dp.polyumi``.
 
 Poses come from one of each episode's ``eef/pose_<source>`` arrays (preprocessing step 5 writes
@@ -81,7 +81,7 @@ contribute additional ``data/<key>`` arrays inside the same segment loop, and ma
 validity mask where they have no observation — so a stream that stops before the others is
 trimmed around like a pose dropout rather than failing the episode. An export with none is
 byte-identical to one from before that seam existed, down to the provenance sidecar, so
-``export-dp``'s contract is unchanged by anything ``export-polyumi`` adds.
+the default ``--type dp``'s contract is unchanged by anything ``--type polyumi`` adds.
 
 ``enforce_preprocessing`` requires only the steps an export actually reads —
 ``PreprocessingStep.required_for_export``, plus whatever its modalities declare. Demanding
@@ -452,8 +452,8 @@ def _export_episode(
             'frame_range': [int(gidx[0]), int(gidx[-1])],
             'frame_stride': stride,
         }
-        # Absent entirely when nothing extra was exported, so export-dp's sidecar and meta attrs
-        # stay byte-identical to what they were before this seam existed.
+        # Absent entirely when nothing extra was exported, so the default --type dp's sidecar
+        # and meta attrs stay byte-identical to a plain visuomotor buffer.
         if modalities:
             ep_provenance['modalities'] = {m.name: m.segment_provenance(gidx) for m in modalities}
         results.append((t, ep_provenance))

@@ -166,9 +166,9 @@ The **dry-run** pattern (validate commanded motion without moving the arm) is `e
 pingest --help
 pingest fetch --host <hostname> --latest
 pingest process-all --force
-pingest export-dp <scene> -o <name>.zarr.zip        # visuomotor dataset
-pingest export-polyumi <scene> -o <name>.zarr.zip   # + data/mic_0 (contact mic, needs pp 6)
-                                                   #   and data/finger_rgb (finger camera, cropped)
+pingest export <scene> -o <name>.zarr.zip                       # visuomotor dataset
+pingest export <scene> -o <name>.zarr.zip --type polyumi        # + data/mic_0 (contact mic, needs pp 6)
+                                                                #   and data/finger_rgb (finger camera, cropped)
 ```
 
 ### Training the diffusion policy (GPU workstation, Docker)
@@ -178,7 +178,7 @@ workspace. One image serves both training and inference. Run it with `./train_po
 (builds the fork image + mounts dataset/output with rootless-safe flags). Full walkthrough,
 including rootless-Docker gotchas, is in
 [docs/training-instructions.md](docs/training-instructions.md). This is the step after `pingest
-export-dp`.
+export`.
 
 **Serving a trained checkpoint** (the real inference server) uses the same image via
 `CKPT=/abs/path/to/<name>.ckpt ./serve_policy.sh` at the repo root (the inference counterpart of

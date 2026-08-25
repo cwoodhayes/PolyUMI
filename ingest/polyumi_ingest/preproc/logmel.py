@@ -4,7 +4,7 @@ Log-mel spectrograms for the contact-mic diagnostic, in numpy/scipy alone.
 **Nothing trains on the output of this module.** It exists so the catalog and the quality pass
 can answer "did the contact mic actually record anything", and so a human can look at an episode
 without a GPU box. The spectrogram the *policy* sees is computed inside the training container
-from the raw waveform ``export-polyumi`` ships, after waveform-domain augmentation — see
+from the raw waveform ``--type polyumi`` ships, after waveform-domain augmentation — see
 ``docs/maniwav-audio-policy.md``. The two are not required to agree bit-for-bit, and this one
 must never become an input to training, because a precomputed mel cannot be augmented.
 
@@ -102,11 +102,14 @@ def log_mel_spectrogram(
         pad = n_fft - win_length
         window = np.pad(window, (pad // 2, pad - pad // 2))
 
-    # p0/p1 with fft_mode='onesided' and no padding gives exactly the frames that fit inside the
-    # signal, i.e. Kaldi's snip_edges=True — no synthesised half-frames at either end.
+    # ShortTimeFFT centers slice p on sample p*hop + k_offset. With k_offset=0, p=0 is centered
+    # on sample 0, so half the first window is zero-padding before the signal even starts.
+    # Shifting k_offset by half the FFT width instead centers p=0 on sample n_fft // 2, which
+    # makes its window exactly audio[0:n_fft] — Kaldi's snip_edges=True, no synthesised
+    # half-frames at either end — and matches the hop-centre timestamps the caller derives below.
     sft = ShortTimeFFT(win=window, hop=hop_length, fs=sample_rate, fft_mode='onesided')
     n_hops = 1 + (len(audio) - n_fft) // hop_length
-    spectrum = sft.stft(audio, p0=0, p1=n_hops, k_offset=0)  # (n_freq, n_hops) complex
+    spectrum = sft.stft(audio, p0=0, p1=n_hops, k_offset=n_fft // 2)  # (n_freq, n_hops) complex
     power = np.abs(spectrum) ** 2
 
     fbank = mel_filterbank(sample_rate, n_fft, n_mels, fmin, fmax)  # (n_mels, n_freq)
