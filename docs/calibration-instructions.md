@@ -261,9 +261,7 @@ went. **This moves the arm.**
      zero travel). `franka_hand_node` already models that internally (`HandLimits.cmd_delay` in
      `gripper_trajectory_interpolator.hpp`) to decide which setpoint each `Move` can still reach —
      so feeding the same figure into `config/inference.yaml`'s `gripper_exec` would compensate for
-     it twice. That field is currently `0.0`, under test; measure the *residual* schedule lead with
-     `latency_probe --ros-args -p mode:=gripper_chirp` instead, and see `inference.yaml`'s own
-     comment on `gripper_exec` before changing it.
+     it twice. That field is currently `0.0` and should be left that way.
    - `latency.gripper` — the **observation** side, half the `/fr3_gripper/joint_states` publish
      interval. Goes in `config/inference.yaml`, unaffected by the above.
 

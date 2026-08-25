@@ -553,8 +553,16 @@ class PolicyClientNode(Node):
 
         The same time-alignment discipline the TF lookup gets, done by hand because a plain topic
         has no tf2-style interpolating buffer. Outside the cached span we hold the nearest endpoint
-        rather than extrapolating: the hand moves slowly relative to the ~60 ms sample interval, so
-        a held value is a far smaller error than a linear extrapolation off the end would be.
+        rather than extrapolating: the hand moves slowly relative to its own sample interval (see
+        franka_hand_node.cpp for the current figure -- it has drifted before and will again), so a
+        held value is a far smaller error than a linear extrapolation off the end would be.
+
+        Interpolating, not holding, inside the span is also why latency.gripper is a pure
+        propagation-lag term and not a sampling-interval correction: two straddling samples already
+        bound the true value regardless of how far apart they are, so nothing here needs shifting
+        to account for the gap between them -- only for the hand's samples arriving late relative to
+        the aperture they claim to report, which is unmeasured (see latency.gripper in
+        inference.yaml).
 
         :param target: instant to sample the aperture at, or None for "latest available".
             Note this is deliberately **not** tf2's convention, where a zero ``Time()`` means

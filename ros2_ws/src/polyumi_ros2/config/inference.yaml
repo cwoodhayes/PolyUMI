@@ -81,17 +81,15 @@
       # the hand stands still BETWEEN moves, not a feed-forward term. Don't paste it in blind.
       gripper_exec: 0.0
 
-      # Delay from the hand's true aperture to it appearing on /fr3_gripper/joint_states.
-      # Kept separate from proprio because the gripper is a different device on its own link and
-      # its own (slower, jitterier) topic.
+      # Delay from the hand's true aperture to it appearing on /fr3_gripper/joint_states. Kept
+      # separate from proprio because the gripper is a different device on its own link and its
+      # own (slower, jitterier) topic.
       #
-      # This is the OBSERVATION half, consumed by the gripper-width lookup; gripper_exec above is
-      # the action half. Half the joint_states publish interval is the honest bound — isolating it
-      # properly needs ground truth of the true aperture, and franka_gripper publishes no measure
-      # timestamp (UMI reads the WSG's).
-      #
-      # Calibrated on 08-10-2026.
-      gripper: 0.0214
+      # 0.0: unmeasurable without a camera on the fingers, same as franka_hand_node's
+      # t_obs_delay_s, which already guesses at it for the action side. Left at 0 rather than
+      # duplicating that guess here, but kept as a real field for the gripper this hand is being
+      # replaced by, where it may be measurable properly.
+      gripper: 0.0
 
     # --- Gripper width conversion. CALIBRATED 2026-08-09. ---
     # The DP exporter subtracts the closed width, so the policy speaks metres of opening from
