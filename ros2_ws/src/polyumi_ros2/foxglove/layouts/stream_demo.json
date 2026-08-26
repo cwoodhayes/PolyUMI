@@ -53,13 +53,13 @@
     "3D!2sy03nw": {
       "cameraState": {
         "perspective": true,
-        "distance": 2.705519085576189,
-        "phi": 85.48891151223991,
-        "thetaOffset": 166.02003567221863,
+        "distance": 5.270401889302381,
+        "phi": 84.28482148462267,
+        "thetaOffset": 170.18743689844393,
         "targetOffset": [
-          0.38248857602111025,
-          -0.49276165970869423,
-          -1.541150377119248e-17
+          0.6616763636834138,
+          -2.705639512953976,
+          -2.0305485011794207e-17
         ],
         "target": [
           0,
@@ -226,9 +226,21 @@
           "enabled": true,
           "color": "#4e98e2",
           "id": "62baf26a-07a1-43f5-b5e2-281fe686ad1d",
-          "label": "Gripper Width (m)"
+          "label": "Gripper cmd (m)"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/polyumi/diag/gripper_width_m.data",
+          "enabled": true,
+          "color": "#f5774d",
+          "id": "72a40798-a4c2-4194-8b7f-c6daad5a77e6",
+          "label": "Gripper state (m)"
         }
-      ]
+      ],
+      "minYValue": 0,
+      "maxYValue": 0.1,
+      "timeWindowMode": "sliding",
+      "followingViewWidth": 20
     },
     "Tab!2xvuj86": {
       "activeTabIdx": 0,

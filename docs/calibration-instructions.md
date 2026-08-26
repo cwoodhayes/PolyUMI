@@ -118,7 +118,10 @@ To iterate without relaunching, `SetLoad` can be called by hand — but **only w
 
 What you really want to see, though, is that when you launch fr3_inference.launch.py,
 (which starts the impedance controller upon first launch after the bringup), 
-that the fingertip doesn't move at all in any direction, by rotation or translation.
+that the fingertip doesn't move at all in any direction, by rotation or translation, at _any position of the arm_.
+
+You can kind of move the arm into different positions to back out if your CoM is at the wrong place once you have the
+mass nailed down at the homing position (where you know that the 100% of the mass error goes into -z displacement).
 
 Failing all else, you can sort of guess-and-check (and start with my existing numbers)
 based on the CAD changes you've made, and watch for that result when you start up.

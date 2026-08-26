@@ -126,7 +126,7 @@ HAND_STATIC_TRANSFORMS = (
 #
 # Note franka_hardware reads no payload from the URDF (only robot_ip and arm_id), so an <inertial>
 # block in fr3_polyumi.urdf.xacro would change nothing here — setLoad or Desk are the only levers.
-PAYLOAD_MASS = 0.5  # kg
+PAYLOAD_MASS = 0.7  # kg
 
 # In fr3_hand, which uses the same frame orientation as TCP_XYZ, so the two are directly comparable
 # (see the linear offset in TCP_XYZ above, positioned at the fingertips). setLoad wants it in the FLANGE,
@@ -136,7 +136,7 @@ PAYLOAD_MASS = 0.5  # kg
 # guesswork; I'd say CoM is about 1/3 of the way along the fingers due to GoPro being far back.
 # and then about 40mm up (which is neg. in this frame) from the finger surface, again due to the gopro
 # and the x is a bit to the right, looking out from the camera, due to the shape of the gopro.
-PAYLOAD_COM_HAND = (0.01, TCP_XYZ[1] - 0.04, TCP_XYZ[2] / 3)  # m
+PAYLOAD_COM_HAND = (0.01, TCP_XYZ[1] - 0.04, TCP_XYZ[2] / 2.5)  # m
 
 # The FR3 firmware validates the tensor before it looks at anything else, and a nonzero mass with a
 # zero inertia is a physical impossibility it rejects outright:

@@ -88,6 +88,7 @@ DIAG_METRICS = (
     'inference_latency_s',
     'image_age_s',
     'gripper_state_age_s',
+    'gripper_width_m',
 )
 
 
@@ -796,6 +797,10 @@ class PolicyClientNode(Node):
             # be wrong for fingers whose closed aperture is non-zero: that aperture is not merely
             # closed, it is narrower than the hand can physically go.
             return 0.0
+
+        # Robot units (aperture), not policy units, so it overlays /polyumi/target_gripper[_preview]
+        # directly: the raw finger topic is half the aperture and can't be scaled in a plot panel.
+        self._diag('gripper_width_m', width)
 
         # A topic that stops publishing is invisible to _gripper_width_at — it just keeps holding
         # its newest sample — so the age is checked explicitly, as the camera path does. Skipped
