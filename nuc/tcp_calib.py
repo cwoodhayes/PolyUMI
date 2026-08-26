@@ -196,16 +196,17 @@ def payload_com_flange() -> tuple[float, float, float]:
     """
     Convert :data:`PAYLOAD_COM_HAND` into ``fr3_link8``, which is the frame setLoad's F_x_Cload is in.
 
-    The rotation is read out of :data:`HAND_STATIC_TRANSFORMS` rather than re-typed, so the flange's
-    mounting yaw stays defined once. That entry's translation is (0, 0, 0) — the two origins
-    coincide — so this is a pure rotation.
+    Both halves of the transform are read out of :data:`HAND_STATIC_TRANSFORMS` rather than
+    re-typed, so the flange's mounting geometry stays defined once. The translation is zero today,
+    which makes this a pure rotation — applied anyway so a future nonzero origin does not silently
+    put the CoM in the wrong place.
     """
-    (_, _, _, (_, _, yaw)) = next(t for t in HAND_STATIC_TRANSFORMS if t[1] == TCP_PARENT)
+    (_, _, (tx, ty, tz), (_, _, yaw)) = next(t for t in HAND_STATIC_TRANSFORMS if t[1] == TCP_PARENT)
     x, y, z = PAYLOAD_COM_HAND
     return (
-        x * math.cos(yaw) - y * math.sin(yaw),
-        x * math.sin(yaw) + y * math.cos(yaw),
-        z,
+        tx + x * math.cos(yaw) - y * math.sin(yaw),
+        ty + x * math.sin(yaw) + y * math.cos(yaw),
+        tz + z,
     )
 
 

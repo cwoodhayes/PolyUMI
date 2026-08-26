@@ -52,6 +52,10 @@ import tcp_calib  # noqa: E402
 # returns as soon as controller_manager answers.
 CONTROLLER_MANAGER_TIMEOUT_S = '60'
 
+# Cap on the set_load call below, whose own wait for the service is unbounded. Matched to the
+# spawner's wait, since both are waiting on the same thing coming up: franka_bringup.
+SET_LOAD_TIMEOUT_S = CONTROLLER_MANAGER_TIMEOUT_S
+
 
 def generate_launch_description():
     """Include franka_bringup and spawn fr3_arm_controller once controller_manager is up."""
@@ -72,8 +76,14 @@ def generate_launch_description():
     # franka_bringup. It does exit 0 even when the response is `success: false` — the body prints to
     # screen, and a payload that did not take announces itself as the same droop, so a hard failure
     # here is not worth a node of its own.
+    #
+    # `timeout` because that wait is UNBOUNDED, and the spawner below is ordered on this exiting:
+    # if franka_bringup dies (FCI off, robot unreachable) the service never appears, and without a
+    # cap the arm controller is never spawned and the only clue is a `waiting for service` line.
     set_load = ExecuteProcess(
         cmd=[
+            'timeout',
+            SET_LOAD_TIMEOUT_S,
             'ros2',
             'service',
             'call',
