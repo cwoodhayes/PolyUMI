@@ -39,7 +39,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from tf2_ros import Buffer, TransformListener
 
-from polyumi_ros2.target_chunk import TargetChunkPublisher, Wire
+from polyumi_ros2.target_chunk import CONSUMER_HINT, TargetChunkPublisher
 
 #: How long to wait for the first TF sample before giving up.
 TF_TIMEOUT_S = 10.0
@@ -97,9 +97,7 @@ class ServoSmokeTest(Node):
 
         self._validate()
 
-        self._pub = TargetChunkPublisher(
-            self, wire=Wire.MULTIDOF, frame_id=self._base, joint_name=self._eef, topic=topic
-        )
+        self._pub = TargetChunkPublisher(self, frame_id=self._base, joint_name=self._eef, topic=topic)
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
 
@@ -167,8 +165,7 @@ class ServoSmokeTest(Node):
                 return True
             time.sleep(0.1)
         self.get_logger().error(
-            f'Nothing is subscribed to {self._pub.topic_name} after {SUBSCRIBER_TIMEOUT_S:.0f}s. '
-            f'Needs: {self._pub.wire.consumer}'
+            f'Nothing is subscribed to {self._pub.topic_name} after {SUBSCRIBER_TIMEOUT_S:.0f}s. Needs: {CONSUMER_HINT}'
         )
         return False
 

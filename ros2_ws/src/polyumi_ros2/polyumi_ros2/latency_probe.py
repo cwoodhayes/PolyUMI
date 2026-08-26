@@ -98,25 +98,23 @@ from tf2_ros import Buffer, TransformListener
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from polyumi_ros2.latency_util import get_latency
-from polyumi_ros2.target_chunk import TargetChunkPublisher, Wire
+from polyumi_ros2.target_chunk import TargetChunkPublisher
 
 MODES = ('camera', 'arm', 'gripper', 'gripper_chirp')
 
 #: Chirp band, in Hz. Bandwidth is what makes the correlation peak sharp (see latency_util). The
-#: arm's sits as high as it can actually follow through MoveIt's plan-then-execute cadence; the
 #: gripper_chirp band is sized in _init_gripper_chirp against the hand's deadband and command
 #: floor, not listed here as a bare constant.
 CHIRP_BAND_HZ = {'arm': (0.05, 0.4), 'gripper_chirp': (0.1, 0.7)}
 
-#: Arm command rate, deliberately slow: `fr3_moveit_bridge` plans and executes each chunk
-#: synchronously and drops any that arrive mid-flight, so commanding at the 10 Hz control rate
-#: would discard most of them. Dropping *some* is harmless — the arm still traverses the same
-#: smooth chirp, and it is the chirp we correlate against — but it is noise we can avoid.
+#: Arm command rate. Matches policy_client_node's control rate, so the probe excites the arm the
+#: way the policy does — the streaming controller splices every waypoint it is handed, so there is
+#: no reason to command more slowly than the thing being measured.
 #:
-#: franka_hand_node has no such synchronous stage — it splices each chunk into a horizon it
-#: re-plans against — so gripper_chirp publishes faster than the hand can act, to keep the horizon
-#: fed a fresh target every window.
-COMMAND_HZ = {'arm': 4.0, 'gripper_chirp': 10.0}
+#: franka_hand_node splices each gripper chunk into a horizon it re-plans against, so
+#: gripper_chirp publishes faster than the hand can act, to keep the horizon fed a fresh target
+#: every window.
+COMMAND_HZ = {'arm': 10.0, 'gripper_chirp': 10.0}
 
 #: Joint name on /polyumi/target_gripper, matching policy_client_node and gripper_range_probe.
 GRIPPER_JOINT_NAME = 'fr3_gripper_width'
@@ -339,10 +337,6 @@ class LatencyProbe(Node):
                     f'chirp_f1_hz ({self._f1}) must be below the Nyquist of command_hz '
                     f'({self._command_hz / 2}), or the commanded sweep aliases'
                 )
-            # Which executor to measure. These are genuinely different numbers, not two ways of
-            # measuring one: PoseArray goes to fr3_moveit_bridge and returns a planning time, while
-            # MultiDOF goes to the streaming controller and returns transport plus a control cycle.
-            self.declare_parameter('wire', str(Wire.MULTIDOF))
             self.declare_parameter('target_topic', '')
             self.declare_parameter('base_frame', 'fr3_link0')
             self.declare_parameter('eef_frame', 'polyumi_tcp')
@@ -350,10 +344,10 @@ class LatencyProbe(Node):
             # Lateral by default: a vertical sweep loads and unloads gravity asymmetrically, so
             # the arm's lag differs between the up and down halves and smears the peak.
             self.declare_parameter('axis', 'y')
-            # How far ahead of publication each waypoint is scheduled, for the timed wire format.
-            # Required, not a tuning knob: the controller ignores any waypoint at or before its
-            # current instant, so one stamped `now` is always stale by the time it crosses the
-            # network. One command period is a comfortable margin over transport.
+            # How far ahead of publication each waypoint is scheduled. Required, not a tuning
+            # knob: the controller ignores any waypoint at or before its current instant, so one
+            # stamped `now` is always stale by the time it crosses the network. This is several
+            # command periods, which is margin over transport rather than a tight bound.
             #
             # It does not bias the result — _run_arm correlates against each waypoint's intended
             # instant, not its publication. Re-run at a different lead to confirm that still holds.
@@ -369,11 +363,8 @@ class LatencyProbe(Node):
                 errors.append(f'amplitude_m must be > 0, got {self._amplitude}')
             if self._lead <= 0:
                 errors.append(f'lead_s must be > 0, got {self._lead} — every waypoint would be dropped as stale')
-            wire = self.get_parameter('wire').get_parameter_value().string_value
             topic = self.get_parameter('target_topic').get_parameter_value().string_value or None
-            self._pub = TargetChunkPublisher(
-                self, wire=wire, frame_id=self._base_frame, joint_name=self._eef_frame, topic=topic
-            )
+            self._pub = TargetChunkPublisher(self, frame_id=self._base_frame, joint_name=self._eef_frame, topic=topic)
             self._tf_buffer = Buffer()
             self._tf_listener = TransformListener(self._tf_buffer, self)
             #: (stamp_s, position on the swept axis)
@@ -699,19 +690,12 @@ class LatencyProbe(Node):
                 # One waypoint per publication, at command_hz; each splices onto the last, which
                 # is the continuous case the policy produces. dt is irrelevant with a single point.
                 #
-                # The two formats measure different quantities, so "when was this commanded" means
-                # different things. MoveIt re-times a PoseArray from arrival, so the command event
-                # is the publication and the answer is a planning time. A MultiDOF waypoint carries
-                # its own instant, so correlating against that — not the publication — measures how
-                # far the arm lags the equilibrium point, which is what policy_client_node
-                # compensates when it anchors chunks at t_obs - arm_exec.
-                if self._pub.wire is Wire.MULTIDOF:
-                    target = self.get_clock().now() + Duration(seconds=self._lead)
-                    self._pub.publish([pose], stamp=target.to_msg())
-                    commanded.append((target.nanoseconds * 1e-9, offset))
-                else:
-                    self._pub.publish([pose])
-                    commanded.append((self._now(), offset))
+                # The waypoint carries its own instant, so correlating against that — not the
+                # publication — measures how far the arm lags the equilibrium point, which is what
+                # policy_client_node compensates when it anchors chunks at t_obs - arm_exec.
+                target = self.get_clock().now() + Duration(seconds=self._lead)
+                self._pub.publish([pose], stamp=target.to_msg())
+                commanded.append((target.nanoseconds * 1e-9, offset))
                 time.sleep(period)
         finally:
             sampler.cancel()
@@ -730,10 +714,9 @@ class LatencyProbe(Node):
                     f'\nFAILED: the arm barely moved — commanded {commanded_span * 100:.1f} cm, '
                     f'observed {actual_span * 100:.2f} cm.\n'
                     '  Nothing acted on the commands. In order of likelihood:\n'
-                    f'  1. no executor is subscribed to {self._pub.topic_name} — for the timed '
-                    'format the impedance\n'
-                    '     controller must be ACTIVE, not merely loaded '
-                    '(ros2 control list_controllers on the NUC).\n'
+                    f'  1. nothing is subscribed to {self._pub.topic_name} — the impedance '
+                    'controller must be ACTIVE,\n'
+                    '     not merely loaded (ros2 control list_controllers on the NUC).\n'
                     '  2. every waypoint was rejected as already elapsed. The controller logs '
                     '"already in the past"\n'
                     '     in the NUC bringup log; raise lead_s if so.\n'
@@ -747,18 +730,11 @@ class LatencyProbe(Node):
             commanded,
             actual,
             note=(
-                'This is plan+execute through MoveIt, not a transport delay: it is a distribution\n'
-                '  dominated by planning time and it shifts with max_velocity_scaling. Measure it at\n'
-                '  the scaling you will actually run at. It feeds _n_stale_actions, in units of\n'
-                f'  action_dt={self._action_dt}s, so tens of ms of spread here is tolerable.'
-            )
-            if self._pub.wire is Wire.POSE_ARRAY
-            else (
                 'This is the streaming controller: transport plus a control cycle, not a planning\n'
-                '  time, so expect it far smaller and far sharper than the MoveIt figure and near\n'
-                "  UMI's robot_action_latency of 0.1. It does two jobs now — it still feeds\n"
-                '  _n_stale_actions, and it is subtracted from every chunk anchor, so an error here\n'
-                '  shifts the whole commanded timeline rather than just rounding a drop count.'
+                "  time, so expect it small and sharp, near UMI's robot_action_latency of 0.1. It\n"
+                '  does two jobs — it feeds _n_stale_actions, and it is subtracted from every chunk\n'
+                '  anchor, so an error here shifts the whole commanded timeline rather than just\n'
+                '  rounding a drop count.'
             ),
         )
 

@@ -27,12 +27,12 @@
   <depend>foxglove_msgs</depend>
   <depend>tf2_ros</depend>
   <!-- Phase 2: when execute_motion is on, the node publishes each action chunk as a
-       geometry_msgs/PoseArray on /polyumi/target_poses. The NUC-side fr3_moveit_bridge
-       does the actual MoveIt calls — moveit_msgs is NOT needed on the laptop (large
-       MoveIt action goals corrupt across the laptop/NUC rmw-version gap). -->
+       trajectory_msgs/MultiDOFJointTrajectory on /polyumi/target_poses_traj, which the
+       NUC-side streaming Cartesian impedance controller splices. geometry_msgs is still
+       needed for the Pose/PoseArray the chunk and its preview are built from. -->
   <depend>geometry_msgs</depend>
   <!-- Phase 2.5: the gripper half of the action chunk goes out separately, as a
-       trajectory_msgs/JointTrajectory on /polyumi/target_gripper. A PoseArray cannot carry a
+       trajectory_msgs/JointTrajectory on /polyumi/target_gripper. The pose chunk carries no
        width, and the Franka Hand is action-only (no ros2_control interface), so it needs its
        own channel and its own cadence. Consumed by franka_hand_node on the NUC — the franka_msgs
        gripper actions are called from the NUC, not here. -->

@@ -38,8 +38,8 @@
 #      not (franka.launch.py couples hand: to load_gripper:, and that's false so
 #      franka_hand_node can own the connection instead of franka_gripper) -- so
 #      /joint_states, sourced from THAT model, never reports fr3_finger_joint1/2 and this
-#      monitor repeats "not yet known" at ~1 Hz forever. Harmless: /polyumi/home and
-#      fr3_moveit_bridge only plan the fr3_arm group, which doesn't include the fingers.
+#      monitor repeats "not yet known" at ~1 Hz forever. Harmless: /polyumi/home only plans the
+#      fr3_arm group, which doesn't include the fingers.
 #      Fixing it for real means decoupling hand: from load_gripper: in fr3_bringup's own
 #      robot_description, which is a bigger, riskier change than a log line justifies.
 # See docs/crb-fr3-inference.md for how to run this and the gotchas around it.
@@ -121,13 +121,10 @@ def generate_launch_description():
 
     db_arg = DeclareLaunchArgument('db', default_value='False', description='Database flag')
 
-    # See header change 4. This is the knob that sets how fast a planned chunk actually runs,
-    # and Humble's GetCartesianPath has no velocity_scaling field to speed one back up after
-    # the fact. Deliberately NOT the FR3's datasheet maximum: conservative, raise it while
-    # watching — the arm will fire a reflex if a chunk is too aggressive. fr3_moveit_bridge
-    # stretches the result back to the span the incoming Path asks for, so a faster plan does
-    # not mean a faster arm; it means the commanded timeline becomes reachable instead of
-    # being the slower of the two.
+    # See header change 4. The ceiling move_group time-parameterizes a homing plan against.
+    # Deliberately NOT the FR3's datasheet maximum: conservative, raise it while watching — the
+    # arm will fire a reflex if a sweep is too aggressive. Nothing downstream slows the result,
+    # so this and the URDF's velocity limits are what a home sweep actually runs at.
     max_acceleration_arg = DeclareLaunchArgument(
         'max_acceleration',
         default_value='1.5',
@@ -135,8 +132,8 @@ def generate_launch_description():
     )
 
     # PolyUMI change 3 (see header): the stock fr3.urdf.xacro, wrapped so move_group's
-    # RobotModel also carries `polyumi_tcp` — the frame the bridge names as GetCartesianPath's
-    # link_name. TF gets the same transform from fr3_bringup.launch.py; both read tcp_calib.
+    # RobotModel also carries `polyumi_tcp`, so the planning scene agrees with TF about where the
+    # policy's frame is. TF gets the same transform from fr3_bringup.launch.py; both read tcp_calib.
     franka_xacro_file = str(NUC_DIR / 'description' / 'fr3_polyumi.urdf.xacro')
 
     robot_description_command = Command(

@@ -59,9 +59,13 @@
       # hardcodes robot_obs_latency: 0.0001. The arm_exec measurement below returns
       # (arm_exec + proprio), which at this magnitude is well inside its own noise floor.
       proprio: 0.001
+
       # How far the arm lags the impedance controller's equilibrium point. Not a transport delay:
       # policy_client_node anchors each chunk at t_obs - arm_exec so the equilibrium reaches pose k
       # that far early and the arm, trailing it, arrives on time.
+      # This is a bit of a handwave-y placeholder architecturally; this quantity is really 
+      # a combination of the frequency response of the controller and the actual hardware latency.
+      # Might revisit a better way to handle this (without making the controller super stiff) later on.
       #
       # Used twice — by _n_stale_actions and by the chunk anchor — and the two cancel in timing but
       # not in phase. The first published waypoint lands at ~now whatever this value is, but WHICH
@@ -69,7 +73,7 @@
       # policy's trajectory rather than commanding early.
       #
       # Calibrated 2026-08-19 in servo mode; close to UMI's robot_action_latency of 0.1.
-      arm_exec: 0.0810
+      arm_exec: 0.0910
 
       # The gripper's counterpart to arm_exec: how far ahead of intent to command the hand.
       # franka_hand_node already plans each Move to ARRIVE at its waypoint's stated instant

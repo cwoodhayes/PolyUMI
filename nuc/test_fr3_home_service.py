@@ -12,7 +12,7 @@ so these tests exercise the bridge's logic and nothing else.
 
     bash -c 'unset VIRTUAL_ENV; source /opt/ros/kilted/setup.bash \
       && source ros2_ws/install/setup.bash \
-      && /usr/bin/python3 -m pytest nuc/test_fr3_moveit_bridge.py -q'
+      && /usr/bin/python3 -m pytest nuc/test_fr3_home_service.py -q'
 """
 
 from unittest.mock import MagicMock, patch
@@ -23,7 +23,7 @@ import rclpy
 from rclpy.parameter import Parameter
 from std_srvs.srv import Trigger
 
-import fr3_moveit_bridge as mb
+import fr3_home_service as mb
 
 
 @pytest.fixture(scope='module', autouse=True)
@@ -47,12 +47,12 @@ def make_node():
     def _make(**overrides):
         params = [Parameter(k, value=v) for k, v in overrides.items()]
         with (
-            patch.object(mb.Fr3MoveItBridge, 'create_client', side_effect=lambda *a, **k: MagicMock()),
+            patch.object(mb.Fr3HomeService, 'create_client', side_effect=lambda *a, **k: MagicMock()),
             patch.object(mb, 'ActionClient') as action_client,
         ):
             action_client.return_value.wait_for_server.return_value = True
             action_client.return_value.server_is_ready.return_value = True
-            node = mb.Fr3MoveItBridge(parameter_overrides=params)
+            node = mb.Fr3HomeService(parameter_overrides=params)
         node.get_logger = MagicMock()
         # Futures never resolve against a mocked client, so _wait would burn its full timeout.
         node._wait = lambda future, timeout_s: True
@@ -78,7 +78,7 @@ def _capture_execute(node) -> list:
     """Replace _run_execute with a recorder, returning the list it appends (trajectory, timeout) to."""
     calls = []
 
-    def _record(trajectory, timeout_s=mb.EXECUTE_TIMEOUT_S):
+    def _record(trajectory, timeout_s):
         calls.append((trajectory, timeout_s))
         return True
 
@@ -117,7 +117,7 @@ def test_home_moves_the_arm_even_in_plan_only_mode(make_node):
 
 
 def test_home_uses_the_long_execute_timeout(make_node):
-    """A joint-space sweep at low velocity scaling outlasts the per-chunk timeout."""
+    """A joint-space sweep at low velocity scaling needs far longer than a short move."""
     node = make_node()
     _stub_plan_ok(node)
     executed = _capture_execute(node)
@@ -125,11 +125,10 @@ def test_home_uses_the_long_execute_timeout(make_node):
     _home(node)
 
     assert executed[0][1] == mb.HOME_EXECUTE_TIMEOUT_S
-    assert mb.HOME_EXECUTE_TIMEOUT_S > mb.EXECUTE_TIMEOUT_S
 
 
 def test_home_refused_while_a_chunk_is_in_flight(make_node):
-    """The busy lock is shared with _on_target, so homing must not cut in on a running plan."""
+    """A concurrent /polyumi/home call must not cut in on one already planning/executing."""
     node = make_node()
     _stub_plan_ok(node)
     executed = _capture_execute(node)
@@ -201,7 +200,7 @@ def test_execute_success_does_not_cancel(make_node):
     result = node._exec.send_goal_async.return_value.result.return_value.get_result_async.return_value
     result.result.return_value.result.error_code.val = MoveItErrorCodes.SUCCESS
 
-    assert node._run_execute(RobotTrajectory())
+    assert node._run_execute(RobotTrajectory(), timeout_s=7.0)
 
     node._exec.send_goal_async.return_value.result.return_value.cancel_goal_async.assert_not_called()
 

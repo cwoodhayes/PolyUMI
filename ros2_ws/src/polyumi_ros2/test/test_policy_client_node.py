@@ -864,24 +864,3 @@ def test_arm_chunk_is_anchored_at_t_obs_minus_arm_exec(make_node):
     # 0.1s obs age + 0.3s arm_exec over a 0.1s action_dt drops 4, so the survivors start at 4.
     assert kwargs['first_index'] == 4
     assert len(pose_pub.call_args[0][0]) == 4
-
-
-def test_wire_decides_where_the_arm_chunk_goes(make_node):
-    """
-    One format, one topic — publishing both let the NUC alone decide which executor acted.
-
-    A stack could then drive MoveIt while looking like it was driving the servo. Now a mismatch
-    between this and the NUC's `executor` means nothing subscribes, which the publish path warns
-    about rather than silently doing the wrong thing.
-    """
-    servo = make_node(control_hz=10.0, execute_motion=True)
-    assert servo._target_pub.topic_name == '/polyumi/target_poses_traj'
-
-    moveit = make_node(control_hz=10.0, execute_motion=True, wire='pose_array')
-    assert moveit._target_pub.topic_name == '/polyumi/target_poses'
-
-
-def test_unknown_wire_fails_fast(make_node):
-    """A typo must not bring the node up publishing where nothing subscribes."""
-    with pytest.raises(ValueError):
-        make_node(control_hz=10.0, execute_motion=True, wire='multidoff')

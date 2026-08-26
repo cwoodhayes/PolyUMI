@@ -130,6 +130,23 @@ real GoPro mount tilt — the geometry itself, `Rz(+90°)` sign included, is con
 `ros2 run polyumi_ros2 tcp_pivot_test`, which pivots about the TCP so you can watch whether the
 closed fingertips hold still. Re-run it after any change to the mount, the fingers, or this file.
 
+**The end-effector payload lives in `nuc/tcp_calib.py` too** (`PAYLOAD_MASS`, `PAYLOAD_COM_HAND`),
+pushed to the FCI once by `fr3_bringup.launch.py` via `franka_msgs/srv/SetLoad`, ordered ahead of
+the `fr3_arm_controller` spawner so no control loop is running when it lands. An under-configured
+payload shows up as the TCP dropping the instant the impedance controller activates and holding a
+steady-state offset — `Δz = m_unmodelled · g / K_trans`, so at K=2000 N/m 1 mm of droop is 0.2 kg.
+Note the CoM is written in `fr3_hand` (the frame `TCP_XYZ` uses) and converted to the flange by
+`payload_com_flange()`; the URDF is *not* a lever here, since `franka_hardware` reads no payload
+out of it. Two FR3 constraints make `SetLoad` fail in ways the service response hides behind the
+string `"command exception error"` — a nonzero mass needs a nonzero inertia tensor
+(`payload_inertia_flange()` derives one), and the call is refused entirely while any controller holds the
+arm (`current mode ("Move")`), which is why bringup sequences it ahead of the spawner. **A failed
+`SetLoad` aborts bringup** — `nuc/set_payload.py` reads `response.success` off the typed message
+rather than the CLI's exit status, which is 0 either way, because the
+spawner immediately makes it unretryable and a wrong gravity model is easy to miss. The real
+message is only in the `/service_server` log. Full procedure in
+[docs/calibration-instructions.md](docs/calibration-instructions.md).
+
 **`./fr3_session.sh`** (repo root) builds the whole wall — NUC, Pi, GPU box, laptop — as one
 tmux session, running the safe commands and pre-typing the robot-moving ones for you to
 confirm. Every fresh start (not a re-attach) also rsyncs `nuc/` to the NUC and runs
