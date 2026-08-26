@@ -75,8 +75,9 @@ def generate_launch_description():
     # Run through a shell so the exit status reflects the RESPONSE, not just the transport: on its
     # own `ros2 service call` exits 0 even when the body says `success: false`, and
     # franka_param_service_server flattens every CommandException to the string "command exception
-    # error", so a rejected payload otherwise scrolls past as ordinary output. `timeout` because the
-    # wait for the service is unbounded, and `tee` so the real response still reaches the log.
+    # error", so a rejected payload otherwise scrolls past as ordinary output. That exit status is
+    # what on_set_load_exit aborts the launch on. `timeout` because the wait for the service is
+    # unbounded, and `tee` so the real response still reaches the log.
     set_load_cmd = (
         'timeout ' + SET_LOAD_TIMEOUT_S + ' ros2 service call /service_server/set_load '
         "franka_msgs/srv/SetLoad '" + tcp_calib.set_load_request() + "' "
@@ -119,29 +120,31 @@ def generate_launch_description():
 
     def on_set_load_exit(event, context):
         """
-        Spawn fr3_arm_controller once set_load is done, shouting first if the payload did not take.
+        Spawn fr3_arm_controller once set_load has succeeded; abort the whole launch if it has not.
 
-        The spawner runs either way. Refusing to spawn would leave the whole session dead rather
-        than merely mis-modelled, and bringup is the piece that has to stay restartable — an
-        unmodelled payload is at least visible as TCP droop once the impedance controller
-        activates. What is not acceptable is that being quiet: by the time you notice the droop the
-        controller is up, and setLoad can then only be retried by deactivating everything again.
+        Aborting rather than warning-and-continuing, because this failure is both critical and easy
+        to miss. It is the last moment the payload can be set: the spawner immediately puts the
+        robot in "Move" mode, where setLoad is rejected, so a session that gets past here keeps a
+        wrong gravity model until someone deactivates every controller. And the symptom — TCP droop
+        under the impedance controller — is a thing you have to be looking for on a torque-controlled
+        arm. Better to have bringup refuse to come up, which is loud, immediate, and safe.
+
+        Raised rather than emitting a Shutdown event so ``ros2 launch`` exits non-zero: a clean
+        Shutdown stops the launch but reports success, which would hide this from anything
+        scripting bringup.
+
+        :raises RuntimeError: if set_load exited non-zero (rejected payload, or timeout).
         """
         if event.returncode == 0:
             return [arm_controller_spawner]
-        return [
-            LogInfo(
-                msg=(
-                    f'\n!!! SetLoad FAILED (exit {event.returncode}) — the arm is running with an '
-                    'UNMODELLED PAYLOAD.\n'
-                    '!!! Expect the TCP to sag when the impedance controller activates.\n'
-                    '!!! The real reason is in the /service_server log, not the response above.\n'
-                    '!!! Retrying means deactivating controllers first — '
-                    'see docs/calibration-instructions.md.\n'
-                )
-            ),
-            arm_controller_spawner,
-        ]
+        raise RuntimeError(
+            f'\n!!! SetLoad FAILED (exit {event.returncode}) — the payload did not configure.\n'
+            '!!! NOT spawning fr3_arm_controller: the impedance controller would fight gravity it\n'
+            '!!! does not know about, and setLoad cannot be retried once a controller holds the arm.\n'
+            '!!! The real reason is in the /service_server log, not the response above:\n'
+            '!!!   grep -i "command exception" $(ls -t ~/.ros/log/ros2_control_node_*.log | head -1)\n'
+            '!!! See docs/calibration-instructions.md ("End-effector payload").\n'
+        )
 
     return LaunchDescription(
         [
@@ -180,7 +183,8 @@ def generate_launch_description():
             set_load,
             # Ordered on set_load's exit, not declared alongside it: the spawner activates
             # fr3_arm_controller, which claims the effort interfaces and puts the robot in "Move"
-            # mode — where setLoad is rejected outright. This ordering is load-bearing, not tidiness.
+            # mode — where setLoad is rejected outright. This ordering is load-bearing, not
+            # tidiness, and the handler aborts the launch rather than spawning if setLoad failed.
             RegisterEventHandler(OnProcessExit(target_action=set_load, on_exit=on_set_load_exit)),
             # The frame the policy actually speaks in. It lives here rather than in the inference
             # launch so it exists whenever the arm does — Foxglove and `tf2_echo fr3_hand
