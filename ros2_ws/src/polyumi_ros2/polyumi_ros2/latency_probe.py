@@ -107,12 +107,14 @@ MODES = ('camera', 'arm', 'gripper', 'gripper_chirp')
 #: floor, not listed here as a bare constant.
 CHIRP_BAND_HZ = {'arm': (0.05, 0.4), 'gripper_chirp': (0.1, 0.7)}
 
-#: Arm command rate, kept below the 10 Hz control rate for comfortable waypoint spacing.
+#: Arm command rate. Matches policy_client_node's control rate, so the probe excites the arm the
+#: way the policy does — the streaming controller splices every waypoint it is handed, so there is
+#: no reason to command more slowly than the thing being measured.
 #:
 #: franka_hand_node splices each gripper chunk into a horizon it re-plans against, so
 #: gripper_chirp publishes faster than the hand can act, to keep the horizon fed a fresh target
 #: every window.
-COMMAND_HZ = {'arm': 4.0, 'gripper_chirp': 10.0}
+COMMAND_HZ = {'arm': 10.0, 'gripper_chirp': 10.0}
 
 #: Joint name on /polyumi/target_gripper, matching policy_client_node and gripper_range_probe.
 GRIPPER_JOINT_NAME = 'fr3_gripper_width'
@@ -343,9 +345,9 @@ class LatencyProbe(Node):
             # the arm's lag differs between the up and down halves and smears the peak.
             self.declare_parameter('axis', 'y')
             # How far ahead of publication each waypoint is scheduled. Required, not a tuning
-            # knob: the controller ignores any waypoint at or before its
-            # current instant, so one stamped `now` is always stale by the time it crosses the
-            # network. One command period is a comfortable margin over transport.
+            # knob: the controller ignores any waypoint at or before its current instant, so one
+            # stamped `now` is always stale by the time it crosses the network. This is several
+            # command periods, which is margin over transport rather than a tight bound.
             #
             # It does not bias the result — _run_arm correlates against each waypoint's intended
             # instant, not its publication. Re-run at a different lead to confirm that still holds.

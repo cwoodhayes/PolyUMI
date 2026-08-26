@@ -1,8 +1,8 @@
 """
 Tests for the chunk wire format and the publisher that builds it.
 
-Three producers build these messages — the policy client and both on-arm probes — so the format
-rules are tested once here rather than through each of them.
+Four producers build these messages — the policy client and the three on-arm probes — so the
+format rules are tested once here rather than through each of them.
 """
 
 import pytest
