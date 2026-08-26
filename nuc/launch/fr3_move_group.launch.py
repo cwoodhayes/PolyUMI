@@ -132,8 +132,8 @@ def generate_launch_description():
     )
 
     # PolyUMI change 3 (see header): the stock fr3.urdf.xacro, wrapped so move_group's
-    # RobotModel also carries `polyumi_tcp` — the frame the bridge names as GetCartesianPath's
-    # link_name. TF gets the same transform from fr3_bringup.launch.py; both read tcp_calib.
+    # RobotModel also carries `polyumi_tcp`, so the planning scene agrees with TF about where the
+    # policy's frame is. TF gets the same transform from fr3_bringup.launch.py; both read tcp_calib.
     franka_xacro_file = str(NUC_DIR / 'description' / 'fr3_polyumi.urdf.xacro')
 
     robot_description_command = Command(

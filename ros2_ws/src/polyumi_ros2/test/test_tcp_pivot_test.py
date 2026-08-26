@@ -85,8 +85,8 @@ def test_sweep_steps_never_exceed_the_requested_spacing():
     """
     Keep the waypoint spacing at or under what was asked for.
 
-    GetCartesianPath's max_step bounds translation only, so a pure rotation is never subdivided
-    by the planner — the spacing here IS the interpolation resolution.
+    Nothing downstream subdivides a commanded rotation — the controller interpolates between the
+    waypoints it is given — so the spacing here IS the interpolation resolution.
     """
     for angle, step in ((20.0, 5.0), (30.0, 7.0), (5.0, 1.0)):
         # sweep_angles' own first element is now the leading 0, so the list already includes that

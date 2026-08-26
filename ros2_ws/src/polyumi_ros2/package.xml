@@ -32,7 +32,7 @@
        needed for the Pose/PoseArray the chunk and its preview are built from. -->
   <depend>geometry_msgs</depend>
   <!-- Phase 2.5: the gripper half of the action chunk goes out separately, as a
-       trajectory_msgs/JointTrajectory on /polyumi/target_gripper. A PoseArray cannot carry a
+       trajectory_msgs/JointTrajectory on /polyumi/target_gripper. The pose chunk carries no
        width, and the Franka Hand is action-only (no ros2_control interface), so it needs its
        own channel and its own cadence. Consumed by franka_hand_node on the NUC — the franka_msgs
        gripper actions are called from the NUC, not here. -->

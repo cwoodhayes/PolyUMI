@@ -366,8 +366,8 @@ went. **This moves the arm.**
 - **The arm and the hand are truncated independently, so neither number affects the other.**
   `_n_stale_actions` runs once per device, each with its own `latency.*_exec`, and the two chunks
   are published from separate slices of the same action list. This is UMI's split
-  (`robot_action_latency` vs `gripper_action_latency`), reached by slicing rather than by absolute
-  waypoint times, since a `PoseArray` carries no timing. It means you can re-measure one device
+  (`robot_action_latency` vs `gripper_action_latency`), reached by slicing which leading actions
+  get dropped rather than by shifting waypoint times. It means you can re-measure one device
   without touching the other, and a chunk too stale for the arm can still drive the hand. A
   `gripper_lead_steps` parameter on the old gripper bridge used to paper over the shared slice by
   indexing further into the chunk; it is gone, and re-adding a lead there would double-compensate.

@@ -123,9 +123,6 @@
         }
       },
       "topics": {
-        "/polyumi/target_poses": {
-          "visible": false
-        },
         "/robot_description": {
           "visible": true
         },
