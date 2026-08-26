@@ -139,7 +139,7 @@ Note the CoM is written in `fr3_hand` (the frame `TCP_XYZ` uses) and converted t
 `payload_com_flange()`; the URDF is *not* a lever here, since `franka_hardware` reads no payload
 out of it. Two FR3 constraints make `SetLoad` fail in ways the service response hides behind the
 string `"command exception error"` — a nonzero mass needs a nonzero inertia tensor
-(`payload_inertia()` derives one), and the call is refused entirely while any controller holds the
+(`payload_inertia_flange()` derives one), and the call is refused entirely while any controller holds the
 arm (`current mode ("Move")`), which is why bringup sequences it ahead of the spawner. The real
 message is only in the `/service_server` log. Full procedure in
 [docs/calibration-instructions.md](docs/calibration-instructions.md).

@@ -72,27 +72,17 @@ def generate_launch_description():
     # ("Move")`. Hence the ordering below, ahead of the spawner. Changing it later means deactivating
     # every controller first — see docs/calibration-instructions.md.
     #
-    # `ros2 service call` waits for the service itself, so this needs no ordering against
-    # franka_bringup. It does exit 0 even when the response is `success: false` — the body prints to
-    # screen, and a payload that did not take announces itself as the same droop, so a hard failure
-    # here is not worth a node of its own.
-    #
-    # `timeout` because that wait is UNBOUNDED, and the spawner below is ordered on this exiting:
-    # if franka_bringup dies (FCI off, robot unreachable) the service never appears, and without a
-    # cap the arm controller is never spawned and the only clue is a `waiting for service` line.
-    set_load = ExecuteProcess(
-        cmd=[
-            'timeout',
-            SET_LOAD_TIMEOUT_S,
-            'ros2',
-            'service',
-            'call',
-            '/service_server/set_load',
-            'franka_msgs/srv/SetLoad',
-            tcp_calib.set_load_request(),
-        ],
-        output='screen',
+    # Run through a shell so the exit status reflects the RESPONSE, not just the transport: on its
+    # own `ros2 service call` exits 0 even when the body says `success: false`, and
+    # franka_param_service_server flattens every CommandException to the string "command exception
+    # error", so a rejected payload otherwise scrolls past as ordinary output. `timeout` because the
+    # wait for the service is unbounded, and `tee` so the real response still reaches the log.
+    set_load_cmd = (
+        'timeout ' + SET_LOAD_TIMEOUT_S + ' ros2 service call /service_server/set_load '
+        "franka_msgs/srv/SetLoad '" + tcp_calib.set_load_request() + "' "
+        '| tee /dev/stderr | grep -q success=True'
     )
+    set_load = ExecuteProcess(cmd=['bash', '-c', set_load_cmd], output='screen')
 
     # The joint-trajectory controller move_group executes through. franka.launch.py spawns
     # only the two broadcasters, so without this /execute_trajectory has nothing to drive
@@ -126,6 +116,32 @@ def generate_launch_description():
             CONTROLLER_MANAGER_TIMEOUT_S,
         ],
     )
+
+    def on_set_load_exit(event, context):
+        """
+        Spawn fr3_arm_controller once set_load is done, shouting first if the payload did not take.
+
+        The spawner runs either way. Refusing to spawn would leave the whole session dead rather
+        than merely mis-modelled, and bringup is the piece that has to stay restartable — an
+        unmodelled payload is at least visible as TCP droop once the impedance controller
+        activates. What is not acceptable is that being quiet: by the time you notice the droop the
+        controller is up, and setLoad can then only be retried by deactivating everything again.
+        """
+        if event.returncode == 0:
+            return [arm_controller_spawner]
+        return [
+            LogInfo(
+                msg=(
+                    f'\n!!! SetLoad FAILED (exit {event.returncode}) — the arm is running with an '
+                    'UNMODELLED PAYLOAD.\n'
+                    '!!! Expect the TCP to sag when the impedance controller activates.\n'
+                    '!!! The real reason is in the /service_server log, not the response above.\n'
+                    '!!! Retrying means deactivating controllers first — '
+                    'see docs/calibration-instructions.md.\n'
+                )
+            ),
+            arm_controller_spawner,
+        ]
 
     return LaunchDescription(
         [
@@ -165,7 +181,7 @@ def generate_launch_description():
             # Ordered on set_load's exit, not declared alongside it: the spawner activates
             # fr3_arm_controller, which claims the effort interfaces and puts the robot in "Move"
             # mode — where setLoad is rejected outright. This ordering is load-bearing, not tidiness.
-            RegisterEventHandler(OnProcessExit(target_action=set_load, on_exit=[arm_controller_spawner])),
+            RegisterEventHandler(OnProcessExit(target_action=set_load, on_exit=on_set_load_exit)),
             # The frame the policy actually speaks in. It lives here rather than in the inference
             # launch so it exists whenever the arm does — Foxglove and `tf2_echo fr3_hand
             # polyumi_tcp` are how you check the calibration, and neither should need move_group.

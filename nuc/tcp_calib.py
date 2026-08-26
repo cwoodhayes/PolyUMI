@@ -211,24 +211,39 @@ def payload_com_flange() -> tuple[float, float, float]:
     )
 
 
-def payload_inertia() -> tuple[float, ...]:
+def payload_inertia_flange() -> tuple[float, ...]:
     """
-    Approximate the payload's inertia tensor as a uniform solid box, column-major about its CoM.
+    Build the payload's inertia tensor about its CoM, in ``fr3_link8``, column-major.
 
-    Computed rather than written down so it stays consistent with :data:`PAYLOAD_MASS`: the FR3
-    rejects a nonzero mass carrying a zero tensor, and a stale hand-typed tensor is the easy way
-    back into that. Off-diagonal terms are zero — the box is taken as axis-aligned.
+    Approximated as a uniform solid box from :data:`PAYLOAD_EXTENTS`, which is good enough — inertia
+    only enters the acceleration terms and we move slowly — and self-consistent by construction: the
+    principal moments of a real box always satisfy the triangle inequality the firmware checks, at
+    whatever mass. Computed rather than written down so it cannot go stale against
+    :data:`PAYLOAD_MASS`; the FR3 rejects a nonzero mass carrying a zero tensor.
+
+    Rotated into the flange for the same reason :func:`payload_com_flange` is: setLoad reads the
+    tensor in the same frame as ``F_x_Cload``. The extents are stated in ``fr3_hand``, a yaw away,
+    and the box's x and y moments differ — so this is not a no-op, and it produces a real xy term
+    that a diagonal tensor would drop.
     """
     w, d, h = PAYLOAD_EXTENTS
     k = PAYLOAD_MASS / 12.0
     ixx, iyy, izz = k * (d**2 + h**2), k * (w**2 + h**2), k * (w**2 + d**2)
-    return (ixx, 0.0, 0.0, 0.0, iyy, 0.0, 0.0, 0.0, izz)
+
+    # R I R^T about z, for a diagonal I: zz is untouched, xx/yy average toward each other, and
+    # whatever asymmetry they had lands in xy. Column-major and row-major agree — it is symmetric.
+    (_, _, _, (_, _, yaw)) = next(t for t in HAND_STATIC_TRANSFORMS if t[1] == TCP_PARENT)
+    c, s = math.cos(yaw), math.sin(yaw)
+    fxx = ixx * c**2 + iyy * s**2
+    fyy = ixx * s**2 + iyy * c**2
+    fxy = (ixx - iyy) * s * c
+    return (fxx, fxy, 0.0, fxy, fyy, 0.0, 0.0, 0.0, izz)
 
 
 def set_load_request() -> str:
     """Build the franka_msgs/srv/SetLoad request literal for a `ros2 service call`."""
     com = ', '.join(str(v) for v in payload_com_flange())
-    inertia = ', '.join(str(v) for v in payload_inertia())
+    inertia = ', '.join(str(v) for v in payload_inertia_flange())
     return f'{{mass: {PAYLOAD_MASS}, center_of_mass: [{com}], load_inertia: [{inertia}]}}'
 
 
