@@ -193,16 +193,29 @@ def hand_transform_publishers() -> list[tuple[str, list[str]]]:
     ]
 
 
+def _flange_from_hand() -> tuple[tuple[float, float, float], float]:
+    """
+    Read the ``fr3_link8 <- fr3_hand`` transform out of :data:`HAND_STATIC_TRANSFORMS`.
+
+    Both payload conversions below need it, and neither may re-type it: the flange's mounting
+    geometry is defined once, in that table, and setLoad wants both halves of the payload in the
+    frame it puts them in.
+
+    :returns: ``(translation, yaw)``. The rotation is a pure yaw — it is the flange's standard
+        45 deg mounting rotation — so roll and pitch are dropped rather than carried unused.
+    """
+    (_, _, xyz, (_, _, yaw)) = next(t for t in HAND_STATIC_TRANSFORMS if t[1] == TCP_PARENT)
+    return xyz, yaw
+
+
 def payload_com_flange() -> tuple[float, float, float]:
     """
     Convert :data:`PAYLOAD_COM_HAND` into ``fr3_link8``, which is the frame setLoad's F_x_Cload is in.
 
-    Both halves of the transform are read out of :data:`HAND_STATIC_TRANSFORMS` rather than
-    re-typed, so the flange's mounting geometry stays defined once. The translation is zero today,
-    which makes this a pure rotation — applied anyway so a future nonzero origin does not silently
-    put the CoM in the wrong place.
+    The translation is zero today, which makes this a pure rotation — applied anyway so a future
+    nonzero origin does not silently put the CoM in the wrong place.
     """
-    (_, _, (tx, ty, tz), (_, _, yaw)) = next(t for t in HAND_STATIC_TRANSFORMS if t[1] == TCP_PARENT)
+    (tx, ty, tz), yaw = _flange_from_hand()
     x, y, z = PAYLOAD_COM_HAND
     return (
         tx + x * math.cos(yaw) - y * math.sin(yaw),
@@ -221,10 +234,10 @@ def payload_inertia_flange() -> tuple[float, ...]:
     whatever mass. Computed rather than written down so it cannot go stale against
     :data:`PAYLOAD_MASS`; the FR3 rejects a nonzero mass carrying a zero tensor.
 
-    Rotated into the flange for the same reason :func:`payload_com_flange` is: setLoad reads the
-    tensor in the same frame as ``F_x_Cload``. The extents are stated in ``fr3_hand``, a yaw away,
-    and the box's x and y moments differ — so this is not a no-op, and it produces a real xy term
-    that a diagonal tensor would drop.
+    Rotated into the flange for the same reason :func:`payload_com_flange` is, and off the same
+    :func:`_flange_from_hand`: setLoad reads the tensor in the same frame as ``F_x_Cload``. The
+    extents are stated in ``fr3_hand``, a yaw away, and the box's x and y moments differ — so this
+    is not a no-op, and it produces a real xy term that a diagonal tensor would drop.
     """
     w, d, h = PAYLOAD_EXTENTS
     k = PAYLOAD_MASS / 12.0
@@ -232,7 +245,7 @@ def payload_inertia_flange() -> tuple[float, ...]:
 
     # R I R^T about z, for a diagonal I: zz is untouched, xx/yy average toward each other, and
     # whatever asymmetry they had lands in xy. Column-major and row-major agree — it is symmetric.
-    (_, _, _, (_, _, yaw)) = next(t for t in HAND_STATIC_TRANSFORMS if t[1] == TCP_PARENT)
+    _, yaw = _flange_from_hand()
     c, s = math.cos(yaw), math.sin(yaw)
     fxx = ixx * c**2 + iyy * s**2
     fyy = ixx * s**2 + iyy * c**2

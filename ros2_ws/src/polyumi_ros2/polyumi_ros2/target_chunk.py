@@ -1,10 +1,16 @@
 """
-The wire format for a chunk of target EEF poses, and one publisher that speaks it.
+How a chunk of target EEF poses is put on the wire — as a command, and as a picture of one.
 
-The streaming Cartesian impedance controller takes a ``MultiDOFJointTrajectory``, where every
-waypoint has an absolute instant (``header.stamp + time_from_start``) that its interpolator
-splices on. Every producer of target poses — the policy client and both on-arm probes — builds
-this same message via ``TargetChunkPublisher``.
+``multidof_trajectory`` is the COMMAND format. The streaming Cartesian impedance controller takes a
+``MultiDOFJointTrajectory``, where every waypoint has an absolute instant (``header.stamp +
+time_from_start``) that its interpolator splices on. Every producer — the policy client and the
+three on-arm probes — builds it through ``TargetChunkPublisher``, which is also what keeps
+``topic_name`` and ``get_subscription_count()`` available for "nobody is listening" errors.
+
+``pose_array`` is the PREVIEW format, and moves nothing. ``policy_client_node`` publishes every
+commanded chunk as an untimed ``PoseArray`` on a separate topic so the motion can be watched in
+Foxglove whether or not execution is enabled. It lives here so both views of a chunk are built
+from one place, but nothing on the NUC subscribes to it.
 """
 
 from geometry_msgs.msg import Pose, PoseArray, Transform

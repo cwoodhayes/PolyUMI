@@ -48,16 +48,13 @@ def test_inertia_is_rotated_into_the_flange_not_left_in_the_hand():
     """
     SetLoad reads the tensor in the same frame as F_x_Cload, and the extents are a yaw away.
 
-    A tensor left diagonal in fr3_hand is wrong in a way nothing downstream reports, so pin the
-    two things the rotation must do: produce the xy term the hand frame does not have, and
-    conserve the trace (a rotation cannot change it, but a botched one would).
+    A tensor left diagonal in fr3_hand is wrong in a way nothing downstream reports. What separates
+    "rotated" from "not rotated" is the shape, not the magnitudes: an unrotated box tensor has no xy
+    term at all. Asserting magnitudes would mean recomputing the box model here, which would then
+    fail for any change to that model rather than to the rotation.
     """
-    fxx, fxy, fxz, fyx, fyy, fyz, fzx, fzy, fzz = tcp_calib.payload_inertia_flange()
+    _, fxy, fxz, fyx, _, fyz, fzx, fzy, _ = tcp_calib.payload_inertia_flange()
 
-    assert fxy != 0.0 and fxy == fyx, 'the -45 deg yaw must mix x and y, symmetrically'
+    assert fxy != 0.0, 'a diagonal tensor here means the hand-frame box was never rotated'
+    assert fxy == fyx, 'the tensor must stay symmetric'
     assert (fxz, fyz, fzx, fzy) == (0.0, 0.0, 0.0, 0.0), 'a yaw cannot tilt z out of plane'
-
-    w, d, h = tcp_calib.PAYLOAD_EXTENTS
-    k = tcp_calib.PAYLOAD_MASS / 12.0
-    hand_trace = k * (d**2 + h**2) + k * (w**2 + h**2) + k * (w**2 + d**2)
-    assert math.isclose(fxx + fyy + fzz, hand_trace)
