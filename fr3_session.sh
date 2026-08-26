@@ -209,7 +209,7 @@ else
       nuc "${NUC_SSH_HOST}:${NUC_REPO}/"; then
     echo "    done."
 
-    # fr3_moveit_bridge is a plain script and runs straight from the synced tree, but
+    # fr3_home_service is a plain script and runs straight from the synced tree, but
     # polyumi_fr3_controllers is C++: rsync only updates the source that ~/franka_ws/src symlinks
     # at, so without this the NUC keeps running the previously built artifacts. That is the worst
     # kind of stale — one is a torque controller and the other drives the hand, and the old build's

@@ -109,7 +109,7 @@ That second static TF is load-bearing. `load_gripper` now defaults **false**, be
 observation lookup, with a symptom pointing nowhere near the flag. The static publisher fills the
 hole; the constant lives in `nuc/tcp_calib.py` next to the TCP.
 
-`fr3_inference` adds the three things that sit on top of it — move_group, `fr3_moveit_bridge`,
+`fr3_inference` adds the three things that sit on top of it — move_group, `fr3_home_service`,
 `franka_hand_node` — plus the `polyumi_cartesian_impedance_controller` spawner, spawned
 `--inactive`. They start, fail and restart together without touching the arm's state.
 
@@ -126,7 +126,7 @@ A dead command path is loud rather than silent: nothing subscribes, the arm hold
 client warns every second naming the topic it expected. The full contract is the module docstring
 of `ros2_ws/src/polyumi_ros2/polyumi_ros2/target_chunk.py`.
 
-`fr3_moveit_bridge` still runs alongside it, but only for `/polyumi/home` — joint-space homing
+`fr3_home_service` runs alongside it, serving only `/polyumi/home` — joint-space homing
 through move_group. It and the streaming controller claim the same `<joint>/effort` interfaces, so
 **exactly one holds the arm at a time** — `ros2 control list_controllers` tells you which, and
 `/polyumi/home` swaps them itself around a home move:

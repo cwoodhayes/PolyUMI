@@ -12,7 +12,7 @@ so these tests exercise the bridge's logic and nothing else.
 
     bash -c 'unset VIRTUAL_ENV; source /opt/ros/kilted/setup.bash \
       && source ros2_ws/install/setup.bash \
-      && /usr/bin/python3 -m pytest nuc/test_fr3_moveit_bridge.py -q'
+      && /usr/bin/python3 -m pytest nuc/test_fr3_home_service.py -q'
 """
 
 from unittest.mock import MagicMock, patch
@@ -23,7 +23,7 @@ import rclpy
 from rclpy.parameter import Parameter
 from std_srvs.srv import Trigger
 
-import fr3_moveit_bridge as mb
+import fr3_home_service as mb
 
 
 @pytest.fixture(scope='module', autouse=True)
@@ -47,12 +47,12 @@ def make_node():
     def _make(**overrides):
         params = [Parameter(k, value=v) for k, v in overrides.items()]
         with (
-            patch.object(mb.Fr3MoveItBridge, 'create_client', side_effect=lambda *a, **k: MagicMock()),
+            patch.object(mb.Fr3HomeService, 'create_client', side_effect=lambda *a, **k: MagicMock()),
             patch.object(mb, 'ActionClient') as action_client,
         ):
             action_client.return_value.wait_for_server.return_value = True
             action_client.return_value.server_is_ready.return_value = True
-            node = mb.Fr3MoveItBridge(parameter_overrides=params)
+            node = mb.Fr3HomeService(parameter_overrides=params)
         node.get_logger = MagicMock()
         # Futures never resolve against a mocked client, so _wait would burn its full timeout.
         node._wait = lambda future, timeout_s: True

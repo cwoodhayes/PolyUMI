@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FR3 MoveIt bridge — runs ON THE NUC (ROS 2 Humble).
+FR3 homing service — runs ON THE NUC (ROS 2 Humble).
 
 Serves /polyumi/home (std_srvs/Trigger): a joint-space move to the SRDF `ready` pose, planned
 and executed through the LOCAL move_group. This node must run on the NUC, not the laptop: the
@@ -15,7 +15,7 @@ Self-contained (no PolyUMI package deps) so it runs from a plain clone on the NU
     source ~/franka_ws/install/setup.bash   # move_group + franka must be up (fr3-bringup)
     export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
     export CYCLONEDDS_URI=file://$HOME/franka_ws/config/cyclonedds.xml
-    python3 nuc/fr3_moveit_bridge.py --ros-args -p max_velocity_scaling:=0.1
+    python3 nuc/fr3_home_service.py --ros-args -p max_velocity_scaling:=0.1
 
 Callable from the laptop despite the rmw gap, as long as the type is given explicitly (the ROS
 *graph* does not cross Humble<->Kilted, so `ros2 node list` and node-name lookups come back
@@ -68,12 +68,12 @@ MOVEIT_CONTROLLER = 'fr3_arm_controller'
 SWITCH_TIMEOUT_S = 5.0
 
 
-class Fr3MoveItBridge(Node):
+class Fr3HomeService(Node):
     """Serve /polyumi/home, driving the FR3 to its SRDF ready pose via the local move_group."""
 
     def __init__(self, **kwargs):
         """Declare params, create the home service and move_group clients."""
-        super().__init__('fr3_moveit_bridge', **kwargs)
+        super().__init__('fr3_home_service', **kwargs)
 
         self.declare_parameter('planning_group', DEFAULT_GROUP)
         self.declare_parameter('max_velocity_scaling', 0.1)
@@ -115,7 +115,7 @@ class Fr3MoveItBridge(Node):
         else:
             self.get_logger().info('move_group found (execute_trajectory ready).')
 
-        self.get_logger().info('fr3_moveit_bridge started — /polyumi/home is up (std_srvs/Trigger).')
+        self.get_logger().info('fr3_home_service started — /polyumi/home is up (std_srvs/Trigger).')
 
     def _on_home(self, _request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         """
@@ -343,7 +343,7 @@ class Fr3MoveItBridge(Node):
 def main():
     """Spin the bridge node under a multithreaded executor."""
     rclpy.init()
-    node = Fr3MoveItBridge()
+    node = Fr3HomeService()
     executor = MultiThreadedExecutor()
     executor.add_node(node)
     try:

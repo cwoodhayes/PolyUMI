@@ -43,7 +43,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 SERVO_CONTROLLER = 'polyumi_cartesian_impedance_controller'
 MOVEIT_CONTROLLER = 'fr3_arm_controller'
 
-# fr3_moveit_bridge is a standalone script, not an installed ament package (it runs from a plain
+# fr3_home_service is a standalone script, not an installed ament package (it runs from a plain
 # clone on the NUC, which has no PolyUMI workspace), so it is ExecuteProcess by path rather than
 # Node by package name. franka_hand_node is C++ and does come from a built package.
 NUC_DIR = Path(__file__).resolve().parent.parent
@@ -138,7 +138,7 @@ def generate_launch_description():
             ExecuteProcess(
                 cmd=[
                     'python3',
-                    str(NUC_DIR / 'fr3_moveit_bridge.py'),
+                    str(NUC_DIR / 'fr3_home_service.py'),
                     '--ros-args',
                     '-p',
                     ['max_velocity_scaling:=', max_velocity_scaling],

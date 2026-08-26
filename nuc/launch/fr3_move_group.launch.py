@@ -38,8 +38,8 @@
 #      not (franka.launch.py couples hand: to load_gripper:, and that's false so
 #      franka_hand_node can own the connection instead of franka_gripper) -- so
 #      /joint_states, sourced from THAT model, never reports fr3_finger_joint1/2 and this
-#      monitor repeats "not yet known" at ~1 Hz forever. Harmless: /polyumi/home and
-#      fr3_moveit_bridge only plan the fr3_arm group, which doesn't include the fingers.
+#      monitor repeats "not yet known" at ~1 Hz forever. Harmless: /polyumi/home only plans the
+#      fr3_arm group, which doesn't include the fingers.
 #      Fixing it for real means decoupling hand: from load_gripper: in fr3_bringup's own
 #      robot_description, which is a bigger, riskier change than a log line justifies.
 # See docs/crb-fr3-inference.md for how to run this and the gotchas around it.
