@@ -15,7 +15,7 @@ Self-contained (no PolyUMI package deps) so it runs from a plain clone on the NU
     source ~/franka_ws/install/setup.bash   # move_group + franka must be up (fr3-bringup)
     export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
     export CYCLONEDDS_URI=file://$HOME/franka_ws/config/cyclonedds.xml
-    python3 nuc/fr3_home_service.py --ros-args -p max_velocity_scaling:=0.1
+    python3 nuc/fr3_home_service.py
 
 Callable from the laptop despite the rmw gap, as long as the type is given explicitly (the ROS
 *graph* does not cross Humble<->Kilted, so `ros2 node list` and node-name lookups come back
@@ -53,8 +53,8 @@ HOME_JOINT_NAMES = [f'fr3_joint{i}' for i in range(1, 8)]
 HOME_JOINTS = [0.0, -math.pi / 4, 0.0, -3 * math.pi / 4, 0.0, math.pi / 2, math.pi / 4]
 HOME_TOLERANCE_RAD = 0.01
 HOME_PLAN_TIME_S = 5.0
-# Homing is a joint-space sweep across the workspace, not a few-centimetre chunk, and it runs at
-# the same max_velocity_scaling — a 3 s planned move at 0.1 takes 30 s.
+# Homing crosses the workspace, so it outlasts any short move. Generous on purpose: this is a
+# wedge detector, and aborting a sweep that was merely slow is worse than waiting out a stuck one.
 HOME_EXECUTE_TIMEOUT_S = 120.0
 
 # --- Controller handover ---
@@ -76,11 +76,9 @@ class Fr3HomeService(Node):
         super().__init__('fr3_home_service', **kwargs)
 
         self.declare_parameter('planning_group', DEFAULT_GROUP)
-        self.declare_parameter('max_velocity_scaling', 0.1)
         self.declare_parameter('home_joints', HOME_JOINTS)
 
         self._group = self.get_parameter('planning_group').get_parameter_value().string_value
-        self._vscale = self.get_parameter('max_velocity_scaling').get_parameter_value().double_value
 
         self._home_joints = list(self.get_parameter('home_joints').get_parameter_value().double_array_value)
 
@@ -228,8 +226,11 @@ class Fr3HomeService(Node):
         mpr.group_name = self._group
         mpr.num_planning_attempts = 10
         mpr.allowed_planning_time = HOME_PLAN_TIME_S
-        # Scaling is left at the planner's default and applied by _slow_trajectory instead, so
-        # max_velocity_scaling stays the single speed knob.
+        # Speed is left alone: MotionPlanRequest documents that a scaling factor outside (0,1] —
+        # 0.0 included, which is what the unset field holds — is treated as 1.0, so this plans at
+        # full speed against the URDF's joint velocity limits and fr3_move_group's
+        # max_acceleration. Homing is an operator repositioning the arm, not a policy motion;
+        # there is nothing here to run slowly for, and those two limits are the real ceiling.
         goal = Constraints()
         for name, position in zip(HOME_JOINT_NAMES, positions):
             jc = JointConstraint()
@@ -252,44 +253,6 @@ class Fr3HomeService(Node):
             return None
         return resp.motion_plan_response.trajectory
 
-    def _slow_trajectory(self, trajectory: RobotTrajectory) -> RobotTrajectory:
-        """
-        Scale a trajectory in time to cap end-effector speed.
-
-        plan_kinematic_path has no velocity_scaling field on Humble, so we stretch
-        time_from_start by 1/vscale and scale velocities/accelerations down — the same
-        path, run proportionally slower.
-
-        move_group already time-parameterizes the plan at full speed against the URDF joint
-        limits, so scale=1.0 means "as fast as MoveIt planned" and is the ceiling: scaling
-        above 1.0 would compress time below the planned profile and exceed those limits, so
-        it is clamped.
-        """
-        scale = min(max(self._vscale, 1e-3), 1.0)
-        if self._vscale > 1.0:
-            self.get_logger().warn(
-                f'max_velocity_scaling={self._vscale} > 1.0 would exceed the planned joint '
-                'limits; clamping to 1.0 (already full planned speed).'
-            )
-        jt = trajectory.joint_trajectory
-        # Track the last point's time while iterating rather than indexing jt.points[-1]
-        # afterward: the rosidl array-field type stub doesn't support __getitem__.
-        last_time = None
-        for pt in jt.points:
-            total_ns = pt.time_from_start.sec * 1_000_000_000 + pt.time_from_start.nanosec
-            total_ns = int(total_ns / scale)
-            pt.time_from_start.sec = total_ns // 1_000_000_000
-            pt.time_from_start.nanosec = total_ns % 1_000_000_000
-            pt.velocities = [v * scale for v in pt.velocities]
-            pt.accelerations = [a * scale * scale for a in pt.accelerations]
-            last_time = pt.time_from_start
-        if last_time is not None:
-            self.get_logger().info(
-                f'Executing {len(jt.points)} pts over {last_time.sec + last_time.nanosec / 1e9:.2f}s '
-                f'(vscale={scale:g}; raise it to go faster, 1.0 = full planned speed)'
-            )
-        return trajectory
-
     def _run_execute(self, trajectory: RobotTrajectory, timeout_s: float) -> bool:
         """Execute a planned trajectory via ExecuteTrajectory; block until done."""
         # Same rationale as _plan_to_joints's service_is_ready() check: send_goal_async on a
@@ -302,7 +265,7 @@ class Fr3HomeService(Node):
             )
             return False
         goal = ExecuteTrajectory.Goal()
-        goal.trajectory = self._slow_trajectory(trajectory)
+        goal.trajectory = trajectory
         gf = self._exec.send_goal_async(goal)
         if not self._wait(gf, PLAN_TIMEOUT_S):
             self.get_logger().warning('Execute goal submission timed out.')

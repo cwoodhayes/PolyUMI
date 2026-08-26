@@ -80,7 +80,7 @@ For the inference constant, use the `tcp_pivot_test` as a helpful sanity check. 
 ```bash
 # NUC: bringup + inference, both execute flags on (this closes the hand itself), and SLOW
 ros2 launch nuc/launch/fr3_inference.launch.py \
-      execute_arm:=true execute_gripper:=true max_velocity_scaling:=0.05
+      execute_arm:=true execute_gripper:=true
 ros2 service call /polyumi/home std_srvs/srv/Trigger "{}"   # a roomy pose; edge poses fail to plan
 ros2 run polyumi_ros2 tcp_pivot_test --ros-args -p angle_deg:=20.0
 ```

@@ -48,7 +48,7 @@ to be restartable alone.
 ros2 launch nuc/launch/fr3_inference.launch.py                        # nothing moves
 ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true  # fingers only
 ros2 launch nuc/launch/fr3_inference.launch.py \
-    execute_arm:=true execute_gripper:=true max_velocity_scaling:=0.2
+    execute_arm:=true execute_gripper:=true
 ```
 
 **Both execute flags default false** — launching alone never moves the robot. 

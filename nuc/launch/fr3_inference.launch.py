@@ -54,7 +54,6 @@ def generate_launch_description():
     robot_ip = LaunchConfiguration('robot_ip')
     execute_arm = LaunchConfiguration('execute_arm')
     execute_gripper = LaunchConfiguration('execute_gripper')
-    max_velocity_scaling = LaunchConfiguration('max_velocity_scaling')
     max_acceleration = LaunchConfiguration('max_acceleration')
     gripper_max_width = LaunchConfiguration('gripper_max_width')
 
@@ -108,17 +107,11 @@ def generate_launch_description():
                 'plans and logs every command at the real cadence.',
             ),
             DeclareLaunchArgument(
-                'max_velocity_scaling',
-                default_value='0.1',
-                description='Arm speed cap. Start low, raise once you trust it.',
-            ),
-            DeclareLaunchArgument(
                 'max_acceleration',
                 default_value='1.5',
                 description='Joint acceleration limit (rad/s^2) move_group time-parameterizes '
-                'against. Forwarded to fr3_move_group.launch.py; without it MoveIt '
-                'defaults to 1 rad/s^2 and plans chunks slower than the policy asked '
-                'for. Distinct from max_velocity_scaling, which caps the RESULT.',
+                'against, for homing. Forwarded to fr3_move_group.launch.py; without it '
+                'MoveIt defaults to 1 rad/s^2 and a home sweep crawls.',
             ),
             DeclareLaunchArgument(
                 'gripper_max_width',
@@ -136,13 +129,7 @@ def generate_launch_description():
             # Always started: it owns /polyumi/home, and homing borrows the arm back from the
             # servo.
             ExecuteProcess(
-                cmd=[
-                    'python3',
-                    str(NUC_DIR / 'fr3_home_service.py'),
-                    '--ros-args',
-                    '-p',
-                    ['max_velocity_scaling:=', max_velocity_scaling],
-                ],
+                cmd=['python3', str(NUC_DIR / 'fr3_home_service.py')],
                 output='screen',
             ),
             impedance_spawner,

@@ -29,7 +29,7 @@ Usage (laptop, after `source setup_franka_env.sh`):
     # 1. NUC: bringup + inference. Both execute flags on — this closes the hand itself — and
     #    SLOW. execute_gripper:=false makes the close a silent no-op, which the script detects.
     ros2 launch nuc/launch/fr3_inference.launch.py \
-        execute_arm:=true execute_gripper:=true max_velocity_scaling:=0.05
+        execute_arm:=true execute_gripper:=true
 
     # 2. Get to a known, roomy pose — a pivot near the workspace edge will fail to plan
     ros2 service call /polyumi/home std_srvs/srv/Trigger "{}"
@@ -57,13 +57,13 @@ from polyumi_ros2.target_chunk import CONSUMER_HINT, TargetChunkPublisher
 from tf2_ros import Buffer, TransformListener
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-# Waypoints are handed over explicitly at this spacing rather than leaving MoveIt to subdivide.
-# GetCartesianPath's max_step bounds *translation*, and a pure rotation has none, so the planner
-# would see a single zero-length segment and interpolate the whole sweep in one jump.
+# Waypoints are handed over explicitly at this spacing rather than as two endpoints: the
+# controller interpolates between whatever it is given, and a pure rotation commanded as one
+# 20-degree step would be taken as a single jump.
 DEFAULT_STEP_DEG = 5.0
 # Completion is detected as "it moved, then stopped", in angular RATE rather than per-sample
-# delta. A raw delta threshold is a trap: at max_velocity_scaling=0.05 a sample is ~0.0016 rad,
-# so any plausible epsilon sits right on top of the real signal — and the sweep REVERSES at
+# delta. A raw delta threshold is a trap: at these waypoint rates a sample is a few thousandths
+# of a radian, so any plausible epsilon sits on top of the real signal — and the sweep REVERSES at
 # both extremes, where the arm genuinely passes through zero velocity mid-motion. Requiring
 # sustained quiet, after motion has been seen, survives both.
 MOTION_RATE_RAD_S = 0.01

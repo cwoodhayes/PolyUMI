@@ -363,7 +363,7 @@ fi
 if [ "$NUC_INFER_FRESH" = 1 ]; then
   tmux send-keys -t "$NUC_INFER_PANE" "cd $NUC_REPO" C-m
   pretype "$NUC_INFER_PANE" \
-    "$(logged fr3_inference 'ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true execute_arm:=true max_velocity_scaling:=1.0')"
+    "$(logged fr3_inference 'ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true execute_arm:=true')"
 fi
 
 # --- Pi: RUN the stream. Stateless, moves nothing, and the laptop warns without it.
