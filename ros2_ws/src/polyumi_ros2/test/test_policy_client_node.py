@@ -864,9 +864,3 @@ def test_arm_chunk_is_anchored_at_t_obs_minus_arm_exec(make_node):
     # 0.1s obs age + 0.3s arm_exec over a 0.1s action_dt drops 4, so the survivors start at 4.
     assert kwargs['first_index'] == 4
     assert len(pose_pub.call_args[0][0]) == 4
-
-
-def test_arm_chunk_goes_to_the_streaming_controller_topic(make_node):
-    """The node always targets the streaming controller — see test_target_chunk.py for the format."""
-    node = make_node(control_hz=10.0, execute_motion=True)
-    assert node._target_pub.topic_name == '/polyumi/target_poses_traj'

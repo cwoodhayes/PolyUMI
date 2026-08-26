@@ -131,9 +131,14 @@ based on the CAD changes you've made, and watch for that result when you start u
 # NUC. Whichever of the two is active — `ros2 control list_controllers` tells you.
 ros2 control switch_controllers --deactivate polyumi_cartesian_impedance_controller
 ros2 service call /service_server/set_load franka_msgs/srv/SetLoad \
-  "{mass: 0.55, center_of_mass: [0.0, 0.0, 0.08], load_inertia: [0.0025,0.0,0.0,0.0,0.0023,0.0,0.0,0.0,0.0008]}"
+  "$(cd ~/Documents/PolyUMI/nuc && python3 -c 'import tcp_calib; print(tcp_calib.set_load_request())')"
 ros2 control switch_controllers --activate polyumi_cartesian_impedance_controller
 ```
+
+That sends what `fr3_bringup.launch.py` sends, so it is only useful once you have edited
+`tcp_calib.py`. To try a number *before* committing to it, paste the request literal by hand in the
+same shape — but read it out of `set_load_request()` first, so the CoM is in `fr3_link8` and the
+inertia is non-zero. Both are easy to get wrong from scratch, and the FR3 hides the reason.
 
 **Hardware verification:** converged when the TCP doesn't visibly move as the impedance controller activates and `o_f_ext_hat_k` sits near zero at rest. If it drops *upward*, the mass is now too high.
 

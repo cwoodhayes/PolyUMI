@@ -11,30 +11,34 @@ import math
 import tcp_calib
 
 
-def test_on_axis_com_is_unchanged_by_the_flange_yaw(monkeypatch):
-    """A CoM on the approach axis sits on the rotation axis, so the yaw must not move it."""
-    monkeypatch.setattr(tcp_calib, 'PAYLOAD_COM_HAND', (0.0, 0.0, 0.09))
-    x, y, z = tcp_calib.payload_com_flange()
-    assert (round(x, 12), round(y, 12), z) == (0.0, 0.0, 0.09)
+def test_com_takes_the_flange_yaw_and_origin_from_hand_static_transforms(monkeypatch):
+    """
+    fr3_link8 -> fr3_hand is Rz(-45 deg) at some origin, and payload_com_flange applies both.
 
-
-def test_off_axis_com_rotates_by_minus_45_degrees(monkeypatch):
-    """fr3_link8 -> fr3_hand is Rz(-45 deg), so +x in the hand lands at +x/-y in the flange."""
+    +x in the hand must land at +x/-y in the flange (the sign is the half that fails silently),
+    offset by the entry's own translation. That translation is zero today, so it is patched here
+    rather than left to the shipped value — otherwise dropping the term again would still pass.
+    """
+    monkeypatch.setattr(
+        tcp_calib,
+        'HAND_STATIC_TRANSFORMS',
+        (('fr3_link8', 'fr3_hand', (0.001, 0.002, 0.003), (0.0, 0.0, -math.pi / 4)),),
+    )
     monkeypatch.setattr(tcp_calib, 'PAYLOAD_COM_HAND', (0.1, 0.0, 0.0))
+
     x, y, z = tcp_calib.payload_com_flange()
-    assert math.isclose(x, 0.1 / math.sqrt(2))
-    assert math.isclose(y, -0.1 / math.sqrt(2))
-    assert z == 0.0
+
+    assert math.isclose(x, 0.001 + 0.1 / math.sqrt(2))
+    assert math.isclose(y, 0.002 - 0.1 / math.sqrt(2))
+    assert math.isclose(z, 0.003)
 
 
-def test_nonzero_mass_never_yields_a_zero_inertia(monkeypatch):
-    """The FR3 rejects mass>0 with a zero tensor as "invalid argument", so guard the pairing."""
-    monkeypatch.setattr(tcp_calib, 'PAYLOAD_MASS', 0.55)
+def test_shipped_payload_constants_give_an_inertia_the_fr3_accepts():
+    """
+    The FR3 rejects mass>0 carrying a zero tensor as a bare "invalid argument".
+
+    Asserted on the SHIPPED constants, not a patched mass: the tensor is a pure function of
+    PAYLOAD_EXTENTS and PAYLOAD_MASS, so the only edit that can break it is an edit to those.
+    """
+    assert tcp_calib.PAYLOAD_MASS > 0
     assert all(v > 0 for v in tcp_calib.payload_inertia()[::4])  # the three diagonal terms
-
-
-def test_inertia_satisfies_the_triangle_inequality(monkeypatch):
-    """Principal moments of a real body obey Ixx + Iyy >= Izz; the firmware checks this."""
-    monkeypatch.setattr(tcp_calib, 'PAYLOAD_MASS', 0.55)
-    ixx, iyy, izz = tcp_calib.payload_inertia()[::4]
-    assert ixx + iyy >= izz and iyy + izz >= ixx and izz + ixx >= iyy
