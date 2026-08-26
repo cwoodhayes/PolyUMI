@@ -141,7 +141,8 @@ out of it. Two FR3 constraints make `SetLoad` fail in ways the service response 
 string `"command exception error"` — a nonzero mass needs a nonzero inertia tensor
 (`payload_inertia_flange()` derives one), and the call is refused entirely while any controller holds the
 arm (`current mode ("Move")`), which is why bringup sequences it ahead of the spawner. **A failed
-`SetLoad` aborts bringup** — the call is checked for `success=True`, not merely exit 0, because the
+`SetLoad` aborts bringup** — `nuc/set_payload.py` reads `response.success` off the typed message
+rather than the CLI's exit status, which is 0 either way, because the
 spawner immediately makes it unretryable and a wrong gravity model is easy to miss. The real
 message is only in the `/service_server` log. Full procedure in
 [docs/calibration-instructions.md](docs/calibration-instructions.md).

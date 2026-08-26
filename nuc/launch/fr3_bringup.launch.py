@@ -52,7 +52,7 @@ import tcp_calib  # noqa: E402
 # returns as soon as controller_manager answers.
 CONTROLLER_MANAGER_TIMEOUT_S = '60'
 
-# Cap on the set_load call below, whose own wait for the service is unbounded. Matched to the
+# Budget set_payload.py gets for the set_load service to appear and answer. Matched to the
 # spawner's wait, since both are waiting on the same thing coming up: franka_bringup.
 SET_LOAD_TIMEOUT_S = CONTROLLER_MANAGER_TIMEOUT_S
 
@@ -72,18 +72,14 @@ def generate_launch_description():
     # ("Move")`. Hence the ordering below, ahead of the spawner. Changing it later means deactivating
     # every controller first — see docs/calibration-instructions.md.
     #
-    # Run through a shell so the exit status reflects the RESPONSE, not just the transport: on its
-    # own `ros2 service call` exits 0 even when the body says `success: false`, and
-    # franka_param_service_server flattens every CommandException to the string "command exception
-    # error", so a rejected payload otherwise scrolls past as ordinary output. That exit status is
-    # what on_set_load_exit aborts the launch on. `timeout` because the wait for the service is
-    # unbounded, and `tee` so the real response still reaches the log.
-    set_load_cmd = (
-        'timeout ' + SET_LOAD_TIMEOUT_S + ' ros2 service call /service_server/set_load '
-        "franka_msgs/srv/SetLoad '" + tcp_calib.set_load_request() + "' "
-        '| tee /dev/stderr | grep -q success=True'
+    # A client rather than `ros2 service call`, because on_set_load_exit below aborts the whole
+    # launch on this exit status: the CLI exits 0 whether the response says success true or false,
+    # so gating on it would mean grepping its human-readable output. set_payload.py reads
+    # response.success off the typed message and owns its own service-wait timeout.
+    set_load = ExecuteProcess(
+        cmd=['python3', str(NUC_DIR / 'set_payload.py'), SET_LOAD_TIMEOUT_S],
+        output='screen',
     )
-    set_load = ExecuteProcess(cmd=['bash', '-c', set_load_cmd], output='screen')
 
     # The joint-trajectory controller move_group executes through. franka.launch.py spawns
     # only the two broadcasters, so without this /execute_trajectory has nothing to drive
@@ -179,7 +175,6 @@ def generate_launch_description():
                     'load_gripper': load_gripper,
                 }.items(),
             ),
-            LogInfo(msg=f'[fr3_bringup] {tcp_calib.describe_payload()}'),
             set_load,
             # Ordered on set_load's exit, not declared alongside it: the spawner activates
             # fr3_arm_controller, which claims the effort interfaces and puts the robot in "Move"
