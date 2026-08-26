@@ -150,11 +150,20 @@ PAYLOAD_COM_HAND = (TCP_XYZ[0] + 0.04, 0.01, TCP_XYZ[2] / 2.5)  # m
 # consistent by construction: the principal moments of a real box always satisfy the triangle
 # inequality the firmware checks, at whatever mass.
 #
-# Bounding box of the whole assembly past the flange, metres, ordered (x, y, z) in fr3_hand
-# fr3_hand frame is at the flange. z is approach axis out through the fingers, x is up (ie out from
-# the ArUco tag face of the fingers), and y is to the right (along the finger travel axis)
-# Can estimate this from the CAD. These numbers generate a symmetrical bounding box.
-# it is then shifted to be centered at the center of mass above.
+# Bounding box of the whole assembly past the flange, metres, ordered (x, y, z) in fr3_hand.
+# fr3_hand frame is at the flange. z is the approach axis out through the fingers, x is up (ie out
+# from the ArUco tag face of the fingers), and y is to the right (along the finger travel axis).
+# Estimate it from the CAD.
+#
+# The box is used to compute a 3x3 inertia matrix, which is then fed into setLoad() load_inertia
+# argument. This matrix describes the inertia about the CoM, and thus the box is defined
+# to be centered at the CoM.
+#
+# Known limitation, deliberately accepted: the box is uniformly dense, which PAYLOAD_COM_HAND
+# already contradicts — that offset exists precisely because the GoPro is heavy and set back. So
+# the tensor is the right order of magnitude and the right shape, not a measurement.
+# Empirically that seems to be enough here; inertia only enters in the acceleration terms
+# for the gravity compensation, and we're not accelerating terribly fast or far in general.
 PAYLOAD_EXTENTS = (0.12, 0.16, 0.27)
 
 
