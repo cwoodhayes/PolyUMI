@@ -38,15 +38,10 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 
-# FR3 SRDF name for homing's joint-space planning group. NOT 'fr3_manipulator' — this bridge
-# used to also plan Cartesian paths, which only 'fr3_arm' has an IK solver entry for; kept for
-# consistency now that only joint-space planning (homing) remains.
+# The SRDF group homing plans in.
 DEFAULT_GROUP = 'fr3_arm'
 
 PLAN_TIMEOUT_S = 5.0
-# A joint-space home sweep at low velocity scaling can take a while; give it more room than a
-# trivial move would need. HOME_EXECUTE_TIMEOUT_S below is the one actually used for homing.
-EXECUTE_TIMEOUT_S = 30.0
 # How long to let a cancelled goal actually abort before giving up on it. Short: move_group stops
 # the controller immediately, so this is deceleration, not motion.
 CANCEL_TIMEOUT_S = 3.0
@@ -59,8 +54,7 @@ HOME_JOINTS = [0.0, -math.pi / 4, 0.0, -3 * math.pi / 4, 0.0, math.pi / 2, math.
 HOME_TOLERANCE_RAD = 0.01
 HOME_PLAN_TIME_S = 5.0
 # Homing is a joint-space sweep across the workspace, not a few-centimetre chunk, and it runs at
-# the same max_velocity_scaling — a 3 s planned move at 0.1 takes 30 s. EXECUTE_TIMEOUT_S would
-# abort it partway.
+# the same max_velocity_scaling — a 3 s planned move at 0.1 takes 30 s.
 HOME_EXECUTE_TIMEOUT_S = 120.0
 
 # --- Controller handover ---
@@ -296,7 +290,7 @@ class Fr3MoveItBridge(Node):
             )
         return trajectory
 
-    def _run_execute(self, trajectory: RobotTrajectory, timeout_s: float = EXECUTE_TIMEOUT_S) -> bool:
+    def _run_execute(self, trajectory: RobotTrajectory, timeout_s: float) -> bool:
         """Execute a planned trajectory via ExecuteTrajectory; block until done."""
         # Same rationale as _plan_to_joints's service_is_ready() check: send_goal_async on a
         # server that isn't there hangs until PLAN_TIMEOUT_S instead of failing immediately,

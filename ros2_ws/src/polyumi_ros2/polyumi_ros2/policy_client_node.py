@@ -59,7 +59,7 @@ from polyumi_ros2.camera_preproc import (
     discarded_bar_intensity,
 )
 from polyumi_ros2.gripper_map import policy_to_robot_width, robot_to_policy_width
-from polyumi_ros2.target_chunk import TargetChunkPublisher, Wire, pose_array
+from polyumi_ros2.target_chunk import CONSUMER_HINT, TargetChunkPublisher, pose_array
 
 # Name used for the single "joint" in the gripper trajectory chunk. Deliberately NOT a real joint
 # name (the FR3's fingers are fr3_finger_joint1/2, each reporting half the aperture): the value we
@@ -143,8 +143,8 @@ class PolicyClientNode(Node):
         self.declare_parameter('execute_motion', False)
         # Viz-only preview: publish every commanded chunk as a PoseArray on
         # /polyumi/target_poses_preview regardless of execute_motion, so the motion can be seen in
-        # Foxglove/RViz without the arm moving (the NUC bridge subscribes only to the execution
-        # topic /polyumi/target_poses, never this one). On by default — it moves nothing.
+        # Foxglove/RViz without the arm moving (the streaming controller subscribes only to the
+        # execution topic /polyumi/target_poses_traj, never this one). On by default — it moves nothing.
         self.declare_parameter('publish_preview', True)
         # HTTP timeout (s) for the inference POST. Real diffusion inference over LAN is slower
         # than the trivial dummy server; 0.5 s was fine for the dummy but risks timing out every
@@ -317,7 +317,6 @@ class PolicyClientNode(Node):
         if self._execute_motion:
             self._target_pub = TargetChunkPublisher(
                 self,
-                wire=Wire.MULTIDOF,
                 frame_id=self._base_frame,
                 joint_name=self._eef_frame,
             )
@@ -378,7 +377,7 @@ class PolicyClientNode(Node):
 
         mode = 'EXECUTE (arm will move)' if self._execute_motion else 'log-only (no motion)'
         if self._target_pub is not None:
-            mode += f' via {self._target_pub.wire} -> {self._target_pub.topic_name}'
+            mode += f' via {self._target_pub.topic_name}'
         preview = 'on (/polyumi/target_poses_preview)' if self._publish_preview else 'off'
         self.get_logger().info(f'policy_client_node started — server: {self._url} — mode: {mode} — preview: {preview}')
         stride_interval = self._steps_per_inference * self._action_dt
@@ -969,7 +968,7 @@ class PolicyClientNode(Node):
             if self._target_pub.get_subscription_count() == 0:
                 self._warn_throttled(
                     f'Nothing is subscribed to {self._target_pub.topic_name}; the arm will not '
-                    f'move. Needs: {self._target_pub.wire.consumer}'
+                    f'move. Needs: {CONSUMER_HINT}'
                 )
             self._target_pub.publish(
                 [self._action_to_pose(action) for action in arm_actions],

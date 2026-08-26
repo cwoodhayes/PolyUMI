@@ -121,13 +121,11 @@ def generate_launch_description():
 
     db_arg = DeclareLaunchArgument('db', default_value='False', description='Database flag')
 
-    # See header change 4. This is the knob that sets how fast a planned chunk actually runs,
-    # and Humble's GetCartesianPath has no velocity_scaling field to speed one back up after
-    # the fact. Deliberately NOT the FR3's datasheet maximum: conservative, raise it while
-    # watching — the arm will fire a reflex if a chunk is too aggressive. fr3_moveit_bridge
-    # stretches the result back to the span the incoming Path asks for, so a faster plan does
-    # not mean a faster arm; it means the commanded timeline becomes reachable instead of
-    # being the slower of the two.
+    # See header change 4. The ceiling move_group time-parameterizes a homing plan against.
+    # Deliberately NOT the FR3's datasheet maximum: conservative, raise it while watching — the
+    # arm will fire a reflex if a sweep is too aggressive. The bridge's max_velocity_scaling
+    # then stretches that plan back out, so this sets what "scale 1.0" means rather than the
+    # speed the arm actually runs at.
     max_acceleration_arg = DeclareLaunchArgument(
         'max_acceleration',
         default_value='1.5',

@@ -5,46 +5,22 @@ The streaming Cartesian impedance controller takes a ``MultiDOFJointTrajectory``
 waypoint has an absolute instant (``header.stamp + time_from_start``) that its interpolator
 splices on. Every producer of target poses — the policy client and both on-arm probes — builds
 this same message via ``TargetChunkPublisher``.
-
-``Wire`` is a single-member enum rather than a bare constant because ``.default_topic``/
-``.consumer`` are still useful for logging, and ``Wire(value)`` still validates a caller's string.
 """
-
-from enum import StrEnum
 
 from geometry_msgs.msg import Pose, PoseArray, Transform
 from rclpy.duration import Duration
 from trajectory_msgs.msg import MultiDOFJointTrajectory, MultiDOFJointTrajectoryPoint
 
+#: Where the streaming controller listens. Producers may override per-node, but this is the one
+#: topic the running stack is wired for.
+TARGET_POSES_TOPIC = '/polyumi/target_poses_traj'
 
-class Wire(StrEnum):
-    """
-    Which wire format a chunk is encoded as.
-
-    A StrEnum so it drops straight into a ROS string parameter and compares equal to the literal,
-    while ``Wire(value)`` does the validation — a typo raises rather than silently publishing to a
-    topic nobody is subscribed to.
-    """
-
-    #: Absolutely-timed poses, consumed by the streaming impedance controller.
-    MULTIDOF = 'multidof'
-
-    @property
-    def default_topic(self) -> str:
-        """Topic this format publishes on."""
-        return {
-            Wire.MULTIDOF: '/polyumi/target_poses_traj',
-        }[self]
-
-    @property
-    def consumer(self) -> str:
-        """What must be running for this format to reach the arm, for 'nobody is listening' errors."""
-        return {
-            Wire.MULTIDOF: (
-                'polyumi_cartesian_impedance_controller, ACTIVE — being loaded is not enough; '
-                'check `ros2 control list_controllers` on the NUC'
-            ),
-        }[self]
+#: What must be running for a chunk to reach the arm, for "nobody is listening" errors. The
+#: controller can be loaded and still not subscribed, which is the confusing half.
+CONSUMER_HINT = (
+    'polyumi_cartesian_impedance_controller, ACTIVE — being loaded is not enough; '
+    'check `ros2 control list_controllers` on the NUC'
+)
 
 
 def pose_array(poses: list[Pose], *, frame_id: str, stamp) -> PoseArray:
@@ -99,35 +75,24 @@ class TargetChunkPublisher:
     Publishes pose chunks as a timed MultiDOFJointTrajectory for the streaming controller.
 
     Wraps a plain publisher rather than replacing it, so callers keep ``topic_name`` and
-    ``get_subscription_count()`` — aiming at a topic nobody subscribes to is otherwise silent,
-    since nothing moves and there is no error anywhere.
+    ``get_subscription_count()`` — publishing where nothing subscribes is otherwise silent, since
+    nothing moves and there is no error anywhere.
     """
 
     def __init__(
         self,
         node,
         *,
-        wire: str,
         frame_id: str,
         joint_name: str,
         topic: str | None = None,
         qos: int = 10,
     ):
-        """
-        Create the underlying publisher for `wire`, defaulting the topic to its default_topic.
-
-        :raises ValueError: if `wire` is not a known format.
-        """
-        self._wire = Wire(wire)
+        """Create the underlying publisher, defaulting to :data:`TARGET_POSES_TOPIC`."""
         self._frame_id = frame_id
         self._joint_name = joint_name
         self._node = node
-        self._pub = node.create_publisher(MultiDOFJointTrajectory, topic or self._wire.default_topic, qos)
-
-    @property
-    def wire(self) -> Wire:
-        """Which wire format this publisher emits."""
-        return self._wire
+        self._pub = node.create_publisher(MultiDOFJointTrajectory, topic or TARGET_POSES_TOPIC, qos)
 
     @property
     def topic_name(self) -> str:

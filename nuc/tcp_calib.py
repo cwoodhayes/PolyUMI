@@ -15,8 +15,9 @@ and they MUST agree, which is why the numbers live here and nowhere else:
   * TF, for the laptop's observation lookup (``policy_client_node``'s ``eef_frame``) and for
     seeing the frame in Foxglove — published by a static_transform_publisher in
     fr3_bringup.launch.py.
-  * move_group's RobotModel, for ``GetCartesianPath.link_name`` (``fr3_moveit_bridge``) — passed
-    as xacro args into nuc/description/fr3_polyumi.urdf.xacro by fr3_move_group.launch.py.
+  * move_group's RobotModel — passed as xacro args into nuc/description/fr3_polyumi.urdf.xacro
+    by fr3_move_group.launch.py, so the planning scene and RViz agree with TF about where the
+    policy's frame is.
 
 Where the numbers come from
 ---------------------------

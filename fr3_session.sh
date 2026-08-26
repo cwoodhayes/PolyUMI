@@ -78,7 +78,7 @@ MAX_IMAGE_AGE_S="${MAX_IMAGE_AGE_S:-0.3}"
 # line is only PRE-TYPED, never run — nothing moves until you press Enter on it, and the NUC
 # side has its own execute_arm/execute_gripper flags (both default false) in front of the arm.
 # EXECUTE_MOTION=false ./fr3_session.sh for a dry run: the preview topics still show every
-# commanded chunk in Foxglove, but /polyumi/target_poses is never published.
+# commanded chunk in Foxglove, but /polyumi/target_poses_traj is never published.
 EXECUTE_MOTION="${EXECUTE_MOTION:-true}"
 
 if [ "${1:-}" = "--kill-local" ] || [ "${1:-}" = "--kill" ]; then

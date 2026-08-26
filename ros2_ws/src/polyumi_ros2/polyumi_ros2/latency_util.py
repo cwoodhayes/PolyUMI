@@ -10,7 +10,7 @@ does not reliably resolve.
 The method, unchanged from upstream: resample the commanded and measured series onto a common 1 kHz
 grid, z-normalize them jointly, full cross-correlation, and take the lag at the peak. It needs no
 model of the plant — only that the measured signal is a delayed, roughly linear echo of the
-commanded one — which is why the same function serves both the arm (`/polyumi/target_poses` vs the
+commanded one — which is why the same function serves both the arm (`/polyumi/target_poses_traj` vs the
 `polyumi_tcp` TF) and the hand (`/polyumi/target_gripper` vs `/fr3_gripper/joint_states`).
 
 Four deliberate divergences from upstream:

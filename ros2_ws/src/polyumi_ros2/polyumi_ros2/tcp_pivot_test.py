@@ -37,8 +37,9 @@ Usage (laptop, after `source setup_franka_env.sh`):
     # 3. Watch the fingertips. The gripper is closed automatically first.
     ros2 run polyumi_ros2 tcp_pivot_test --ros-args -p angle_deg:=20.0
 
-**Do not run this while policy_client_node is running.** It publishes to /polyumi/target_poses,
-the same topic the policy uses, and the bridge acts on whichever chunk arrives last.
+**Do not run this while policy_client_node is running.** It publishes to
+/polyumi/target_poses_traj, the same topic the policy uses, and the controller splices whichever
+chunk arrives last.
 """
 
 import math
@@ -52,7 +53,7 @@ from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from polyumi_ros2.target_chunk import TargetChunkPublisher, Wire
+from polyumi_ros2.target_chunk import CONSUMER_HINT, TargetChunkPublisher
 from tf2_ros import Buffer, TransformListener
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
@@ -192,9 +193,7 @@ class TcpPivotTest(Node):
         if self._waypoint_dt <= 0:
             raise ValueError(f'waypoint_dt_s must be > 0, got {self._waypoint_dt}')
 
-        self._pub = TargetChunkPublisher(
-            self, wire=Wire.MULTIDOF, frame_id=self._base, joint_name=self._eef, topic=topic
-        )
+        self._pub = TargetChunkPublisher(self, frame_id=self._base, joint_name=self._eef, topic=topic)
         self._gripper_pub = self.create_publisher(JointTrajectory, gripper_topic, 10)
         self._gripper_lock = threading.Lock()
         self._gripper_actual: float | None = None
@@ -350,7 +349,7 @@ class TcpPivotTest(Node):
                 'source setup_franka_env.sh?'
             )
             return 1
-        if not self.wait_for_subscriber(self._pub, self._pub.wire.consumer):
+        if not self.wait_for_subscriber(self._pub, CONSUMER_HINT):
             return 1
         if self._close_gripper:
             if not self.wait_for_subscriber(

@@ -12,7 +12,7 @@ from geometry_msgs.msg import Pose
 from rclpy.node import Node
 from trajectory_msgs.msg import MultiDOFJointTrajectory
 
-from polyumi_ros2.target_chunk import TargetChunkPublisher, Wire, multidof_trajectory
+from polyumi_ros2.target_chunk import TARGET_POSES_TOPIC, TargetChunkPublisher, multidof_trajectory
 
 
 @pytest.fixture(scope='module', autouse=True)
@@ -47,19 +47,12 @@ def _stamp(seconds: float):
     return Time(sec=int(seconds), nanosec=int((seconds % 1) * 1e9))
 
 
-def test_multidof_gets_its_own_topic_and_type(node):
+def test_publisher_defaults_to_the_controller_topic_and_type(node):
     """The publisher resolves the default topic and builds the right message type."""
-    pub = TargetChunkPublisher(node, wire=Wire.MULTIDOF, frame_id='fr3_link0', joint_name='polyumi_tcp')
+    pub = TargetChunkPublisher(node, frame_id='fr3_link0', joint_name='polyumi_tcp')
 
-    assert pub.wire is Wire.MULTIDOF
-    assert pub.topic_name == '/polyumi/target_poses_traj'
+    assert pub.topic_name == TARGET_POSES_TOPIC
     assert pub._pub.msg_type is MultiDOFJointTrajectory
-
-
-def test_unknown_wire_fails_fast(node):
-    """A typo must not leave a producer publishing where nothing subscribes."""
-    with pytest.raises(ValueError):
-        TargetChunkPublisher(node, wire='multidoff', frame_id='fr3_link0', joint_name='polyumi_tcp')
 
 
 def test_multidof_times_use_the_preslice_index():

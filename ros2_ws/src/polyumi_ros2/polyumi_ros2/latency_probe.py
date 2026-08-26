@@ -98,7 +98,7 @@ from tf2_ros import Buffer, TransformListener
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from polyumi_ros2.latency_util import get_latency
-from polyumi_ros2.target_chunk import TargetChunkPublisher, Wire
+from polyumi_ros2.target_chunk import TargetChunkPublisher
 
 MODES = ('camera', 'arm', 'gripper', 'gripper_chirp')
 
@@ -362,9 +362,7 @@ class LatencyProbe(Node):
             if self._lead <= 0:
                 errors.append(f'lead_s must be > 0, got {self._lead} — every waypoint would be dropped as stale')
             topic = self.get_parameter('target_topic').get_parameter_value().string_value or None
-            self._pub = TargetChunkPublisher(
-                self, wire=Wire.MULTIDOF, frame_id=self._base_frame, joint_name=self._eef_frame, topic=topic
-            )
+            self._pub = TargetChunkPublisher(self, frame_id=self._base_frame, joint_name=self._eef_frame, topic=topic)
             self._tf_buffer = Buffer()
             self._tf_listener = TransformListener(self._tf_buffer, self)
             #: (stamp_s, position on the swept axis)
