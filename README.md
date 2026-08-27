@@ -170,7 +170,7 @@ Main article: [catalog/README.md](/catalog/README.md)
 
 Collecting demonstration data, running preprocessing pipelines, and training models results in a bunch of files that can quickly
 become confusing & disorganized on disk.
-In the era of Claude, bringing up simple web app UI's to manage this sort of data management problem is simple; hence
+In the era of Claude, bringing up simple web app UIs to manage this sort of data management problem is simple; hence
 the existence of the `polyumi-catalog` web tool.
 
 It provides a GUI for managing episodes, scenes, tasks, and datasets, creating associations to keep your data organized, and providing
@@ -185,7 +185,7 @@ diffusion policy in Docker on a GPU workstation. See
 [docs/training-instructions.md](docs/training-instructions.md) for the build/run walkthrough,
 the rootless-Docker notes, and how the trained policy is served back to the ROS inference node.
 
-## Streaming / Demos
+## Inference
 
 ### Streaming Demo
 
@@ -215,7 +215,7 @@ First, see the [system calibration instructions](/docs/calibration-instructions.
 The arm's control stack typically runs on its own machine and is reached over ROS2;
 how you bring that up, network the two machines, and configure DDS depends on your
 robot and lab. The wire contract lives in [inference_server/](inference_server/) and its tests,
-and [docs/crb-fr3-inference.md](docs/crb-fr3-inference.md) is a worked example for one
+and [docs/crb-fr3-inference.md](docs/crb-fr3-inference.md) is a worked example for our
 specific Franka FR3 setup that you can adapt.
 
 ## Hardware Notes
@@ -231,15 +231,13 @@ sudo i2cdetect -y 1
 sudo i2cget -y 0x57 0x2a   # battery percentage; 100% = 0x64, 50% = 0x32, etc.
 ```
 
-## Troubleshooting
+### Troubleshooting the Pi
 
 **`_version.py` missing on the Pi** — run `./deploy.sh <pi_ssh_hostname>` from the PC; this generates the file from the current git HEAD.
 
 **Audio not detected** — confirm `wm8960-soundcard` appears in `arecord -l`. If the default RaspiAudio driver was previously installed, the Waveshare DKMS driver may need to be reinstalled after a kernel update.
 
 **Wi-Fi not listing on the Pi** — run `sudo modprobe brcmfmac`, then retry `nmcli dev wifi connect "your-network"`.
-
-**ZMQ frames dropping** — check the `cb_drops` counter in the Pi logs. The audio streamer uses a 100-frame queue with drop-and-replace on overflow; the video streamer uses `NOBLOCK` sends with a high-watermark of 2. Persistent drops indicate the network link is the bottleneck.
 
 **`protoc` not found during `polyumi_pi_msgs` install** — install `protobuf-compiler` (`sudo apt install protobuf-compiler` on the Pi, or via your system package manager on the PC).
 
