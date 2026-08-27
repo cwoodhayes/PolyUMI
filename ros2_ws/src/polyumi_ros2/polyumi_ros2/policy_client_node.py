@@ -84,8 +84,8 @@ DIAG_METRICS = (
     'n_stale_gripper',
     'obs_age_s',
     'inference_latency_s',
-    'inference_server_s',
-    'inference_network_s',
+    'inference_model_s',
+    'inference_overhead_s',
     'image_age_s',
     'gripper_state_age_s',
 )
@@ -994,8 +994,8 @@ class PolicyClientNode(Node):
             return
         latency_inference = time.monotonic() - t_sent
         actions = result['actions']
-        server_total_ms = result.get('server_total_ms')
-        latency_server_s = None if server_total_ms is None else float(server_total_ms) * 1e-3
+        model_ms = result.get('model_ms')
+        latency_model_s = None if model_ms is None else float(model_ms) * 1e-3
 
         # Viz-only preview: publish the full commanded chunk (before the stale-drop below) so the
         # motion is visible in Foxglove/RViz even when execute_motion is off or the whole chunk is
@@ -1028,14 +1028,23 @@ class PolicyClientNode(Node):
         age_s = (self.get_clock().now() - t_obs).nanoseconds * 1e-9
         self._diag('obs_age_s', age_s)
         self._diag('inference_latency_s', latency_inference)
-        # Split the round trip into the half each side owns. They fail for different reasons and
-        # have different fixes: server time is GPU work (and whoever else is on that box), while
-        # the remainder is serialization plus the link, and scales with the observation payload.
-        # The server reports its own total; absent it (an older server) the split is unknowable,
-        # so publish nothing rather than a number that silently means something else.
-        if latency_server_s is not None:
-            self._diag('inference_server_s', latency_server_s)
-            self._diag('inference_network_s', max(0.0, latency_inference - latency_server_s))
+        # Split the round trip against the forward pass, which is the one term measured cleanly
+        # anywhere: the server times predict_action through its .cpu() sync point. Everything else
+        # — serialization, the link, FastAPI, the body coming off the socket — lands in overhead,
+        # and that is the number this work is trying to move.
+        #
+        # Deliberately NOT rtt minus the server's own total. The server starts its clock in the
+        # middleware, but FastAPI reads the request body inside the endpoint, so a large upload
+        # is still arriving while the server is timing itself: its total absorbs link time, and
+        # the remainder would understate the link exactly when the link is what is wrong.
+        # Measured against a do-nothing echo server over the 100 Mbit link, an 0.40 MB request
+        # reported 36 ms of "server" time on a box doing nothing but a base64 decode.
+        #
+        # Absent model_ms (an older server) the split is unknowable, so publish nothing rather
+        # than a number that silently means something else.
+        if latency_model_s is not None:
+            self._diag('inference_model_s', latency_model_s)
+            self._diag('inference_overhead_s', max(0.0, latency_inference - latency_model_s))
         self._diag('n_stale_arm', n_stale_arm)
         self._diag('n_stale_gripper', n_stale_grip)
         self._diag('n_published_arm', len(arm_actions))
@@ -1058,8 +1067,8 @@ class PolicyClientNode(Node):
         grip_robot = policy_to_robot_width(float(first[7]), self._gripper_min_width_m, self._gripper_max_width_m)
         split = (
             ''
-            if latency_server_s is None
-            else f' = {latency_server_s * 1000:.0f} server + {(latency_inference - latency_server_s) * 1000:.0f} net'
+            if latency_model_s is None
+            else f' = {latency_model_s * 1000:.0f} model + {(latency_inference - latency_model_s) * 1000:.0f} overhead'
         )
         self.get_logger().info(
             f'action chunk n={n_received} (dropped {n_stale_arm} arm / {n_stale_grip} gripper, '
