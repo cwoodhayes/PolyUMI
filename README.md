@@ -302,3 +302,9 @@ If you just want to use PolyUMI's hardware designs + associated system software 
 
 If you wish to cite the full tactile learning system (including models, datasets, inference pipeline, etc),
 please let us know, as this will be released in an upcoming work.
+
+## Acknowledgments & Maintenance
+
+This project was originally developed by Conor Wood Hayes as part of the Master of Science in Robotics (MSR) program at Northwestern University.
+
+It is currently maintained by the **[Center for Robotics and Biosystems](https://robotics.northwestern.edu/)** at Northwestern University.
