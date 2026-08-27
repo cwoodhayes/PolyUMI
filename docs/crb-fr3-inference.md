@@ -57,6 +57,11 @@ Velocity scaling is only applicable if the arm is being controlled by moveit, wh
 
 ## 3. Inference server
 
+The GPU box (`lamb`) is on the far end of a dedicated cable, not on campus wifi, so it is
+addressed by IP: `129.105.69.10`, port 8002. `./deploy_gpu.sh` pushes this working copy's fork
+and entrypoints to it — it is deliberately NOT part of `fr3_session.sh`'s auto-deploy, because
+the GPU box tracks its own training branch.
+
 ```bash
 # real policy, on the GPU box (see training-instructions.md):
 CKPT=/abs/path/to/<name>.ckpt ./serve_policy.sh

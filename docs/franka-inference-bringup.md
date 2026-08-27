@@ -33,7 +33,7 @@ replaced — so its remaining work is tracked with the hand itself, in
 | Gripper command path | `franka_hand_node` written and unit-tested; **on-arm run pending** — tracked in [crb-fr3-inference.md](crb-fr3-inference.md), "Gripper problems", since the hand outlives this document |
 | Receding-horizon inference stride | **done** — `steps_per_inference` (default 6) |
 | DP export | **works**; UMI schema + tests landed. `export --type polyumi` adds the contact mic and the finger camera (`data/mic_0`, `data/finger_rgb`) |
-| Real inference server | **in progress** — `serve_policy.py` green standalone on sheep; client wiring done + unit-tested; on-arm dry run pending hardware |
+| Real inference server | **in progress** — `serve_policy.py` green standalone on the GPU box; client wiring done + unit-tested; on-arm dry run pending hardware |
 
 Everything else on the original list is done and has been deleted from here: DDS interop, the
 round trip, gopro/proprio latency compensation, the `polyumi_tcp` body frame, the pixel transform,
