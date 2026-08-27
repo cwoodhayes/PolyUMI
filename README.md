@@ -2,14 +2,14 @@ https://github.com/user-attachments/assets/2f902600-9682-4e67-a75c-fc8fa358cb92
 
 # PolyUMI: Visual + Auditory + Tactile Manipulation Platform for Imitation Learning
 
-**Project website:** https://cwoodhayes.github.io/projects/polyumi
+**Project website:** https://cwoodhayes.github.io/projects/polyumi<br>
 **Hardware build guide:** [Google Doc](https://docs.google.com/document/d/1T0v_7H8YAJjOud9QWYlQct29a78YKvELPIpKTzajFs0/edit?usp=sharing)
 
-PolyUMI is an imitation learning platform supporting UMI-style data collection via handheld gripper which unifies the following sensor modalities in a single end-effector:
-- **touch** (via a custom optical tactile-sensing finger, based off of [PolyTouch](https://polytouch.alanz.info/)) - *10fps 540x480 MJPEG video (MP4)*
+PolyUMI is an imitation learning platform supporting UMI-style data collection via a handheld gripper, which unifies the following sensor modalities in a single end-effector:
+- **touch** (via a custom optical tactile-sensing finger, based on [PolyTouch](https://polytouch.alanz.info/)) - *10fps 540x480 MJPEG video (MP4)*
 - **mechanical vibration** (via a contact microphone fixed to the finger housing) - *16kHz PCM audio (WAV)*
 - **vision** (via GoPro camera on wrist + finger camera peripheral vision) - *60fps 1920x1080 MJPEG video (MP4) + 10fps 540x480 MJPEG video*
-- **proprioception** (via monocular inertial SLAM from GoPro + IMU in gripper, or OptiTrack for the same; and robot joint encoders + FK in embodiments)
+- **proprioception** (via monocular inertial SLAM from GoPro + IMU in gripper, or OptiTrack for the same, plus robot joint encoders + FK in embodiments)
 
 It combines the [Universal Manipulation Interface (UMI)](https://umi-gripper.github.io/) platform with a custom touch-sensing finger inspired by the [PolyTouch tactile + audio sensor](https://polytouch.alanz.info/), with hardware, firmware, and software designed from scratch for modularity and hardware performance on a modern robotics stack (ROS2 Kilted/Humble, Python 3.13, Foxglove).
 
@@ -58,7 +58,7 @@ train_policy.sh     # starts model training
 
 **PC** (ingest, ROS 2 nodes, catalog): Ubuntu 24.04, Python 3.13, [uv](https://github.com/astral-sh/uv), ROS 2 Kilted, `ffmpeg`, `protobuf-compiler`, plus the ORB-SLAM3 build deps (`cmake`, `libopencv-dev`, `libeigen3-dev`, `libboost-serialization-dev`) — see [Installation](#installation) below.
 
-**RPi** (gripper): Raspberry Pi Zero 2W flashed with Raspberry Pi OS, plus a GoPro Hero 12. See [docs/pi-provisioning.md](docs/pi-provisioning.md) for setup, and the hardware build guide linked above for instructions on building the data collection gripper + franka end-effector.
+**RPi** (gripper): Raspberry Pi Zero 2W flashed with Raspberry Pi OS, plus a GoPro Hero 12. See [docs/pi-provisioning.md](docs/pi-provisioning.md) for setup, and the hardware build guide linked above for instructions on building the data collection gripper + Franka end-effector.
 
 **GPU workstation** (training + policy serving via [`train_policy.sh`](train_policy.sh) / [`serve_policy.sh`](serve_policy.sh)): our code has only been tested to run on
 an NVIDIA RTX 6000 Ada GPU (48GB VRAM), but should run with at least 32GB. You need Docker with the NVIDIA container toolkit (ours runs rootless). Everything else lives in the image, so no host conda or CUDA toolkit is needed, nor is ROS. Optionally a [Weights & Biases](https://wandb.ai) API key for logging. See [docs/training-instructions.md](docs/training-instructions.md).
@@ -170,8 +170,7 @@ Main article: [catalog/README.md](/catalog/README.md)
 
 Collecting demonstration data, running preprocessing pipelines, and training models results in a bunch of files that can quickly
 become confusing & disorganized on disk.
-In the era of Claude, bringing up simple web app UIs to manage this sort of data management problem is simple; hence
-the existence of the `polyumi-catalog` web tool.
+A lightweight web UI helps manage this data and keep it organized; hence the existence of the `polyumi-catalog` web tool.
 
 It provides a GUI for managing episodes, scenes, tasks, and datasets, creating associations to keep your data organized, and providing
 a convenient UI to access the ingestion scripts & foxglove viewer described above.
@@ -286,7 +285,7 @@ The `pi` extra pulls in the Raspberry Pi hardware-only dependencies (`lgpio`, `g
 
 Run `polyumi-pi --help` for a full list of commands.
 
-# Citation
+## Citation
 
 If you just want to use PolyUMI's hardware designs + associated system software (i.e. the pi application), please cite the original workshop paper:
 
