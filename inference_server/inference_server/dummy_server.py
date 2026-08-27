@@ -10,11 +10,15 @@ on a cosine. The phase offset is deliberate — the gripper's extremes land on X
 so a routing bug that feeds X into the gripper (or vice versa) is visible at a glance in the logs
 and in Foxglove, instead of looking perfectly plausible.
 
+Speaks the same wire contract as the real server (external/polyumi_diffusion_policy/serve_policy.py):
+a binary observation frame on POST /predict_cartesian/, decoded by the shared ``obs_wire`` module.
+That includes refusing a frame that omits a required channel — this is the bringup path, so a
+frame it accepts must be one a checkpoint would also accept.
+
 Usage:
     HOME_POSE="0.4 0.0 0.4 0 0 0 1 0.04" uv run uvicorn inference_server.dummy_server:app --host 0.0.0.0 --port 8000
 """
 
-import base64
 import math
 import os
 import time
@@ -22,14 +26,19 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 
 import numpy as np
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import Body, FastAPI, HTTPException
+from pydantic import BaseModel
+
+from inference_server.obs_wire import WireFormatError, require_channels, unpack_observation
 
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
 
-REQUIRED_OBS_KEYS = {'image', 'agent_pos'}
+#: Channels the request must carry. Must match serve_policy's REQUIRED_CHANNELS: this server is
+#: the bringup path, so it has to refuse exactly what the real one refuses or it certifies frames
+#: that fail later against a checkpoint.
+REQUIRED_CHANNELS = ('camera0_rgb', 'agent_pos')
 AGENT_POS_DIM = 8  # [x, y, z, qx, qy, qz, qw, gripper_width]
 OSCILLATION_AMPLITUDE_M = 0.05
 OSCILLATION_PERIOD_STEPS = 20  # full cycle over this many /predict calls
@@ -43,14 +52,6 @@ DEFAULT_HOME_POSE = '0.56 0.13 0.25 -1 0 0 0 0.05'  # xyz qxqyqzqw gripper
 # gripper's tags separate to ~0.1 m, so anything past this is a units error (this default used to
 # read 0.4 — 400 mm — which went unnoticed only because the width was being dropped downstream).
 MAX_PLAUSIBLE_GRIPPER_M = 0.2
-
-
-class PredictRequest(BaseModel):
-    """Request body for /predict_cartesian/."""
-
-    n_obs_steps: Annotated[int, Field(ge=1)] = 2
-    n_action_steps: Annotated[int, Field(ge=1)] = 1
-    observations: dict
 
 
 class PredictResponse(BaseModel):
@@ -113,45 +114,42 @@ def reset(body: dict | None = None) -> dict:
 
 
 @app.post('/predict_cartesian/', response_model=PredictResponse)
-def predict_cartesian(req: PredictRequest) -> PredictResponse:
+def predict_cartesian(
+    body: Annotated[bytes, Body(media_type='application/octet-stream')],
+) -> PredictResponse:
     """Return an n_action_steps-long chunk of a sinusoidally oscillating EEF pose."""
     global _call_count
 
     t_start = time.perf_counter()
 
-    # Validate observation keys
-    missing = REQUIRED_OBS_KEYS - req.observations.keys()
-    if missing:
-        raise HTTPException(status_code=422, detail=f'Missing observation keys: {missing}')
-
-    # Validate image: base64-encoded raw bytes + dtype/shape, uint8 [To,H,W,3] in practice
-    # (see policy_client_node._control_tick). The dtype is honoured rather than assumed, so the
-    # dummy keeps accepting whatever the real server does.
-    image = req.observations.get('image')
-    if not isinstance(image, dict) or not {'dtype', 'shape', 'data'} <= image.keys():
-        raise HTTPException(status_code=422, detail="image must be a dict with 'dtype', 'shape', 'data'")
+    # Decode the frame and enforce the same channel requirement the real server does. The dtypes
+    # and shapes are honoured rather than assumed, so this accepts exactly what serve_policy does.
     try:
-        image_bytes = base64.b64decode(image['data'])
-        image_arr = np.frombuffer(image_bytes, dtype=np.dtype(image['dtype'])).reshape(image['shape'])
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f'Failed to decode image: {e}') from e
-    if image_arr.shape[0] != req.n_obs_steps:
+        channels, header = unpack_observation(body)
+        require_channels(channels, REQUIRED_CHANNELS)
+    except WireFormatError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    n_obs_steps = header.get('n_obs_steps')
+    image_arr = channels['camera0_rgb']
+    agent_pos = channels['agent_pos']
+    for name, arr in (('camera0_rgb', image_arr), ('agent_pos', agent_pos)):
+        if arr.shape[0] != n_obs_steps:
+            raise HTTPException(
+                status_code=422,
+                detail=f'{name} leading dim must be n_obs_steps={n_obs_steps}, got {arr.shape[0]}',
+            )
+    if image_arr.ndim != 4 or image_arr.shape[-1] != 3:
+        raise HTTPException(status_code=422, detail=f'camera0_rgb must be [To,H,W,3], got {list(image_arr.shape)}')
+    if agent_pos.ndim != 2 or agent_pos.shape[1] != AGENT_POS_DIM:
         raise HTTPException(
             status_code=422,
-            detail=f'image leading dim must be n_obs_steps={req.n_obs_steps}, got {image_arr.shape[0]}',
+            detail=f'agent_pos must be [To,{AGENT_POS_DIM}], got {list(agent_pos.shape)}',
         )
 
-    # Validate agent_pos shape: [n_obs_steps, AGENT_POS_DIM]
-    agent_pos = req.observations.get('agent_pos')
-    if (
-        not isinstance(agent_pos, list)
-        or len(agent_pos) != req.n_obs_steps
-        or not all(isinstance(row, list) and len(row) == AGENT_POS_DIM for row in agent_pos)
-    ):
-        raise HTTPException(
-            status_code=422,
-            detail=f'agent_pos must have shape [{req.n_obs_steps}, {AGENT_POS_DIM}]',
-        )
+    n_action_steps = header.get('n_action_steps')
+    if not isinstance(n_action_steps, int) or n_action_steps < 1:
+        raise HTTPException(status_code=422, detail=f'n_action_steps must be a positive int, got {n_action_steps!r}')
 
     # Oscillate X and the gripper width around the fixed home pose (set via HOME_POSE env var at
     # startup). Return a genuine forward-looking chunk — one pose per step, phase advancing by one
@@ -160,7 +158,7 @@ def predict_cartesian(req: PredictRequest) -> PredictResponse:
     # points). _call_count advances by the full chunk length so consecutive calls continue
     # the sine smoothly instead of restarting from the same phase.
     model_n_action_steps = 8  # matches training config n_action_steps
-    n_return = min(req.n_action_steps, model_n_action_steps)
+    n_return = min(n_action_steps, model_n_action_steps)
 
     actions = []
     for i in range(n_return):

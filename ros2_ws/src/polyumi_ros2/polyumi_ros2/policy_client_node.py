@@ -27,7 +27,6 @@ Usage:
         -p inference_server_url:=http://192.168.1.10:8000/predict_cartesian/
 """
 
-import base64
 import math
 import os
 import threading
@@ -57,6 +56,7 @@ from polyumi_ros2.camera_preproc import (
     discarded_bar_intensity,
 )
 from polyumi_ros2.gripper_map import policy_to_robot_width, robot_to_policy_width
+from polyumi_ros2.obs_wire import pack_observation
 from polyumi_ros2.target_chunk import TargetChunkPublisher, Wire, pose_array
 
 # Name used for the single "joint" in the gripper trajectory chunk. Deliberately NOT a real joint
@@ -350,7 +350,7 @@ class PolicyClientNode(Node):
         self._episode_reset_done = False
 
         # One session for the life of the node, so every request rides an already-open connection.
-        # See _http_post_json for why that matters at this payload size.
+        # See _post for why that matters at this payload size.
         self._session = requests.Session()
 
         # Diagnostics. Always on: ten Float32s at the control rate is nothing next to the image
@@ -393,7 +393,7 @@ class PolicyClientNode(Node):
         # worker, which cannot serve two forward passes concurrently anyway. And an observation
         # superseded before the worker picks it up is discarded rather than queued: by the time a
         # backlog could deliver it, _n_stale_actions would drop the whole chunk it produced.
-        self._pending: tuple[dict, rclpy.time.Time] | None = None
+        self._pending: tuple[bytes, rclpy.time.Time] | None = None
         self._pending_cv = threading.Condition()
         self._stopping = False
         self._infer_thread = threading.Thread(target=self._inference_worker, name='policy_infer', daemon=True)
@@ -695,27 +695,22 @@ class PolicyClientNode(Node):
             return
 
         # --- 4. Serialize and hand to the inference worker ---
-        # Images go as base64-encoded raw bytes (+ dtype/shape) rather than nested-list JSON,
-        # which is ~30x slower to encode at this size. They go as uint8, not float32: the
-        # request is bandwidth-bound, not CPU-bound (a 2x224x224x3 float32 stack is 1.6 MB of
-        # base64, four times what uint8 costs), and the server's /255 reproduces this exactly.
-        # agent_pos is tiny (n_obs_steps x 8 floats) so it stays a plain list.
-        image_stack = np.stack([obs[0] for obs in self._obs_buffer])
-        poses = [obs[1].tolist() for obs in self._obs_buffer]
-        payload = {
-            'n_obs_steps': self._n_obs_steps,
-            'n_action_steps': self._n_action_steps,
-            'observations': {
-                'image': {
-                    'dtype': str(image_stack.dtype),
-                    'shape': list(image_stack.shape),
-                    'data': base64.b64encode(image_stack.tobytes()).decode('ascii'),
-                },
-                'agent_pos': poses,
+        # One binary frame per request: a JSON header naming each channel's dtype/shape/offset,
+        # then the raw bytes. Channels carry the dataset's own names, so a future finger camera or
+        # contact mic is another entry here rather than a new wire shape. See obs_wire.
+        #
+        # Images stay uint8 all the way from _image_cb: that is the dtype the dataset stores, and
+        # the server's /255 reproduces the old float32 payload exactly at a quarter of the bytes.
+        body = pack_observation(
+            {
+                'camera0_rgb': np.stack([obs[0] for obs in self._obs_buffer]),
+                'agent_pos': np.stack([obs[1] for obs in self._obs_buffer]),
             },
-        }
+            n_obs_steps=self._n_obs_steps,
+            n_action_steps=self._n_action_steps,
+        )
         # t_obs: when this frame was actually captured, i.e. the instant action[0] targets.
-        self._submit_inference(payload, image_stamp - Duration(seconds=self._latency['gopro']))
+        self._submit_inference(body, image_stamp - Duration(seconds=self._latency['gopro']))
 
     def _lookup_agent_pos(self, image_stamp: rclpy.time.Time) -> np.ndarray | None:
         """
@@ -887,25 +882,40 @@ class PolicyClientNode(Node):
         total_latency = elapsed_since_obs + latency_act
         return max(0, math.ceil(total_latency / self._action_dt))
 
-    def _http_post_json(self, url: str, payload: dict) -> dict | None:
+    def _post(self, url: str, **kwargs) -> dict | None:
         """
-        POST payload as JSON to url and return the parsed response, or None on failure (logged).
+        POST to url through the persistent session and return the parsed reply, or None (logged).
 
-        Goes through a persistent ``requests.Session`` rather than ``urllib.request.urlopen``,
-        which opens a fresh connection per call. On a several-hundred-kilobyte body that costs a
-        TCP handshake plus a slow-start ramp every single inference — the window has to reopen
-        from the initial ~14 kB before the request can even finish uploading. Keep-alive holds one
-        warm connection for the life of the node instead.
+        The session, rather than ``urllib.request.urlopen``, because urlopen opens a fresh
+        connection per call: on a several-hundred-kilobyte body that costs a TCP handshake plus a
+        slow-start ramp every single inference, with the window reopening from the initial ~14 kB
+        before the request can even finish uploading. One warm connection for the life of the node
+        instead.
+
+        :param kwargs: passed to ``requests``, so callers choose ``json=`` or ``data=``.
         """
         try:
-            resp = self._session.post(url, json=payload, timeout=self._post_timeout_s)
+            resp = self._session.post(url, timeout=self._post_timeout_s, **kwargs)
             resp.raise_for_status()
             return resp.json()
         except requests.RequestException as e:
-            self.get_logger().error(f'POST {url} failed: {e}')
+            # A 4xx body carries the server's reason (a malformed frame, a missing channel), and
+            # that reason is the whole diagnostic — without it this is just "422".
+            detail = ''
+            if getattr(e, 'response', None) is not None:
+                detail = f' — {e.response.text[:500]}'
+            self.get_logger().error(f'POST {url} failed: {e}{detail}')
         except Exception as e:
             self.get_logger().error(f'POST {url} returned an unreadable response: {e}')
         return None
+
+    def _http_post_json(self, url: str, payload: dict) -> dict | None:
+        """POST a JSON document (the episode /reset) and return the parsed reply, or None."""
+        return self._post(url, json=payload)
+
+    def _http_post_frame(self, url: str, body: bytes) -> dict | None:
+        """POST a packed observation frame (see obs_wire) and return the parsed reply, or None."""
+        return self._post(url, data=body, headers={'Content-Type': 'application/octet-stream'})
 
     def _reset_episode(self, agent_pos: np.ndarray) -> None:
         """Send the episode-start pose to the server's /reset once; retried each tick until it lands."""
@@ -916,16 +926,16 @@ class PolicyClientNode(Node):
         else:
             self._warn_throttled('episode /reset failed; server will approximate wrt_start with the current pose')
 
-    def _submit_inference(self, payload: dict, t_obs: rclpy.time.Time) -> None:
+    def _submit_inference(self, body: bytes, t_obs: rclpy.time.Time) -> None:
         """
         Leave an observation for the inference worker, replacing any it has not started yet.
 
-        :param payload: request body for /predict_cartesian/.
+        :param body: packed request frame for /predict_cartesian/ (see obs_wire).
         :param t_obs: instant the observation was captured.
         """
         with self._pending_cv:
             superseded = self._pending is not None
-            self._pending = (payload, t_obs)
+            self._pending = (body, t_obs)
             self._pending_cv.notify()
         if superseded:
             # The worker is still inside a round trip that started at least one stride ago. Worth
@@ -951,10 +961,10 @@ class PolicyClientNode(Node):
                     self._pending_cv.wait()
                 if self._stopping:
                     return
-                payload, t_obs = self._pending
+                body, t_obs = self._pending
                 self._pending = None
             try:
-                self._post_and_act(payload, t_obs)
+                self._post_and_act(body, t_obs)
             except Exception as e:  # noqa: BLE001 - see the docstring
                 self.get_logger().error(f'Inference worker error (loop continues): {e!r}')
 
@@ -981,15 +991,15 @@ class PolicyClientNode(Node):
             session.close()
         return super().destroy_node()
 
-    def _post_and_act(self, payload: dict, t_obs: rclpy.time.Time) -> None:
+    def _post_and_act(self, body: bytes, t_obs: rclpy.time.Time) -> None:
         """
-        POST payload to the inference server, log the returned action, and optionally execute it.
+        POST one observation frame, log the returned action, and optionally execute it.
 
-        :param payload: request body for /predict_cartesian/.
+        :param body: packed request frame for /predict_cartesian/ (see obs_wire).
         :param t_obs: instant the observation was captured, used to drop stale actions.
         """
         t_sent = time.monotonic()
-        result = self._http_post_json(self._url, payload)
+        result = self._http_post_frame(self._url, body)
         if result is None:
             return
         latency_inference = time.monotonic() - t_sent
@@ -1038,7 +1048,7 @@ class PolicyClientNode(Node):
         # is still arriving while the server is timing itself: its total absorbs link time, and
         # the remainder would understate the link exactly when the link is what is wrong.
         # Measured against a do-nothing echo server over the 100 Mbit link, an 0.40 MB request
-        # reported 36 ms of "server" time on a box doing nothing but a base64 decode.
+        # reported 36 ms of "server" time on a box doing nothing but decode the frame.
         #
         # Absent model_ms (an older server) the split is unknowable, so publish nothing rather
         # than a number that silently means something else.

@@ -21,6 +21,7 @@ from rclpy.parameter import Parameter
 from rclpy.time import Time
 from sensor_msgs.msg import Image, JointState
 
+from polyumi_ros2.obs_wire import unpack_observation
 from polyumi_ros2.policy_client_node import PolicyClientNode
 
 BASE_FRAME = 'fr3_link0'
@@ -364,11 +365,11 @@ def test_preview_published_full_chunk_without_execution(make_node):
     now = _t(100.0)
     t_obs = _t(98.0)  # 2s old -> every action is stale, so the chunk is dropped for execution
     with (
-        patch.object(node, '_http_post_json', return_value={'actions': actions}),
+        patch.object(node, '_http_post_frame', return_value={'actions': actions}),
         patch.object(node, 'get_clock', return_value=_FakeClock(now)),
         patch.object(node._preview_pub, 'publish') as preview_pub,
     ):
-        node._post_and_act(payload={}, t_obs=t_obs)
+        node._post_and_act(body=b'', t_obs=t_obs)
 
     preview_pub.assert_called_once()
     msg = preview_pub.call_args[0][0]
@@ -721,12 +722,12 @@ def test_gripper_and_pose_chunks_stay_index_aligned(make_node):
     t_obs = _t(99.75)  # partially stale: some leading actions get dropped
 
     with (
-        patch.object(node, '_http_post_json', return_value={'actions': actions}),
+        patch.object(node, '_http_post_frame', return_value={'actions': actions}),
         patch.object(node, 'get_clock', return_value=_FakeClock(now)),
         patch.object(node._target_pub, 'publish') as pose_pub,
         patch.object(node._gripper_pub, 'publish') as grip_pub,
     ):
-        node._post_and_act(payload={}, t_obs=t_obs)
+        node._post_and_act(body=b'', t_obs=t_obs)
 
     poses = pose_pub.call_args[0][0]
     grip_msg = grip_pub.call_args[0][0]
@@ -779,10 +780,10 @@ def test_diagnostics_report_zero_published_when_the_chunk_is_all_stale(make_node
     actions = _actions_with_grip([0.02] * 8)
 
     with (
-        patch.object(node, '_http_post_json', return_value={'actions': actions}),
+        patch.object(node, '_http_post_frame', return_value={'actions': actions}),
         patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))),
     ):
-        node._post_and_act(payload={}, t_obs=_t(98.0))  # 2s old: stale for both devices
+        node._post_and_act(body=b'', t_obs=_t(98.0))  # 2s old: stale for both devices
 
     values = _diag_values(captured)
     assert values['n_published_arm'] == 0
@@ -803,10 +804,10 @@ def test_diagnostics_report_what_each_device_actually_got(make_node):
     actions = _actions_with_grip([0.02] * 8)
 
     with (
-        patch.object(node, '_http_post_json', return_value={'actions': actions}),
+        patch.object(node, '_http_post_frame', return_value={'actions': actions}),
         patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))),
     ):
-        node._post_and_act(payload={}, t_obs=_t(99.9))
+        node._post_and_act(body=b'', t_obs=_t(99.9))
 
     values = _diag_values(captured)
     # 0.1s obs age: arm drops ceil(0.4/0.1)=4, gripper ceil(0.2/0.1)=2.
@@ -824,11 +825,11 @@ def test_gripper_preview_publishes_full_chunk(make_node):
     actions = _actions_with_grip([0.02] * 8)
     now = _t(100.0)
     with (
-        patch.object(node, '_http_post_json', return_value={'actions': actions}),
+        patch.object(node, '_http_post_frame', return_value={'actions': actions}),
         patch.object(node, 'get_clock', return_value=_FakeClock(now)),
         patch.object(node._gripper_preview_pub, 'publish') as grip_preview,
     ):
-        node._post_and_act(payload={}, t_obs=_t(98.0))  # fully stale
+        node._post_and_act(body=b'', t_obs=_t(98.0))  # fully stale
 
     grip_preview.assert_called_once()
     assert len(grip_preview.call_args[0][0].points) == 8
@@ -858,11 +859,11 @@ def test_arm_chunk_is_anchored_at_t_obs_minus_arm_exec(make_node):
     actions = _actions_with_grip([0.02] * 8)
 
     with (
-        patch.object(node, '_http_post_json', return_value={'actions': actions}),
+        patch.object(node, '_http_post_frame', return_value={'actions': actions}),
         patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))),
         patch.object(node._target_pub, 'publish') as pose_pub,
     ):
-        node._post_and_act(payload={}, t_obs=_t(99.9))
+        node._post_and_act(body=b'', t_obs=_t(99.9))
 
     kwargs = pose_pub.call_args[1]
     stamp = kwargs['stamp'].sec + kwargs['stamp'].nanosec * 1e-9
@@ -923,8 +924,13 @@ def test_cached_frame_stays_uint8(make_node):
     assert node._latest_image.shape == (32, 32, 3)
 
 
-def test_payload_declares_uint8_and_stays_small(make_node):
-    """The serialized body must name the dtype it actually sent, and be the uint8-sized one."""
+def test_tick_packs_the_channels_the_policy_needs(make_node):
+    """
+    The tick must emit a frame carrying camera0_rgb as uint8 and agent_pos, dt-spaced.
+
+    Channel names are the dataset's, not the wire's own invention, so that adding a modality is
+    adding a name rather than a name plus a mapping on the far side.
+    """
     node = make_node(control_hz=10.0, n_obs_steps=2, image_width=224, image_height=224)
     now = _t(100.0)
     node._latest_image = np.zeros((224, 224, 3), dtype=np.uint8)
@@ -933,20 +939,26 @@ def test_payload_declares_uint8_and_stays_small(make_node):
     for _ in range(node._n_obs_steps):
         node._obs_buffer.append((node._latest_image, np.zeros(8)))
 
-    captured = {}
+    captured = []
     with (
         patch.object(node, 'get_clock', return_value=_FakeClock(now)),
         patch.object(node, '_lookup_agent_pos', return_value=np.zeros(8)),
-        patch.object(node, '_submit_inference', side_effect=lambda p, t: captured.update(p)),
+        patch.object(node, '_submit_inference', side_effect=lambda b, t: captured.append(b)),
     ):
         node._control_tick()
 
-    image = captured['observations']['image']
-    assert image['dtype'] == 'uint8'
-    assert image['shape'] == [2, 224, 224, 3]
-    # 2*224*224*3 bytes base64-encoded. The float32 form was four times this; the check is on the
-    # order of magnitude, not the exact length, so it survives a formatting change.
-    assert len(image['data']) < 600_000
+    assert len(captured) == 1
+    channels, header = unpack_observation(captured[0])
+
+    assert sorted(channels) == ['agent_pos', 'camera0_rgb']
+    assert channels['camera0_rgb'].dtype == np.uint8
+    assert channels['camera0_rgb'].shape == (2, 224, 224, 3)
+    assert channels['agent_pos'].shape == (2, 8)
+    assert header['n_obs_steps'] == 2
+    assert header['n_action_steps'] == node._n_action_steps
+    # Raw bytes plus a small header. The float32-and-base64 form this replaced was 1.6 MB; the
+    # bound is loose on purpose so it survives a header formatting change.
+    assert len(captured[0]) < 350_000
 
 
 def test_submit_keeps_only_the_newest_observation(make_node):
