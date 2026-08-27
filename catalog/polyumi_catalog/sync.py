@@ -290,6 +290,7 @@ def _sync_dataset_manifest(
     dataset.output_path = str(manifest_path.parent / manifest.output) if manifest.output else None
     dataset.n_episodes = manifest.n_episodes
     dataset.polyumi_version = manifest.polyumi_version
+    dataset.exporter_type = manifest.exporter_type
     db.add(dataset)
     db.flush()  # assign dataset.id if new
 

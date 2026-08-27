@@ -17,7 +17,7 @@
 # `fr3-bringup` on the NUC — it starts ONLY the move_group node (no hardware, no
 # controllers, no robot_state_publisher), so there is no collision.
 #
-# Three changes vs. upstream:
+# Changes vs. upstream:
 #   1. Declare robot_ip / use_fake_hardware / fake_sensor_commands. Upstream references
 #      these LaunchConfigurations without declaring them, so it can't launch at all
 #      ("launch configuration 'fake_sensor_commands' does not exist").
@@ -33,6 +33,15 @@
 #      so move_group's time parameterization falls back to 1 rad/s^2 and every Cartesian chunk
 #      comes back slower than the policy asked for — the bridge then never hits the commanded
 #      timeline and drops most chunks as still-busy.
+#   5. Silence planning_scene_monitor's finger-joint warning. This move_group's OWN model
+#      (fr3_polyumi.urdf.xacro) carries the hand, but fr3_bringup's robot_description does
+#      not (franka.launch.py couples hand: to load_gripper:, and that's false so
+#      franka_hand_node can own the connection instead of franka_gripper) -- so
+#      /joint_states, sourced from THAT model, never reports fr3_finger_joint1/2 and this
+#      monitor repeats "not yet known" at ~1 Hz forever. Harmless: /polyumi/home only plans the
+#      fr3_arm group, which doesn't include the fingers.
+#      Fixing it for real means decoupling hand: from load_gripper: in fr3_bringup's own
+#      robot_description, which is a bigger, riskier change than a log line justifies.
 # See docs/crb-fr3-inference.md for how to run this and the gotchas around it.
 
 """Launch a standalone MoveIt move_group for the FR3, alongside a running fr3-bringup."""
@@ -112,13 +121,10 @@ def generate_launch_description():
 
     db_arg = DeclareLaunchArgument('db', default_value='False', description='Database flag')
 
-    # See header change 4. This is the knob that sets how fast a planned chunk actually runs,
-    # and Humble's GetCartesianPath has no velocity_scaling field to speed one back up after
-    # the fact. Deliberately NOT the FR3's datasheet maximum: conservative, raise it while
-    # watching — the arm will fire a reflex if a chunk is too aggressive. fr3_moveit_bridge
-    # stretches the result back to the span the incoming Path asks for, so a faster plan does
-    # not mean a faster arm; it means the commanded timeline becomes reachable instead of
-    # being the slower of the two.
+    # See header change 4. The ceiling move_group time-parameterizes a homing plan against.
+    # Deliberately NOT the FR3's datasheet maximum: conservative, raise it while watching — the
+    # arm will fire a reflex if a sweep is too aggressive. Nothing downstream slows the result,
+    # so this and the URDF's velocity limits are what a home sweep actually runs at.
     max_acceleration_arg = DeclareLaunchArgument(
         'max_acceleration',
         default_value='1.5',
@@ -126,8 +132,8 @@ def generate_launch_description():
     )
 
     # PolyUMI change 3 (see header): the stock fr3.urdf.xacro, wrapped so move_group's
-    # RobotModel also carries `polyumi_tcp` — the frame the bridge names as GetCartesianPath's
-    # link_name. TF gets the same transform from fr3_bringup.launch.py; both read tcp_calib.
+    # RobotModel also carries `polyumi_tcp`, so the planning scene agrees with TF about where the
+    # policy's frame is. TF gets the same transform from fr3_bringup.launch.py; both read tcp_calib.
     franka_xacro_file = str(NUC_DIR / 'description' / 'fr3_polyumi.urdf.xacro')
 
     robot_description_command = Command(
@@ -233,6 +239,14 @@ def generate_launch_description():
             moveit_controllers,
             planning_scene_monitor_parameters,
             joint_limits,
+        ],
+        # See change 5 above: fr3_bringup's robot_description never reports the finger joints
+        # this move_group's own model expects, so this fires at ~1 Hz forever and is pure noise.
+        # Scoped to the one logger so a real planning_scene_monitor problem still surfaces.
+        arguments=[
+            '--ros-args',
+            '--log-level',
+            'moveit_ros.planning_scene_monitor.planning_scene_monitor:=error',
         ],
     )
 

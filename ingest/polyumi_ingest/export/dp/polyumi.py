@@ -1,0 +1,43 @@
+"""
+``pingest export --type polyumi``: the visuomotor ReplayBuffer plus PolyUMI's extra streams.
+
+A thin frontend over :func:`export_scenes_to_dp`, not a second exporter — see that function's
+module (``export.dp.buffer``) for what the shared code path actually does. This module only
+decides which modalities ride along; a new stream is one more entry in
+:data:`POLYUMI_MODALITIES`.
+"""
+
+from __future__ import annotations
+
+import pathlib
+
+from polyumi_ingest.export.dp.audio import PiezoMicModality
+from polyumi_ingest.export.dp.buffer import MIN_SEGMENT_STEPS, export_scenes_to_dp
+from polyumi_ingest.export.dp.finger_camera import FingerCameraModality
+from polyumi_ingest.export.dp.modality import ExportModality
+
+#: Modalities ``--type polyumi`` adds on top of the visuomotor keys. Anything later joins this
+#: tuple and nothing else changes.
+POLYUMI_MODALITIES: tuple[type[ExportModality], ...] = (PiezoMicModality, FingerCameraModality)
+
+
+def export_scenes_to_polyumi(
+    scene_paths: list[pathlib.Path],
+    output_path: pathlib.Path,
+    enforce_preprocessing: bool = True,
+    min_segment_steps: int = MIN_SEGMENT_STEPS,
+) -> tuple[int, list[dict]]:
+    """
+    Export one or more pzarr scenes to a ``.zarr.zip`` carrying every PolyUMI modality.
+
+    Identical to :func:`export_scenes_to_dp` in every respect except the extra ``data/`` keys
+    (see :data:`POLYUMI_MODALITIES`) and the ``meta.attrs`` describing them. Returns
+    ``(n_episodes, provenance)``; each provenance entry gains a ``modalities`` sub-dict.
+    """
+    return export_scenes_to_dp(
+        scene_paths,
+        output_path,
+        enforce_preprocessing=enforce_preprocessing,
+        min_segment_steps=min_segment_steps,
+        modalities=[cls() for cls in POLYUMI_MODALITIES],
+    )

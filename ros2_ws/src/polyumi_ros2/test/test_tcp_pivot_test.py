@@ -15,7 +15,7 @@ import pytest
 import rclpy
 from rclpy.parameter import Parameter
 
-from polyumi_ros2.target_chunk import Wire
+from polyumi_ros2.target_chunk import CONSUMER_HINT
 from polyumi_ros2.tcp_pivot_test import (
     TcpPivotTest,
     axis_quat,
@@ -85,8 +85,8 @@ def test_sweep_steps_never_exceed_the_requested_spacing():
     """
     Keep the waypoint spacing at or under what was asked for.
 
-    GetCartesianPath's max_step bounds translation only, so a pure rotation is never subdivided
-    by the planner — the spacing here IS the interpolation resolution.
+    Nothing downstream subdivides a commanded rotation — the controller interpolates between the
+    waypoints it is given — so the spacing here IS the interpolation resolution.
     """
     for angle, step in ((20.0, 5.0), (30.0, 7.0), (5.0, 1.0)):
         # sweep_angles' own first element is now the leading 0, so the list already includes that
@@ -140,21 +140,6 @@ def test_sweep_carries_the_waypoint_spacing():
 
         _, kwargs = published[0]
         assert kwargs['dt'] == pytest.approx(0.25)
-    finally:
-        node.destroy_node()
-
-
-def test_defaults_to_the_streaming_controller():
-    """
-    The streaming controller is the executor this test is for; MoveIt is the legacy path.
-
-    Defaulting the other way would silently drive the wrong executor, and the pivot would report a
-    drift figure for a controller nobody is validating. The wire formats themselves are covered by
-    test_target_chunk.py; what matters here is which one this node picks when told nothing.
-    """
-    node = TcpPivotTest()
-    try:
-        assert node._pub.wire is Wire.MULTIDOF
     finally:
         node.destroy_node()
 
@@ -237,7 +222,7 @@ def test_close_gripper_tolerates_fingers_stalling_just_short():
 class _Pub:
     """A publisher stub whose subscription count appears after `after` polls."""
 
-    topic_name = '/polyumi/target_poses'
+    topic_name = '/polyumi/target_poses_traj'
 
     def __init__(self, after: int):
         self._after = after
@@ -248,11 +233,11 @@ class _Pub:
         return 1 if self.polls > self._after else 0
 
 
-def test_wait_for_subscriber_returns_once_the_bridge_matches():
+def test_wait_for_subscriber_returns_once_the_consumer_matches():
     """DDS discovery is asynchronous, so the wait has to poll rather than sample once."""
     node = TcpPivotTest(parameter_overrides=[])
     try:
-        assert node.wait_for_subscriber(_Pub(after=2), 'fr3_moveit_bridge', timeout_s=5.0)
+        assert node.wait_for_subscriber(_Pub(after=2), CONSUMER_HINT, timeout_s=5.0)
     finally:
         node.destroy_node()
 
@@ -261,12 +246,12 @@ def test_wait_for_subscriber_gives_up_when_nothing_is_listening():
     """
     A chunk published into an unmatched topic vanishes with no error anywhere.
 
-    That must fail here, naming the bridge — not later as 'the arm never moved', which sends you
-    to look at execute_arm instead of at discovery.
+    That must fail here, naming the controller — not later as 'the arm never moved', which sends
+    you to look at execute_arm instead of at discovery.
     """
     node = TcpPivotTest(parameter_overrides=[])
     try:
-        assert not node.wait_for_subscriber(_Pub(after=10**6), 'fr3_moveit_bridge', timeout_s=0.3)
+        assert not node.wait_for_subscriber(_Pub(after=10**6), CONSUMER_HINT, timeout_s=0.3)
     finally:
         node.destroy_node()
 

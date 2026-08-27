@@ -130,6 +130,23 @@ real GoPro mount tilt — the geometry itself, `Rz(+90°)` sign included, is con
 `ros2 run polyumi_ros2 tcp_pivot_test`, which pivots about the TCP so you can watch whether the
 closed fingertips hold still. Re-run it after any change to the mount, the fingers, or this file.
 
+**The end-effector payload lives in `nuc/tcp_calib.py` too** (`PAYLOAD_MASS`, `PAYLOAD_COM_HAND`),
+pushed to the FCI once by `fr3_bringup.launch.py` via `franka_msgs/srv/SetLoad`, ordered ahead of
+the `fr3_arm_controller` spawner so no control loop is running when it lands. An under-configured
+payload shows up as the TCP dropping the instant the impedance controller activates and holding a
+steady-state offset — `Δz = m_unmodelled · g / K_trans`, so at K=2000 N/m 1 mm of droop is 0.2 kg.
+Note the CoM is written in `fr3_hand` (the frame `TCP_XYZ` uses) and converted to the flange by
+`payload_com_flange()`; the URDF is *not* a lever here, since `franka_hardware` reads no payload
+out of it. Two FR3 constraints make `SetLoad` fail in ways the service response hides behind the
+string `"command exception error"` — a nonzero mass needs a nonzero inertia tensor
+(`payload_inertia_flange()` derives one), and the call is refused entirely while any controller holds the
+arm (`current mode ("Move")`), which is why bringup sequences it ahead of the spawner. **A failed
+`SetLoad` aborts bringup** — `nuc/set_payload.py` reads `response.success` off the typed message
+rather than the CLI's exit status, which is 0 either way, because the
+spawner immediately makes it unretryable and a wrong gravity model is easy to miss. The real
+message is only in the `/service_server` log. Full procedure in
+[docs/calibration-instructions.md](docs/calibration-instructions.md).
+
 **`./fr3_session.sh`** (repo root) builds the whole wall — NUC, Pi, GPU box, laptop — as one
 tmux session, running the safe commands and pre-typing the robot-moving ones for you to
 confirm. Every fresh start (not a re-attach) also rsyncs `nuc/` to the NUC and runs
@@ -152,7 +169,7 @@ place, `tf_use_latest` is no longer needed for real runs — it was only a stati
 crutch for the old skew.
 
 **When debugging FR3 inference on the arm — read [docs/crb-fr3-inference.md](docs/crb-fr3-inference.md)
-FIRST, especially its Troubleshooting section, before re-diagnosing.** The common failure modes and
+FIRST, especially "When it doesn't come up" and "Gripper problems", before re-diagnosing.** The common failure modes and
 their fixes are documented there: nothing publishing / Foxglove blank (a duplicate or leftover
 launch grabbing port 8765 + `/dev/video2` — `pkill` leftovers and confirm a single stack); TF
 "extrapolation into the past" (laptop↔NUC clock skew — should be fixed durably by the chrony
@@ -166,6 +183,9 @@ The **dry-run** pattern (validate commanded motion without moving the arm) is `e
 pingest --help
 pingest fetch --host <hostname> --latest
 pingest process-all --force
+pingest export <scene> -o <name>.zarr.zip                       # visuomotor dataset
+pingest export <scene> -o <name>.zarr.zip --type polyumi        # + data/mic_0 (contact mic, needs pp 6)
+                                                                #   and data/finger_rgb (finger camera, cropped)
 ```
 
 ### Training the diffusion policy (GPU workstation, Docker)
@@ -175,7 +195,7 @@ workspace. One image serves both training and inference. Run it with `./train_po
 (builds the fork image + mounts dataset/output with rootless-safe flags). Full walkthrough,
 including rootless-Docker gotchas, is in
 [docs/training-instructions.md](docs/training-instructions.md). This is the step after `pingest
-export-dp`.
+export`.
 
 **Serving a trained checkpoint** (the real inference server) uses the same image via
 `CKPT=/abs/path/to/<name>.ckpt ./serve_policy.sh` at the repo root (the inference counterpart of

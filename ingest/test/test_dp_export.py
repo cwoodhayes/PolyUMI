@@ -26,9 +26,12 @@ from polyumi_ingest.preproc import available_preprocessing_steps
 RES = 224
 RATE = 59.94
 
-#: The full registered pipeline; a scene must have all of these marked complete to pass the
-#: exporter's enforce_preprocessing check.
+#: The full registered pipeline.
 ALL_STEPS = sorted(cls.step_number for cls in available_preprocessing_steps())
+#: The subset the visuomotor export actually reads, and so the only steps whose absence makes
+#: the plain visuomotor export refuse. Steps feeding an optional modality (contact-audio) are excluded, which
+#: is what keeps scenes preprocessed before those steps existed exportable.
+DP_REQUIRED_STEPS = sorted(cls.step_number for cls in available_preprocessing_steps() if cls.required_for_export)
 
 
 def _write_gopro_mp4(path: pathlib.Path, n: int, h: int = 240, w: int = 320) -> None:
@@ -479,14 +482,27 @@ def test_missing_chirp_end_annotation_exports_without_trim(tmp_path: pathlib.Pat
 
 
 def test_enforce_preprocessing_raises_when_step_incomplete(tmp_path: pathlib.Path) -> None:
-    """A scene missing a registered preprocessing step fails fast, naming the missing step."""
-    missing_step = ALL_STEPS[-1]
+    """A scene missing a step the export depends on fails fast, naming the missing step."""
+    missing_step = DP_REQUIRED_STEPS[-1]
     scene = _build_scene(tmp_path, preprocessing_steps=[s for s in ALL_STEPS if s != missing_step])
     out = tmp_path / 'buf.zarr.zip'
 
     with pytest.raises(RuntimeError, match=r'preprocessing steps \[' + str(missing_step)):
         export_scene_to_dp(scene, out)
     assert not out.exists()
+
+
+def test_export_dp_ignores_steps_it_does_not_read(tmp_path: pathlib.Path) -> None:
+    """A scene missing a step the visuomotor export never reads (e.g. contact-audio) still exports fine."""
+    audio_only = sorted(set(ALL_STEPS) - set(DP_REQUIRED_STEPS))
+    assert audio_only, 'expected at least one step marked required_for_export = False'
+    scene = _build_scene(tmp_path, n=30, preprocessing_steps=DP_REQUIRED_STEPS)
+    out = tmp_path / 'buf.zarr.zip'
+
+    n_eps, _ = export_scene_to_dp(scene, out)
+
+    assert n_eps == 1
+    assert set(_open_zip(out)['data'].keys()) == set(EXPECTED_KEYS)
 
 
 def test_enforce_preprocessing_raises_when_never_preprocessed(tmp_path: pathlib.Path) -> None:

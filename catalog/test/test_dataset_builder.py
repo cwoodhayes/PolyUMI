@@ -36,7 +36,7 @@ def test_build_dataset_rejects_empty_name(tmp_path: pathlib.Path):
     engine = get_engine(tmp_path / 'catalog.db')
     with DBSession(engine) as db:
         with pytest.raises(DatasetBuildError, match='empty'):
-            build_dataset(db, name='   ', task_id=None, scene_ids=['scene-a'], output_dir=tmp_path)
+            build_dataset(db, name='   ', task_id=None, scene_ids=['scene-a'], output_dir=tmp_path, exporter_type='dp')
 
 
 def test_build_dataset_rejects_duplicate_name(tmp_path: pathlib.Path):
@@ -46,7 +46,9 @@ def test_build_dataset_rejects_duplicate_name(tmp_path: pathlib.Path):
         db.add(Dataset(name='existing'))
         db.commit()
         with pytest.raises(DatasetBuildError, match='already exists'):
-            build_dataset(db, name='existing', task_id=None, scene_ids=['scene-a'], output_dir=tmp_path)
+            build_dataset(
+                db, name='existing', task_id=None, scene_ids=['scene-a'], output_dir=tmp_path, exporter_type='dp'
+            )
 
 
 def test_build_dataset_rejects_no_scenes(tmp_path: pathlib.Path):
@@ -54,7 +56,7 @@ def test_build_dataset_rejects_no_scenes(tmp_path: pathlib.Path):
     engine = get_engine(tmp_path / 'catalog.db')
     with DBSession(engine) as db:
         with pytest.raises(DatasetBuildError, match='at least one scene'):
-            build_dataset(db, name='ds', task_id=None, scene_ids=[], output_dir=tmp_path)
+            build_dataset(db, name='ds', task_id=None, scene_ids=[], output_dir=tmp_path, exporter_type='dp')
 
 
 def test_build_dataset_rejects_unknown_scene_id(tmp_path: pathlib.Path):
@@ -62,7 +64,9 @@ def test_build_dataset_rejects_unknown_scene_id(tmp_path: pathlib.Path):
     engine = get_engine(tmp_path / 'catalog.db')
     with DBSession(engine) as db:
         with pytest.raises(DatasetBuildError, match='No such scene'):
-            build_dataset(db, name='ds', task_id=None, scene_ids=['no-such-scene'], output_dir=tmp_path)
+            build_dataset(
+                db, name='ds', task_id=None, scene_ids=['no-such-scene'], output_dir=tmp_path, exporter_type='dp'
+            )
 
 
 def test_build_dataset_rejects_unknown_task_id(tmp_path: pathlib.Path):
@@ -71,7 +75,7 @@ def test_build_dataset_rejects_unknown_task_id(tmp_path: pathlib.Path):
     with DBSession(engine) as db:
         _seed_scenes(db, tmp_path)
         with pytest.raises(DatasetBuildError, match='No such task'):
-            build_dataset(db, name='ds', task_id=999, scene_ids=['scene-a'], output_dir=tmp_path)
+            build_dataset(db, name='ds', task_id=999, scene_ids=['scene-a'], output_dir=tmp_path, exporter_type='dp')
 
 
 def test_build_dataset_success_writes_manifest_and_rows(tmp_path: pathlib.Path, monkeypatch):
@@ -103,10 +107,12 @@ def test_build_dataset_success_writes_manifest_and_rows(tmp_path: pathlib.Path, 
             task_id=task.id,
             scene_ids=[scene_a.scene_id, scene_b.scene_id],
             output_dir=output_dir,
+            exporter_type='dp',
         )
 
         assert dataset.n_episodes == 5
         assert dataset.task_id == task.id
+        assert dataset.exporter_type == 'dp'
         expected_paths = [pathlib.Path(scene_a.dir), pathlib.Path(scene_b.dir)]
         assert calls == [(expected_paths, output_dir / 'fold_towel_v1.zarr.zip')]
 
@@ -121,7 +127,53 @@ def test_build_dataset_success_writes_manifest_and_rows(tmp_path: pathlib.Path, 
     assert manifest.task == 'fold_towel'
     assert {m.scene_id for m in manifest.members} == {'scene-a', 'scene-b'}
     assert manifest.pose_provenance == fake_provenance
+    assert manifest.exporter_type == 'dp'
     assert (output_dir / 'fold_towel_v1.zarr.zip').is_file()
+
+
+def test_build_dataset_rejects_unknown_exporter_type(tmp_path: pathlib.Path):
+    """An exporter_type outside {'dp', 'polyumi'} is rejected before touching export or disk."""
+    engine = get_engine(tmp_path / 'catalog.db')
+    with DBSession(engine) as db:
+        _seed_scenes(db, tmp_path)
+        with pytest.raises(DatasetBuildError, match='Unknown exporter type'):
+            build_dataset(
+                db, name='ds', task_id=None, scene_ids=['scene-a'], output_dir=tmp_path, exporter_type='bogus'
+            )
+
+
+def test_build_dataset_polyumi_exporter_calls_export_scenes_to_polyumi(tmp_path: pathlib.Path, monkeypatch):
+    """exporter_type='polyumi' runs export_scenes_to_polyumi and records the choice."""
+    calls = []
+    fake_provenance = [{'scene': 'scene-a', 'session': 's1', 'episode': 'episode_0', 'source': 'optitrack'}]
+
+    def fake_export_scenes_to_polyumi(scene_paths, output_path):
+        calls.append((list(scene_paths), output_path))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b'fake-zip')
+        return 3, fake_provenance
+
+    monkeypatch.setattr('polyumi_ingest.export.dp.export_scenes_to_polyumi', fake_export_scenes_to_polyumi)
+
+    engine = get_engine(tmp_path / 'catalog.db')
+    output_dir = tmp_path / 'datasets'
+    with DBSession(engine) as db:
+        scene_a, _ = _seed_scenes(db, tmp_path)
+
+        dataset = build_dataset(
+            db,
+            name='with_mic',
+            task_id=None,
+            scene_ids=[scene_a.scene_id],
+            output_dir=output_dir,
+            exporter_type='polyumi',
+        )
+
+        assert dataset.exporter_type == 'polyumi'
+        assert calls == [([pathlib.Path(scene_a.dir)], output_dir / 'with_mic.zarr.zip')]
+
+    manifest = DatasetManifest.from_file(output_dir / 'with_mic.dataset.json')
+    assert manifest.exporter_type == 'polyumi'
 
 
 def test_build_dataset_export_failure_leaves_no_manifest_or_rows(tmp_path: pathlib.Path, monkeypatch):
@@ -137,7 +189,14 @@ def test_build_dataset_export_failure_leaves_no_manifest_or_rows(tmp_path: pathl
     with DBSession(engine) as db:
         scene_a, _ = _seed_scenes(db, tmp_path)
         with pytest.raises(DatasetBuildError, match='no EPISODE sessions'):
-            build_dataset(db, name='broken', task_id=None, scene_ids=[scene_a.scene_id], output_dir=output_dir)
+            build_dataset(
+                db,
+                name='broken',
+                task_id=None,
+                scene_ids=[scene_a.scene_id],
+                output_dir=output_dir,
+                exporter_type='dp',
+            )
 
         assert db.exec(select(Dataset).where(Dataset.name == 'broken')).first() is None
 

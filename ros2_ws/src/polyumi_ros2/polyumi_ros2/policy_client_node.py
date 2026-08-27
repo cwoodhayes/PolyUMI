@@ -14,12 +14,12 @@ At each control tick the node:
   4. Drops the leading actions of the returned chunk that are already stale by the time the
      arm could act on them (observation + inference + arm-execution latency).
   5. Logs the chunk. If execute_motion is set, publishes the remaining chunk on two topics for
-     the NUC-side bridges: the pose half as a PoseArray on /polyumi/target_poses (planned and
-     executed as one Cartesian path by fr3_moveit_bridge, receding-horizon control), and the
-     gripper half as a JointTrajectory on /polyumi/target_gripper (fr3_gripper_bridge). The two
-     ride separate channels because a PoseArray cannot carry a width and because the Franka Hand
+     the NUC-side bridges: the pose half as a MultiDOFJointTrajectory on
+     /polyumi/target_poses_traj (spliced by the streaming Cartesian impedance controller), and the
+     gripper half as a JointTrajectory on /polyumi/target_gripper (franka_hand_node). The two
+     ride separate channels because the pose message carries no width and because the Franka Hand
      is action-only, so it needs a different execution cadence entirely — see
-     docs/crb-fr3-inference.md and docs/franka-inference-bringup.md ("Gripper hardware").
+     docs/crb-fr3-inference.md ("Gripper problems").
 
 Usage:
     ros2 run polyumi_ros2 policy_client_node
@@ -59,7 +59,7 @@ from polyumi_ros2.camera_preproc import (
     discarded_bar_intensity,
 )
 from polyumi_ros2.gripper_map import policy_to_robot_width, robot_to_policy_width
-from polyumi_ros2.target_chunk import TargetChunkPublisher, Wire, pose_array
+from polyumi_ros2.target_chunk import CONSUMER_HINT, TargetChunkPublisher, pose_array
 
 # Name used for the single "joint" in the gripper trajectory chunk. Deliberately NOT a real joint
 # name (the FR3's fingers are fr3_finger_joint1/2, each reporting half the aperture): the value we
@@ -88,6 +88,7 @@ DIAG_METRICS = (
     'inference_latency_s',
     'image_age_s',
     'gripper_state_age_s',
+    'gripper_width_m',
 )
 
 
@@ -110,7 +111,7 @@ class PolicyClientNode(Node):
         # 224 matches the model's shape_meta (camera0_rgb [3,224,224]). The resize below MUST
         # match the DP exporter's camera0_rgb contract exactly (RGB, 224x224, INTER_AREA, no
         # crop) — same pixels at train and inference. See ingest camera_preproc.resize_camera0_rgb
-        # and docs/data-format.md ("camera0_rgb preprocessing contract").
+        # and docs/data-format.md ("Camera preprocessing contracts").
         self.declare_parameter('image_width', 224)
         self.declare_parameter('image_height', 224)
         # Max age (s) of the newest cached camera frame before a tick is dropped as a stalled
@@ -140,15 +141,10 @@ class PolicyClientNode(Node):
         # but does NOT publish target poses unless execute_motion is explicitly enabled.
         # Planning params (group, velocity scaling) live on the NUC bridge, not here.
         self.declare_parameter('execute_motion', False)
-        # Which executor the action chunk is aimed at. The two speak different message types on
-        # different topics, so this decides what gets built and where it goes — see target_chunk.py.
-        # Publishing both formats, as this node used to, meant the NUC alone decided which executor
-        # acted, and a stack could drive MoveIt while looking like it was driving the servo.
-        self.declare_parameter('wire', str(Wire.MULTIDOF))
         # Viz-only preview: publish every commanded chunk as a PoseArray on
         # /polyumi/target_poses_preview regardless of execute_motion, so the motion can be seen in
-        # Foxglove/RViz without the arm moving (the NUC bridge subscribes only to the execution
-        # topic /polyumi/target_poses, never this one). On by default — it moves nothing.
+        # Foxglove/RViz without the arm moving (the streaming controller subscribes only to the
+        # execution topic /polyumi/target_poses_traj, never this one). On by default — it moves nothing.
         self.declare_parameter('publish_preview', True)
         # HTTP timeout (s) for the inference POST. Real diffusion inference over LAN is slower
         # than the trivial dummy server; 0.5 s was fine for the dummy but risks timing out every
@@ -185,9 +181,10 @@ class PolicyClientNode(Node):
         self.declare_parameter('latency.arm_exec', 0.0)
         # Delay from publishing a width to the fingers actually starting to move. The gripper's
         # counterpart to arm_exec, and separate from it because the two devices are genuinely
-        # different speeds — the hand beat the arm by ~190 ms on first measurement. Each chunk is
-        # truncated by its own device's value (see _post_and_act), which is UMI's split of
-        # robot_action_latency vs gripper_action_latency.
+        # different speeds. Each chunk is truncated by its own device's value (see _post_and_act),
+        # which is UMI's split of robot_action_latency vs gripper_action_latency. Which device
+        # leads depends entirely on the two measured values; see config/inference.yaml for the
+        # shipped pair and what is currently under test.
         self.declare_parameter('latency.gripper_exec', 0.0)
         # Delay from the hand's true aperture to its measurement appearing on the joint-state
         # topic. Kept separate from latency.proprio because the gripper is a different device on a
@@ -196,7 +193,7 @@ class PolicyClientNode(Node):
         self.declare_parameter('latency.gripper', 0.0)
         # --- Gripper ---
         # Source for agent_pos[7]. The FR3 publishes each finger at HALF the aperture, so the two
-        # positions are summed; see docs/crb-fr3-inference.md ("Gripper interface").
+        # positions are summed; see docs/crb-fr3-inference.md ("The facts you can't deduce by looking").
         self.declare_parameter('gripper_state_topic', '/fr3_gripper/joint_states')
         # If true, a tick with no gripper state is skipped (as a failed TF lookup is). Off by
         # default so setups without a hand — motion_only bringup, a bare arm — still run, feeding
@@ -307,35 +304,27 @@ class PolicyClientNode(Node):
         # cause. See _warn_no_tf_ever.
         self._tf_ever_ok = False
 
-        # Motion execution (Phase 2). The MoveIt calls run in a bridge node ON THE NUC
-        # (fr3_moveit_bridge), not here: the laptop (rmw_cyclonedds 4.x, Kilted) and NUC
-        # (rmw 1.x, Humble) can exchange small messages but corrupt large MoveIt action
-        # goals across the rmw-major boundary. So when execution is enabled we just publish
-        # the target EEF pose chunk (PoseArray); the NUC bridge subscribes and plans+executes
-        # the whole chunk as one Cartesian path via its local move_group.
-        # The gripper rides a SEPARATE topic, not a field on the pose chunk: a PoseArray cannot
-        # carry a width, and the Franka Hand is action-only (no ros2_control interface, libfranka
-        # offers only blocking move/grasp), so it cannot be driven at the arm's cadence anyway.
-        # fr3_gripper_bridge on the NUC deadbands and rate-limits it into Move/Grasp goals.
-        #
-        # The pose chunk goes to exactly ONE executor, chosen by `wire`. The MULTIDOF form carries
-        # per-waypoint absolute times, which is what lets the NUC's 1 kHz interpolator splice chunks
-        # without stopping; the PoseArray form carries no timing and leaves fr3_moveit_bridge to
-        # re-time the chunk from arrival. It goes away with the MoveIt executor.
+        # Motion execution (Phase 2). When execution is enabled we publish the target EEF pose
+        # chunk as a MultiDOFJointTrajectory, consumed on the NUC by the streaming Cartesian
+        # impedance controller (its 1 kHz interpolator splices consecutive chunks on the
+        # per-waypoint absolute times the message carries). See target_chunk.py.
+        # The gripper rides a SEPARATE topic, not a field on the pose chunk: the trajectory
+        # message carries no width, and the Franka Hand is action-only (no ros2_control interface,
+        # libfranka offers only blocking move/grasp), so it cannot be driven at the arm's cadence
+        # anyway. franka_hand_node on the NUC holds it as a horizon and plans Moves against it.
         self._target_pub = None
         self._gripper_pub = None
         if self._execute_motion:
             self._target_pub = TargetChunkPublisher(
                 self,
-                wire=self.get_parameter('wire').get_parameter_value().string_value,
                 frame_id=self._base_frame,
                 joint_name=self._eef_frame,
             )
             self._gripper_pub = self.create_publisher(JointTrajectory, '/polyumi/target_gripper', 10)
 
         # Viz-only preview publisher (always on when publish_preview). Shows every commanded chunk
-        # in Foxglove/RViz without moving the arm: the NUC bridge subscribes only to the execution
-        # topic /polyumi/target_poses, never this one.
+        # in Foxglove/RViz without moving the arm: the streaming controller subscribes only to the
+        # execution topic /polyumi/target_poses_traj, never this one.
         self._preview_pub = None
         self._gripper_preview_pub = None
         if self._publish_preview:
@@ -388,7 +377,7 @@ class PolicyClientNode(Node):
 
         mode = 'EXECUTE (arm will move)' if self._execute_motion else 'log-only (no motion)'
         if self._target_pub is not None:
-            mode += f' via {self._target_pub.wire} -> {self._target_pub.topic_name}'
+            mode += f' via {self._target_pub.topic_name}'
         preview = 'on (/polyumi/target_poses_preview)' if self._publish_preview else 'off'
         self.get_logger().info(f'policy_client_node started — server: {self._url} — mode: {mode} — preview: {preview}')
         stride_interval = self._steps_per_inference * self._action_dt
@@ -552,8 +541,16 @@ class PolicyClientNode(Node):
 
         The same time-alignment discipline the TF lookup gets, done by hand because a plain topic
         has no tf2-style interpolating buffer. Outside the cached span we hold the nearest endpoint
-        rather than extrapolating: the hand moves slowly relative to the ~60 ms sample interval, so
-        a held value is a far smaller error than a linear extrapolation off the end would be.
+        rather than extrapolating: the hand moves slowly relative to its own sample interval (see
+        franka_hand_node.cpp for the current figure -- it has drifted before and will again), so a
+        held value is a far smaller error than a linear extrapolation off the end would be.
+
+        Interpolating, not holding, inside the span is also why latency.gripper is a pure
+        propagation-lag term and not a sampling-interval correction: two straddling samples already
+        bound the true value regardless of how far apart they are, so nothing here needs shifting
+        to account for the gap between them -- only for the hand's samples arriving late relative to
+        the aperture they claim to report, which is unmeasured (see latency.gripper in
+        inference.yaml).
 
         :param target: instant to sample the aperture at, or None for "latest available".
             Note this is deliberately **not** tf2's convention, where a zero ``Time()`` means
@@ -800,6 +797,10 @@ class PolicyClientNode(Node):
             # closed, it is narrower than the hand can physically go.
             return 0.0
 
+        # Robot units (aperture), not policy units, so it overlays /polyumi/target_gripper[_preview]
+        # directly: the raw finger topic is half the aperture and can't be scaled in a plot panel.
+        self._diag('gripper_width_m', width)
+
         # A topic that stops publishing is invisible to _gripper_width_at — it just keeps holding
         # its newest sample — so the age is checked explicitly, as the camera path does. Skipped
         # under tf_use_latest, which exists precisely because the stamps are known to be skewed
@@ -903,19 +904,19 @@ class PolicyClientNode(Node):
         if self._preview_pub is not None:
             self._preview_pub.publish(self._actions_to_pose_array(actions))
         if self._gripper_preview_pub is not None:
-            self._gripper_preview_pub.publish(self._actions_to_gripper_trajectory(actions))
+            self._gripper_preview_pub.publish(self._actions_to_gripper_trajectory(actions, t_obs))
 
         # Drop the leading actions that refer to instants already elapsed by the time each device
         # can act on them, so execution starts from the first still-future waypoint.
         #
         # The two devices are truncated INDEPENDENTLY, because they are genuinely different
-        # speeds: the hand starts moving ~190 ms before the arm does. A single shared slice would
-        # force the faster device to inherit the slower one's lead and act that much too early,
-        # which is what fr3_gripper_bridge's (now removed) gripper_lead_steps existed to claw
-        # back. This is UMI's split — robot_action_latency vs gripper_action_latency, each
-        # subtracted per device — reached through slicing rather than absolute waypoint times,
-        # since a PoseArray carries no timing. Note _actions_to_gripper_trajectory recomputes
-        # time_from_start relative to whatever slice it is handed, so the two stay self-consistent.
+        # speeds. A single shared slice would force whichever device leads to inherit the other's
+        # lead and act that much too early — which is what the old gripper bridge's
+        # gripper_lead_steps existed to claw back, and it could add lead but never remove it.
+        # This is UMI's split — robot_action_latency vs gripper_action_latency, each subtracted
+        # per device and applied by slicing which leading actions get dropped. Both halves number
+        # time_from_start from the PRE-slice index against their own anchor, so dropping stale
+        # actions never shifts what remains — see _actions_to_gripper_trajectory.
         n_received = len(actions)
         n_stale_arm = self._n_stale_actions(t_obs, self._latency_act)
         n_stale_grip = self._n_stale_actions(t_obs, self._latency_act_gripper)
@@ -953,23 +954,21 @@ class PolicyClientNode(Node):
             f'z={first[2]:.4f} grip={first[7]:.3f}→{grip_robot:.3f}m'
         )
 
-        # Phase 2: publish the whole action chunk for the NUC bridge to plan+execute as one
-        # Cartesian path (receding-horizon control). Non-blocking (unlike a direct MoveIt
-        # call): the NUC bridge does its own skip-while-busy, so at worst it drops chunks
-        # that arrive mid-motion. The gripper half goes out on its own topic and its own slice.
-        # Each is published only if it still has waypoints, so a chunk too stale for the arm can
-        # still drive the hand rather than stalling both.
+        # Publish the whole action chunk for the streaming Cartesian impedance controller to
+        # splice via its 1 kHz interpolator (receding-horizon control). The gripper half goes out
+        # on its own topic and its own slice. Each is published only if it still has waypoints, so
+        # a chunk too stale for the arm can still drive the hand rather than stalling both.
         if self._target_pub is not None and arm_actions:
             # Anchored at t_obs minus latency.arm_exec, so every waypoint is commanded that far
             # ahead of when it should be reached — UMI's per-waypoint `target_time -
             # robot_action_latency` (exec_actions in bimanual_umi_env.py), folded into the anchor
             # because the offset is the same for every waypoint. first_index is the index in the
             # ORIGINAL chunk: numbering the survivors of the stale-drop from zero would slide the
-            # whole timeline earlier. PoseArray ignores both, carrying no timing at all.
+            # whole timeline earlier.
             if self._target_pub.get_subscription_count() == 0:
                 self._warn_throttled(
                     f'Nothing is subscribed to {self._target_pub.topic_name}; the arm will not '
-                    f'move. Needs: {self._target_pub.wire.consumer}'
+                    f'move. Needs: {CONSUMER_HINT}'
                 )
             self._target_pub.publish(
                 [self._action_to_pose(action) for action in arm_actions],
@@ -978,7 +977,9 @@ class PolicyClientNode(Node):
                 stamp=(t_obs - Duration(seconds=self._latency_act)).to_msg(),
             )
         if self._gripper_pub is not None and grip_actions:
-            self._gripper_pub.publish(self._actions_to_gripper_trajectory(grip_actions))
+            self._gripper_pub.publish(
+                self._actions_to_gripper_trajectory(grip_actions, t_obs, first_index=n_stale_grip)
+            )
 
     @staticmethod
     def _action_to_pose(action) -> Pose:
@@ -1001,23 +1002,26 @@ class PolicyClientNode(Node):
             stamp=self.get_clock().now().to_msg(),
         )
 
-    def _actions_to_gripper_trajectory(self, actions) -> JointTrajectory:
+    def _actions_to_gripper_trajectory(self, actions, t_obs, first_index: int = 0) -> JointTrajectory:
         """
-        Build the gripper half of an action chunk as a timed single-DOF trajectory.
+        Build the gripper half of an action chunk as an absolutely-timed single-DOF trajectory.
 
-        Carries per-point ``time_from_start`` so the NUC bridge can pick a lead waypoint and derive
-        a move speed from it, rather than commanding every width at one fixed speed. The widths are
-        converted to robot jaw aperture here so the bridge stays free of calibration — see
+        ``header.stamp + time_from_start`` is a real schedule, exactly as for the arm chunk:
+        franka_hand_node holds these as a horizon and plans which of them a Move can still reach,
+        which only works if they name instants. The anchor is ``t_obs - latency.gripper_exec``, so
+        every waypoint is commanded that far ahead of when it should be reached, and the index is
+        the PRE-slice one — numbering the survivors of the stale-drop from zero would slide the
+        whole timeline earlier by exactly the amount the drop was meant to remove.
+
+        Widths are converted to robot jaw aperture here so the NUC stays free of calibration — see
         polyumi_ros2.gripper_map.
 
-        Times run from the SLICE index, deliberately unlike the arm chunk, which is numbered from
-        its pre-slice index: this consumer reads time_from_start as a relative shape to derive a
-        speed, not as an absolute schedule, so shifting it changes nothing.
-
         :param actions: 8-vector actions [x,y,z,qx,qy,qz,qw,grip], grip in policy units.
+        :param t_obs: the observation instant the chunk was inferred from.
+        :param first_index: index of ``actions[0]`` within the original, unsliced chunk.
         """
         msg = JointTrajectory()
-        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.stamp = (t_obs - Duration(seconds=self._latency_act_gripper)).to_msg()
         msg.header.frame_id = self._base_frame
         msg.joint_names = [GRIPPER_JOINT_NAME]
         for i, action in enumerate(actions):
@@ -1025,7 +1029,7 @@ class PolicyClientNode(Node):
             point.positions = [
                 policy_to_robot_width(float(action[7]), self._gripper_min_width_m, self._gripper_max_width_m)
             ]
-            point.time_from_start = Duration(seconds=i * self._action_dt).to_msg()
+            point.time_from_start = Duration(seconds=(first_index + i) * self._action_dt).to_msg()
             msg.points.append(point)
         return msg
 

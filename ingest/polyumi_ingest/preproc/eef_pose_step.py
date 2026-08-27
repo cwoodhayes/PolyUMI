@@ -13,7 +13,7 @@ from polyumi_ingest.episode_status import Episode, SceneContext
 from polyumi_ingest.preproc.slam_step import post_chirp_start
 from polyumi_ingest.preproc.step_base import PreprocessingStep, register_preprocessing_step
 from polyumi_ingest.pzarr.store import arr, grp
-from polyumi_ingest.timebase import nearest_idx
+from polyumi_ingest.timebase import gopro_ts_in_finger_clock, nearest_idx
 from polyumi_ingest.transforms import (
     gopro_to_hand_transform,
     gripper_calib_transforms,
@@ -64,15 +64,6 @@ def _max_pose_jump_m(ep: zarr.Group, pose: np.ndarray) -> float | None:
         return None
     steps = np.linalg.norm(np.diff(pose[tracked, :3], axis=0), axis=1)
     return float(steps[adjacent].max())
-
-
-def _gopro_ts_in_finger_clock(ep: zarr.Group) -> np.ndarray:
-    """GoPro frame timestamps shifted into the finger (= OptiTrack) clock domain."""
-    ts = np.asarray(arr(ep, 'timestamps/gopro')[:], dtype=np.float64)
-    if 'annotations/time_sync' in ep:
-        offset = float(grp(ep, 'annotations/time_sync').attrs.get('gopro_to_finger_offset_s', 0.0))
-        ts = ts - offset
-    return ts
 
 
 @register_preprocessing_step(step_number=5, step_name='eef-pose')
@@ -165,7 +156,10 @@ class EefPoseStep(PreprocessingStep):
             log.info(f'  {episode_key}: eef/pose_* already present for {sources}; use --force to recompute.')
             return
 
-        gopro_ts = _gopro_ts_in_finger_clock(ep)
+        # require_offset=False: this step resamples slowly-varying poses, so the unshifted
+        # grid degrades the result rather than invalidating it, and stores predating the
+        # chirp marker must keep working.
+        gopro_ts = gopro_ts_in_finger_clock(ep, require_offset=False)
         out_grp = ep.require_group('eef')
 
         # Clean up the pre-dual-source schema: a scene preprocessed by the old EefPoseStep (a

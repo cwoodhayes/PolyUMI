@@ -387,6 +387,7 @@ def test_sync_datasets_populates_dataset_and_members(tmp_path: pathlib.Path):
         output='fold_towel_v1.zarr.zip',
         n_episodes=7,
         polyumi_version='deadbeef',
+        exporter_type='polyumi',
         members=[
             DatasetMemberSpec('scene-1', 'scene_a/', 'all'),
             DatasetMemberSpec('scene-2', 'scene_b/', [0, 2]),
@@ -404,6 +405,7 @@ def test_sync_datasets_populates_dataset_and_members(tmp_path: pathlib.Path):
         assert dataset is not None
         assert dataset.n_episodes == 7
         assert dataset.polyumi_version == 'deadbeef'
+        assert dataset.exporter_type == 'polyumi'
         task = db.get(Task, dataset.task_id)
         assert task.name == 'fold_towel'
 

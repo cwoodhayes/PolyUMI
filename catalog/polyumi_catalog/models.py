@@ -99,6 +99,11 @@ class Dataset(SQLModel, table=True):
     output_path: str | None = None
     n_episodes: int | None = None
     polyumi_version: str | None = None
+    #: Which ``polyumi_ingest.export.dp`` entry point produced this dataset: ``'dp'``
+    #: (visuomotor only) or ``'polyumi'`` (adds the contact-mic and finger-camera
+    #: modalities). Mirrors
+    #: ``DatasetManifest.exporter_type``, which is the source of truth on re-sync.
+    exporter_type: str = 'dp'
     created_at: datetime = Field(default_factory=_utcnow)
 
 

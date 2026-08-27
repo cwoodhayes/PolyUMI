@@ -5,7 +5,7 @@
 # it wires the checkpoint + HF-cache mounts and the rootless-safe run flags, then runs the
 # container's serve entrypoint (docker/serve.sh -> uvicorn serve_policy:app). serve_policy.py
 # serves the trained policy over POST /predict_cartesian/ + /reset; the ROS-side
-# policy_client_node POSTs to it. Full walkthrough in docs/franka-inference-bringup.md.
+# policy_client_node POSTs to it. Full walkthrough in docs/training-instructions.md.
 #
 # NOTE: external/polyumi_diffusion_policy/docker/serve.sh is the IN-CONTAINER entrypoint and will
 # NOT run on the host ("exec: uvicorn: not found") — the umi conda env only exists in the image.
@@ -18,7 +18,6 @@
 #
 # serve_policy.py loads the policy on plain 'cuda', i.e. whatever CUDA_VISIBLE_DEVICES makes
 # device 0. Not defaulted here: which card is quiet changes hour to hour, so check `nvidia-smi`.
-# See docs/crb-fr3-inference.md for what pinning does and does not buy.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

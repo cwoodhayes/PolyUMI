@@ -388,6 +388,7 @@ def dataset_detail(db: DBSession, dataset_id: int) -> dict:
         'output_path': d.output_path,
         'manifest_path': d.manifest_path,
         'polyumi_version': d.polyumi_version,
+        'exporter_type': d.exporter_type,
         'created_at': d.created_at,
         'members': [
             {'scene_id': m.scene_id, 'name': scene_names.get(m.scene_id, m.scene_id), 'episodes': m.episodes}

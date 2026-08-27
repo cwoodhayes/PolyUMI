@@ -80,7 +80,7 @@ For the inference constant, use the `tcp_pivot_test` as a helpful sanity check. 
 ```bash
 # NUC: bringup + inference, both execute flags on (this closes the hand itself), and SLOW
 ros2 launch nuc/launch/fr3_inference.launch.py \
-      execute_arm:=true execute_gripper:=true max_velocity_scaling:=0.05
+      execute_arm:=true execute_gripper:=true
 ros2 service call /polyumi/home std_srvs/srv/Trigger "{}"   # a roomy pose; edge poses fail to plan
 ros2 run polyumi_ros2 tcp_pivot_test --ros-args -p angle_deg:=20.0
 ```
@@ -91,6 +91,67 @@ ros2 run polyumi_ros2 tcp_pivot_test --ros-args -p angle_deg:=20.0
 - **Single source of truth for the transform is `nuc/tcp_calib.py`.** is the single definition; it reaches TF via a `static_transform_publisher` in `fr3_bringup.launch.py` and move_group's RobotModel via `nuc/description/fr3_polyumi.urdf.xacro`. Both read it from there.
 - **Changing `T_gopro_to_fingertip` invalidates every dataset exported before the change**, since their poses are on the old body frame. Re-export and retrain; do not try to compensate at inference time.
 - Residual error we deliberately don't chase: real GoPro mount tilt versus the CAD-nominal "optical axis parallel to the approach axis". Suspect it first if the policy is systematically off in *orientation* rather than position. Closing it would need a camera-based hand-eye calibration.
+
+### End-effector payload
+
+**Change required when: hardware design revision**
+
+This is relevant for any setup using a Franka arm:
+
+The FCI only cancels gravity for the mass it knows about (`m_ee` + `m_load`). Anything past the flange it *doesn't* know about — the GoPro, its mount, our fingers — is a constant force the cartesian impedance spring has to fight, so the TCP drops the instant that controller activates and holds a steady offset. Set in `nuc/tcp_calib.py` → `PAYLOAD_MASS`, `PAYLOAD_COM_HAND`; `fr3_bringup.launch.py` pushes it once per session by running `nuc/set_payload.py`, a one-shot `franka_msgs/srv/SetLoad` client.
+
+First, find out what the robot already thinks it's carrying — this decides whether `PAYLOAD_MASS` is the whole assembly or just the part Desk isn't covering:
+
+```bash
+ros2 topic echo /franka_robot_state_broadcaster/robot_state --field inertia_ee   --once  # Desk's EE config; the Franka Hand is 0.73 kg
+ros2 topic echo /franka_robot_state_broadcaster/robot_state --field inertia_load --once  # what SetLoad last applied
+```
+
+Then get a starting number. Weighing the unbolted assembly on a kitchen scale beats every indirect method (±5 g), and balancing it on a straight edge in two orientations gives the CoM to the ~1 cm that's plenty here. (fair warning I did not do this; eyeballing it as follows is probably good enough). Failing that, the arm will tell you, either from the droop you can already see or from its own force estimate:
+
+```bash
+# with the arm stationary and nothing touching it — this is the unmodelled payload's gravity wrench
+ros2 topic echo /franka_robot_state_broadcaster/robot_state --field o_f_ext_hat_k.wrench   # m = -F_z / 9.81
+```
+
+To iterate without relaunching, `SetLoad` can be called by hand — but **only while no controller holds the arm.** With one active the robot is in `Move` mode and rejects it outright, so deactivate first and reactivate after. Note also that `center_of_mass` on the wire is in **`fr3_link8`** while `PAYLOAD_COM_HAND` is in `fr3_hand` — `tcp_calib.payload_com_flange()` does that conversion, and `tcp_calib.set_load_request()` prints the whole request literal for you. Write the winning numbers into `nuc/tcp_calib.py` when you're done.
+
+What you really want to see, though, is that when you launch fr3_inference.launch.py,
+(which starts the impedance controller upon first launch after the bringup), 
+that the fingertip doesn't move at all in any direction, by rotation or translation, at _any position of the arm_.
+
+You can kind of move the arm into different positions to back out if your CoM is at the wrong place once you have the
+mass nailed down at the homing position (where you know that the 100% of the mass error goes into -z displacement).
+
+Failing all else, you can sort of guess-and-check (and start with my existing numbers)
+based on the CAD changes you've made, and watch for that result when you start up.
+
+
+```bash
+# NUC. Whichever of the two is active — `ros2 control list_controllers` tells you.
+ros2 control switch_controllers --deactivate polyumi_cartesian_impedance_controller
+ros2 service call /service_server/set_load franka_msgs/srv/SetLoad \
+  "$(cd ~/Documents/PolyUMI/nuc && python3 -c 'import tcp_calib; print(tcp_calib.set_load_request())')"
+ros2 control switch_controllers --activate polyumi_cartesian_impedance_controller
+```
+
+That sends what `fr3_bringup.launch.py` sends, so it is only useful once you have edited
+`tcp_calib.py`. To try a number *before* committing to it, paste the request literal by hand in the
+same shape — but read it out of `set_load_request()` first, so the CoM is in `fr3_link8` and the
+inertia is non-zero. Both are easy to get wrong from scratch, and the FR3 hides the reason.
+
+**Hardware verification:** converged when the TCP doesn't visibly move as the impedance controller activates and `o_f_ext_hat_k` sits near zero at rest. If it drops *upward*, the mass is now too high.
+
+#### Gotchas
+
+- **The URDF is not the lever.** `franka_hardware` reads only `robot_ip` and `arm_id` out of it, so an `<inertial>` block in `nuc/description/fr3_polyumi.urdf.xacro` changes nothing. Only `SetLoad` or Desk move `m_load`.
+- **The droop is a measurement, not just a symptom**: $\Delta z = m_{unmodelled} \cdot g / K_{trans}$, so at `translational_stiffness: 2000` each mm of sag is 0.204 kg. But `translational_clip` is 0.01 m, so at ~1 cm the spring saturates at 20 N and the reading is pinned — the real mass is only *at least* 2 kg.
+- `o_f_ext_hat_k` carries joint friction and arm model error too (~1–3 N, the same order as a 0.5 kg payload). Average it, and read it at two or three wrist orientations — the part that rotates with the tool is the payload.
+- **Inertia may NOT be left at zero.** A nonzero mass with a zero tensor is physically impossible and the FR3 rejects it — the whole error you get back through ROS is `success: false, error: 'command exception error'`, with the real message (`Set Load command rejected: invalid argument!`) only in the `/service_server` log. `tcp_calib.payload_inertia_flange()` approximates it as a uniform solid box from `PAYLOAD_EXTENTS` and rotates it into the flange, where setLoad reads it — the same frame as `center_of_mass`, and not the `fr3_hand` frame the extents are stated in. It is a 3x3 matrix flattened to 9 elements, about the CoM. The box is assumed concentric with the CoM and uniformly dense, which `PAYLOAD_COM_HAND` already contradicts — accepted because inertia only enters the acceleration terms at speeds this low. Get the mass and the CoM right; the tensor only has to be plausible and non-zero. (UMI, SERL and polymetis all appear to leave inertia unset, but they reach the load through Desk, which derives a tensor for them.)
+- **`SetLoad` only works when no controller is active.** Otherwise: `Set Load command rejected: command not possible in the current mode ("Move")`. This is why `fr3_bringup.launch.py` sequences the call ahead of the `fr3_arm_controller` spawner rather than alongside it.
+- **A failed `SetLoad` aborts bringup**, rather than warning and carrying on. `nuc/set_payload.py` checks `response.success` and exits non-zero, and bringup refuses to spawn `fr3_arm_controller` unless it exited 0. (It is a client and not a `ros2 service call` precisely because the CLI exits 0 even when the body says `success: false` — gating on that would mean grepping its output for `success=True`, and a repr change would then read a *good* SetLoad as a failure.) The spawner is the point of no return — after it the robot is in `Move` mode and the payload cannot be set again without deactivating everything — and the only other symptom is TCP droop, which you have to be watching for. If bringup dies here, read the `/service_server` log before re-launching.
+- **The service response tells you almost nothing.** `franka_param_service_server` catches every `franka::CommandException` and flattens it to the string `"command exception error"`. When a call fails, go read the `/service_server` log for the real reason: `grep -i "command exception" $(ls -t ~/.ros/log/ros2_control_node_*.log | head -1)`.
+- If a residual sag survives a correct payload, that's joint friction, not payload. `translational_ki` in `nuc/config/polyumi_controllers.yaml` is the tool for it — SERL's approach — but reach for it second.
 
 ### Gripper Static Offsets
 
@@ -178,9 +239,9 @@ empirically on every tick by `_n_stale_actions`, which runs *after* the response
 
 | Value | Where it comes from |
 |---|---|
-| `latency.gopro` | **measure** — `latency_probe -p mode:=camera` |
-| `latency.arm_exec` | **measure** — `latency_probe -p mode:=arm` |
-| `latency.gripper_exec` | **measure** — `latency_probe -p mode:=gripper` |
+| `latency.gopro` | **measure** — `latency_probe --ros-args -p mode:=camera` |
+| `latency.arm_exec` | **measure** — `latency_probe --ros-args -p mode:=arm` |
+| `latency.gripper_exec` | **measure** — `latency_probe --ros-args -p mode:=gripper_chirp`, not `mode:=gripper` — see below |
 | `latency.gripper` | printed by the gripper run; half the joint-state publish interval |
 | `latency.proprio` | adopted constant, ~0.001 — see below |
 | round trip | nothing to do; measured live |
@@ -227,7 +288,7 @@ Chirps the commanded EEF pose sideways and cross-correlates it against where `po
 went. **This moves the arm.**
 
 1. **Bring up the arm with execution on**, and get it somewhere roomy — edge poses fail to plan.
-   `executor` defaults to `servo`, so this activates the impedance controller:
+   `execute_arm:=true` activates the streaming impedance controller:
    ```bash
    # NUC
    ros2 launch nuc/launch/fr3_inference.launch.py execute_arm:=true
@@ -256,13 +317,14 @@ went. **This moves the arm.**
    fingers start moving, and repeats 8 times alternating direction. See the gotcha below for why
    cross-correlation is the wrong tool for this particular plant.
 3. This prints **two** numbers, because they are two different quantities:
-   - `latency.gripper_exec` — the **action** side, command → the hand actually moving. Goes into
-     `config/inference.yaml` exactly as measured; `policy_client_node` truncates the gripper chunk
-     by this value alone. Expect a few hundred ms and a spread of roughly one
-     `min_command_period_s`, most of which is the bridge's own command timer — that quantisation is
-     real delay in service too, so it belongs in the number.
+   - `latency.gripper_exec` — do **not** paste this one in. It is command → the hand actually
+     moving, a few hundred ms, most of it the hand's own firmware (a `Move` blocks 363 ms even for
+     zero travel). `franka_hand_node` already models that internally (`HandLimits.cmd_delay` in
+     `gripper_trajectory_interpolator.hpp`) to decide which setpoint each `Move` can still reach —
+     so feeding the same figure into `config/inference.yaml`'s `gripper_exec` would compensate for
+     it twice. That field is currently `0.0` and should be left that way.
    - `latency.gripper` — the **observation** side, half the `/fr3_gripper/joint_states` publish
-     interval. Goes in `config/inference.yaml`.
+     interval. Goes in `config/inference.yaml`, unaffected by the above.
 
 
 #### Gotchas
@@ -278,9 +340,6 @@ went. **This moves the arm.**
   published waypoint lands at ~now regardless — but not in *phase*: overstating it skips
   `arm_exec / action_dt` steps ahead in the policy's intended trajectory. Carrying the old MoveIt
   planning figure over to the servo would be several steps of skip.
-- **`-p wire:=pose_array` measures a different quantity**, not the same one less well: it drives
-  `fr3_moveit_bridge`, and returns a planning time dominated by `max_velocity_scaling`. Only use it
-  while the MoveIt executor still exists.
 - **The old ±20 ms bound was MoveIt's fault and is gone.** Correlation accuracy is set by excitation
   bandwidth, and the planner's cadence used to cap how fast the arm could be swept. The servo
   removes that cap, so expect a far sharper peak. A result still in the hundreds of milliseconds
@@ -292,8 +351,8 @@ went. **This moves the arm.**
   which the sharpness check rejects with a message about peak width. The probe now detects this
   directly and names the likely causes instead.
 - **The gripper is measured by step response, not cross-correlation, and that is deliberate.**
-  `fr3_gripper_bridge` quantises commands to `min_command_period_s` (0.25 s), supersedes each
-  in-flight `Move` goal with the next, and drops anything inside its 5 mm deadband. Correlation
+  `franka_hand_node` runs each `Move` to completion — a floor of 363 ms even for zero travel, and
+  0.6–1.4 s for a real stroke — and drops anything inside its 5 mm deadband. Correlation
   assumes the response is a delayed *linear echo* of the command, which that is not. Driven at
   0.6 Hz on 2026-08-10 the hand fell most of a cycle behind and the estimator reported the phase
   lag — 1.2 s — as if it were a delay. The tell was that the answer grew with how much of the
@@ -307,11 +366,13 @@ went. **This moves the arm.**
 - **The arm and the hand are truncated independently, so neither number affects the other.**
   `_n_stale_actions` runs once per device, each with its own `latency.*_exec`, and the two chunks
   are published from separate slices of the same action list. This is UMI's split
-  (`robot_action_latency` vs `gripper_action_latency`), reached by slicing rather than by absolute
-  waypoint times, since a `PoseArray` carries no timing. It means you can re-measure one device
+  (`robot_action_latency` vs `gripper_action_latency`), reached by slicing which leading actions
+  get dropped rather than by shifting waypoint times. It means you can re-measure one device
   without touching the other, and a chunk too stale for the arm can still drive the hand. A
-  `gripper_lead_steps` parameter on `fr3_gripper_bridge` used to paper over the shared slice by
+  `gripper_lead_steps` parameter on the old gripper bridge used to paper over the shared slice by
   indexing further into the chunk; it is gone, and re-adding a lead there would double-compensate.
+  Both halves now carry an absolute schedule (`header.stamp + time_from_start`) numbered from the
+  pre-slice index, so the drop removes waypoints without moving the ones that survive.
 - **`latency.proprio` is adopted, not measured, on purpose.** It means "true EE pose → the stamp on
   TF", and isolating it needs external ground truth of the true pose. libfranka stamps at read, so
   it is ~1 ms; UMI hit the identical wall and hardcodes `robot_obs_latency: 0.0001`. The `arm_exec`

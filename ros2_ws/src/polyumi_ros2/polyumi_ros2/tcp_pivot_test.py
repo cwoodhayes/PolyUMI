@@ -29,7 +29,7 @@ Usage (laptop, after `source setup_franka_env.sh`):
     # 1. NUC: bringup + inference. Both execute flags on — this closes the hand itself — and
     #    SLOW. execute_gripper:=false makes the close a silent no-op, which the script detects.
     ros2 launch nuc/launch/fr3_inference.launch.py \
-        execute_arm:=true execute_gripper:=true max_velocity_scaling:=0.05
+        execute_arm:=true execute_gripper:=true
 
     # 2. Get to a known, roomy pose — a pivot near the workspace edge will fail to plan
     ros2 service call /polyumi/home std_srvs/srv/Trigger "{}"
@@ -37,8 +37,9 @@ Usage (laptop, after `source setup_franka_env.sh`):
     # 3. Watch the fingertips. The gripper is closed automatically first.
     ros2 run polyumi_ros2 tcp_pivot_test --ros-args -p angle_deg:=20.0
 
-**Do not run this while policy_client_node is running.** It publishes to /polyumi/target_poses,
-the same topic the policy uses, and the bridge acts on whichever chunk arrives last.
+**Do not run this while policy_client_node is running.** It publishes to
+/polyumi/target_poses_traj, the same topic the policy uses, and the controller splices whichever
+chunk arrives last.
 """
 
 import math
@@ -52,17 +53,17 @@ from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from polyumi_ros2.target_chunk import TargetChunkPublisher, Wire
+from polyumi_ros2.target_chunk import CONSUMER_HINT, TargetChunkPublisher
 from tf2_ros import Buffer, TransformListener
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-# Waypoints are handed over explicitly at this spacing rather than leaving MoveIt to subdivide.
-# GetCartesianPath's max_step bounds *translation*, and a pure rotation has none, so the planner
-# would see a single zero-length segment and interpolate the whole sweep in one jump.
+# Waypoints are handed over explicitly at this spacing rather than as two endpoints: the
+# controller interpolates between whatever it is given, and a pure rotation commanded as one
+# 20-degree step would be taken as a single jump.
 DEFAULT_STEP_DEG = 5.0
 # Completion is detected as "it moved, then stopped", in angular RATE rather than per-sample
-# delta. A raw delta threshold is a trap: at max_velocity_scaling=0.05 a sample is ~0.0016 rad,
-# so any plausible epsilon sits right on top of the real signal — and the sweep REVERSES at
+# delta. A raw delta threshold is a trap: at these waypoint rates a sample is a few thousandths
+# of a radian, so any plausible epsilon sits on top of the real signal — and the sweep REVERSES at
 # both extremes, where the arm genuinely passes through zero velocity mid-motion. Requiring
 # sustained quiet, after motion has been seen, survives both.
 MOTION_RATE_RAD_S = 0.01
@@ -141,14 +142,9 @@ class TcpPivotTest(Node):
 
         self.declare_parameter('base_frame', 'fr3_link0')
         self.declare_parameter('eef_frame', 'polyumi_tcp')
-        # Which executor to drive. The impedance controller and fr3_moveit_bridge take different
-        # message types on different topics, and aiming at the wrong one is SILENT — the other
-        # executor simply never subscribes and the arm sits there. `target_topic` follows the wire
-        # format unless you override it.
-        self.declare_parameter('wire', str(Wire.MULTIDOF))
         self.declare_parameter('target_topic', '')
-        # Seconds between waypoints, for the timed wire format. Slow on purpose: this test is meant
-        # to be watched, and it also bounds how far the equilibrium point leads the arm.
+        # Seconds between waypoints. Slow on purpose: this test is meant to be watched, and it
+        # also bounds how far the equilibrium point leads the arm.
         self.declare_parameter('waypoint_dt_s', 0.5)
         self.declare_parameter('angle_deg', 20.0)
         self.declare_parameter('step_deg', DEFAULT_STEP_DEG)
@@ -159,9 +155,9 @@ class TcpPivotTest(Node):
         # How long to allow for plan + execution start before concluding nothing is going to move.
         self.declare_parameter('motion_start_timeout_s', 20.0)
         # Ceiling on how far the TCP may drift and still be called a pure rotation. Generous,
-        # because some of it is legitimate: the bridge's Cartesian plan pins the TCP only AT the
-        # waypoints, and joint-space interpolation between two 5-degree-apart orientations bows
-        # the TCP out by a few mm. Tighten step_deg before tightening this.
+        # because some of it is legitimate: the streaming controller's interpolator pins the TCP
+        # only AT the waypoints, and joint-space interpolation between two 5-degree-apart
+        # orientations bows the TCP out by a few mm. Tighten step_deg before tightening this.
         self.declare_parameter('max_drift_mm', 25.0)
         # Close the hand first — a pivot test with open fingers has no fingertip to watch. Goes
         # out on the bridge's own topic rather than the NUC action servers, since that path is
@@ -174,7 +170,6 @@ class TcpPivotTest(Node):
 
         self._base = self.get_parameter('base_frame').get_parameter_value().string_value
         self._eef = self.get_parameter('eef_frame').get_parameter_value().string_value
-        wire = self.get_parameter('wire').get_parameter_value().string_value
         topic = self.get_parameter('target_topic').get_parameter_value().string_value or None
         self._waypoint_dt = self.get_parameter('waypoint_dt_s').get_parameter_value().double_value
         self._angle_deg = self.get_parameter('angle_deg').get_parameter_value().double_value
@@ -198,7 +193,7 @@ class TcpPivotTest(Node):
         if self._waypoint_dt <= 0:
             raise ValueError(f'waypoint_dt_s must be > 0, got {self._waypoint_dt}')
 
-        self._pub = TargetChunkPublisher(self, wire=wire, frame_id=self._base, joint_name=self._eef, topic=topic)
+        self._pub = TargetChunkPublisher(self, frame_id=self._base, joint_name=self._eef, topic=topic)
         self._gripper_pub = self.create_publisher(JointTrajectory, gripper_topic, 10)
         self._gripper_lock = threading.Lock()
         self._gripper_actual: float | None = None
@@ -354,12 +349,12 @@ class TcpPivotTest(Node):
                 'source setup_franka_env.sh?'
             )
             return 1
-        if not self.wait_for_subscriber(self._pub, self._pub.wire.consumer):
+        if not self.wait_for_subscriber(self._pub, CONSUMER_HINT):
             return 1
         if self._close_gripper:
             if not self.wait_for_subscriber(
                 self._gripper_pub,
-                'fr3_gripper_bridge (ros2 launch nuc/launch/fr3_inference.launch.py on the NUC)',
+                'franka_hand_node (ros2 launch nuc/launch/fr3_inference.launch.py on the NUC)',
             ):
                 return 1
             if not self.close_gripper():

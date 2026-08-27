@@ -2,7 +2,7 @@ https://github.com/user-attachments/assets/2f902600-9682-4e67-a75c-fc8fa358cb92
 
 # PolyUMI: Visual + Auditory + Tactile Manipulation Platform for Imitation Learning
 
-**Project website:** https://cwoodhayes.github.io/projects/polyumi  
+**Project website:** https://cwoodhayes.github.io/projects/polyumi
 **Hardware build guide:** [Google Doc](https://docs.google.com/document/d/1T0v_7H8YAJjOud9QWYlQct29a78YKvELPIpKTzajFs0/edit?usp=sharing)
 
 PolyUMI is an imitation learning platform supporting UMI-style data collection via handheld gripper which unifies the following sensor modalities in a single end-effector:
@@ -39,13 +39,13 @@ ingest/           # PC-side CLI: fetch sessions from Pi, run preprocessing pipel
 notebooks/        # jupyter notebooks for bringup/debugging
 nuc/              # inference pipeline code specific to Northwestern CRB's Franka FR3 arm setup
 pi/               # RPi app: streaming server for video + audio on the EE, gripper episode recording, etc
-ros2_ws/          
+ros2_ws/
   src/
     polyumi_pi_msgs/   # Protobuf message definitions (camera frame, audio chunk)
     polyumi_ros2/      # ROS 2 nodes + Foxglove launch files
 ```
 
-**Additional scripts:**  
+**Additional scripts:**
 ```
 deploy.sh           # deploys code updates to the pi
 fr3_session.sh      # brings up tmux sessions for inference on the CRB's arm
@@ -148,12 +148,12 @@ pingest fetch-gopro --host <pi_ssh_hostname>
 # ingest all new scenes on disk into their pzarr form, skipping already-processed scenes:
 pingest process-all
 # run the preprocessing pipeline on a particular scene (time alignment, SLAM, etc)
-pingest pp <scene_directory> 
-# export a single session to MCAP for easy visualization in foxglove (use the foxglove config 
+pingest pp <scene_directory>
+# export a single session to MCAP for easy visualization in foxglove (use the foxglove config
 # in ingest/foxglove)
 pingest export-mcap <scene_directory> <session_number>
 # export a scene's EPISODE sessions to a UMI-format ReplayBuffer (.zarr.zip) for training:
-pingest export-dp <scene_directory> --output <output.zarr.zip>
+pingest export <scene_directory> --output <output.zarr.zip>
 ```
 
 The at-rest data format used during the preprocessing stage managed by `pingest` is a
@@ -164,7 +164,7 @@ zarr-based format stored in `scene.zarr` in each scene directory, referred to in
 Main article: [catalog/README.md](/catalog/README.md)
 
 Collecting demonstration data, running preprocessing pipelines, and training models results in a bunch of files that can quickly
-become confusing & disorganized on disk. 
+become confusing & disorganized on disk.
 In the era of Claude, bringing up simple web app UI's to manage this sort of data management problem is simple; hence
 the existence of the `polyumi-catalog` web tool.
 
@@ -175,7 +175,7 @@ Run the server with: `uv run polyumi-catalog serve --recordings <path-to-your-re
 
 ## Training
 
-Once a scene is preprocessed and exported (`pingest export-dp`, above), train the visuomotor
+Once a scene is preprocessed and exported (`pingest export`, above), train the visuomotor
 diffusion policy in Docker on a GPU workstation. See
 [docs/training-instructions.md](docs/training-instructions.md) for the build/run walkthrough,
 the rootless-Docker notes, and how the trained policy is served back to the ROS inference node.
@@ -209,9 +209,8 @@ First, see the [system calibration instructions](/docs/calibration-instructions.
 `policy_client_node` drives a robot arm from a diffusion-policy inference server.
 The arm's control stack typically runs on its own machine and is reached over ROS2;
 how you bring that up, network the two machines, and configure DDS depends on your
-robot and lab. [docs/franka-inference-bringup.md](docs/franka-inference-bringup.md)
-describes the general inference architecture and API contract, and
-[docs/crb-fr3-inference.md](docs/crb-fr3-inference.md) is a worked example for one
+robot and lab. The wire contract lives in [inference_server/](inference_server/) and its tests,
+and [docs/crb-fr3-inference.md](docs/crb-fr3-inference.md) is a worked example for one
 specific Franka FR3 setup that you can adapt.
 
 ## Hardware Notes

@@ -21,9 +21,9 @@
 <launch>
   <arg name="inference_server_url" default="http://localhost:8000/predict_cartesian/"/>
   <!-- Phase 2 motion execution. Off by default: the arm does NOT move until this is
-       true. When true, publishes each action chunk as a PoseArray on /polyumi/target_poses;
-       the NUC-side fr3_moveit_bridge drives move_group. Requires move_group + the bridge
-       running on the FR3 NUC (see docs/crb-fr3-inference.md). -->
+       true. When true, publishes each action chunk as a MultiDOFJointTrajectory on
+       /polyumi/target_poses_traj; the NUC-side streaming Cartesian impedance controller
+       splices it. Requires that controller ACTIVE on the FR3 NUC (see docs/crb-fr3-inference.md). -->
   <arg name="execute_motion" default="false"/>
   <!-- Viz-only preview of the commanded chunk on /polyumi/target_poses_preview (Foxglove/RViz).
        On by default; the NUC bridge ignores it, so it never moves the arm. This is how the arm

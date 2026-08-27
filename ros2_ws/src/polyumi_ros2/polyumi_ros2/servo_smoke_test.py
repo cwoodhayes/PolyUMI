@@ -14,12 +14,12 @@ The path is a circle traced around wherever the TCP already is, at a speed you c
 Orientation is held: a wrong orientation would be a second variable in a test that exists to isolate
 one.
 
-    # NUC: fr3_bringup up, impedance controller ACTIVE (docs/franka-inference-bringup.md)
+    # NUC: fr3_bringup up, impedance controller ACTIVE (docs/crb-fr3-inference.md)
     ros2 run polyumi_ros2 servo_smoke_test
     ros2 run polyumi_ros2 servo_smoke_test --ros-args -p radius_m:=0.05 -p period_s:=6.0
 
-The plain invocation is the one validated on hardware (docs/franka-inference-bringup.md, "Phase 4
-bringup" step 3) — do not run a bigger or faster override as the FIRST pass on a new arm.
+The plain invocation is the one validated on hardware — do not run a bigger or faster override as
+the FIRST pass on a new arm.
 
 Watch for smooth continuous motion, no pause at chunk boundaries, and no ``cartesian_reflex``. A
 stutter at exactly ``chunk_hz`` is the splice going wrong, not the gains.
@@ -39,7 +39,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from tf2_ros import Buffer, TransformListener
 
-from polyumi_ros2.target_chunk import TargetChunkPublisher, Wire
+from polyumi_ros2.target_chunk import CONSUMER_HINT, TargetChunkPublisher
 
 #: How long to wait for the first TF sample before giving up.
 TF_TIMEOUT_S = 10.0
@@ -97,9 +97,7 @@ class ServoSmokeTest(Node):
 
         self._validate()
 
-        self._pub = TargetChunkPublisher(
-            self, wire=Wire.MULTIDOF, frame_id=self._base, joint_name=self._eef, topic=topic
-        )
+        self._pub = TargetChunkPublisher(self, frame_id=self._base, joint_name=self._eef, topic=topic)
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
 
@@ -167,8 +165,7 @@ class ServoSmokeTest(Node):
                 return True
             time.sleep(0.1)
         self.get_logger().error(
-            f'Nothing is subscribed to {self._pub.topic_name} after {SUBSCRIBER_TIMEOUT_S:.0f}s. '
-            f'Needs: {self._pub.wire.consumer}'
+            f'Nothing is subscribed to {self._pub.topic_name} after {SUBSCRIBER_TIMEOUT_S:.0f}s. Needs: {CONSUMER_HINT}'
         )
         return False
 

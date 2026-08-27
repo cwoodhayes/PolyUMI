@@ -78,7 +78,7 @@ MAX_IMAGE_AGE_S="${MAX_IMAGE_AGE_S:-0.3}"
 # line is only PRE-TYPED, never run — nothing moves until you press Enter on it, and the NUC
 # side has its own execute_arm/execute_gripper flags (both default false) in front of the arm.
 # EXECUTE_MOTION=false ./fr3_session.sh for a dry run: the preview topics still show every
-# commanded chunk in Foxglove, but /polyumi/target_poses is never published.
+# commanded chunk in Foxglove, but /polyumi/target_poses_traj is never published.
 EXECUTE_MOTION="${EXECUTE_MOTION:-true}"
 
 if [ "${1:-}" = "--kill-local" ] || [ "${1:-}" = "--kill" ]; then
@@ -165,9 +165,14 @@ fi
 # a powered-off Pi at the same time. Non-fatal, matching how the deploy section below treats an
 # unreachable machine: one box being down should not block bringing the others up.
 PI_HOST="$(ssh -G "$POLYUMI_PI_HOST" 2>/dev/null | awk '/^hostname /{print $2}')" || true
+# Remembered as PI_REACHABLE and reused by the deploy step below, so an unreachable Pi is a single
+# 5s probe rather than also eating whatever rsync's own (unset here) connect timeout turns out to
+# be — that one hangs well past 5s rather than failing fast.
 if ssh -o ConnectTimeout=5 -o BatchMode=yes "$POLYUMI_PI_HOST" true 2>/dev/null; then
+  PI_REACHABLE=1
   echo "Pi resolved to $PI_HOST (ssh alias: $POLYUMI_PI_HOST)"
 else
+  PI_REACHABLE=0
   echo "WARNING: cannot reach the Pi at ssh alias '$POLYUMI_PI_HOST' (resolved: '${PI_HOST:-nothing}')." >&2
   echo "         Either the Pi is off, or the alias is not in your ssh config — in which case" >&2
   echo "         ssh hands back the alias verbatim and pi_host:= below will be wrong." >&2
@@ -180,8 +185,10 @@ fi
 # runs against them — the fix for "I edited a launch file locally and the NUC ran the old one".
 # SKIP_DEPLOY=1 bypasses both for a fast re-launch once you know they're already current.
 # Non-fatal per target: a machine that's unreachable (Pi powered off, say) warns and is
-# skipped rather than blocking the machines that ARE up. Sheep is deliberately not included —
-# it tracks its own training branch, not this one, so force-syncing it would be wrong.
+# skipped rather than blocking the machines that ARE up — the Pi is skipped up front on
+# PI_REACHABLE from the probe above, the NUC by letting rsync/ssh fail and warning after the
+# fact (it has no equivalent cheap up-front probe worth adding). Sheep is deliberately not
+# included — it tracks its own training branch, not this one, so force-syncing it would be wrong.
 # ---------------------------------------------------------------------------
 if [ "${SKIP_DEPLOY:-0}" = 1 ]; then
   echo "SKIP_DEPLOY=1 — leaving the laptop build and the NUC/Pi source trees as they are."
@@ -202,11 +209,12 @@ else
       nuc "${NUC_SSH_HOST}:${NUC_REPO}/"; then
     echo "    done."
 
-    # The bridges are plain scripts and run straight from the synced tree, but
+    # fr3_home_service is a plain script and runs straight from the synced tree, but
     # polyumi_fr3_controllers is C++: rsync only updates the source that ~/franka_ws/src symlinks
-    # at, so without this the NUC keeps loading the previously built .so. That is the worst kind of
-    # stale — it is a torque controller, and the old build's behaviour includes the old build's
-    # error messages. Sourcing is explicit because `ssh host 'cmd'` gets no ~/.bashrc.
+    # at, so without this the NUC keeps running the previously built artifacts. That is the worst
+    # kind of stale — one is a torque controller and the other drives the hand, and the old build's
+    # behaviour includes the old build's error messages. Sourcing is explicit because
+    # `ssh host 'cmd'` gets no ~/.bashrc.
     echo "==> Rebuilding polyumi_fr3_controllers on $NUC_SSH_HOST ..."
     if ssh -o ConnectTimeout=10 "$NUC_SSH_HOST" \
         "source /opt/ros/humble/setup.bash \
@@ -214,19 +222,26 @@ else
          && cd $NUC_FRANKA_WS \
          && colcon build --packages-select polyumi_fr3_controllers \
               --cmake-args -DCMAKE_BUILD_TYPE=Release"; then
-      echo "    done. NOTE: pluginlib keeps a loaded .so mapped, so a controller_manager that has"
-      echo "    already touched this controller keeps running the OLD build until fr3_bringup is"
-      echo "    restarted. Re-attaching to a live bringup session does not pick this up."
+      echo "    done. NOTE: this build has two consumers and they pick it up at different times."
+      echo "    The impedance controller is a pluginlib .so that controller_manager keeps mapped, so"
+      echo "    it runs the OLD build until fr3_bringup restarts. franka_hand_node is an executable"
+      echo "    fr3_inference spawns, so it needs fr3_inference restarted. Re-attaching to either"
+      echo "    live session picks up neither."
     else
-      echo "WARNING: colcon build on $NUC_SSH_HOST failed — it may run a stale impedance controller." >&2
+      echo "WARNING: colcon build on $NUC_SSH_HOST failed — $NUC_SSH_HOST may run a stale impedance" >&2
+      echo "         controller or a stale franka_hand_node." >&2
     fi
   else
     echo "WARNING: rsync to $NUC_SSH_HOST failed — it may be running stale nuc/ code." >&2
   fi
 
-  echo "==> Deploying pi/ to $POLYUMI_PI_HOST via ./deploy.sh ..."
-  if ! (cd "$REPO_DIR" && ./deploy.sh "$POLYUMI_PI_HOST"); then
-    echo "WARNING: deploy.sh failed (Pi unreachable?) — it may be running stale code." >&2
+  if [ "$PI_REACHABLE" = 1 ]; then
+    echo "==> Deploying pi/ to $POLYUMI_PI_HOST via ./deploy.sh ..."
+    if ! (cd "$REPO_DIR" && ./deploy.sh "$POLYUMI_PI_HOST"); then
+      echo "WARNING: deploy.sh failed — it may be running stale code." >&2
+    fi
+  else
+    echo "==> Skipping Pi deploy — already confirmed unreachable above." >&2
   fi
 fi
 
@@ -304,7 +319,7 @@ remote_shell() {
 # ---------------------------------------------------------------------------
 # Window 1: the NUC — hardware session and inference stack, one pane each.
 # Split because bringup is the piece that crashes mid-session and needs restarting on its own
-# (docs/crb-fr3-inference.md, "TF lookup fails"), which is also why they are two launch files.
+# (docs/crb-fr3-inference.md, "When it doesn't come up"), which is also why they are two launch files.
 # ---------------------------------------------------------------------------
 read -r NUC_BRINGUP_PANE NUC_WINDOW < <(
   tmux new-session -d -P -F '#{pane_id} #{window_id}' -s "$SESSION" -n nuc -c "$REPO_DIR")
@@ -348,7 +363,7 @@ fi
 if [ "$NUC_INFER_FRESH" = 1 ]; then
   tmux send-keys -t "$NUC_INFER_PANE" "cd $NUC_REPO" C-m
   pretype "$NUC_INFER_PANE" \
-    "$(logged fr3_inference 'ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true execute_arm:=true max_velocity_scaling:=1.0')"
+    "$(logged fr3_inference 'ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true execute_arm:=true')"
 fi
 
 # --- Pi: RUN the stream. Stateless, moves nothing, and the laptop warns without it.
@@ -395,6 +410,13 @@ Session '$SESSION' is up. Order to press Enter in:
 
 Send the arm home (needs pane 2 running; MOVES THE ARM even in plan-only mode):
   ros2 service call /polyumi/home std_srvs/srv/Trigger "{}"
+
+Gripper only, for a first run on the hand — edit pane 2's line down to:
+  ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true
+Then, from the laptop pane, the acceptance test (MOVES THE FINGERS):
+  ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper_chirp
+franka_hand_node logs every move(width, speed) it plans in pane 2, at 0.7-1.7 Hz.
+That ceiling is the hand, not a fault: see docs/crb-fr3-inference.md, "Gripper problems".
 
 tmux, minimum viable:
   C-b n / C-b p    next / previous window        C-b o     next pane

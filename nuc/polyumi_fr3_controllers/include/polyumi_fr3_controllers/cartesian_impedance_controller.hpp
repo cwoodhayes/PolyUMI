@@ -27,10 +27,9 @@ namespace polyumi_fr3_controllers {
 /**
  * Streaming Cartesian impedance controller for the FR3, driven by absolutely-timed pose chunks.
  *
- * This is PolyUMI's on-arm executor. It replaces plan-then-execute (`fr3_moveit_bridge` calling
- * `compute_cartesian_path` + `ExecuteTrajectory`), which started every action chunk from rest,
- * stopped at its end, and discarded the policy's `dt` timeline — costing ~0.6 s of latency and all
- * compliance.
+ * This is PolyUMI's on-arm executor: the only thing that drives the arm from a policy chunk. It
+ * splices consecutive chunks on their own absolute waypoint times, so the arm neither starts from
+ * rest nor stops at a chunk boundary, and the policy's `dt` timeline survives to the joint level.
  *
  * Architecture, following UMI:
  *
@@ -48,6 +47,14 @@ namespace polyumi_fr3_controllers {
  * The control point is `polyumi_tcp`, NOT franka's `O_T_EE` (which is `fr3_hand_tcp`, verified on
  * hardware). Both the measured pose and the Jacobian are moved onto it at activation using a TF
  * lookup, so `nuc/tcp_calib.py` stays the single definition of that frame.
+ *
+ * Torque, and not `franka_hardware`'s native `cartesian_pose` interface, which looks like the
+ * direct analogue of UMI's `update_desired_ee_pose`: under it libfranka hardcodes
+ * `ControllerMode::kJointImpedance` (`robot.cpp`), whose gains are stiffness-only with no damping
+ * knob at all. Contact tasks need a real Cartesian mass-spring-damper. That interface also applies
+ * no continuity safety net (the rate limiter and low-pass filter are hardcoded off), so nothing
+ * downstream will catch a discontinuity for us either way — hence the interpolator is mandatory
+ * and activation MUST seed from the measured pose.
  */
 class CartesianImpedanceController : public controller_interface::ControllerInterface {
  public:
