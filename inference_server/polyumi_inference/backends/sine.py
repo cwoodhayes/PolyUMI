@@ -18,9 +18,9 @@ import os
 
 import numpy as np
 
+from polyumi_inference.contract import AGENT_POS_DIM
 from polyumi_inference.types import ActionChunk, Observation
 
-AGENT_POS_DIM = 8  # [x, y, z, qx, qy, qz, qw, gripper_width]
 OSCILLATION_AMPLITUDE_M = 0.05
 OSCILLATION_PERIOD_STEPS = 20  # full cycle over this many /predict calls
 # Gripper swing, in the same units as the training data: metres of opening from fully closed, so
@@ -30,8 +30,7 @@ OSCILLATION_PERIOD_STEPS = 20  # full cycle over this many /predict calls
 GRIPPER_OSCILLATION_AMPLITUDE_M = 0.04
 DEFAULT_HOME_POSE = '0.56 0.13 0.25 -1 0 0 0 0.05'  # xyz qxqyqzqw gripper
 # Sanity bound on the home gripper width. The Franka Hand tops out near 0.0817 m and the handheld
-# gripper's tags separate to ~0.1 m, so anything past this is a units error (this default used to
-# read 0.4 -- 400 mm -- which went unnoticed only because the width was being dropped downstream).
+# gripper's tags separate to ~0.1 m, so anything past this is a units error.
 MAX_PLAUSIBLE_GRIPPER_M = 0.2
 #: The horizon a trained checkpoint emits. Matched here so the dummy's chunks are the same length
 #: the client will see in production, which is what the stale-action arithmetic is tuned against.

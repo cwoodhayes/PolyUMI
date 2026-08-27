@@ -383,12 +383,10 @@ class PolicyClientNode(Node):
             callback_group=MutuallyExclusiveCallbackGroup(),
         )
 
-        # Inference runs on its own thread, never in the timer callback. A round trip is several
-        # control periods long, so calling it inline froze the whole loop: the tick that issued the
-        # request held the callback group for its entire duration, and every tick that landed
-        # inside it was dropped outright — the observation buffer stopped filling too, so the
-        # window handed to the next inference was no longer dt-spaced. The timer now only assembles
-        # an observation and leaves it in a one-slot mailbox.
+        # Inference runs on its own thread, never in the timer callback: a round trip is several
+        # control periods long, and issuing it inline would hold the exclusive callback group for
+        # that whole duration, dropping every tick (and stalling the observation buffer) until it
+        # returns. The timer only assembles an observation and leaves it in a one-slot mailbox.
         #
         # One slot, newest wins, which buys two properties at once. At most one request is ever in
         # flight, because the worker is single-threaded — matching the server's single uvicorn

@@ -1,14 +1,13 @@
 """
 The client and the server, tested against each other.
 
-This is the pairing that did not exist before this library: a real :class:`PolicyClient` puts the
-exact bytes the ROS node puts on the wire, and the exact server code a checkpoint runs behind
-decodes them -- in one process, with no socket and no second interpreter. It used to be kept honest
-by a test that compared three copies of a file for byte equality.
+A real :class:`PolicyClient` puts the exact bytes the ROS node puts on the wire, and the exact
+server code a checkpoint runs behind decodes them -- in one process, with no socket and no second
+interpreter.
 
 Everything here goes through :func:`create_app`, so it holds for *every* backend. That is the point:
 ``dummy_server`` is the bringup path, so a frame it accepts must be one a checkpoint would also
-accept, and the two now share the code that decides.
+accept, and the two share the code that decides.
 """
 
 import numpy as np
@@ -218,9 +217,8 @@ def test_the_dummy_refuses_exactly_what_a_checkpoint_would():
     """
     The bringup server and the real one share the app, so their refusals cannot drift.
 
-    Previously this was two hand-matched listings of the same checks in two repos, and a test that
-    compared file bytes. Here the same frames go to the sine backend and to a stand-in for a
-    checkpoint, and the verdicts have to match.
+    The same frames go to the sine backend and to a stand-in for a checkpoint, and the verdicts
+    have to match.
     """
     import os
     from unittest.mock import patch

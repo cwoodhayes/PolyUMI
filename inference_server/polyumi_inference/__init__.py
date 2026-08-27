@@ -2,7 +2,8 @@
 The PolyUMI inference protocol, and both ends of it.
 
 One library owns the wire format, the client that speaks it, and the server app that answers --
-because the three are one contract and used to be three copies of a file. The ROS-side
+because the three are one contract, and the two ends cannot disagree about a contract they share.
+The ROS-side
 ``policy_client_node`` imports the client; the dummy server and the diffusion-policy fork's
 ``serve_policy.py`` are backends behind :func:`~polyumi_inference.server.create_app`.
 

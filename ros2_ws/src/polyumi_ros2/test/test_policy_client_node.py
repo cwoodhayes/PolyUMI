@@ -976,44 +976,41 @@ def test_submit_keeps_only_the_newest_observation(make_node):
     """
     A superseded observation is dropped, never queued.
 
-    By the time a backlog could deliver it, _n_stale_actions would discard every action the
-    chunk contained — so queueing buys a round trip's worth of GPU time for nothing.
-
-    The worker is held inside a request for the duration; otherwise it drains the slot between
-    the two submissions and the test races it.
+    _post_and_act only ever sees the newest observation still pending once the worker frees up.
+    By the time a backlog could deliver a queued one, _n_stale_actions would discard every action
+    the chunk contained — so queueing would buy a round trip's worth of GPU time for nothing.
     """
     node = make_node(control_hz=10.0)
-    started = threading.Event()
-    release = threading.Event()
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_done = threading.Event()
     sent = []
 
     def _slow_post(payload, t_obs):
         sent.append(payload)
-        started.set()
-        release.wait(timeout=5.0)
+        if payload == {'in_flight': True}:
+            first_started.set()
+            release_first.wait(timeout=5.0)
+        else:
+            second_done.set()
 
     with patch.object(node, '_post_and_act', side_effect=_slow_post):
         node._submit_inference({'in_flight': True}, _t(100.0))
-        assert started.wait(timeout=5.0), 'worker never picked up the observation'
+        assert first_started.wait(timeout=5.0), 'worker never picked up the observation'
 
+        # Both land while the worker is still busy with 'in_flight'; only the newest one may
+        # still be waiting when it frees up.
         node._submit_inference({'first': True}, _t(100.1))
         node._submit_inference({'second': True}, _t(100.2))
-        with node._pending_cv:
-            pending, _ = node._pending
 
-        release.set()
+        release_first.set()
+        assert second_done.wait(timeout=5.0), 'worker never picked up the newest observation'
 
-    assert pending == {'second': True}
-    assert sent == [{'in_flight': True}]
+    assert sent == [{'in_flight': True}, {'second': True}]
 
 
 def test_tick_does_not_block_on_the_request(make_node):
-    """
-    The control tick hands off and returns; the request runs on the worker thread.
-
-    Issuing it inline froze the whole loop for the round trip, dropping every tick that landed
-    inside it — the observation buffer included, so the next window was no longer dt-spaced.
-    """
+    """The control tick hands off and returns; the request runs on the worker thread, not here."""
     node = make_node(control_hz=10.0)
     started = threading.Event()
     release = threading.Event()

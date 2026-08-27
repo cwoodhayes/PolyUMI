@@ -3,8 +3,7 @@ Drive a real :class:`~polyumi_inference.client.PolicyClient` against a real app,
 
 This is why :class:`~polyumi_inference.client.Transport` is a seam. With it, a test can send the
 exact bytes the ROS node sends and have them decoded by the exact code the server runs, with no
-socket, no port, and no second process -- which is the one pairing that was previously untestable,
-and the one that used to be kept honest by comparing files.
+socket, no port, and no second process.
 
 Test-only: it imports Starlette's ``TestClient``, which the production install does not have.
 """

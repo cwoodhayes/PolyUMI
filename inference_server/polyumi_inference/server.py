@@ -6,8 +6,8 @@ contract, turning a bad frame into a 422, truncating the chunk, and the request 
 then only a :class:`PolicyBackend`: a sine oscillator for bringup, a diffusion checkpoint in
 production. Neither writes a route.
 
-That split is what makes "the dummy must refuse exactly what a checkpoint refuses" structural. It
-used to be a comment in two files and a test that compared them.
+That split is what makes "the dummy must refuse exactly what a checkpoint refuses" structural
+rather than a convention two files have to keep matching by hand.
 """
 
 from __future__ import annotations
