@@ -58,9 +58,15 @@ Velocity scaling is only applicable if the arm is being controlled by moveit, wh
 ## 3. Inference server
 
 The GPU box (`lamb`) is on the far end of a dedicated cable, not on campus wifi, so it is
-addressed by IP: `129.105.69.10`, port 8002. `./deploy_gpu.sh` pushes this working copy's fork
-and entrypoints to it — it is deliberately NOT part of `fr3_session.sh`'s auto-deploy, because
-the GPU box tracks its own training branch.
+addressed by IP: `129.105.69.10`, port 8002. `./deploy_gpu.sh` pushes this working copy's fork,
+entrypoints and `inference_server/` to it — it is deliberately NOT part of `fr3_session.sh`'s
+auto-deploy, because the GPU box tracks its own training branch.
+
+The dummy and the real server are the **same app** — `create_app` in the `polyumi_inference`
+library (`inference_server/`), which the ROS client imports too — with different backends. So a
+frame the dummy accepts is one a checkpoint accepts, and a refusal you see during bringup is the
+one you would have seen in production. If you change anything about the request, change it there:
+both ends and both servers move together.
 
 ```bash
 # real policy, on the GPU box (see training-instructions.md):

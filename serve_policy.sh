@@ -21,7 +21,6 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FORK_DIR="${REPO_ROOT}/external/polyumi_diffusion_policy"
 
 IMAGE="${IMAGE:-polyumi-dp}"
 CKPT="${CKPT:?set CKPT=/abs/path/to/<name>.ckpt (a trained checkpoint from train_policy.sh)}"
@@ -52,8 +51,9 @@ fi
 
 mkdir -p "${HF_CACHE_DIR}"
 
-echo ">> building ${IMAGE} from ${FORK_DIR}"
-docker build -t "${IMAGE}" "${FORK_DIR}"
+# shellcheck source=build_policy_image.sh
+source "${REPO_ROOT}/build_policy_image.sh"
+build_policy_image "${REPO_ROOT}" "${IMAGE}"
 
 echo ">> serving (checkpoint: ${CKPT}) on http://0.0.0.0:${PORT}"
 # The checkpoint file is mounted directly (its filename contains '=', which is fine for a bind

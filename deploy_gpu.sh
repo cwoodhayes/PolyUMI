@@ -43,7 +43,19 @@ rsync -av --delete --mkpath \
     "${GPU_HOST}:${GPU_REPO}/external/"
 
 rsync -av --mkpath \
-    train_policy.sh serve_policy.sh \
+    train_policy.sh serve_policy.sh build_policy_image.sh \
+    "${GPU_HOST}:${GPU_REPO}/"
+
+# The shared protocol library and the Dockerfile that layers it in. Both ends of the inference
+# protocol import polyumi_inference -- the ROS client and the policy server -- so the GPU box needs
+# the same working copy the laptop has, not a copy of it.
+rsync -av --delete --mkpath \
+    --exclude='.venv/' \
+    --exclude='*.pyc' \
+    --exclude='__pycache__/' \
+    --exclude='*.egg-info/' \
+    --exclude='.pytest_cache/' \
+    inference_server docker \
     "${GPU_HOST}:${GPU_REPO}/"
 
 rsync -av --delete --mkpath \
@@ -58,6 +70,9 @@ ssh "${GPU_HOST}" "
     cd ${GPU_REPO}/external/polyumi_diffusion_policy
     test -f serve_policy.py && test -f serve_obs.py
     echo '    fork present'
+    test -f ${GPU_REPO}/inference_server/polyumi_inference/wire.py
+    test -f ${GPU_REPO}/docker/polyumi_inference.Dockerfile
+    echo '    polyumi_inference present'
 "
 
 echo "==> Done. Next:"

@@ -35,7 +35,6 @@ from collections import deque
 
 import cv2
 import numpy as np
-import requests
 import rclpy
 import rclpy.time
 import tf2_ros
@@ -55,8 +54,10 @@ from polyumi_ros2.camera_preproc import (
     crop_to_source_aspect,
     discarded_bar_intensity,
 )
+from polyumi_inference import Observation, TransportError, WireFormatError
+from polyumi_inference.client import PolicyClient
+
 from polyumi_ros2.gripper_map import policy_to_robot_width, robot_to_policy_width
-from polyumi_ros2.obs_wire import pack_observation
 from polyumi_ros2.target_chunk import TargetChunkPublisher, Wire, pose_array
 
 # Name used for the single "joint" in the gripper trajectory chunk. Deliberately NOT a real joint
@@ -343,15 +344,16 @@ class PolicyClientNode(Node):
             self._preview_pub = self.create_publisher(PoseArray, '/polyumi/target_poses_preview', 10)
             self._gripper_preview_pub = self.create_publisher(JointTrajectory, '/polyumi/target_gripper_preview', 10)
 
-        # Episode-start /reset. The server needs the episode-start EEF pose for
-        # robot0_eef_rot_axis_angle_wrt_start; sent once on the first full-buffer tick. The reset
-        # URL is derived from the predict URL's base so one param configures both endpoints.
-        self._reset_url = self._url.split('/predict_cartesian')[0] + '/reset'
+        # The protocol lives in polyumi_inference, which the inference server imports too: one
+        # library owns the frame format, this client, and the server app that answers. The client
+        # derives /reset and /health from the predict URL, so one parameter configures all three,
+        # and holds a persistent connection for the life of the node.
+        #
+        # Episode-start /reset: the server needs the episode-start EEF pose for
+        # robot0_eef_rot_axis_angle_wrt_start; sent once on the first full-buffer tick.
+        self._client = PolicyClient(self._url, timeout_s=self._post_timeout_s)
+        self._reset_url = self._client.reset_url
         self._episode_reset_done = False
-
-        # One session for the life of the node, so every request rides an already-open connection.
-        # See _post for why that matters at this payload size.
-        self._session = requests.Session()
 
         # Diagnostics. Always on: ten Float32s at the control rate is nothing next to the image
         # traffic already on the wire, and the failures these catch are exactly the ones you only
@@ -393,7 +395,7 @@ class PolicyClientNode(Node):
         # worker, which cannot serve two forward passes concurrently anyway. And an observation
         # superseded before the worker picks it up is discarded rather than queued: by the time a
         # backlog could deliver it, _n_stale_actions would drop the whole chunk it produced.
-        self._pending: tuple[bytes, rclpy.time.Time] | None = None
+        self._pending: tuple[Observation, rclpy.time.Time] | None = None
         self._pending_cv = threading.Condition()
         self._stopping = False
         self._infer_thread = threading.Thread(target=self._inference_worker, name='policy_infer', daemon=True)
@@ -694,23 +696,23 @@ class PolicyClientNode(Node):
         if not infer_now:
             return
 
-        # --- 4. Serialize and hand to the inference worker ---
-        # One binary frame per request: a JSON header naming each channel's dtype/shape/offset,
-        # then the raw bytes. Channels carry the dataset's own names, so a future finger camera or
-        # contact mic is another entry here rather than a new wire shape. See obs_wire.
+        # --- 4. Assemble the observation and hand it to the inference worker ---
+        # Channels carry the dataset's own names, so a future finger camera or contact mic is
+        # another entry here rather than a new request shape. Serialization is the client's, so
+        # this side never touches bytes.
         #
         # Images stay uint8 all the way from _image_cb: that is the dtype the dataset stores, and
         # the server's /255 reproduces the old float32 payload exactly at a quarter of the bytes.
-        body = pack_observation(
-            {
-                'camera0_rgb': np.stack([obs[0] for obs in self._obs_buffer]),
-                'agent_pos': np.stack([obs[1] for obs in self._obs_buffer]),
+        obs = Observation(
+            channels={
+                'camera0_rgb': np.stack([entry[0] for entry in self._obs_buffer]),
+                'agent_pos': np.stack([entry[1] for entry in self._obs_buffer]),
             },
             n_obs_steps=self._n_obs_steps,
             n_action_steps=self._n_action_steps,
         )
         # t_obs: when this frame was actually captured, i.e. the instant action[0] targets.
-        self._submit_inference(body, image_stamp - Duration(seconds=self._latency['gopro']))
+        self._submit_inference(obs, image_stamp - Duration(seconds=self._latency['gopro']))
 
     def _lookup_agent_pos(self, image_stamp: rclpy.time.Time) -> np.ndarray | None:
         """
@@ -882,60 +884,27 @@ class PolicyClientNode(Node):
         total_latency = elapsed_since_obs + latency_act
         return max(0, math.ceil(total_latency / self._action_dt))
 
-    def _post(self, url: str, **kwargs) -> dict | None:
-        """
-        POST to url through the persistent session and return the parsed reply, or None (logged).
-
-        The session, rather than ``urllib.request.urlopen``, because urlopen opens a fresh
-        connection per call: on a several-hundred-kilobyte body that costs a TCP handshake plus a
-        slow-start ramp every single inference, with the window reopening from the initial ~14 kB
-        before the request can even finish uploading. One warm connection for the life of the node
-        instead.
-
-        :param kwargs: passed to ``requests``, so callers choose ``json=`` or ``data=``.
-        """
-        try:
-            resp = self._session.post(url, timeout=self._post_timeout_s, **kwargs)
-            resp.raise_for_status()
-            return resp.json()
-        except requests.RequestException as e:
-            # A 4xx body carries the server's reason (a malformed frame, a missing channel), and
-            # that reason is the whole diagnostic — without it this is just "422".
-            detail = ''
-            if getattr(e, 'response', None) is not None:
-                detail = f' — {e.response.text[:500]}'
-            self.get_logger().error(f'POST {url} failed: {e}{detail}')
-        except Exception as e:
-            self.get_logger().error(f'POST {url} returned an unreadable response: {e}')
-        return None
-
-    def _http_post_json(self, url: str, payload: dict) -> dict | None:
-        """POST a JSON document (the episode /reset) and return the parsed reply, or None."""
-        return self._post(url, json=payload)
-
-    def _http_post_frame(self, url: str, body: bytes) -> dict | None:
-        """POST a packed observation frame (see obs_wire) and return the parsed reply, or None."""
-        return self._post(url, data=body, headers={'Content-Type': 'application/octet-stream'})
-
     def _reset_episode(self, agent_pos: np.ndarray) -> None:
         """Send the episode-start pose to the server's /reset once; retried each tick until it lands."""
-        result = self._http_post_json(self._reset_url, {'agent_pos': agent_pos.tolist()})
-        if result is not None:
-            self._episode_reset_done = True
-            self.get_logger().info(f'episode /reset sent (start pose set): {self._reset_url}')
-        else:
+        try:
+            self._client.reset(agent_pos)
+        except TransportError as e:
+            self.get_logger().error(str(e))
             self._warn_throttled('episode /reset failed; server will approximate wrt_start with the current pose')
+            return
+        self._episode_reset_done = True
+        self.get_logger().info(f'episode /reset sent (start pose set): {self._reset_url}')
 
-    def _submit_inference(self, body: bytes, t_obs: rclpy.time.Time) -> None:
+    def _submit_inference(self, obs: Observation, t_obs: rclpy.time.Time) -> None:
         """
         Leave an observation for the inference worker, replacing any it has not started yet.
 
-        :param body: packed request frame for /predict_cartesian/ (see obs_wire).
+        :param obs: the observation window to run inference on.
         :param t_obs: instant the observation was captured.
         """
         with self._pending_cv:
             superseded = self._pending is not None
-            self._pending = (body, t_obs)
+            self._pending = (obs, t_obs)
             self._pending_cv.notify()
         if superseded:
             # The worker is still inside a round trip that started at least one stride ago. Worth
@@ -961,16 +930,16 @@ class PolicyClientNode(Node):
                     self._pending_cv.wait()
                 if self._stopping:
                     return
-                body, t_obs = self._pending
+                obs, t_obs = self._pending
                 self._pending = None
             try:
-                self._post_and_act(body, t_obs)
+                self._post_and_act(obs, t_obs)
             except Exception as e:  # noqa: BLE001 - see the docstring
                 self.get_logger().error(f'Inference worker error (loop continues): {e!r}')
 
     def destroy_node(self):
         """
-        Stop the inference worker and close the HTTP session before tearing the node down.
+        Stop the inference worker and close the HTTP client before tearing the node down.
 
         Written to tolerate a half-built node: __init__ can raise partway (an unknown ``wire``
         does, deliberately), and a teardown that then raised AttributeError would bury the real
@@ -986,26 +955,30 @@ class PolicyClientNode(Node):
             # Bounded by the request timeout plus slack: the worker may be mid-round-trip, and
             # that request cannot be cancelled, only waited out.
             thread.join(timeout=self._post_timeout_s + 1.0)
-        session = getattr(self, '_session', None)
-        if session is not None:
-            session.close()
+        client = getattr(self, '_client', None)
+        if client is not None:
+            client.close()
         return super().destroy_node()
 
-    def _post_and_act(self, body: bytes, t_obs: rclpy.time.Time) -> None:
+    def _post_and_act(self, obs: Observation, t_obs: rclpy.time.Time) -> None:
         """
-        POST one observation frame, log the returned action, and optionally execute it.
+        Run one observation through the policy, log the returned action, and optionally execute it.
 
-        :param body: packed request frame for /predict_cartesian/ (see obs_wire).
+        :param obs: the observation window to send.
         :param t_obs: instant the observation was captured, used to drop stale actions.
         """
         t_sent = time.monotonic()
-        result = self._http_post_frame(self._url, body)
-        if result is None:
+        try:
+            chunk = self._client.predict(obs)
+        except (TransportError, WireFormatError) as e:
+            # The client raises rather than returning nothing, so a refused frame and an empty
+            # chunk cannot be confused at this call site. The message carries the server's own
+            # words: on a 422 that is the whole diagnostic.
+            self.get_logger().error(str(e))
             return
         latency_inference = time.monotonic() - t_sent
-        actions = result['actions']
-        model_ms = result.get('model_ms')
-        latency_model_s = None if model_ms is None else float(model_ms) * 1e-3
+        actions = chunk.actions
+        latency_model_s = None if chunk.model_ms is None else chunk.model_ms * 1e-3
 
         # Viz-only preview: publish the full commanded chunk (before the stale-drop below) so the
         # motion is visible in Foxglove/RViz even when execute_motion is off or the whole chunk is
@@ -1060,7 +1033,9 @@ class PolicyClientNode(Node):
         self._diag('n_published_arm', len(arm_actions))
         self._diag('n_published_gripper', len(grip_actions))
 
-        if not arm_actions and not grip_actions:
+        # len(), not truthiness: the chunk is a numpy array now, and bool() on a multi-element
+        # array raises rather than answering "is it empty".
+        if len(arm_actions) == 0 and len(grip_actions) == 0:
             self._warn_throttled(
                 f'Whole action chunk stale for both devices: dropped all {n_received} actions '
                 f'(observation is {age_s:.3f}s old, of which inference={latency_inference:.3f}s; '
@@ -1071,7 +1046,7 @@ class PolicyClientNode(Node):
             return
 
         # Log against whichever device still has waypoints; the faster one outlives the other.
-        first = (arm_actions or grip_actions)[0]
+        first = arm_actions[0] if len(arm_actions) else grip_actions[0]
         # Log the width in both spaces: policy units are what the model emitted, robot units are
         # what the hand will be commanded. A surprising gap between them is the offset being wrong.
         grip_robot = policy_to_robot_width(float(first[7]), self._gripper_min_width_m, self._gripper_max_width_m)
@@ -1092,7 +1067,7 @@ class PolicyClientNode(Node):
         # that arrive mid-motion. The gripper half goes out on its own topic and its own slice.
         # Each is published only if it still has waypoints, so a chunk too stale for the arm can
         # still drive the hand rather than stalling both.
-        if self._target_pub is not None and arm_actions:
+        if self._target_pub is not None and len(arm_actions):
             # Anchored at t_obs minus latency.arm_exec, so every waypoint is commanded that far
             # ahead of when it should be reached — UMI's per-waypoint `target_time -
             # robot_action_latency` (exec_actions in bimanual_umi_env.py), folded into the anchor
@@ -1110,7 +1085,7 @@ class PolicyClientNode(Node):
                 first_index=n_stale_arm,
                 stamp=(t_obs - Duration(seconds=self._latency_act)).to_msg(),
             )
-        if self._gripper_pub is not None and grip_actions:
+        if self._gripper_pub is not None and len(grip_actions):
             self._gripper_pub.publish(
                 self._actions_to_gripper_trajectory(grip_actions, t_obs, first_index=n_stale_grip)
             )

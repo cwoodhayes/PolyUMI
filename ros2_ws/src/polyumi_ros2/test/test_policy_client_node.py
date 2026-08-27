@@ -21,8 +21,16 @@ from rclpy.parameter import Parameter
 from rclpy.time import Time
 from sensor_msgs.msg import Image, JointState
 
-from polyumi_ros2.obs_wire import unpack_observation
+from polyumi_inference import ActionChunk, Observation, TransportError
 from polyumi_ros2.policy_client_node import PolicyClientNode
+
+#: Stand-in for the tests that drive _post_and_act directly. Its contents never reach a server --
+#: those tests mock the client -- but it has to be the type the method now takes.
+_OBS = Observation(
+    channels={'camera0_rgb': np.zeros((2, 4, 4, 3), dtype=np.uint8), 'agent_pos': np.zeros((2, 8))},
+    n_obs_steps=2,
+    n_action_steps=8,
+)
 
 BASE_FRAME = 'fr3_link0'
 EEF_FRAME = 'polyumi_tcp'
@@ -327,25 +335,28 @@ def test_reset_url_derives_from_predict_url(make_node):
     assert node2._reset_url == 'http://sheep:8000/reset'
 
 
-def test_reset_episode_posts_start_pose_once(make_node):
-    """_reset_episode POSTs the given pose to the reset URL and latches _episode_reset_done."""
+def test_reset_episode_sends_start_pose_once(make_node):
+    """
+    _reset_episode hands the given pose to the client and latches _episode_reset_done.
+
+    The URL and the JSON shaping belong to PolicyClient and are tested there; what this node owns
+    is sending the pose exactly once per episode.
+    """
     node = make_node(inference_server_url='http://sheep:8000/predict_cartesian/')
     agent_pos = np.array([0.4, 0.0, 0.3, 0.0, 0.0, 0.0, 1.0, 0.0])
 
-    with patch.object(node, '_http_post_json', return_value={'status': 'ok'}) as post:
+    with patch.object(node._client, 'reset', return_value={'status': 'ok'}) as post:
         node._reset_episode(agent_pos)
 
     assert node._episode_reset_done is True
     post.assert_called_once()
-    url, body = post.call_args[0]
-    assert url == 'http://sheep:8000/reset'
-    assert body == {'agent_pos': agent_pos.tolist()}
+    assert np.array_equal(post.call_args[0][0], agent_pos)
 
 
 def test_reset_episode_not_latched_on_failure(make_node):
     """A failed /reset leaves the flag unset so the next tick retries."""
     node = make_node()
-    with patch.object(node, '_http_post_json', return_value=None):
+    with patch.object(node._client, 'reset', side_effect=TransportError('nope', url='u')):
         node._reset_episode(np.zeros(8))
     assert node._episode_reset_done is False
 
@@ -365,11 +376,11 @@ def test_preview_published_full_chunk_without_execution(make_node):
     now = _t(100.0)
     t_obs = _t(98.0)  # 2s old -> every action is stale, so the chunk is dropped for execution
     with (
-        patch.object(node, '_http_post_frame', return_value={'actions': actions}),
+        patch.object(node._client, 'predict', return_value=ActionChunk(actions)),
         patch.object(node, 'get_clock', return_value=_FakeClock(now)),
         patch.object(node._preview_pub, 'publish') as preview_pub,
     ):
-        node._post_and_act(body=b'', t_obs=t_obs)
+        node._post_and_act(obs=_OBS, t_obs=t_obs)
 
     preview_pub.assert_called_once()
     msg = preview_pub.call_args[0][0]
@@ -722,12 +733,12 @@ def test_gripper_and_pose_chunks_stay_index_aligned(make_node):
     t_obs = _t(99.75)  # partially stale: some leading actions get dropped
 
     with (
-        patch.object(node, '_http_post_frame', return_value={'actions': actions}),
+        patch.object(node._client, 'predict', return_value=ActionChunk(actions)),
         patch.object(node, 'get_clock', return_value=_FakeClock(now)),
         patch.object(node._target_pub, 'publish') as pose_pub,
         patch.object(node._gripper_pub, 'publish') as grip_pub,
     ):
-        node._post_and_act(body=b'', t_obs=t_obs)
+        node._post_and_act(obs=_OBS, t_obs=t_obs)
 
     poses = pose_pub.call_args[0][0]
     grip_msg = grip_pub.call_args[0][0]
@@ -780,10 +791,10 @@ def test_diagnostics_report_zero_published_when_the_chunk_is_all_stale(make_node
     actions = _actions_with_grip([0.02] * 8)
 
     with (
-        patch.object(node, '_http_post_frame', return_value={'actions': actions}),
+        patch.object(node._client, 'predict', return_value=ActionChunk(actions)),
         patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))),
     ):
-        node._post_and_act(body=b'', t_obs=_t(98.0))  # 2s old: stale for both devices
+        node._post_and_act(obs=_OBS, t_obs=_t(98.0))  # 2s old: stale for both devices
 
     values = _diag_values(captured)
     assert values['n_published_arm'] == 0
@@ -804,10 +815,10 @@ def test_diagnostics_report_what_each_device_actually_got(make_node):
     actions = _actions_with_grip([0.02] * 8)
 
     with (
-        patch.object(node, '_http_post_frame', return_value={'actions': actions}),
+        patch.object(node._client, 'predict', return_value=ActionChunk(actions)),
         patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))),
     ):
-        node._post_and_act(body=b'', t_obs=_t(99.9))
+        node._post_and_act(obs=_OBS, t_obs=_t(99.9))
 
     values = _diag_values(captured)
     # 0.1s obs age: arm drops ceil(0.4/0.1)=4, gripper ceil(0.2/0.1)=2.
@@ -825,11 +836,11 @@ def test_gripper_preview_publishes_full_chunk(make_node):
     actions = _actions_with_grip([0.02] * 8)
     now = _t(100.0)
     with (
-        patch.object(node, '_http_post_frame', return_value={'actions': actions}),
+        patch.object(node._client, 'predict', return_value=ActionChunk(actions)),
         patch.object(node, 'get_clock', return_value=_FakeClock(now)),
         patch.object(node._gripper_preview_pub, 'publish') as grip_preview,
     ):
-        node._post_and_act(body=b'', t_obs=_t(98.0))  # fully stale
+        node._post_and_act(obs=_OBS, t_obs=_t(98.0))  # fully stale
 
     grip_preview.assert_called_once()
     assert len(grip_preview.call_args[0][0].points) == 8
@@ -859,11 +870,11 @@ def test_arm_chunk_is_anchored_at_t_obs_minus_arm_exec(make_node):
     actions = _actions_with_grip([0.02] * 8)
 
     with (
-        patch.object(node, '_http_post_frame', return_value={'actions': actions}),
+        patch.object(node._client, 'predict', return_value=ActionChunk(actions)),
         patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))),
         patch.object(node._target_pub, 'publish') as pose_pub,
     ):
-        node._post_and_act(body=b'', t_obs=_t(99.9))
+        node._post_and_act(obs=_OBS, t_obs=_t(99.9))
 
     kwargs = pose_pub.call_args[1]
     stamp = kwargs['stamp'].sec + kwargs['stamp'].nanosec * 1e-9
@@ -948,17 +959,17 @@ def test_tick_packs_the_channels_the_policy_needs(make_node):
         node._control_tick()
 
     assert len(captured) == 1
-    channels, header = unpack_observation(captured[0])
+    obs = captured[0]
 
-    assert sorted(channels) == ['agent_pos', 'camera0_rgb']
-    assert channels['camera0_rgb'].dtype == np.uint8
-    assert channels['camera0_rgb'].shape == (2, 224, 224, 3)
-    assert channels['agent_pos'].shape == (2, 8)
-    assert header['n_obs_steps'] == 2
-    assert header['n_action_steps'] == node._n_action_steps
+    assert obs.names() == ['agent_pos', 'camera0_rgb']
+    assert obs['camera0_rgb'].dtype == np.uint8
+    assert obs['camera0_rgb'].shape == (2, 224, 224, 3)
+    assert obs['agent_pos'].shape == (2, 8)
+    assert obs.n_obs_steps == 2
+    assert obs.n_action_steps == node._n_action_steps
     # Raw bytes plus a small header. The float32-and-base64 form this replaced was 1.6 MB; the
     # bound is loose on purpose so it survives a header formatting change.
-    assert len(captured[0]) < 350_000
+    assert len(obs.to_frame()) < 350_000
 
 
 def test_submit_keeps_only_the_newest_observation(make_node):
