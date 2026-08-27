@@ -282,3 +282,20 @@ The `pi` extra pulls in the Raspberry Pi hardware-only dependencies (`lgpio`, `g
 **Tip for development:** add the `deploy.sh` invocation to `.vscode/tasks.json` as a build task so it runs with Ctrl+Shift+B.
 
 Run `polyumi-pi --help` for a full list of commands.
+
+# Citation
+
+If you just want to use PolyUMI's hardware designs + associated system software (i.e. the pi application), please cite the original workshop paper:
+
+```bibtex
+@inproceedings{hayes2026polyumi,
+  title     = {PolyUMI: Visual + Auditory + Tactile Manipulation Platform for Imitation Learning},
+  author    = {Hayes, Conor Wood},
+  booktitle = {IEEE ICRA 2026 Workshop on Contact-Rich Robotic Manipulation (CR2)},
+  year      = {2026},
+  url       = {https://openreview.net/forum?id=Ou39QMiCMP}
+}
+```
+
+If you wish to cite the full tactile learning system (including models, datasets, inference pipeline, etc),
+please let us know, as this will be released in an upcoming work.
