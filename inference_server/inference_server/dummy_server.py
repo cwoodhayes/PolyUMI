@@ -17,6 +17,7 @@ Usage:
 import base64
 import math
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import Annotated
 
@@ -57,6 +58,12 @@ class PredictResponse(BaseModel):
 
     actions: list[list[float]]
     n_action_steps: int
+    #: Wall time this process spent on the request, in ms. Carried so the dummy speaks the same
+    #: contract as serve_policy.py — policy_client_node plots the round trip split into server
+    #: and network, and a dummy that omitted the field would leave that plot blank during bringup.
+    server_total_ms: float | None = None
+    #: The "forward pass", in ms. Near zero here; the field exists for contract parity.
+    model_ms: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -110,12 +117,16 @@ def predict_cartesian(req: PredictRequest) -> PredictResponse:
     """Return an n_action_steps-long chunk of a sinusoidally oscillating EEF pose."""
     global _call_count
 
+    t_start = time.perf_counter()
+
     # Validate observation keys
     missing = REQUIRED_OBS_KEYS - req.observations.keys()
     if missing:
         raise HTTPException(status_code=422, detail=f'Missing observation keys: {missing}')
 
-    # Validate image: base64-encoded raw bytes + dtype/shape (see policy_client_node._control_tick)
+    # Validate image: base64-encoded raw bytes + dtype/shape, uint8 [To,H,W,3] in practice
+    # (see policy_client_node._control_tick). The dtype is honoured rather than assumed, so the
+    # dummy keeps accepting whatever the real server does.
     image = req.observations.get('image')
     if not isinstance(image, dict) or not {'dtype', 'shape', 'data'} <= image.keys():
         raise HTTPException(status_code=422, detail="image must be a dict with 'dtype', 'shape', 'data'")
@@ -165,7 +176,12 @@ def predict_cartesian(req: PredictRequest) -> PredictResponse:
         actions.append(target.tolist())
     _call_count += n_return
 
-    return PredictResponse(actions=actions, n_action_steps=n_return)
+    return PredictResponse(
+        actions=actions,
+        n_action_steps=n_return,
+        server_total_ms=(time.perf_counter() - t_start) * 1e3,
+        model_ms=0.0,
+    )
 
 
 # ---------------------------------------------------------------------------

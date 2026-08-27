@@ -96,6 +96,30 @@ Health and latency scalars are published one-per-topic under `/polyumi/diag/*` f
 Plot panel — `ros2 topic list | grep diag` for the set. **`n_published_arm` is the one to watch**:
 the higher the number the better (this is the number of actions we didn't have to discard due to latency in each chunk).
 
+### Reading the round trip
+
+`inference_latency_s` is the whole request, and on its own it cannot tell a busy GPU from a slow
+link. The server reports its own total on the wire, so two more topics split it:
+
+| Topic | What it is | What makes it grow |
+|---|---|---|
+| `inference_server_s` | Everything the server spent, from the bytes landing to the reply | GPU work; whoever else is on that box |
+| `inference_network_s` | The round trip minus the above | Serialization and the link — scales with the observation payload |
+
+The same split appears in the log line (`inference=NNNms = NN server + NN net`) and in the
+server's own access log (`... in NNN ms, model NN ms`).
+
+**The link is the thing to check first when `inference_network_s` is large.** The observation is
+~0.4 MB of base64 (`n_obs_steps` frames of 224x224x3 uint8), so the wire time is set entirely by
+how fast the laptop can push that. The laptop's USB ethernet adapter is an ASIX AX88772 — a USB
+2.0 Fast Ethernet part, hard-capped at 100 Mbit, which puts a floor of ~32 ms under every
+inference. `cat /sys/class/net/<iface>/speed` says which side you are on; a gigabit adapter takes
+that floor to ~3 ms and is the cheapest latency fix available.
+
+Sending the frames as `uint8` rather than `float32` is what got the payload to 0.4 MB — the
+`/255` happens server-side in `serve_obs.wire_to_obs_dict`, which is bit-identical, and the
+dataset stores `camera0_rgb` as uint8 anyway. Don't widen it again on the way out.
+
 ## Architecture on the NUC
 
 `fr3_bringup` owns the hardware: `franka_bringup` (controller_manager + the libfranka hardware

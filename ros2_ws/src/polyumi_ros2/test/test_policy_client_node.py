@@ -8,6 +8,8 @@ a bad stale count just moves the arm to the wrong waypoint — so they are pinne
 than left to hardware testing to notice.
 """
 
+import threading
+import time
 from unittest.mock import patch
 
 import numpy as np
@@ -17,7 +19,7 @@ from geometry_msgs.msg import TransformStamped
 from rclpy.clock import ClockType
 from rclpy.parameter import Parameter
 from rclpy.time import Time
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import Image, JointState
 
 from polyumi_ros2.policy_client_node import PolicyClientNode
 
@@ -403,10 +405,14 @@ def _drive_ticks(node, n_ticks: int) -> int:
 
     Bypasses the camera/TF plumbing (image cached, pose mocked, buffer pre-filled, reset
     latched) so the test isolates the stride gate alone: the only thing that varies tick to
-    tick is _inference_phase, so the count of _post_and_act calls is the inference cadence.
+    tick is _inference_phase, so the count of _submit_inference calls is the inference cadence.
+
+    _submit_inference is the seam, not _post_and_act: the tick's whole job is to decide and hand
+    off, and the request itself runs on another thread. Counting there would be counting the
+    worker's schedule as well as the stride.
     """
     now = _t(100.0)
-    node._latest_image = np.zeros((4, 4, 3), dtype=np.float32)
+    node._latest_image = np.zeros((4, 4, 3), dtype=np.uint8)
     node._latest_image_stamp = now
     # Pre-fill the obs buffer so every tick is a full-buffer tick (skips the fill-up ramp),
     # and latch the reset so the episode-start POST doesn't interfere.
@@ -419,7 +425,7 @@ def _drive_ticks(node, n_ticks: int) -> int:
     with (
         patch.object(node, 'get_clock', return_value=_FakeClock(now)),
         patch.object(node, '_lookup_agent_pos', return_value=fixed_pose),
-        patch.object(node, '_post_and_act', side_effect=lambda *a, **k: infer_calls.append(1)),
+        patch.object(node, '_submit_inference', side_effect=lambda *a, **k: infer_calls.append(1)),
     ):
         for _ in range(n_ticks):
             node._control_tick()
@@ -885,3 +891,119 @@ def test_unknown_wire_fails_fast(make_node):
     """A typo must not bring the node up publishing where nothing subscribes."""
     with pytest.raises(ValueError):
         make_node(control_hz=10.0, execute_motion=True, wire='multidoff')
+
+
+# ----------------------------------------------------------------------
+# Wire payload and the inference worker
+# ----------------------------------------------------------------------
+
+
+def _image_msg(width=64, height=48, encoding='rgb8'):
+    """Build a synthetic sensor_msgs/Image with a deterministic gradient."""
+    frame = np.tile(np.arange(width, dtype=np.uint8)[None, :, None], (height, 1, 3))
+    msg = Image()
+    msg.height, msg.width, msg.encoding, msg.step = height, width, encoding, width * 3
+    msg.data = frame.tobytes()
+    msg.header.stamp = _t(100.0).to_msg()
+    return msg
+
+
+def test_cached_frame_stays_uint8(make_node):
+    """
+    The wire carries uint8, not float32.
+
+    Widening to float32 before sending quadruples the request for no extra information — the
+    dataset stores camera0_rgb as uint8 — and the request is bandwidth-bound.
+    """
+    node = make_node(control_hz=10.0, image_width=32, image_height=32)
+    node._image_cb(_image_msg())
+
+    assert node._latest_image is not None
+    assert node._latest_image.dtype == np.uint8
+    assert node._latest_image.shape == (32, 32, 3)
+
+
+def test_payload_declares_uint8_and_stays_small(make_node):
+    """The serialized body must name the dtype it actually sent, and be the uint8-sized one."""
+    node = make_node(control_hz=10.0, n_obs_steps=2, image_width=224, image_height=224)
+    now = _t(100.0)
+    node._latest_image = np.zeros((224, 224, 3), dtype=np.uint8)
+    node._latest_image_stamp = now
+    node._episode_reset_done = True
+    for _ in range(node._n_obs_steps):
+        node._obs_buffer.append((node._latest_image, np.zeros(8)))
+
+    captured = {}
+    with (
+        patch.object(node, 'get_clock', return_value=_FakeClock(now)),
+        patch.object(node, '_lookup_agent_pos', return_value=np.zeros(8)),
+        patch.object(node, '_submit_inference', side_effect=lambda p, t: captured.update(p)),
+    ):
+        node._control_tick()
+
+    image = captured['observations']['image']
+    assert image['dtype'] == 'uint8'
+    assert image['shape'] == [2, 224, 224, 3]
+    # 2*224*224*3 bytes base64-encoded. The float32 form was four times this; the check is on the
+    # order of magnitude, not the exact length, so it survives a formatting change.
+    assert len(image['data']) < 600_000
+
+
+def test_submit_keeps_only_the_newest_observation(make_node):
+    """
+    A superseded observation is dropped, never queued.
+
+    By the time a backlog could deliver it, _n_stale_actions would discard every action the
+    chunk contained — so queueing buys a round trip's worth of GPU time for nothing.
+
+    The worker is held inside a request for the duration; otherwise it drains the slot between
+    the two submissions and the test races it.
+    """
+    node = make_node(control_hz=10.0)
+    started = threading.Event()
+    release = threading.Event()
+    sent = []
+
+    def _slow_post(payload, t_obs):
+        sent.append(payload)
+        started.set()
+        release.wait(timeout=5.0)
+
+    with patch.object(node, '_post_and_act', side_effect=_slow_post):
+        node._submit_inference({'in_flight': True}, _t(100.0))
+        assert started.wait(timeout=5.0), 'worker never picked up the observation'
+
+        node._submit_inference({'first': True}, _t(100.1))
+        node._submit_inference({'second': True}, _t(100.2))
+        with node._pending_cv:
+            pending, _ = node._pending
+
+        release.set()
+
+    assert pending == {'second': True}
+    assert sent == [{'in_flight': True}]
+
+
+def test_tick_does_not_block_on_the_request(make_node):
+    """
+    The control tick hands off and returns; the request runs on the worker thread.
+
+    Issuing it inline froze the whole loop for the round trip, dropping every tick that landed
+    inside it — the observation buffer included, so the next window was no longer dt-spaced.
+    """
+    node = make_node(control_hz=10.0)
+    started = threading.Event()
+    release = threading.Event()
+
+    def _slow_post(payload, t_obs):
+        started.set()
+        release.wait(timeout=5.0)
+
+    with patch.object(node, '_post_and_act', side_effect=_slow_post):
+        node._submit_inference({}, _t(100.0))
+        assert started.wait(timeout=5.0), 'worker never picked up the observation'
+        # The worker is mid-"request". A tick submitting now must return immediately.
+        t0 = time.monotonic()
+        node._submit_inference({}, _t(100.1))
+        assert time.monotonic() - t0 < 0.5
+        release.set()

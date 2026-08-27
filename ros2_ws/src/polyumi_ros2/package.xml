@@ -21,6 +21,10 @@
   <exec_depend>v4l2_camera</exec_depend>
   <depend>polyumi_pi_msgs</depend>
   <depend>rclpy</depend>
+  <!-- policy_client_node's HTTP client. requests, not urllib, for keep-alive: the inference POST
+       carries a few hundred kilobytes of observation and urllib opens a fresh connection per
+       call, paying a handshake and a slow-start ramp on every single inference. -->
+  <exec_depend>python3-requests</exec_depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>

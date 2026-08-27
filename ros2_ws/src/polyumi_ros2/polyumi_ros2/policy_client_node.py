@@ -28,17 +28,15 @@ Usage:
 """
 
 import base64
-import json
 import math
 import os
 import threading
 import time
-import urllib.error
-import urllib.request
 from collections import deque
 
 import cv2
 import numpy as np
+import requests
 import rclpy
 import rclpy.time
 import tf2_ros
@@ -86,6 +84,8 @@ DIAG_METRICS = (
     'n_stale_gripper',
     'obs_age_s',
     'inference_latency_s',
+    'inference_server_s',
+    'inference_network_s',
     'image_age_s',
     'gripper_state_age_s',
 )
@@ -270,7 +270,7 @@ class PolicyClientNode(Node):
         # if a model is ever trained at a different action rate this needs its own parameter.
         self._action_dt = 1.0 / control_hz
 
-        # History buffers — each entry: (image_float32 [H,W,C], agent_pos [8])
+        # History buffers — each entry: (image_uint8 [H,W,C], agent_pos [8])
         self._obs_buffer: deque = deque(maxlen=self._n_obs_steps)
         # Receding-horizon stride counter: inference runs on the tick where this is 0, then
         # every steps_per_inference ticks after. Kept in [0, steps_per_inference) so it never
@@ -349,7 +349,11 @@ class PolicyClientNode(Node):
         self._reset_url = self._url.split('/predict_cartesian')[0] + '/reset'
         self._episode_reset_done = False
 
-        # Diagnostics. Always on: eight Float32s at the control rate is nothing next to the image
+        # One session for the life of the node, so every request rides an already-open connection.
+        # See _http_post_json for why that matters at this payload size.
+        self._session = requests.Session()
+
+        # Diagnostics. Always on: ten Float32s at the control rate is nothing next to the image
         # traffic already on the wire, and the failures these catch are exactly the ones you only
         # notice if the number was already being plotted.
         self._diag_pubs = {name: self.create_publisher(Float32, f'/polyumi/diag/{name}', 10) for name in DIAG_METRICS}
@@ -377,10 +381,25 @@ class PolicyClientNode(Node):
             callback_group=MutuallyExclusiveCallbackGroup(),
         )
 
-        # Control timer — exclusive callback group ensures only one tick (and its
-        # blocking POST) runs at a time; an in-flight tick causes the next one to
-        # be skipped rather than overlapping.
-        self._tick_lock = threading.Lock()
+        # Inference runs on its own thread, never in the timer callback. A round trip is several
+        # control periods long, so calling it inline froze the whole loop: the tick that issued the
+        # request held the callback group for its entire duration, and every tick that landed
+        # inside it was dropped outright — the observation buffer stopped filling too, so the
+        # window handed to the next inference was no longer dt-spaced. The timer now only assembles
+        # an observation and leaves it in a one-slot mailbox.
+        #
+        # One slot, newest wins, which buys two properties at once. At most one request is ever in
+        # flight, because the worker is single-threaded — matching the server's single uvicorn
+        # worker, which cannot serve two forward passes concurrently anyway. And an observation
+        # superseded before the worker picks it up is discarded rather than queued: by the time a
+        # backlog could deliver it, _n_stale_actions would drop the whole chunk it produced.
+        self._pending: tuple[dict, rclpy.time.Time] | None = None
+        self._pending_cv = threading.Condition()
+        self._stopping = False
+        self._infer_thread = threading.Thread(target=self._inference_worker, name='policy_infer', daemon=True)
+        self._infer_thread.start()
+
+        # Control timer — exclusive callback group, so ticks cannot overlap each other.
         period = 1.0 / control_hz
         self.create_timer(period, self._control_tick, callback_group=MutuallyExclusiveCallbackGroup())
 
@@ -509,7 +528,7 @@ class PolicyClientNode(Node):
         )
 
     def _image_cb(self, msg: Image) -> None:
-        """Convert incoming ROS image to float32 numpy array and cache it with its stamp."""
+        """Convert incoming ROS image to the policy's camera0_rgb grid and cache it with its stamp."""
         if msg.encoding not in ('rgb8', 'bgr8'):
             raise ValueError(f'Unsupported image encoding {msg.encoding!r}; expected rgb8 or bgr8')
         if msg.step != msg.width * 3:
@@ -524,9 +543,11 @@ class PolicyClientNode(Node):
         self._check_pillarbox_once(img)
         img = crop_to_source_aspect(img)
         resized = cv2.resize(img, (self._image_w, self._image_h), interpolation=CAMERA0_RGB_INTERPOLATION)
-        float_img = resized.astype(np.float32) / 255.0
+        # Kept as uint8 — the dtype the dataset stores camera0_rgb in, and a quarter of the bytes
+        # float32 would put on the wire. The server does the /255 as it builds the obs dict, which
+        # is bit-identical to doing it here. See _control_tick's payload note.
         with self._latest_image_lock:
-            self._latest_image = float_img
+            self._latest_image = resized
             # Keep the frame's own stamp: the pose lookup must align to when THIS frame was
             # captured, not to when the control tick happens to run. The camera publishes at
             # 60 Hz while the tick runs at control_hz, so a cached frame is already up to one
@@ -623,82 +644,78 @@ class PolicyClientNode(Node):
 
     def _control_tick(self) -> None:
         """
-        Assemble one observation, fill buffer, POST to inference server.
+        Assemble one observation, fill the history buffer, and hand it to the inference worker.
 
-        If the previous tick's POST is still in flight, this tick is skipped
-        (and a warning logged) rather than overlapping with it.
+        Never blocks on the network: the request itself is issued by _inference_worker, so a slow
+        round trip costs a superseded observation rather than the control ticks that ran during it.
         """
-        if not self._tick_lock.acquire(blocking=False):
-            self.get_logger().warn('Dropped control tick: previous POST to inference server still in flight')
+        # --- 1. Get latest image ---
+        with self._latest_image_lock:
+            image = self._latest_image
+            image_stamp = self._latest_image_stamp
+        if image is None or image_stamp is None:
+            self._warn_throttled('Waiting for first camera image')
             return
-        try:
-            # --- 1. Get latest image ---
-            with self._latest_image_lock:
-                image = self._latest_image
-                image_stamp = self._latest_image_stamp
-            if image is None or image_stamp is None:
-                self._warn_throttled('Waiting for first camera image')
-                return
 
-            # Guard against pairing a stale frame with a fresh pose (see _max_image_age_s).
-            image_age_s = (self.get_clock().now() - image_stamp).nanoseconds * 1e-9
-            # Published before the guard, so a stalling capture pipeline shows up as a rising
-            # trend rather than only as the warning it eventually trips.
-            self._diag('image_age_s', image_age_s)
-            if image_age_s > self._max_image_age_s:
-                self._warn_throttled(
-                    f'Dropped control tick: newest camera frame is {image_age_s * 1e3:.0f} ms old '
-                    f'(limit {self._max_image_age_s * 1e3:.0f} ms) — capture pipeline stalled?'
-                )
-                return
+        # Guard against pairing a stale frame with a fresh pose (see _max_image_age_s).
+        image_age_s = (self.get_clock().now() - image_stamp).nanoseconds * 1e-9
+        # Published before the guard, so a stalling capture pipeline shows up as a rising
+        # trend rather than only as the warning it eventually trips.
+        self._diag('image_age_s', image_age_s)
+        if image_age_s > self._max_image_age_s:
+            self._warn_throttled(
+                f'Dropped control tick: newest camera frame is {image_age_s * 1e3:.0f} ms old '
+                f'(limit {self._max_image_age_s * 1e3:.0f} ms) — capture pipeline stalled?'
+            )
+            return
 
-            # --- 2. Get EEF pose from TF, aligned to this frame's capture instant ---
-            agent_pos = self._lookup_agent_pos(image_stamp)
-            if agent_pos is None:
-                return  # warning already logged inside
+        # --- 2. Get EEF pose from TF, aligned to this frame's capture instant ---
+        agent_pos = self._lookup_agent_pos(image_stamp)
+        if agent_pos is None:
+            return  # warning already logged inside
 
-            # --- 3. Append to history buffer ---
-            self._obs_buffer.append((image, agent_pos))
-            if len(self._obs_buffer) < self._n_obs_steps:
-                self._warn_throttled(f'Observation buffer filling ({len(self._obs_buffer)}/{self._n_obs_steps})')
-                return
+        # --- 3. Append to history buffer ---
+        self._obs_buffer.append((image, agent_pos))
+        if len(self._obs_buffer) < self._n_obs_steps:
+            self._warn_throttled(f'Observation buffer filling ({len(self._obs_buffer)}/{self._n_obs_steps})')
+            return
 
-            # First full observation marks the episode start: tell the server the start pose once
-            # (used for robot0_eef_rot_axis_angle_wrt_start). Retried on failure until it lands.
-            if not self._episode_reset_done:
-                self._reset_episode(agent_pos)
+        # First full observation marks the episode start: tell the server the start pose once
+        # (used for robot0_eef_rot_axis_angle_wrt_start). Retried on failure until it lands.
+        if not self._episode_reset_done:
+            self._reset_episode(agent_pos)
 
-            # Receding-horizon stride: only the every-steps_per_inference-th tick actually runs
-            # inference. The obs buffer was still appended above, so the next inference sees a
-            # fresh dt-spaced window; we just don't re-POST/publish a chunk every tick (which
-            # swamps the NUC bridge). Advance the phase AFTER deciding, kept in [0, stride).
-            infer_now = self._inference_phase == 0
-            self._inference_phase = (self._inference_phase + 1) % self._steps_per_inference
-            if not infer_now:
-                return
+        # Receding-horizon stride: only the every-steps_per_inference-th tick actually runs
+        # inference. The obs buffer was still appended above, so the next inference sees a
+        # fresh dt-spaced window; we just don't re-POST/publish a chunk every tick (which
+        # swamps the NUC bridge). Advance the phase AFTER deciding, kept in [0, stride).
+        infer_now = self._inference_phase == 0
+        self._inference_phase = (self._inference_phase + 1) % self._steps_per_inference
+        if not infer_now:
+            return
 
-            # --- 4. Serialize and POST ---
-            # Images go as base64-encoded raw bytes (+ dtype/shape) rather than nested-list
-            # JSON, which is ~1.5MB+ per frame and slow to encode/decode at 10 Hz.
-            # agent_pos is tiny (n_obs_steps x 8 floats) so it stays a plain list.
-            image_stack = np.stack([obs[0] for obs in self._obs_buffer])
-            poses = [obs[1].tolist() for obs in self._obs_buffer]
-            payload = {
-                'n_obs_steps': self._n_obs_steps,
-                'n_action_steps': self._n_action_steps,
-                'observations': {
-                    'image': {
-                        'dtype': str(image_stack.dtype),
-                        'shape': list(image_stack.shape),
-                        'data': base64.b64encode(image_stack.tobytes()).decode('ascii'),
-                    },
-                    'agent_pos': poses,
+        # --- 4. Serialize and hand to the inference worker ---
+        # Images go as base64-encoded raw bytes (+ dtype/shape) rather than nested-list JSON,
+        # which is ~30x slower to encode at this size. They go as uint8, not float32: the
+        # request is bandwidth-bound, not CPU-bound (a 2x224x224x3 float32 stack is 1.6 MB of
+        # base64, four times what uint8 costs), and the server's /255 reproduces this exactly.
+        # agent_pos is tiny (n_obs_steps x 8 floats) so it stays a plain list.
+        image_stack = np.stack([obs[0] for obs in self._obs_buffer])
+        poses = [obs[1].tolist() for obs in self._obs_buffer]
+        payload = {
+            'n_obs_steps': self._n_obs_steps,
+            'n_action_steps': self._n_action_steps,
+            'observations': {
+                'image': {
+                    'dtype': str(image_stack.dtype),
+                    'shape': list(image_stack.shape),
+                    'data': base64.b64encode(image_stack.tobytes()).decode('ascii'),
                 },
-            }
-            # t_obs: when this frame was actually captured, i.e. the instant action[0] targets.
-            self._post_and_act(payload, image_stamp - Duration(seconds=self._latency['gopro']))
-        finally:
-            self._tick_lock.release()
+                'agent_pos': poses,
+            },
+        }
+        # t_obs: when this frame was actually captured, i.e. the instant action[0] targets.
+        self._submit_inference(payload, image_stamp - Duration(seconds=self._latency['gopro']))
 
     def _lookup_agent_pos(self, image_stamp: rclpy.time.Time) -> np.ndarray | None:
         """
@@ -871,16 +888,23 @@ class PolicyClientNode(Node):
         return max(0, math.ceil(total_latency / self._action_dt))
 
     def _http_post_json(self, url: str, payload: dict) -> dict | None:
-        """POST payload as JSON to url and return the parsed response, or None on failure (logged)."""
-        body = json.dumps(payload).encode()
-        req = urllib.request.Request(url, data=body, headers={'Content-Type': 'application/json'}, method='POST')
+        """
+        POST payload as JSON to url and return the parsed response, or None on failure (logged).
+
+        Goes through a persistent ``requests.Session`` rather than ``urllib.request.urlopen``,
+        which opens a fresh connection per call. On a several-hundred-kilobyte body that costs a
+        TCP handshake plus a slow-start ramp every single inference — the window has to reopen
+        from the initial ~14 kB before the request can even finish uploading. Keep-alive holds one
+        warm connection for the life of the node instead.
+        """
         try:
-            with urllib.request.urlopen(req, timeout=self._post_timeout_s) as resp:
-                return json.loads(resp.read())
-        except urllib.error.URLError as e:
-            self.get_logger().error(f'POST {url} unreachable: {e}')
-        except Exception as e:
+            resp = self._session.post(url, json=payload, timeout=self._post_timeout_s)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.RequestException as e:
             self.get_logger().error(f'POST {url} failed: {e}')
+        except Exception as e:
+            self.get_logger().error(f'POST {url} returned an unreadable response: {e}')
         return None
 
     def _reset_episode(self, agent_pos: np.ndarray) -> None:
@@ -891,6 +915,71 @@ class PolicyClientNode(Node):
             self.get_logger().info(f'episode /reset sent (start pose set): {self._reset_url}')
         else:
             self._warn_throttled('episode /reset failed; server will approximate wrt_start with the current pose')
+
+    def _submit_inference(self, payload: dict, t_obs: rclpy.time.Time) -> None:
+        """
+        Leave an observation for the inference worker, replacing any it has not started yet.
+
+        :param payload: request body for /predict_cartesian/.
+        :param t_obs: instant the observation was captured.
+        """
+        with self._pending_cv:
+            superseded = self._pending is not None
+            self._pending = (payload, t_obs)
+            self._pending_cv.notify()
+        if superseded:
+            # The worker is still inside a round trip that started at least one stride ago. Worth
+            # saying, because it means the loop is running open-loop on the previous chunk for
+            # longer than steps_per_inference was set to allow.
+            self._warn_throttled(
+                'Inference round trip is outlasting the stride: discarded an observation before '
+                'it was ever sent. Raise steps_per_inference or reduce round-trip latency.'
+            )
+
+    def _inference_worker(self) -> None:
+        """
+        Run the request/publish half of the loop on its own thread, one observation at a time.
+
+        The body is guarded because this thread is the only thing that ever issues a request:
+        letting an exception escape would end inference for the life of the process while the
+        timer went on ticking, the arm went on executing a chunk from before the fault, and
+        nothing anywhere said so.
+        """
+        while True:
+            with self._pending_cv:
+                while self._pending is None and not self._stopping:
+                    self._pending_cv.wait()
+                if self._stopping:
+                    return
+                payload, t_obs = self._pending
+                self._pending = None
+            try:
+                self._post_and_act(payload, t_obs)
+            except Exception as e:  # noqa: BLE001 - see the docstring
+                self.get_logger().error(f'Inference worker error (loop continues): {e!r}')
+
+    def destroy_node(self):
+        """
+        Stop the inference worker and close the HTTP session before tearing the node down.
+
+        Written to tolerate a half-built node: __init__ can raise partway (an unknown ``wire``
+        does, deliberately), and a teardown that then raised AttributeError would bury the real
+        error under a second one.
+        """
+        cv = getattr(self, '_pending_cv', None)
+        if cv is not None:
+            with cv:
+                self._stopping = True
+                cv.notify_all()
+        thread = getattr(self, '_infer_thread', None)
+        if thread is not None:
+            # Bounded by the request timeout plus slack: the worker may be mid-round-trip, and
+            # that request cannot be cancelled, only waited out.
+            thread.join(timeout=self._post_timeout_s + 1.0)
+        session = getattr(self, '_session', None)
+        if session is not None:
+            session.close()
+        return super().destroy_node()
 
     def _post_and_act(self, payload: dict, t_obs: rclpy.time.Time) -> None:
         """
@@ -905,6 +994,8 @@ class PolicyClientNode(Node):
             return
         latency_inference = time.monotonic() - t_sent
         actions = result['actions']
+        server_total_ms = result.get('server_total_ms')
+        latency_server_s = None if server_total_ms is None else float(server_total_ms) * 1e-3
 
         # Viz-only preview: publish the full commanded chunk (before the stale-drop below) so the
         # motion is visible in Foxglove/RViz even when execute_motion is off or the whole chunk is
@@ -937,6 +1028,14 @@ class PolicyClientNode(Node):
         age_s = (self.get_clock().now() - t_obs).nanoseconds * 1e-9
         self._diag('obs_age_s', age_s)
         self._diag('inference_latency_s', latency_inference)
+        # Split the round trip into the half each side owns. They fail for different reasons and
+        # have different fixes: server time is GPU work (and whoever else is on that box), while
+        # the remainder is serialization plus the link, and scales with the observation payload.
+        # The server reports its own total; absent it (an older server) the split is unknowable,
+        # so publish nothing rather than a number that silently means something else.
+        if latency_server_s is not None:
+            self._diag('inference_server_s', latency_server_s)
+            self._diag('inference_network_s', max(0.0, latency_inference - latency_server_s))
         self._diag('n_stale_arm', n_stale_arm)
         self._diag('n_stale_gripper', n_stale_grip)
         self._diag('n_published_arm', len(arm_actions))
@@ -957,10 +1056,15 @@ class PolicyClientNode(Node):
         # Log the width in both spaces: policy units are what the model emitted, robot units are
         # what the hand will be commanded. A surprising gap between them is the offset being wrong.
         grip_robot = policy_to_robot_width(float(first[7]), self._gripper_min_width_m, self._gripper_max_width_m)
+        split = (
+            ''
+            if latency_server_s is None
+            else f' = {latency_server_s * 1000:.0f} server + {(latency_inference - latency_server_s) * 1000:.0f} net'
+        )
         self.get_logger().info(
             f'action chunk n={n_received} (dropped {n_stale_arm} arm / {n_stale_grip} gripper, '
-            f'inference={latency_inference * 1000:.0f}ms) first: x={first[0]:.4f} y={first[1]:.4f} '
-            f'z={first[2]:.4f} grip={first[7]:.3f}→{grip_robot:.3f}m'
+            f'inference={latency_inference * 1000:.0f}ms{split}) first: x={first[0]:.4f} '
+            f'y={first[1]:.4f} z={first[2]:.4f} grip={first[7]:.3f}→{grip_robot:.3f}m'
         )
 
         # Phase 2: publish the whole action chunk for the NUC bridge to plan+execute as one

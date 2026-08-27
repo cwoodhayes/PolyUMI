@@ -27,13 +27,14 @@ HOME_POSE = f'0.56 0.13 0.25 -1 0 0 0 {HOME_GRIPPER}'
 
 def _request_body(n_action_steps: int = 8, n_obs_steps: int = 2) -> dict:
     """Build a structurally valid /predict_cartesian/ body."""
-    image = np.full((n_obs_steps, 8, 8, 3), 0.5, dtype=np.float32)
+    # uint8, as the client sends and as the dataset stores camera0_rgb.
+    image = np.full((n_obs_steps, 8, 8, 3), 128, dtype=np.uint8)
     return {
         'n_obs_steps': n_obs_steps,
         'n_action_steps': n_action_steps,
         'observations': {
             'image': {
-                'dtype': 'float32',
+                'dtype': 'uint8',
                 'shape': list(image.shape),
                 'data': base64.b64encode(image.tobytes()).decode(),
             },
