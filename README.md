@@ -56,9 +56,14 @@ train_policy.sh     # starts model training
 
 ## Prerequisites
 
-**PC:** Python 3.13, [uv](https://github.com/astral-sh/uv), ROS 2 Kilted, `ffmpeg`, `protobuf-compiler`
+**PC** (ingest, ROS 2 nodes, catalog): Ubuntu 24.04, Python 3.13, [uv](https://github.com/astral-sh/uv), ROS 2 Kilted, `ffmpeg`, `protobuf-compiler`, plus the ORB-SLAM3 build deps (`cmake`, `libopencv-dev`, `libeigen3-dev`, `libboost-serialization-dev`) — see [Installation](#installation) below.
 
-**RPi:** Raspberry Pi Zero 2W flashed with Raspberry Pi OS. See [docs/pi-provisioning.md](docs/pi-provisioning.md) for detailed setup instructions for the pi.
+**RPi** (gripper): Raspberry Pi Zero 2W flashed with Raspberry Pi OS, plus a GoPro Hero 12. See [docs/pi-provisioning.md](docs/pi-provisioning.md) for setup, and the hardware build guide linked above for instructions on building the data collection gripper + franka end-effector.
+
+**GPU workstation** (training + policy serving via [`train_policy.sh`](train_policy.sh) / [`serve_policy.sh`](serve_policy.sh)): our code has only been tested to run on
+an NVIDIA RTX 6000 Ada GPU (48GB VRAM), but should run with at least 32GB. You need Docker with the NVIDIA container toolkit (ours runs rootless). Everything else lives in the image, so no host conda or CUDA toolkit is needed, nor is ROS. Optionally a [Weights & Biases](https://wandb.ai) API key for logging. See [docs/training-instructions.md](docs/training-instructions.md).
+
+**Robot arm** (inference, optional): any arm you can drive from ROS 2. Ours is a Franka FR3 driven from a NUC running Ubuntu 22.04 / ROS 2 Humble and the Franka stack, talking to the PC over CycloneDDS; the arm-side code is in [nuc/](nuc/). See [docs/crb-fr3-inference.md](docs/crb-fr3-inference.md).
 
 ## Installation
 
