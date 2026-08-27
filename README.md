@@ -2,16 +2,16 @@ https://github.com/user-attachments/assets/2f902600-9682-4e67-a75c-fc8fa358cb92
 
 # PolyUMI: Visual + Auditory + Tactile Manipulation Platform for Imitation Learning
 
-**Project website:** https://cwoodhayes.github.io/projects/polyumi  
-**Hardware guide:** [Google Doc](https://docs.google.com/document/d/1T0v_7H8YAJjOud9QWYlQct29a78YKvELPIpKTzajFs0/edit?usp=sharing)
+**Project website:** https://cwoodhayes.github.io/projects/polyumi<br>
+**Hardware build guide:** [Google Doc](https://docs.google.com/document/d/1T0v_7H8YAJjOud9QWYlQct29a78YKvELPIpKTzajFs0/edit?usp=sharing)
 
-PolyUMI is a real-time data collection & control platform for robotic imitation learning, which unifies the following sensor modalities in a single end-effector:
-- **touch** (via a custom optical tactile-sensing finger, based off of [PolyTouch](https://polytouch.alanz.info/)) - *10fps 540x480 MJPEG video (MP4)*
+PolyUMI is an imitation learning platform supporting UMI-style data collection via a handheld gripper, which unifies the following sensor modalities in a single end-effector:
+- **touch** (via a custom optical tactile-sensing finger, based on [PolyTouch](https://polytouch.alanz.info/)) - *10fps 540x480 MJPEG video (MP4)*
 - **mechanical vibration** (via a contact microphone fixed to the finger housing) - *16kHz PCM audio (WAV)*
 - **vision** (via GoPro camera on wrist + finger camera peripheral vision) - *60fps 1920x1080 MJPEG video (MP4) + 10fps 540x480 MJPEG video*
-- **proprioception** (via monocular inertial SLAM from GoPro + IMU in gripper, or robot joint encoders + FK in embodiments)
+- **proprioception** (via monocular inertial SLAM from GoPro + IMU in gripper, or OptiTrack for the same, plus robot joint encoders + FK in embodiments)
 
-It combines the [Universal Manipulation Interface (UMI)](https://umi-gripper.github.io/) platform with a custom touch-sensing finger inspired by the [PolyTouch tactile + audio sensor](https://polytouch.alanz.info/), with hardware, firmware, and software built from scratch for a modern robotics stack (ROS2 Kilted + Python 3.13 + Foxglove visualizer).
+It combines the [Universal Manipulation Interface (UMI)](https://umi-gripper.github.io/) platform with a custom touch-sensing finger inspired by the [PolyTouch tactile + audio sensor](https://polytouch.alanz.info/), with hardware, firmware, and software designed from scratch for modularity and hardware performance on a modern robotics stack (ROS2 Kilted/Humble, Python 3.13, Foxglove).
 
 <div align="center" style="display: flex; flex-wrap: wrap; gap: 12px; justify-content: center;">
   <div style="flex: 1 1 480px; min-width: 320px; max-width: 600px;">
@@ -27,23 +27,44 @@ It combines the [Universal Manipulation Interface (UMI)](https://umi-gripper.git
 ## Repo Structure
 
 ```
-pi/               # RPi client: camera, audio, LED streaming + episode recording
-ingest/           # PC-side CLI: fetch sessions from Pi, encode video
+catalog/          # Catalog UI: Web UI for organizing datasets collected on the gripper
+docs/             # Documentation for this repo
+external/         # Git submodules
+  franka_ros2/              # ROS2 control stack for Franka Emika Panda robot arm
+  ORB_SLAM3_PolyUMI/        # PolyUMI's ORB_SLAM3 fork (monocular visual-inertial SLAM for the GoPro Hero 12)
+  polyumi_diffusion_policy  # control policy implementations, dockerized & wrapped in an API server
 inference_server/ # polyumi_inference: the inference wire protocol and both ends of it
                   #   (the ROS client imports it; so does the policy server. See docs/crb-fr3-inference.md)
+infra/            # RPi provisioning infrastructure (see docs/pi-provisioning.md)
+ingest/           # PC-side CLI: fetch sessions from Pi, run preprocessing pipeline, and export training datasets
+notebooks/        # jupyter notebooks for bringup/debugging
+nuc/              # inference pipeline code specific to Northwestern CRB's Franka FR3 arm setup
+pi/               # RPi app: streaming server for video + audio on the EE, gripper episode recording, etc
 ros2_ws/
   src/
     polyumi_pi_msgs/   # Protobuf message definitions (camera frame, audio chunk)
     polyumi_ros2/      # ROS 2 nodes + Foxglove launch files
-external/
-  ORB_SLAM3_PolyUMI/   # Git submodule: PolyUMI's ORB_SLAM3 fork (monocular visual-inertial SLAM for the GoPro Hero 12)
+```
+
+**Additional scripts:**
+```
+deploy.sh           # deploys code updates to the pi
+fr3_session.sh      # brings up tmux sessions for inference on the CRB's arm
+serve_policy.sh     # brings up inference server for a trained model
+setup_franka_env.sh # sets up PC-side environment for interacting with the CRB's arm
+train_policy.sh     # starts model training
 ```
 
 ## Prerequisites
 
-**PC:** Python 3.13, [uv](https://github.com/astral-sh/uv), ROS 2 Kilted, `ffmpeg`, `protobuf-compiler`
+**PC** (ingest, ROS 2 nodes, catalog): Ubuntu 24.04, Python 3.13, [uv](https://github.com/astral-sh/uv), ROS 2 Kilted, `ffmpeg`, `protobuf-compiler`, plus the ORB-SLAM3 build deps (`cmake`, `libopencv-dev`, `libeigen3-dev`, `libboost-serialization-dev`) — see [Installation](#installation) below.
 
-**RPi:** Raspberry Pi Zero 2W flashed with Raspberry Pi OS. See [docs/pi-provisioning.md](docs/pi-provisioning.md) for detailed setup instructions for the pi.
+**RPi** (gripper): Raspberry Pi Zero 2W flashed with Raspberry Pi OS, plus a GoPro Hero 12. See [docs/pi-provisioning.md](docs/pi-provisioning.md) for setup, and the hardware build guide linked above for instructions on building the data collection gripper + Franka end-effector.
+
+**GPU workstation** (training + policy serving via [`train_policy.sh`](train_policy.sh) / [`serve_policy.sh`](serve_policy.sh)): our code has only been tested to run on
+an NVIDIA RTX 6000 Ada GPU (48GB VRAM), but should run with at least 32GB. You need Docker with the NVIDIA container toolkit (ours runs rootless). Everything else lives in the image, so no host conda or CUDA toolkit is needed, nor is ROS. Optionally a [Weights & Biases](https://wandb.ai) API key for logging. See [docs/training-instructions.md](docs/training-instructions.md).
+
+**Robot arm** (inference, optional): any arm you can drive from ROS 2. Ours is a Franka FR3 driven from a NUC running Ubuntu 22.04 / ROS 2 Humble and the Franka stack, talking to the PC over CycloneDDS; the arm-side code is in [nuc/](nuc/). See [docs/crb-fr3-inference.md](docs/crb-fr3-inference.md).
 
 ## Installation
 
@@ -144,8 +165,8 @@ pingest fetch-gopro --host <pi_ssh_hostname>
 # ingest all new scenes on disk into their pzarr form, skipping already-processed scenes:
 pingest process-all
 # run the preprocessing pipeline on a particular scene (time alignment, SLAM, etc)
-pingest pp <scene_directory> 
-# export a single session to MCAP for easy visualization in foxglove (use the foxglove config 
+pingest pp <scene_directory>
+# export a single session to MCAP for easy visualization in foxglove (use the foxglove config
 # in ingest/foxglove)
 pingest export-mcap <scene_directory> <session_number>
 # export a scene's EPISODE sessions to a UMI-format ReplayBuffer (.zarr.zip) for training:
@@ -160,9 +181,8 @@ zarr-based format stored in `scene.zarr` in each scene directory, referred to in
 Main article: [catalog/README.md](/catalog/README.md)
 
 Collecting demonstration data, running preprocessing pipelines, and training models results in a bunch of files that can quickly
-become confusing & disorganized on disk. 
-In the era of Claude, bringing up simple web app UI's to manage this sort of data management problem is simple; hence
-the existence of the `polyumi-catalog` web tool.
+become confusing & disorganized on disk.
+A lightweight web UI helps manage this data and keep it organized; hence the existence of the `polyumi-catalog` web tool.
 
 It provides a GUI for managing episodes, scenes, tasks, and datasets, creating associations to keep your data organized, and providing
 a convenient UI to access the ingestion scripts & foxglove viewer described above.
@@ -176,7 +196,7 @@ diffusion policy in Docker on a GPU workstation. See
 [docs/training-instructions.md](docs/training-instructions.md) for the build/run walkthrough,
 the rootless-Docker notes, and how the trained policy is served back to the ROS inference node.
 
-## Streaming / Demos
+## Inference
 
 ### Streaming Demo
 
@@ -205,10 +225,10 @@ First, see the [system calibration instructions](/docs/calibration-instructions.
 `policy_client_node` drives a robot arm from a diffusion-policy inference server.
 The arm's control stack typically runs on its own machine and is reached over ROS2;
 how you bring that up, network the two machines, and configure DDS depends on your
-robot and lab. The protocol — the wire format, the client, and the server app both the dummy
-and the real policy run behind — is the `polyumi_inference` library in
-[inference_server/](inference_server/),
-and [docs/crb-fr3-inference.md](docs/crb-fr3-inference.md) is a worked example for one
+robot and lab. The protocol — the wire format, the client, and the server app — is the `polyumi_inference` library in
+[inference_server/](inference_server/).
+
+[docs/crb-fr3-inference.md](docs/crb-fr3-inference.md) is a worked example for one
 specific Franka FR3 setup that you can adapt.
 
 ## Hardware Notes
@@ -224,15 +244,13 @@ sudo i2cdetect -y 1
 sudo i2cget -y 0x57 0x2a   # battery percentage; 100% = 0x64, 50% = 0x32, etc.
 ```
 
-## Troubleshooting
+### Troubleshooting the Pi
 
 **`_version.py` missing on the Pi** — run `./deploy.sh <pi_ssh_hostname>` from the PC; this generates the file from the current git HEAD.
 
 **Audio not detected** — confirm `wm8960-soundcard` appears in `arecord -l`. If the default RaspiAudio driver was previously installed, the Waveshare DKMS driver may need to be reinstalled after a kernel update.
 
 **Wi-Fi not listing on the Pi** — run `sudo modprobe brcmfmac`, then retry `nmcli dev wifi connect "your-network"`.
-
-**ZMQ frames dropping** — check the `cb_drops` counter in the Pi logs. The audio streamer uses a 100-frame queue with drop-and-replace on overflow; the video streamer uses `NOBLOCK` sends with a high-watermark of 2. Persistent drops indicate the network link is the bottleneck.
 
 **`protoc` not found during `polyumi_pi_msgs` install** — install `protobuf-compiler` (`sudo apt install protobuf-compiler` on the Pi, or via your system package manager on the PC).
 
@@ -280,3 +298,26 @@ The `pi` extra pulls in the Raspberry Pi hardware-only dependencies (`lgpio`, `g
 **Tip for development:** add the `deploy.sh` invocation to `.vscode/tasks.json` as a build task so it runs with Ctrl+Shift+B.
 
 Run `polyumi-pi --help` for a full list of commands.
+
+## Citation
+
+If you just want to use PolyUMI's hardware designs + associated system software (i.e. the pi application), please cite the original workshop paper:
+
+```bibtex
+@inproceedings{hayes2026polyumi,
+  title     = {PolyUMI: Visual + Auditory + Tactile Manipulation Platform for Imitation Learning},
+  author    = {Hayes, Conor Wood},
+  booktitle = {IEEE ICRA 2026 Workshop on Contact-Rich Robotic Manipulation (CR2)},
+  year      = {2026},
+  url       = {https://openreview.net/forum?id=Ou39QMiCMP}
+}
+```
+
+If you wish to cite the full tactile learning system (including models, datasets, inference pipeline, etc),
+please let us know, as this will be released in an upcoming work.
+
+## Acknowledgments & Maintenance
+
+This project was originally developed by Conor Wood Hayes as part of the Master of Science in Robotics (MSR) program at Northwestern University.
+
+It is currently maintained by the **[Center for Robotics and Biosystems](https://robotics.northwestern.edu/)** at Northwestern University.

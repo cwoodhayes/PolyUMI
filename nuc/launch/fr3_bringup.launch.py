@@ -24,8 +24,15 @@ from pathlib import Path
 import sys
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo
+from launch.actions import (
+    DeclareLaunchArgument,
+    ExecuteProcess,
+    IncludeLaunchDescription,
+    LogInfo,
+    RegisterEventHandler,
+)
 from launch.conditions import UnlessCondition
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -45,12 +52,95 @@ import tcp_calib  # noqa: E402
 # returns as soon as controller_manager answers.
 CONTROLLER_MANAGER_TIMEOUT_S = '60'
 
+# Budget set_payload.py gets for the set_load service to appear and answer. Matched to the
+# spawner's wait, since both are waiting on the same thing coming up: franka_bringup.
+SET_LOAD_TIMEOUT_S = CONTROLLER_MANAGER_TIMEOUT_S
+
 
 def generate_launch_description():
     """Include franka_bringup and spawn fr3_arm_controller once controller_manager is up."""
     robot_ip = LaunchConfiguration('robot_ip')
     arm_id = LaunchConfiguration('arm_id')
     load_gripper = LaunchConfiguration('load_gripper')
+
+    # Tell the FCI what is bolted to the flange, so its gravity compensation cancels the whole
+    # weight. Without this the unmodelled part is a constant force the cartesian impedance spring
+    # fights, visible as the TCP dropping the moment that controller activates. See nuc/tcp_calib.py.
+    #
+    # This is the ONLY window in which it can be set: the FR3 refuses the command once a controller
+    # holds the arm, with `Set Load command rejected: command not possible in the current mode
+    # ("Move")`. Hence the ordering below, ahead of the spawner. Changing it later means deactivating
+    # every controller first — see docs/calibration-instructions.md.
+    #
+    # A client rather than `ros2 service call`, because on_set_load_exit below aborts the whole
+    # launch on this exit status: the CLI exits 0 whether the response says success true or false,
+    # so gating on it would mean grepping its human-readable output. set_payload.py reads
+    # response.success off the typed message and owns its own service-wait timeout.
+    set_load = ExecuteProcess(
+        cmd=['python3', str(NUC_DIR / 'set_payload.py'), SET_LOAD_TIMEOUT_S],
+        output='screen',
+    )
+
+    # The joint-trajectory controller move_group executes through. franka.launch.py spawns
+    # only the two broadcasters, so without this /execute_trajectory has nothing to drive
+    # and the arm never moves. The two arguments do DIFFERENT jobs and both are required:
+    # Humble's spawner sets the `type` param only from -t (spawner.py:208), while
+    # --param-file goes through set_controller_parameters_from_param_files, which sets the
+    # controller's `params_file` and never reads a type out of it. Dropping -t fails with
+    # "The 'type' param was not defined for ...", pointing at the controller rather than at
+    # the missing flag.
+    #
+    # Hoisted out of the LaunchDescription list so set_load can be ordered ahead of it: setLoad is a
+    # libfranka command, and it lands cleanly only while no controller holds the effort interfaces.
+    arm_controller_spawner = Node(
+        package='controller_manager',
+        executable='spawner',
+        name='fr3_arm_controller_spawner',
+        output='screen',
+        arguments=[
+            'fr3_arm_controller',
+            '-t',
+            'joint_trajectory_controller/JointTrajectoryController',
+            '--param-file',
+            PathJoinSubstitution(
+                [
+                    FindPackageShare('franka_fr3_moveit_config'),
+                    'config',
+                    'fr3_ros_controllers.yaml',
+                ]
+            ),
+            '--controller-manager-timeout',
+            CONTROLLER_MANAGER_TIMEOUT_S,
+        ],
+    )
+
+    def on_set_load_exit(event, context):
+        """
+        Spawn fr3_arm_controller once set_load has succeeded; abort the whole launch if it has not.
+
+        Aborting rather than warning-and-continuing, because this failure is both critical and easy
+        to miss. It is the last moment the payload can be set: the spawner immediately puts the
+        robot in "Move" mode, where setLoad is rejected, so a session that gets past here keeps a
+        wrong gravity model until someone deactivates every controller. And the symptom — TCP droop
+        under the impedance controller — is a thing you have to be looking for on a torque-controlled
+        arm. Better to have bringup refuse to come up, which is loud, immediate, and safe.
+
+        Raised rather than emitting a Shutdown event so ``ros2 launch`` exits non-zero: a clean
+        Shutdown stops the launch but reports success, which would hide this from anything
+        scripting bringup.
+
+        :raises RuntimeError: if set_load exited non-zero (rejected payload, or timeout).
+        """
+        if event.returncode == 0:
+            return [arm_controller_spawner]
+        raise RuntimeError(
+            f'\n!!! SetLoad FAILED (exit {event.returncode}) — the payload did not configure.\n'
+            '!!! NOT spawning fr3_arm_controller: the impedance controller would fight gravity it\n'
+            '!!! does not know about, and setLoad cannot be retried once a controller holds the arm.\n'
+            '!!! The real reason is in the /service_server log, not the response above:\n'
+            '!!!   grep -i "command exception" $(ls -t ~/.ros/log/ros2_control_node_*.log | head -1)\n'
+            '!!! See docs/calibration-instructions.md ("End-effector payload").\n'
+        )
 
     return LaunchDescription(
         [
@@ -85,35 +175,12 @@ def generate_launch_description():
                     'load_gripper': load_gripper,
                 }.items(),
             ),
-            # The joint-trajectory controller move_group executes through. franka.launch.py spawns
-            # only the two broadcasters, so without this /execute_trajectory has nothing to drive
-            # and the arm never moves. The two arguments do DIFFERENT jobs and both are required:
-            # Humble's spawner sets the `type` param only from -t (spawner.py:208), while
-            # --param-file goes through set_controller_parameters_from_param_files, which sets the
-            # controller's `params_file` and never reads a type out of it. Dropping -t fails with
-            # "The 'type' param was not defined for ...", pointing at the controller rather than at
-            # the missing flag.
-            Node(
-                package='controller_manager',
-                executable='spawner',
-                name='fr3_arm_controller_spawner',
-                output='screen',
-                arguments=[
-                    'fr3_arm_controller',
-                    '-t',
-                    'joint_trajectory_controller/JointTrajectoryController',
-                    '--param-file',
-                    PathJoinSubstitution(
-                        [
-                            FindPackageShare('franka_fr3_moveit_config'),
-                            'config',
-                            'fr3_ros_controllers.yaml',
-                        ]
-                    ),
-                    '--controller-manager-timeout',
-                    CONTROLLER_MANAGER_TIMEOUT_S,
-                ],
-            ),
+            set_load,
+            # Ordered on set_load's exit, not declared alongside it: the spawner activates
+            # fr3_arm_controller, which claims the effort interfaces and puts the robot in "Move"
+            # mode — where setLoad is rejected outright. This ordering is load-bearing, not
+            # tidiness, and the handler aborts the launch rather than spawning if setLoad failed.
+            RegisterEventHandler(OnProcessExit(target_action=set_load, on_exit=on_set_load_exit)),
             # The frame the policy actually speaks in. It lives here rather than in the inference
             # launch so it exists whenever the arm does — Foxglove and `tf2_echo fr3_hand
             # polyumi_tcp` are how you check the calibration, and neither should need move_group.

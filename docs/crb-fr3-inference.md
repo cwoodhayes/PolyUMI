@@ -48,7 +48,7 @@ to be restartable alone.
 ros2 launch nuc/launch/fr3_inference.launch.py                        # nothing moves
 ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true  # fingers only
 ros2 launch nuc/launch/fr3_inference.launch.py \
-    execute_arm:=true execute_gripper:=true max_velocity_scaling:=0.2
+    execute_arm:=true execute_gripper:=true
 ```
 
 **Both execute flags default false** — launching alone never moves the robot. 
@@ -163,29 +163,27 @@ That second static TF is load-bearing. `load_gripper` now defaults **false**, be
 observation lookup, with a symptom pointing nowhere near the flag. The static publisher fills the
 hole; the constant lives in `nuc/tcp_calib.py` next to the TCP.
 
-`fr3_inference` adds the three things that sit on top of it — move_group, `fr3_moveit_bridge`,
+`fr3_inference` adds the three things that sit on top of it — move_group, `fr3_home_service`,
 `franka_hand_node` — plus the `polyumi_cartesian_impedance_controller` spawner, spawned
 `--inactive`. They start, fail and restart together without touching the arm's state.
 
 The laptop publishes an entire inference **action chunk** (`n_action_steps` waypoints, not
-`actions[0]`) and a NUC-side executor drives the arm from it. Two executors exist; the laptop's
-`wire` param picks the message format and the NUC's `executor` arg picks the consumer, and the
-two must agree:
+`actions[0]`) as a `MultiDOFJointTrajectory`, which the NUC's `polyumi_cartesian_impedance_controller`
+(1 kHz streaming servo) splices onto:
 
-| `wire` / `executor` | topic | consumer |
-|---|---|---|
-| `multidof` (default) | `/polyumi/target_poses_traj` | `polyumi_cartesian_impedance_controller` — 1 kHz streaming servo |
-| `pose_array` | `/polyumi/target_poses` | `fr3_moveit_bridge` → move_group, one Cartesian plan per chunk |
-| always | `/polyumi/target_gripper` | `franka_hand_node` → libfranka `Gripper::move` |
+| topic | consumer |
+|---|---|
+| `/polyumi/target_poses_traj` | `polyumi_cartesian_impedance_controller` — 1 kHz streaming servo |
+| `/polyumi/target_gripper` | `franka_hand_node` → libfranka `Gripper::move` |
 
-A mismatch is loud rather than silent: nothing subscribes, the arm holds still, and the client
-warns every second naming the topic it expected. The full contract is the module docstring of
-`ros2_ws/src/polyumi_ros2/polyumi_ros2/target_chunk.py`.
+A dead command path is loud rather than silent: nothing subscribes, the arm holds still, and the
+client warns every second naming the topic it expected. The full contract is the module docstring
+of `ros2_ws/src/polyumi_ros2/polyumi_ros2/target_chunk.py`.
 
-Both controllers claim the same `<joint>/effort` interfaces, so **exactly one holds the arm** —
-`ros2 control list_controllers` tells you which:
-
-The moveit (pose_array) executor is deprecated and no longer intended for use.
+`fr3_home_service` runs alongside it, serving only `/polyumi/home` — joint-space homing
+through move_group. It and the streaming controller claim the same `<joint>/effort` interfaces, so
+**exactly one holds the arm at a time** — `ros2 control list_controllers` tells you which, and
+`/polyumi/home` swaps them itself around a home move:
 
 ```bash
 # Arm must be STATIONARY: switching restarts the libfranka control loop.
@@ -193,7 +191,8 @@ ros2 control switch_controllers --deactivate fr3_arm_controller \
     --activate polyumi_cartesian_impedance_controller
 ```
 
-`/polyumi/home` does this swap itself, both directions, and hands the arm back afterwards.
+(This is the manual form of the swap `/polyumi/home` does itself, both directions, hands back
+afterwards.)
 
 ## The facts you can't deduce by looking
 

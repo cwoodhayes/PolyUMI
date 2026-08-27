@@ -27,10 +27,9 @@ namespace polyumi_fr3_controllers {
 /**
  * Streaming Cartesian impedance controller for the FR3, driven by absolutely-timed pose chunks.
  *
- * This is PolyUMI's on-arm executor. It replaces plan-then-execute (`fr3_moveit_bridge` calling
- * `compute_cartesian_path` + `ExecuteTrajectory`), which started every action chunk from rest,
- * stopped at its end, and discarded the policy's `dt` timeline — costing ~0.6 s of latency and all
- * compliance.
+ * This is PolyUMI's on-arm executor: the only thing that drives the arm from a policy chunk. It
+ * splices consecutive chunks on their own absolute waypoint times, so the arm neither starts from
+ * rest nor stops at a chunk boundary, and the policy's `dt` timeline survives to the joint level.
  *
  * Architecture, following UMI:
  *

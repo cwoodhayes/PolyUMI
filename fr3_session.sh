@@ -81,7 +81,7 @@ MAX_IMAGE_AGE_S="${MAX_IMAGE_AGE_S:-0.3}"
 # line is only PRE-TYPED, never run — nothing moves until you press Enter on it, and the NUC
 # side has its own execute_arm/execute_gripper flags (both default false) in front of the arm.
 # EXECUTE_MOTION=false ./fr3_session.sh for a dry run: the preview topics still show every
-# commanded chunk in Foxglove, but /polyumi/target_poses is never published.
+# commanded chunk in Foxglove, but /polyumi/target_poses_traj is never published.
 EXECUTE_MOTION="${EXECUTE_MOTION:-true}"
 
 if [ "${1:-}" = "--kill-local" ] || [ "${1:-}" = "--kill" ]; then
@@ -213,7 +213,7 @@ else
       nuc "${NUC_SSH_HOST}:${NUC_REPO}/"; then
     echo "    done."
 
-    # fr3_moveit_bridge is a plain script and runs straight from the synced tree, but
+    # fr3_home_service is a plain script and runs straight from the synced tree, but
     # polyumi_fr3_controllers is C++: rsync only updates the source that ~/franka_ws/src symlinks
     # at, so without this the NUC keeps running the previously built artifacts. That is the worst
     # kind of stale — one is a torque controller and the other drives the hand, and the old build's
@@ -367,7 +367,7 @@ fi
 if [ "$NUC_INFER_FRESH" = 1 ]; then
   tmux send-keys -t "$NUC_INFER_PANE" "cd $NUC_REPO" C-m
   pretype "$NUC_INFER_PANE" \
-    "$(logged fr3_inference 'ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true execute_arm:=true max_velocity_scaling:=1.0')"
+    "$(logged fr3_inference 'ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true execute_arm:=true')"
 fi
 
 # --- Pi: RUN the stream. Stateless, moves nothing, and the laptop warns without it.

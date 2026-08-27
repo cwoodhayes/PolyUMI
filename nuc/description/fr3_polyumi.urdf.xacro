@@ -3,8 +3,8 @@
   PolyUMI: the stock FR3 description plus the one frame the policy speaks in.
 
   `polyumi_tcp` is the closed-fingertip midpoint in GoPro-optical axes — the body frame every
-  exported training pose is expressed at. move_group needs it as a real link (it is the
-  `link_name` of the bridge's GetCartesianPath request); TF gets the same transform from a
+  exported training pose is expressed at. move_group needs it as a real link so its planning
+  scene agrees with TF about where the policy's frame is; TF itself gets the same transform from a
   static_transform_publisher in fr3_bringup.launch.py. Both read nuc/tcp_calib.py, which is
   where the numbers and their derivation live.
 
