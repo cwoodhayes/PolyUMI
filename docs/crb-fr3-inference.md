@@ -61,6 +61,12 @@ ros2 launch nuc/launch/fr3_inference.launch.py \
 
 **Both execute flags default false** — launching alone never moves the robot. 
 
+`gripper:=hand|faulhaber|none` picks *which* driver, `execute_gripper` decides whether it may
+move; the two are separate so `gripper:=faulhaber` on its own is a safe way to check the
+selection resolves. `hand` is `franka_hand_node` (Franka Hand over libfranka, see "Gripper
+problems"); `faulhaber` is `franka_gripper_control` (below). Never both — they are mutually
+exclusive hardware and each claims its device on startup.
+
 Velocity scaling is only applicable if the arm is being controlled by moveit, which is deprecated aside from the homing functionality.
 
 ## 3. Inference server
@@ -286,8 +292,60 @@ Most failures here are one of four things, in rough order of frequency:
    the arm just never moved. That call is now a daemon-free `ros2 service call`, but if you see the
    fault anywhere else, this is it.
 
+## The FAULHABER gripper (`gripper:=faulhaber`)
+
+`external/franka_gripper_control` is Anunth Ramaswami's CANopen driver for the FAULHABER-actuated
+gripper — a 200 Hz Cyclic Synchronous Position tracker over a 105 mm stroke, i.e. a real tracker
+where the Franka Hand is a decimator (see "Gripper problems").
+
+It is a submodule and needs **no fork and no patch**: it already subscribes `/polyumi/target_gripper`
+as a `JointTrajectory` carrying `fr3_gripper_width` in metres, which is exactly what
+`policy_client_node` publishes. The whole integration is one launch argument —
+`joint_state_topic:=/fr3_gripper/joint_states` — moving its state stream onto the topic the six
+existing consumers already read. Its tuning knobs are **argparse CLI arguments, not ROS
+parameters**: set them through its own launch arguments (its README lists them), never
+`--ros-args -p`.
+
+`fr3_session.sh` rsyncs it to the NUC, symlinks it into `~/franka_ws/src`, and builds it, so the
+only thing left is per-boot and per-machine:
+
+```bash
+sudo ip link set can0 up type can bitrate 500000        # per boot, on the NUC
+ros2 service call /faulhaber_gripper/calibrate std_srvs/srv/Trigger "{}"
+```
+
+**It tracks nothing until that calibration succeeds.** It holds position with the motor disabled
+instead — which looks exactly like a dead node. The routine drives the mechanism into both hard
+stops twice, so clear the bench and supervise it. The result persists in
+`~/.ros/faulhaber_gripper_limits.json` and is loaded on every later launch, so this is once per
+NUC, not once per session.
+
+Two diagnostic topics the Hand never had, both worth a Foxglove plot during a rollout:
+`/faulhaber_gripper/motor_current_ma` and `/faulhaber_gripper/waypoint_tracking_error_mm` (the
+latter published only at source waypoints, not at interpolated CSP samples).
+
+Two things to re-derive before trusting a rollout on it:
+
+- **`gripper_max_width_m` in `ros2_ws/src/polyumi_ros2/config/inference.yaml` is 0.0816, the
+  Franka Hand's measured aperture.** Re-measure with `ros2 run polyumi_ros2 gripper_range_probe`.
+  This is not cosmetic: the handheld rig reaches 132.3 mm of tag separation against the Hand's
+  126.2 mm, so the top ~7% of the policy's commanded range currently saturates. A 105 mm stroke
+  should close that gap. (The probe's "is this a real stop or a software clamp" check queries
+  `/fr3_gripper/get_parameters` for `max_width_m`, which only `franka_hand_node` serves — expect
+  that one warning here, and take the hard-stop calibration as the better answer.)
+- **`latency.gripper_exec` / `latency.gripper`, both 0.0.** Re-measure with
+  `ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper_chirp`. Unlike the Hand's,
+  these should now be small and actually measurable.
+
+**A different gripper is a different TCP and a different payload.** `nuc/tcp_calib.py` feeds both
+TF and move_group's RobotModel, and running the arm with the Hand's numbers still in it gives the
+policy a frame it was never trained on and the FCI a wrong gravity model. Gripper-only bringup is
+safe without it; `execute_arm:=true` is not. See
+[calibration-instructions.md](calibration-instructions.md).
+
 ## Gripper problems
-Currently this setup uses the Franka Hand, which is terrible. I've done a bunch of analysis on it, tl;dr it has ~210ms observable command delay, only updates its state at 5Hz, and its move() commands cannot be pre-empted once issued.
+This is the `gripper:=hand` path — the Franka Hand, which is terrible, and which the FAULHABER
+gripper above exists to replace. I've done a bunch of analysis on it, tl;dr it has ~210ms observable command delay, only updates its state at 5Hz, and its move() commands cannot be pre-empted once issued.
 
 The scripts I used for this analysis are in `nuc/polyumi_fr3_controllers/src/franka_hand_testing`, gated off the default build behind `-DBUILD_HAND_PROBES=ON`. The constants below were fitted to their output in a Jupyter notebook that is not in the repo; the values as shipped live in `HandLimits` (`gripper_trajectory_interpolator.hpp`), pinned by the anchor tests in `test_gripper_trajectory_interpolator.cpp`. Re-run the probes against any other hand before trusting them.
 

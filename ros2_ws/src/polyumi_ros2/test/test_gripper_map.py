@@ -9,7 +9,7 @@ to flip) and the clamping behaviour.
 
 import pytest
 
-from polyumi_ros2.gripper_map import policy_to_robot_width, robot_to_policy_width
+from polyumi_ros2.gripper_map import aperture_from_positions, policy_to_robot_width, robot_to_policy_width
 
 #: A hypothetical set of fingers whose tips meet before the mechanism bottoms out. The real ones
 #: measure 0.0 (see test_current_hardware_is_a_passthrough), which would make every test here pass
@@ -102,3 +102,24 @@ def test_current_hardware_is_a_passthrough():
     """
     assert policy_to_robot_width(0.03, 0.0, MAX_WIDTH) == pytest.approx(0.03)
     assert robot_to_policy_width(0.03, 0.0) == pytest.approx(0.03)
+
+
+def test_two_finger_positions_are_summed():
+    """franka_hand_node / franka_gripper: each finger carries half the aperture."""
+    assert aperture_from_positions([0.0408, 0.0408]) == pytest.approx(0.0816)
+
+
+def test_single_position_is_the_whole_aperture():
+    """
+    franka_gripper_control publishes one joint, fr3_gripper_width, already the full width.
+
+    Summing blindly would have read it as itself (one element), but the guards that preceded this
+    helper required two and dropped the message outright — which is what left every consumer of
+    /fr3_gripper/joint_states blind on the FAULHABER gripper.
+    """
+    assert aperture_from_positions([0.105]) == pytest.approx(0.105)
+
+
+def test_no_positions_is_none_not_zero():
+    """A width-less message must not read as a closed gripper."""
+    assert aperture_from_positions([]) is None

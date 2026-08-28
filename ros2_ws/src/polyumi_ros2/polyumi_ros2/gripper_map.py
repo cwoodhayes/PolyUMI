@@ -54,6 +54,31 @@ rather than as an error.
 """
 
 
+def aperture_from_positions(positions) -> float | None:
+    """
+    Read a jaw aperture out of a ``/fr3_gripper/joint_states`` message's ``position`` field.
+
+    Two drivers publish that topic and they spell the same aperture differently:
+
+    * ``franka_hand_node`` follows franka_gripper — ``[fr3_finger_joint1, fr3_finger_joint2]``,
+      each finger carrying **half** the aperture, so consumers sum them.
+    * ``franka_gripper_control`` (the FAULHABER driver) publishes the single joint
+      ``fr3_gripper_width``, already the **whole** aperture.
+
+    Both failure modes are a silent halving or doubling of a physical width, so the decision is
+    made here once rather than in each subscriber. Summing the first two rather than doubling
+    ``position[0]`` keeps the two-finger case honest if the fingers are ever asymmetric.
+
+    :param positions: the message's ``position`` field.
+    :returns: jaw aperture in metres, or None if the message carries no position at all.
+    """
+    if len(positions) >= 2:
+        return float(positions[0] + positions[1])
+    if len(positions) == 1:
+        return float(positions[0])
+    return None
+
+
 def policy_to_robot_width(width_m: float, min_width_m: float, max_width_m: float) -> float:
     """
     Convert a policy-space width to a commandable jaw aperture.

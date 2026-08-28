@@ -171,6 +171,19 @@ clock); `ssh jailfranka 'sudo chronyc makestep'` once the link is up re-steps it
 place, `tf_use_latest` is no longer needed for real runs — it was only a stationary-dry-run
 crutch for the old skew.
 
+**The gripper driver is selectable.** `fr3_inference.launch.py` takes
+`gripper:=hand|faulhaber|none`; `execute_gripper` stays the separate flag for whether it may move.
+`hand` is our `franka_hand_node` (Franka Hand over libfranka — a decimator, see the doc);
+`faulhaber` is the `external/franka_gripper_control` submodule, a third-party 200 Hz CANopen
+driver that already speaks our `/polyumi/target_gripper` contract, so it is wired in with a single
+`joint_state_topic:=/fr3_gripper/joint_states` launch argument and **no fork and no patch** — keep
+it that way. Its knobs are argparse CLI args, not ROS params. `fr3_session.sh` rsyncs, symlinks
+and builds it on the NUC (`GRIPPER=faulhaber ./fr3_session.sh`); `can0` and a one-time
+`/faulhaber_gripper/calibrate` are manual. `inference.yaml`'s `gripper_max_width_m` and
+`latency.gripper*` are still the Franka Hand's numbers, and `nuc/tcp_calib.py` is too — re-measure
+both before running the arm on a different gripper. See
+[docs/crb-fr3-inference.md](docs/crb-fr3-inference.md).
+
 **When debugging FR3 inference on the arm — read [docs/crb-fr3-inference.md](docs/crb-fr3-inference.md)
 FIRST, especially "When it doesn't come up" and "Gripper problems", before re-diagnosing.** The common failure modes and
 their fixes are documented there: nothing publishing / Foxglove blank (a duplicate or leftover

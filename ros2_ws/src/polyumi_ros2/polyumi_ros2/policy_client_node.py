@@ -57,7 +57,7 @@ from polyumi_ros2.camera_preproc import (
 from polyumi_inference import Observation, TransportError, WireFormatError
 from polyumi_inference.client import PolicyClient
 
-from polyumi_ros2.gripper_map import policy_to_robot_width, robot_to_policy_width
+from polyumi_ros2.gripper_map import aperture_from_positions, policy_to_robot_width, robot_to_policy_width
 from polyumi_ros2.target_chunk import CONSUMER_HINT, TargetChunkPublisher, pose_array
 
 # Name used for the single "joint" in the gripper trajectory chunk. Deliberately NOT a real joint
@@ -549,15 +549,11 @@ class PolicyClientNode(Node):
             self._latest_image_stamp = rclpy.time.Time.from_msg(msg.header.stamp)
 
     def _gripper_cb(self, msg: JointState) -> None:
-        """Cache the gripper aperture with its stamp, summing the two finger joints."""
-        if len(msg.position) < 2:
-            self._warn_throttled(
-                f'Ignoring gripper state with {len(msg.position)} position(s); expected 2 (names: {list(msg.name)})'
-            )
+        """Cache the gripper aperture with its stamp, whichever driver published it."""
+        width = aperture_from_positions(msg.position)
+        if width is None:
+            self._warn_throttled(f'Ignoring gripper state with no position (names: {list(msg.name)})')
             return
-        # Each FR3 finger reports HALF the aperture, so the full opening is their sum. Summing
-        # rather than doubling position[0] keeps this honest if the fingers are ever asymmetric.
-        width = float(msg.position[0] + msg.position[1])
         with self._gripper_lock:
             self._gripper_buffer.append((rclpy.time.Time.from_msg(msg.header.stamp), width))
 

@@ -97,6 +97,7 @@ from sensor_msgs.msg import Image, JointState
 from tf2_ros import Buffer, TransformListener
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
+from polyumi_ros2.gripper_map import aperture_from_positions
 from polyumi_ros2.latency_util import get_latency
 from polyumi_ros2.target_chunk import TargetChunkPublisher
 
@@ -550,11 +551,12 @@ class LatencyProbe(Node):
         The stamps are kept separately, since the publish INTERVAL is a property of the NUC-side
         publisher and measuring it off arrivals would fold in transport jitter.
         """
-        if len(msg.position) < 2:
+        aperture = aperture_from_positions(msg.position)
+        if aperture is None:
             return
         stamp_s = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         with self._lock:
-            self._actual.append((self._now(), float(msg.position[0] + msg.position[1])))
+            self._actual.append((self._now(), aperture))
             self._state_stamps.append(stamp_s)
 
     def _now(self) -> float:

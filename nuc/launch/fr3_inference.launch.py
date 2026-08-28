@@ -18,6 +18,8 @@ Run on the NUC, after fr3_bringup.launch.py is up:
     ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true # fingers only
     ros2 launch nuc/launch/fr3_inference.launch.py execute_arm:=true     # servo drives the arm
 
+`gripper:=hand|faulhaber|none` picks the driver; `execute_gripper` decides whether it may move.
+
 The streaming Cartesian impedance controller is loaded inactive and only ACTIVATED once
 `execute_arm:=true`; otherwise it sits loaded but idle and nothing moves.
 
@@ -35,10 +37,11 @@ from launch.actions import (
 )
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
-from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch.launch_description_sources import AnyLaunchDescriptionSource, PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.substitutions import FindPackageShare
 
 SERVO_CONTROLLER = 'polyumi_cartesian_impedance_controller'
 MOVEIT_CONTROLLER = 'fr3_arm_controller'
@@ -54,12 +57,18 @@ def generate_launch_description():
     robot_ip = LaunchConfiguration('robot_ip')
     execute_arm = LaunchConfiguration('execute_arm')
     execute_gripper = LaunchConfiguration('execute_gripper')
+    gripper = LaunchConfiguration('gripper')
     max_acceleration = LaunchConfiguration('max_acceleration')
     gripper_max_width = LaunchConfiguration('gripper_max_width')
 
     # Torque control starts the moment the controller activates, so it is gated on the same flag
     # as every other way this file can move the arm.
     activate_servo = PythonExpression(["'", execute_arm, "' == 'true'"])
+
+    # Which hardware, and whether it is allowed to move, stay two separate questions: the
+    # first-run pattern in docs/crb-fr3-inference.md is a live gripper against a plan-only arm.
+    def _selected(name):
+        return PythonExpression(["'", gripper, "' == '", name, "' and '", execute_gripper, "' == 'true'"])
 
     # Hoisted out of the LaunchDescription list so the event handler below can name it: the switch
     # has to wait for this to finish, and launch offers no ordering guarantee otherwise.
@@ -103,9 +112,22 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 'execute_gripper',
                 default_value='false',
-                description='Start franka_hand_node and let it issue Moves (MOVES THE FINGERS). '
-                'False does not start the node at all — there is no hand to connect to on a '
-                'gripper-less run, and franka_hand_node treats a missing Hand as fatal.',
+                description='Start the driver named by `gripper` and let it move the fingers '
+                '(MOVES THE FINGERS). False does not start it at all — both drivers open their '
+                'hardware connection on startup and treat a missing device as fatal, so a '
+                'gripper-less run has no dry-run mode, only "do not start it".',
+            ),
+            # The two grippers are mutually exclusive hardware, so this selects one rather than
+            # gating each. Kept separate from execute_gripper so `gripper:=faulhaber` alone is a
+            # safe way to check the selection resolves without touching the mechanism.
+            DeclareLaunchArgument(
+                'gripper',
+                default_value='hand',
+                choices=['hand', 'faulhaber', 'none'],
+                description='Which gripper driver to run: `hand` = franka_hand_node (Franka Hand, '
+                'over libfranka); `faulhaber` = franka_gripper_control (FAULHABER over CANopen, '
+                'needs can0 up and a completed /faulhaber_gripper/calibrate); `none` = neither, '
+                'for an arm-only session. Only takes effect with execute_gripper:=true.',
             ),
             DeclareLaunchArgument(
                 'max_acceleration',
@@ -181,7 +203,7 @@ def generate_launch_description():
                 executable='franka_hand_node',
                 name='fr3_gripper',
                 output='screen',
-                condition=IfCondition(execute_gripper),
+                condition=IfCondition(_selected('hand')),
                 parameters=[
                     {
                         # value_type is not optional: a LaunchConfiguration resolves to a STRING,
@@ -191,6 +213,30 @@ def generate_launch_description():
                         'max_width_m': ParameterValue(gripper_max_width, value_type=float),
                     }
                 ],
+            ),
+            # The FAULHABER gripper, from the franka_gripper_control submodule. It already
+            # subscribes /polyumi/target_gripper as a JointTrajectory carrying fr3_gripper_width
+            # in metres — the same contract franka_hand_node serves — so the ONLY thing this
+            # override does is move its state stream onto the topic the six existing consumers
+            # read. Everything else is left at its defaults; retune via its own launch args (see
+            # its README), never `--ros-args -p`: its knobs are argparse, not ROS parameters.
+            #
+            # Unlike the Hand it holds position until /faulhaber_gripper/calibrate has found both
+            # hard stops, so a fresh NUC needs that service call before any width is tracked.
+            IncludeLaunchDescription(
+                AnyLaunchDescriptionSource(
+                    PathJoinSubstitution(
+                        [
+                            FindPackageShare('franka_gripper_control'),
+                            'launch',
+                            'faulhaber_gripper.launch.xml',
+                        ]
+                    )
+                ),
+                launch_arguments={
+                    'joint_state_topic': '/fr3_gripper/joint_states',
+                }.items(),
+                condition=IfCondition(_selected('faulhaber')),
             ),
         ]
     )

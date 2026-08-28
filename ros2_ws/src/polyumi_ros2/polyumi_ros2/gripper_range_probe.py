@@ -67,6 +67,8 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
+from polyumi_ros2.gripper_map import aperture_from_positions
+
 #: Joint name the hand node expects on /polyumi/target_gripper (it reads positions, not names, but
 #: matching policy_client_node keeps the topic self-describing).
 GRIPPER_JOINT_NAME = 'fr3_gripper_width'
@@ -183,10 +185,11 @@ class GripperRangeProbe(Node):
         return float(response.values[0].double_value)
 
     def _on_state(self, msg: JointState) -> None:
-        """Cache the aperture; each FR3 finger reports half of it."""
-        if len(msg.position) >= 2:
+        """Cache the aperture, however the running gripper driver spells it."""
+        aperture = aperture_from_positions(msg.position)
+        if aperture is not None:
             with self._lock:
-                self._aperture = float(msg.position[0] + msg.position[1])
+                self._aperture = aperture
 
     def aperture(self) -> float | None:
         """Return the most recent jaw aperture in metres, or None if nothing has arrived."""
@@ -201,8 +204,9 @@ class GripperRangeProbe(Node):
                 return True
             time.sleep(0.1)
         self.get_logger().error(
-            f'Nothing published on {self._state_topic} after {timeout_s:.0f}s — is fr3_bringup up '
-            'on the NUC with load_gripper:=true (the default)?'
+            f'Nothing published on {self._state_topic} after {timeout_s:.0f}s — is a gripper '
+            'driver running on the NUC (ros2 launch nuc/launch/fr3_inference.launch.py '
+            'gripper:=hand|faulhaber execute_gripper:=true)?'
         )
         return False
 

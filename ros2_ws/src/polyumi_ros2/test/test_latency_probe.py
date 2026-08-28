@@ -160,15 +160,24 @@ def test_gripper_state_is_timed_on_arrival_not_on_the_nuc_stamp():
     probe.destroy_node()
 
 
-def test_short_gripper_state_messages_are_ignored():
-    """A malformed state message must not enter the series as a bogus aperture."""
+def test_positionless_gripper_state_messages_are_ignored():
+    """
+    A state message carrying no position must not enter the series as a bogus aperture.
+
+    A SINGLE position is not malformed — that is the FAULHABER driver's whole aperture, and
+    requiring two silently dropped every one of its samples. See gripper_map.aperture_from_positions.
+    """
     from sensor_msgs.msg import JointState
 
     probe = _probe(mode='gripper')
     msg = JointState()
-    msg.position = [0.02]
+    msg.position = []
     probe._on_gripper_state(msg)
     assert probe._actual == []
+
+    msg.position = [0.02]
+    probe._on_gripper_state(msg)
+    assert [w for _, w in probe._actual] == [0.02]
     probe.destroy_node()
 
 

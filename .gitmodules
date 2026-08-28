@@ -7,3 +7,6 @@
 [submodule "external/polyumi_diffusion_policy"]
 	path = external/polyumi_diffusion_policy
 	url = https://github.com/cwoodhayes/polyumi_diffusion_policy.git
+[submodule "external/franka_gripper_control"]
+	path = external/franka_gripper_control
+	url = https://github.com/anunthramaswami2030/franka_gripper_control.git

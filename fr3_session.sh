@@ -68,6 +68,10 @@ MAX_IMAGE_AGE_S="${MAX_IMAGE_AGE_S:-0.3}"
 # execute_arm/execute_gripper flags (both default false) in front of the arm. Set false for a
 # dry run: the preview topics still show every commanded chunk, but nothing is published.
 EXECUTE_MOTION="${EXECUTE_MOTION:-true}"
+# Which gripper driver the NUC starts: `hand` (Franka Hand over libfranka) or `faulhaber`
+# (franka_gripper_control over CANopen; needs can0 up and a completed calibration). Only rides
+# the PRE-TYPED nuc-inference line, so it still takes an Enter before anything moves.
+GRIPPER="${GRIPPER:-faulhaber}"
 
 # Every remote tmux session this script owns. Also spelled out in the pane table below; kept
 # separate because --kill must work without first resolving the Pi or building the table.
@@ -179,26 +183,34 @@ fi
 if [ "${SKIP_DEPLOY:-0}" = 1 ]; then
   echo "SKIP_DEPLOY=1 — leaving the remote source trees as they are."
 else
-  echo "==> Syncing nuc/ to $NUC_SSH_HOST:$NUC_REPO ..."
-  if rsync -a --delete --mkpath --exclude='__pycache__/' --exclude='*.pyc' \
-      nuc "${NUC_SSH_HOST}:${NUC_REPO}/"; then
-    # fr3_home_service runs straight from the synced tree, but polyumi_fr3_controllers is C++:
-    # rsync only updates the source that ~/franka_ws/src symlinks at, so without this the NUC
-    # keeps running the previously built artifacts. One is a torque controller and the other
-    # drives the hand. Sourcing is explicit because `ssh host 'cmd'` gets no ~/.bashrc.
-    echo "==> Rebuilding polyumi_fr3_controllers on $NUC_SSH_HOST ..."
+  echo "==> Syncing nuc/ + franka_gripper_control to $NUC_SSH_HOST:$NUC_REPO ..."
+  # -R (--relative) so each source keeps its path under $NUC_REPO — external/franka_gripper_control
+  # must land at external/franka_gripper_control, not at the repo root. --delete stays scoped to
+  # the transferred directories; the implied external/ is created, never scanned, so the other
+  # submodules (which the NUC does not have and does not need) are safe.
+  if rsync -aR --delete --mkpath --exclude='__pycache__/' --exclude='*.pyc' --exclude='.git/' \
+      nuc external/franka_gripper_control "${NUC_SSH_HOST}:${NUC_REPO}/"; then
+    # fr3_home_service runs straight from the synced tree, but polyumi_fr3_controllers is C++ and
+    # franka_gripper_control is an installed ament_python package: rsync only updates the sources
+    # that ~/franka_ws/src symlinks at, so without this the NUC keeps running the previously built
+    # artifacts — a torque controller, the Franka Hand driver, and the FAULHABER driver.
+    # Sourcing is explicit because `ssh host 'cmd'` gets no ~/.bashrc.
+    echo "==> Rebuilding polyumi_fr3_controllers + franka_gripper_control on $NUC_SSH_HOST ..."
     if ssh -o ConnectTimeout=10 "$NUC_SSH_HOST" \
-        "source /opt/ros/humble/setup.bash \
+        "ln -sfn $NUC_REPO/external/franka_gripper_control \
+             $NUC_FRANKA_WS/src/franka_gripper_control \
+         && source /opt/ros/humble/setup.bash \
          && source $NUC_FRANKA_WS/install/setup.bash \
          && cd $NUC_FRANKA_WS \
-         && colcon build --packages-select polyumi_fr3_controllers \
+         && colcon build --packages-select polyumi_fr3_controllers franka_gripper_control \
               --cmake-args -DCMAKE_BUILD_TYPE=Release"; then
       echo "    done. NOTE: the impedance controller is a pluginlib .so that controller_manager"
-      echo "    keeps mapped, so it runs the OLD build until fr3_bringup restarts; franka_hand_node"
-      echo "    needs fr3_inference restarted. Re-attaching to either live session picks up neither."
+      echo "    keeps mapped, so it runs the OLD build until fr3_bringup restarts; the gripper"
+      echo "    driver needs fr3_inference restarted. Re-attaching to either live session picks"
+      echo "    up neither."
     else
       echo "WARNING: colcon build on $NUC_SSH_HOST failed — it may run a stale impedance" >&2
-      echo "         controller or a stale franka_hand_node." >&2
+      echo "         controller or a stale gripper driver." >&2
     fi
   else
     echo "WARNING: rsync to $NUC_SSH_HOST failed — it may be running stale nuc/ code." >&2
@@ -256,7 +268,7 @@ add_pane nuc "$NUC_SSH_HOST" fr3-bringup window \
 
 # PRETYPE: carries the execute flags, so it is yours to press Enter on.
 add_pane nuc-inference "$NUC_SSH_HOST" fr3-inference split "" \
-  "cd $NUC_REPO && $(logged fr3_inference 'ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true execute_arm:=true')"
+  "cd $NUC_REPO && $(logged fr3_inference "ros2 launch nuc/launch/fr3_inference.launch.py gripper:=$GRIPPER execute_gripper:=true execute_arm:=true")"
 
 # RUN: stateless, moves nothing, and the client warns without it.
 #
@@ -362,12 +374,19 @@ Order to press Enter in:
 Send the arm home (needs pane 2 running; MOVES THE ARM even in plan-only mode):
   ros2 service call /polyumi/home std_srvs/srv/Trigger "{}"
 
-Gripper only, for a first run on the hand — edit pane 2's line down to:
-  ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true
+Gripper only, for a first run — edit pane 2's line down to:
+  ros2 launch nuc/launch/fr3_inference.launch.py gripper:=$GRIPPER execute_gripper:=true
 Then, from the ros-client pane, the acceptance test (MOVES THE FINGERS):
   ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper_chirp
-franka_hand_node logs every move(width, speed) it plans in pane 2, at 0.7-1.7 Hz.
-That ceiling is the hand, not a fault: see docs/crb-fr3-inference.md, "Gripper problems".
+
+Running gripper:=faulhaber? Bring the bus up on the NUC and, on a NUC that has never been
+calibrated, find the hard stops once (SWEEPS THE FULL STROKE — clear the mechanism first):
+  ssh $NUC_SSH_HOST 'sudo ip link set can0 up type can bitrate 500000'
+  ros2 service call /faulhaber_gripper/calibrate std_srvs/srv/Trigger "{}"
+It tracks nothing until that succeeds. The result persists in ~/.ros/ across launches.
+
+Running gripper:=hand? franka_hand_node logs every move(width, speed) it plans in pane 2, at
+0.7-1.7 Hz. That ceiling is the hand, not a fault: docs/crb-fr3-inference.md, "Gripper problems".
 
 tmux, minimum viable:
   C-b n / C-b p    next / previous window        C-b o     next pane
