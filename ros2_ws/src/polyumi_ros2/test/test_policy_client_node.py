@@ -8,6 +8,8 @@ a bad stale count just moves the arm to the wrong waypoint — so they are pinne
 than left to hardware testing to notice.
 """
 
+import threading
+import time
 from unittest.mock import patch
 
 import numpy as np
@@ -17,9 +19,18 @@ from geometry_msgs.msg import TransformStamped
 from rclpy.clock import ClockType
 from rclpy.parameter import Parameter
 from rclpy.time import Time
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import Image, JointState
 
+from polyumi_inference import ActionChunk, Observation, TransportError
 from polyumi_ros2.policy_client_node import PolicyClientNode
+
+#: Stand-in for the tests that drive _post_and_act directly. Its contents never reach a server --
+#: those tests mock the client -- but it has to be the type the method now takes.
+_OBS = Observation(
+    channels={'camera0_rgb': np.zeros((2, 4, 4, 3), dtype=np.uint8), 'agent_pos': np.zeros((2, 8))},
+    n_obs_steps=2,
+    n_action_steps=8,
+)
 
 BASE_FRAME = 'fr3_link0'
 EEF_FRAME = 'polyumi_tcp'
@@ -324,25 +335,28 @@ def test_reset_url_derives_from_predict_url(make_node):
     assert node2._reset_url == 'http://sheep:8000/reset'
 
 
-def test_reset_episode_posts_start_pose_once(make_node):
-    """_reset_episode POSTs the given pose to the reset URL and latches _episode_reset_done."""
+def test_reset_episode_sends_start_pose_once(make_node):
+    """
+    _reset_episode hands the given pose to the client and latches _episode_reset_done.
+
+    The URL and the JSON shaping belong to PolicyClient and are tested there; what this node owns
+    is sending the pose exactly once per episode.
+    """
     node = make_node(inference_server_url='http://sheep:8000/predict_cartesian/')
     agent_pos = np.array([0.4, 0.0, 0.3, 0.0, 0.0, 0.0, 1.0, 0.0])
 
-    with patch.object(node, '_http_post_json', return_value={'status': 'ok'}) as post:
+    with patch.object(node._client, 'reset', return_value={'status': 'ok'}) as post:
         node._reset_episode(agent_pos)
 
     assert node._episode_reset_done is True
     post.assert_called_once()
-    url, body = post.call_args[0]
-    assert url == 'http://sheep:8000/reset'
-    assert body == {'agent_pos': agent_pos.tolist()}
+    assert np.array_equal(post.call_args[0][0], agent_pos)
 
 
 def test_reset_episode_not_latched_on_failure(make_node):
     """A failed /reset leaves the flag unset so the next tick retries."""
     node = make_node()
-    with patch.object(node, '_http_post_json', return_value=None):
+    with patch.object(node._client, 'reset', side_effect=TransportError('nope', url='u')):
         node._reset_episode(np.zeros(8))
     assert node._episode_reset_done is False
 
@@ -362,11 +376,11 @@ def test_preview_published_full_chunk_without_execution(make_node):
     now = _t(100.0)
     t_obs = _t(98.0)  # 2s old -> every action is stale, so the chunk is dropped for execution
     with (
-        patch.object(node, '_http_post_json', return_value={'actions': actions}),
+        patch.object(node._client, 'predict', return_value=ActionChunk(actions)),
         patch.object(node, 'get_clock', return_value=_FakeClock(now)),
         patch.object(node._preview_pub, 'publish') as preview_pub,
     ):
-        node._post_and_act(payload={}, t_obs=t_obs)
+        node._post_and_act(obs=_OBS, t_obs=t_obs)
 
     preview_pub.assert_called_once()
     msg = preview_pub.call_args[0][0]
@@ -403,10 +417,14 @@ def _drive_ticks(node, n_ticks: int) -> int:
 
     Bypasses the camera/TF plumbing (image cached, pose mocked, buffer pre-filled, reset
     latched) so the test isolates the stride gate alone: the only thing that varies tick to
-    tick is _inference_phase, so the count of _post_and_act calls is the inference cadence.
+    tick is _inference_phase, so the count of _submit_inference calls is the inference cadence.
+
+    _submit_inference is the seam, not _post_and_act: the tick's whole job is to decide and hand
+    off, and the request itself runs on another thread. Counting there would be counting the
+    worker's schedule as well as the stride.
     """
     now = _t(100.0)
-    node._latest_image = np.zeros((4, 4, 3), dtype=np.float32)
+    node._latest_image = np.zeros((4, 4, 3), dtype=np.uint8)
     node._latest_image_stamp = now
     # Pre-fill the obs buffer so every tick is a full-buffer tick (skips the fill-up ramp),
     # and latch the reset so the episode-start POST doesn't interfere.
@@ -419,7 +437,7 @@ def _drive_ticks(node, n_ticks: int) -> int:
     with (
         patch.object(node, 'get_clock', return_value=_FakeClock(now)),
         patch.object(node, '_lookup_agent_pos', return_value=fixed_pose),
-        patch.object(node, '_post_and_act', side_effect=lambda *a, **k: infer_calls.append(1)),
+        patch.object(node, '_submit_inference', side_effect=lambda *a, **k: infer_calls.append(1)),
     ):
         for _ in range(n_ticks):
             node._control_tick()
@@ -715,12 +733,12 @@ def test_gripper_and_pose_chunks_stay_index_aligned(make_node):
     t_obs = _t(99.75)  # partially stale: some leading actions get dropped
 
     with (
-        patch.object(node, '_http_post_json', return_value={'actions': actions}),
+        patch.object(node._client, 'predict', return_value=ActionChunk(actions)),
         patch.object(node, 'get_clock', return_value=_FakeClock(now)),
         patch.object(node._target_pub, 'publish') as pose_pub,
         patch.object(node._gripper_pub, 'publish') as grip_pub,
     ):
-        node._post_and_act(payload={}, t_obs=t_obs)
+        node._post_and_act(obs=_OBS, t_obs=t_obs)
 
     poses = pose_pub.call_args[0][0]
     grip_msg = grip_pub.call_args[0][0]
@@ -773,10 +791,10 @@ def test_diagnostics_report_zero_published_when_the_chunk_is_all_stale(make_node
     actions = _actions_with_grip([0.02] * 8)
 
     with (
-        patch.object(node, '_http_post_json', return_value={'actions': actions}),
+        patch.object(node._client, 'predict', return_value=ActionChunk(actions)),
         patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))),
     ):
-        node._post_and_act(payload={}, t_obs=_t(98.0))  # 2s old: stale for both devices
+        node._post_and_act(obs=_OBS, t_obs=_t(98.0))  # 2s old: stale for both devices
 
     values = _diag_values(captured)
     assert values['n_published_arm'] == 0
@@ -797,10 +815,10 @@ def test_diagnostics_report_what_each_device_actually_got(make_node):
     actions = _actions_with_grip([0.02] * 8)
 
     with (
-        patch.object(node, '_http_post_json', return_value={'actions': actions}),
+        patch.object(node._client, 'predict', return_value=ActionChunk(actions)),
         patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))),
     ):
-        node._post_and_act(payload={}, t_obs=_t(99.9))
+        node._post_and_act(obs=_OBS, t_obs=_t(99.9))
 
     values = _diag_values(captured)
     # 0.1s obs age: arm drops ceil(0.4/0.1)=4, gripper ceil(0.2/0.1)=2.
@@ -818,11 +836,11 @@ def test_gripper_preview_publishes_full_chunk(make_node):
     actions = _actions_with_grip([0.02] * 8)
     now = _t(100.0)
     with (
-        patch.object(node, '_http_post_json', return_value={'actions': actions}),
+        patch.object(node._client, 'predict', return_value=ActionChunk(actions)),
         patch.object(node, 'get_clock', return_value=_FakeClock(now)),
         patch.object(node._gripper_preview_pub, 'publish') as grip_preview,
     ):
-        node._post_and_act(payload={}, t_obs=_t(98.0))  # fully stale
+        node._post_and_act(obs=_OBS, t_obs=_t(98.0))  # fully stale
 
     grip_preview.assert_called_once()
     assert len(grip_preview.call_args[0][0].points) == 8
@@ -852,11 +870,11 @@ def test_arm_chunk_is_anchored_at_t_obs_minus_arm_exec(make_node):
     actions = _actions_with_grip([0.02] * 8)
 
     with (
-        patch.object(node, '_http_post_json', return_value={'actions': actions}),
+        patch.object(node._client, 'predict', return_value=ActionChunk(actions)),
         patch.object(node, 'get_clock', return_value=_FakeClock(_t(100.0))),
         patch.object(node._target_pub, 'publish') as pose_pub,
     ):
-        node._post_and_act(payload={}, t_obs=_t(99.9))
+        node._post_and_act(obs=_OBS, t_obs=_t(99.9))
 
     kwargs = pose_pub.call_args[1]
     stamp = kwargs['stamp'].sec + kwargs['stamp'].nanosec * 1e-9
@@ -864,3 +882,192 @@ def test_arm_chunk_is_anchored_at_t_obs_minus_arm_exec(make_node):
     # 0.1s obs age + 0.3s arm_exec over a 0.1s action_dt drops 4, so the survivors start at 4.
     assert kwargs['first_index'] == 4
     assert len(pose_pub.call_args[0][0]) == 4
+
+
+# ----------------------------------------------------------------------
+# Wire payload and the inference worker
+# ----------------------------------------------------------------------
+
+
+def _image_msg(width=64, height=48, encoding='rgb8'):
+    """Build a synthetic sensor_msgs/Image with a deterministic gradient."""
+    frame = np.tile(np.arange(width, dtype=np.uint8)[None, :, None], (height, 1, 3))
+    msg = Image()
+    msg.height, msg.width, msg.encoding, msg.step = height, width, encoding, width * 3
+    msg.data = frame.tobytes()
+    msg.header.stamp = _t(100.0).to_msg()
+    return msg
+
+
+def test_cached_frame_stays_uint8(make_node):
+    """
+    The wire carries uint8, not float32.
+
+    Widening to float32 before sending quadruples the request for no extra information — the
+    dataset stores camera0_rgb as uint8 — and the request is bandwidth-bound.
+    """
+    node = make_node(control_hz=10.0, image_width=32, image_height=32)
+    node._image_cb(_image_msg())
+
+    assert node._latest_image is not None
+    assert node._latest_image.dtype == np.uint8
+    assert node._latest_image.shape == (32, 32, 3)
+
+
+def test_tick_packs_the_channels_the_policy_needs(make_node):
+    """
+    The tick must emit a frame carrying camera0_rgb as uint8 and agent_pos, dt-spaced.
+
+    Channel names are the dataset's, not the wire's own invention, so that adding a modality is
+    adding a name rather than a name plus a mapping on the far side.
+    """
+    node = make_node(control_hz=10.0, n_obs_steps=2, image_width=224, image_height=224)
+    now = _t(100.0)
+    node._latest_image = np.zeros((224, 224, 3), dtype=np.uint8)
+    node._latest_image_stamp = now
+    node._episode_reset_done = True
+    for _ in range(node._n_obs_steps):
+        node._obs_buffer.append((node._latest_image, np.zeros(8)))
+
+    captured = []
+    with (
+        patch.object(node, 'get_clock', return_value=_FakeClock(now)),
+        patch.object(node, '_lookup_agent_pos', return_value=np.zeros(8)),
+        patch.object(node, '_submit_inference', side_effect=lambda b, t: captured.append(b)),
+    ):
+        node._control_tick()
+
+    assert len(captured) == 1
+    obs = captured[0]
+
+    assert obs.names() == ['agent_pos', 'camera0_rgb']
+    assert obs['camera0_rgb'].dtype == np.uint8
+    assert obs['camera0_rgb'].shape == (2, 224, 224, 3)
+    assert obs['agent_pos'].shape == (2, 8)
+    assert obs.n_obs_steps == 2
+    assert obs.n_action_steps == node._n_action_steps
+    # Raw bytes plus a small header. The float32-and-base64 form this replaced was 1.6 MB; the
+    # bound is loose on purpose so it survives a header formatting change.
+    assert len(obs.to_frame()) < 350_000
+
+
+def test_submit_keeps_only_the_newest_observation(make_node):
+    """
+    A superseded observation is dropped, never queued.
+
+    _post_and_act only ever sees the newest observation still pending once the worker frees up.
+    By the time a backlog could deliver a queued one, _n_stale_actions would discard every action
+    the chunk contained — so queueing would buy a round trip's worth of GPU time for nothing.
+    """
+    node = make_node(control_hz=10.0)
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_done = threading.Event()
+    sent = []
+
+    def _slow_post(payload, t_obs):
+        sent.append(payload)
+        if payload == {'in_flight': True}:
+            first_started.set()
+            release_first.wait(timeout=5.0)
+        else:
+            second_done.set()
+
+    with patch.object(node, '_post_and_act', side_effect=_slow_post):
+        node._submit_inference({'in_flight': True}, _t(100.0))
+        assert first_started.wait(timeout=5.0), 'worker never picked up the observation'
+
+        # Both land while the worker is still busy with 'in_flight'; only the newest one may
+        # still be waiting when it frees up.
+        node._submit_inference({'first': True}, _t(100.1))
+        node._submit_inference({'second': True}, _t(100.2))
+
+        release_first.set()
+        assert second_done.wait(timeout=5.0), 'worker never picked up the newest observation'
+
+    assert sent == [{'in_flight': True}, {'second': True}]
+
+
+def test_tick_does_not_block_on_the_request(make_node):
+    """The control tick hands off and returns; the request runs on the worker thread, not here."""
+    node = make_node(control_hz=10.0)
+    started = threading.Event()
+    release = threading.Event()
+
+    def _slow_post(payload, t_obs):
+        started.set()
+        release.wait(timeout=5.0)
+
+    with patch.object(node, '_post_and_act', side_effect=_slow_post):
+        node._submit_inference({}, _t(100.0))
+        assert started.wait(timeout=5.0), 'worker never picked up the observation'
+        # The worker is mid-"request". A tick submitting now must return immediately.
+        t0 = time.monotonic()
+        node._submit_inference({}, _t(100.1))
+        assert time.monotonic() - t0 < 0.5
+        release.set()
+
+
+def test_control_tick_does_not_block_on_reset(make_node):
+    """
+    The episode-start /reset also runs on the worker thread, not the control tick.
+
+    A tick that dispatches it inline would stall the whole loop (buffer included) for up to
+    post_timeout_s on every retry while the server is slow or unreachable — the same failure
+    mode _submit_inference exists to avoid for /predict_cartesian/.
+    """
+    node = make_node(control_hz=10.0)
+    now = _t(100.0)
+    node._latest_image = np.zeros((4, 4, 3), dtype=np.uint8)
+    node._latest_image_stamp = now
+    for _ in range(node._n_obs_steps):
+        node._obs_buffer.append((node._latest_image, np.zeros(8)))
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def _slow_reset(agent_pos):
+        started.set()
+        release.wait(timeout=5.0)
+
+    with (
+        patch.object(node, 'get_clock', return_value=_FakeClock(now)),
+        patch.object(node, '_lookup_agent_pos', return_value=np.zeros(8)),
+        patch.object(node._client, 'reset', side_effect=_slow_reset),
+    ):
+        t0 = time.monotonic()
+        node._control_tick()
+        assert time.monotonic() - t0 < 0.5, '_control_tick blocked on the reset request'
+        assert started.wait(timeout=5.0), 'worker never picked up the reset'
+        release.set()
+
+
+def test_worker_does_a_pending_reset_before_a_pending_observation(make_node):
+    """A late reset makes every wrt_start pose in the episode wrong; a late inference tick doesn't."""
+    node = make_node(control_hz=10.0)
+    order = []
+    reset_started = threading.Event()
+    release_reset = threading.Event()
+
+    def _slow_reset(agent_pos):
+        reset_started.set()
+        release_reset.wait(timeout=5.0)
+        order.append('reset')
+
+    with (
+        patch.object(node, '_post_and_act', side_effect=lambda *a, **k: order.append('predict')),
+        patch.object(node._client, 'reset', side_effect=_slow_reset),
+    ):
+        node._submit_reset(np.zeros(8))
+        assert reset_started.wait(timeout=5.0), 'worker never picked up the reset'
+        # The worker is now blocked inside the reset call; submitting an observation here can
+        # only land in the mailbox, never jump ahead of it.
+        node._submit_inference(_OBS, _t(100.0))
+        release_reset.set()
+
+        for _ in range(50):
+            if len(order) >= 2:
+                break
+            time.sleep(0.05)
+
+    assert order == ['reset', 'predict']

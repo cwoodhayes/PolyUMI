@@ -64,6 +64,29 @@ visuomotor default always runs regardless of the value. See
 so leaving them unset falls back to your wandb login's default entity and the `polyumi` project
 — it does not fall back to a hard-coded team.
 
+## Building the image
+
+`polyumi-dp` is built in two stages, by `build_policy_image.sh` at the repo root — which
+`train_policy.sh` and `serve_policy.sh` both source, so the two roles always run the same image
+(a checkpoint is dill-pickled and must unpickle against the exact dep tree it was trained with):
+
+| Stage | Context | What | Cost |
+|---|---|---|---|
+| `polyumi-dp-base` | `external/polyumi_diffusion_policy` | conda env, torch, diffusion_policy | ~23 min cold, then cached |
+| `polyumi-dp` | `inference_server` | `polyumi_inference` layered on top | seconds |
+
+Two stages because the fork's Dockerfile builds with the *fork directory* as its context and so
+cannot see `inference_server/`, which both ends of the inference protocol import. Layer caching
+makes this cheaper than one build would be: editing the shared library rebuilds only stage two.
+
+To build by hand:
+
+```bash
+docker build -t polyumi-dp-base external/polyumi_diffusion_policy
+docker build -t polyumi-dp --build-arg BASE=polyumi-dp-base \
+    -f docker/polyumi_inference.Dockerfile inference_server
+```
+
 ## The two entrypoints
 
 The image (`polyumi-dp`) has one env and two thin wrappers, both in the fork's `docker/`:
@@ -102,8 +125,13 @@ Run these in order; each isolates the next failure.
 
 ```bash
 # 1. GPU visible (do this first — the likeliest rootless snag):
-docker build -t polyumi-dp external/polyumi_diffusion_policy
+#    (both stages; see "Building the image" above)
+docker build -t polyumi-dp-base external/polyumi_diffusion_policy
+docker build -t polyumi-dp --build-arg BASE=polyumi-dp-base \
+    -f docker/polyumi_inference.Dockerfile inference_server
 docker run --rm --gpus all polyumi-dp nvidia-smi          # or --device nvidia.com/gpu=all
+docker run --rm polyumi-dp \
+    micromamba run -n umi python -c "import polyumi_inference"   # the shared protocol library
 docker run --rm --gpus all polyumi-dp \
     micromamba run -n umi python -c "import torch; print(torch.cuda.is_available())"   # -> True
 

@@ -33,7 +33,8 @@ external/         # Git submodules
   franka_ros2/              # ROS2 control stack for Franka Emika Panda robot arm
   ORB_SLAM3_PolyUMI/        # PolyUMI's ORB_SLAM3 fork (monocular visual-inertial SLAM for the GoPro Hero 12)
   polyumi_diffusion_policy  # control policy implementations, dockerized & wrapped in an API server
-inference_server/ # dummy inference server for testing inference pipeline without the model
+inference_server/ # polyumi_inference: the inference wire protocol and both ends of it
+                  #   (the ROS client imports it; so does the policy server. See docs/crb-fr3-inference.md)
 infra/            # RPi provisioning infrastructure (see docs/pi-provisioning.md)
 ingest/           # PC-side CLI: fetch sessions from Pi, run preprocessing pipeline, and export training datasets
 notebooks/        # jupyter notebooks for bringup/debugging
@@ -83,6 +84,17 @@ Install ingest dependencies (includes the `polyumi_pi` package for shared data t
 ```bash
 uv sync --group dev
 ```
+
+Install the inference protocol library for the ROS node's interpreter. `policy_client_node`
+runs under `/usr/bin/python3`, not the uv venv, and imports `polyumi_inference` for the client
+half of the protocol:
+
+```bash
+pip install --user --break-system-packages --no-deps -e inference_server/
+```
+
+`--no-deps` because numpy and requests arrive from apt via `rosdep` below; letting pip resolve
+them would shadow the system numpy the rest of the ROS stack links against.
 
 Build the ROS 2 workspace:
 
@@ -213,8 +225,10 @@ First, see the [system calibration instructions](/docs/calibration-instructions.
 `policy_client_node` drives a robot arm from a diffusion-policy inference server.
 The arm's control stack typically runs on its own machine and is reached over ROS2;
 how you bring that up, network the two machines, and configure DDS depends on your
-robot and lab. The wire contract lives in [inference_server/](inference_server/) and its tests,
-and [docs/crb-fr3-inference.md](docs/crb-fr3-inference.md) is a worked example for our
+robot and lab. The protocol — the wire format, the client, and the server app — is the `polyumi_inference` library in
+[inference_server/](inference_server/).
+
+[docs/crb-fr3-inference.md](docs/crb-fr3-inference.md) is a worked example for one
 specific Franka FR3 setup that you can adapt.
 
 ## Hardware Notes

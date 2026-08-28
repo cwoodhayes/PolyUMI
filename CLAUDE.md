@@ -243,7 +243,42 @@ pzarr stores) and the dataset manifests are the source of truth; every row is re
 ```
 
 ## Package Management
-This is a `uv` workspace. `ingest/` is the only workspace member. `pi/` is referenced as an editable path source (`tool.uv.sources`) so `polyumi_pi` is importable in the workspace venv, but it is not a member — it has its own `pi/.venv` managed separately for the Pi. `inference_server/` is also deliberately **not** a member: it is meant to run isolated on a standalone GPU/inference machine, so it keeps its own minimal `inference_server/.venv` (just fastapi/uvicorn/numpy) — run it with `cd inference_server && uv run dummy-server`. Run `uv sync` at the root for PC-side dev dependencies. The `pi/` package requires `--system-site-packages` on the Pi for `picamera2`/`sounddevice`.
+This is a `uv` workspace. `ingest/` is the only workspace member. `pi/` is referenced as an editable path source (`tool.uv.sources`) so `polyumi_pi` is importable in the workspace venv, but it is not a member — it has its own `pi/.venv` managed separately for the Pi. `inference_server/` is also deliberately **not** a member: it must import under three interpreters (see below), so it keeps its own `inference_server/.venv` — run the dummy server with `cd inference_server && uv run dummy-server`. Run `uv sync` at the root for PC-side dev dependencies. The `pi/` package requires `--system-site-packages` on the Pi for `picamera2`/`sounddevice`.
+
+## The Inference Protocol Lives in One Library
+
+`inference_server/` is the `polyumi_inference` package: the observation wire format, the client
+that speaks it, and the FastAPI app that answers. **Both ends import it.** The ROS-side
+`policy_client_node` holds a `PolicyClient`; `dummy_server` and the fork's `serve_policy.py` are
+`PolicyBackend`s behind `create_app`. A server writes no routes and no validation — that is what
+makes "the dummy refuses exactly what a checkpoint refuses" true by construction. It used to be
+three byte-identical copies of one file and a test that compared them.
+
+Layers, innermost out: `wire.py` (bytes ↔ arrays) → `types.py` (`Observation`, `ActionChunk`) →
+`contract.py` (what the policy requires) → `client.py` / `server.py`.
+
+**It must stay Python 3.9 compatible.** The policy container's conda env is `python=3.9` /
+numpy 1.24 while the ROS node is 3.12, and both import this. Every module carries
+`from __future__ import annotations`; `test_python39_floor.py` asserts that, since a `X | None`
+annotation raises at import on 3.9 and is invisible on 3.12. Verify a real change against the
+floor by building the image and importing there — that is the only place it is actually exercised.
+
+**Installing it for the ROS node** (ament_python under `/usr/bin/python3`, PEP 668):
+
+```bash
+pip install --user --break-system-packages --no-deps -e inference_server/
+```
+
+`--no-deps` because numpy and requests come from apt via rosdep; letting pip resolve them would
+shadow the system numpy the rest of the ROS stack links against. Editable, so it tracks the
+working copy.
+
+**Getting it into the policy container** is a two-stage `docker build` (`build_policy_image.sh`,
+used by both `train_policy.sh` and `serve_policy.sh` so the two roles run the same image). The
+fork's Dockerfile builds with the *fork directory* as its context and cannot see
+`inference_server/`, so `docker/polyumi_inference.Dockerfile` layers the library on top with
+`inference_server/` as its own context. Do **not** "fix" this by staging a copy into the fork —
+that re-creates the duplicated file this library exists to delete.
 
 ## Running Commands in the Right Environment
 

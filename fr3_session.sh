@@ -9,12 +9,13 @@
 #     ./fr3_session.sh --kill         # --kill-local, plus stop the remote sessions too
 #
 # Both --kill forms interrupt what is running and wait KILL_GRACE_S (default 8) before killing
-# any pane: SIGHUP, what killing a pane delivers, leaves the Pi's LED lit and sheep's inference
+# any pane: SIGHUP, what killing a pane delivers, leaves the Pi's LED lit and the GPU box's inference
 # container running.
 #
 # Every fresh start (not a re-attach) also makes each machine run this working copy — builds
 # polyumi_ros2 here, rsyncs nuc/ to the NUC, and calls ./deploy.sh for the Pi — so nothing runs
-# code you no longer have checked out. See the "Deploy" section below.
+# code you no longer have checked out. See the "Deploy" section below. The GPU box is the one
+# exception and has its own script, ./deploy_gpu.sh; the reason is in that section.
 #
 # WHERE TMUX RUNS, AND WHY IT MATTERS
 # The NUC and GPU-box panes run tmux *on the remote host* (`ssh -t host tmux new -A -s ...`),
@@ -61,8 +62,8 @@ NUC_REPO="${NUC_REPO:-~/Documents/PolyUMI}"
 # The NUC's franka_ros2 workspace. ~/franka_ws/src/polyumi_fr3_controllers is a symlink into
 # $NUC_REPO/nuc, so a build here picks up whatever the rsync above just landed.
 NUC_FRANKA_WS="${NUC_FRANKA_WS:-~/franka_ws}"
-SHEEP_SSH_HOST="${SHEEP_SSH_HOST:-sheep}"
-SHEEP_REPO="${SHEEP_REPO:-~/repos/PolyUMI}"
+GPU_SSH_HOST="${GPU_SSH_HOST:-lamb}"
+GPU_REPO="${GPU_REPO:-~/repos/PolyUMI}"
 
 # ssh destination for the Pi — the same POLYUMI_PI_HOST that `pingest fetch` and the catalog's
 # Fetch button read, down to this same default, so all three agree with nothing exported and one
@@ -71,7 +72,9 @@ SHEEP_REPO="${SHEEP_REPO:-~/repos/PolyUMI}"
 #   POLYUMI_PI_HOST=conorpi ./fr3_session.sh
 POLYUMI_PI_HOST="${POLYUMI_PI_HOST:-polyumi-pi}"
 
-INFERENCE_URL="${INFERENCE_URL:-http://sheep.mech.northwestern.edu:8002/predict_cartesian/}"
+# lamb sits on the far end of a dedicated cable, not on campus wifi, so this is an IP rather
+# than a name: the direct link has no DNS behind it. See docs/crb-fr3-inference.md.
+INFERENCE_URL="${INFERENCE_URL:-http://129.105.69.10:8002/predict_cartesian/}"
 # The Elgato's 1080p software convert runs ~200ms behind; the 50ms auto default drops every tick.
 MAX_IMAGE_AGE_S="${MAX_IMAGE_AGE_S:-0.3}"
 # Whether the laptop publishes chunks to the NUC bridges at all. Defaults true because the
@@ -84,7 +87,7 @@ EXECUTE_MOTION="${EXECUTE_MOTION:-true}"
 if [ "${1:-}" = "--kill-local" ] || [ "${1:-}" = "--kill" ]; then
   # Interrupt everything, wait once, then kill. Killing a pane delivers SIGHUP, which none of
   # these clean up on: the Pi leaves the finger LED lit (its `finally:` only runs via
-  # KeyboardInterrupt), sheep's `docker run` CLI dies without forwarding it so the container and
+  # KeyboardInterrupt), the GPU box's `docker run` CLI dies without forwarding it so the container and
   # its port survive, and ros2 launch skips the shutdown that reports whether the FCI was
   # released. 8s covers the Pi's worst case: stream() stops both child streamers (2s SIGTERM +
   # 2s SIGKILL join each) before it touches the LED.
@@ -117,7 +120,7 @@ if [ "${1:-}" = "--kill-local" ] || [ "${1:-}" = "--kill" ]; then
     for sess in fr3-bringup fr3-inference; do
       interrupt_remote_session "$NUC_SSH_HOST" "$sess" && NEEDS_GRACE=1
     done
-    interrupt_remote_session "$SHEEP_SSH_HOST" polyumi && NEEDS_GRACE=1
+    interrupt_remote_session "$GPU_SSH_HOST" polyumi && NEEDS_GRACE=1
     [ "$NEEDS_GRACE" = 1 ] && echo "Sent C-c to the remote sessions."
   fi
 
@@ -128,7 +131,7 @@ if [ "${1:-}" = "--kill-local" ] || [ "${1:-}" = "--kill" ]; then
 
   tmux kill-session -t "$SESSION" 2>/dev/null && echo "Killed local session '$SESSION'."
   if [ "${1:-}" = "--kill-local" ]; then
-    echo "NOTE: the remote tmux sessions on $NUC_SSH_HOST/$SHEEP_SSH_HOST are still running by design."
+    echo "NOTE: the remote tmux sessions on $NUC_SSH_HOST/$GPU_SSH_HOST are still running by design."
     echo "      To stop those too:  ./fr3_session.sh --kill"
     exit 0
   fi
@@ -145,7 +148,7 @@ if [ "${1:-}" = "--kill-local" ] || [ "${1:-}" = "--kill" ]; then
   }
   kill_remote_session "$NUC_SSH_HOST" fr3-bringup
   kill_remote_session "$NUC_SSH_HOST" fr3-inference
-  kill_remote_session "$SHEEP_SSH_HOST" polyumi
+  kill_remote_session "$GPU_SSH_HOST" polyumi
   exit 0
 fi
 
@@ -187,8 +190,9 @@ fi
 # Non-fatal per target: a machine that's unreachable (Pi powered off, say) warns and is
 # skipped rather than blocking the machines that ARE up — the Pi is skipped up front on
 # PI_REACHABLE from the probe above, the NUC by letting rsync/ssh fail and warning after the
-# fact (it has no equivalent cheap up-front probe worth adding). Sheep is deliberately not
+# fact (it has no equivalent cheap up-front probe worth adding). The GPU box is deliberately not
 # included — it tracks its own training branch, not this one, so force-syncing it would be wrong.
+# Push to it explicitly with ./deploy_gpu.sh when you do want it running this working copy.
 # ---------------------------------------------------------------------------
 if [ "${SKIP_DEPLOY:-0}" = 1 ]; then
   echo "SKIP_DEPLOY=1 — leaving the laptop build and the NUC/Pi source trees as they are."
@@ -257,8 +261,8 @@ remote_session_exists() {
 # submits the result. Re-attaching is supposed to hand the pane back exactly as it was.
 NUC_BRINGUP_FRESH=1; remote_session_exists "$NUC_SSH_HOST" fr3-bringup   && NUC_BRINGUP_FRESH=0
 NUC_INFER_FRESH=1;   remote_session_exists "$NUC_SSH_HOST" fr3-inference && NUC_INFER_FRESH=0
-SHEEP_FRESH=1;       remote_session_exists "$SHEEP_SSH_HOST" polyumi     && SHEEP_FRESH=0
-if [ "$NUC_BRINGUP_FRESH$NUC_INFER_FRESH$SHEEP_FRESH" != "111" ]; then
+GPU_FRESH=1;       remote_session_exists "$GPU_SSH_HOST" polyumi     && GPU_FRESH=0
+if [ "$NUC_BRINGUP_FRESH$NUC_INFER_FRESH$GPU_FRESH" != "111" ]; then
   echo "Re-attaching to remote sessions that are already running; leaving those panes untouched."
 fi
 
@@ -340,8 +344,8 @@ tmux send-keys -t "$NUC_INFER_PANE" "$(remote_shell "$NUC_SSH_HOST" fr3-inferenc
 read -r PI_PANE PI_WINDOW < <(
   tmux new-window -a -t "$NUC_WINDOW" -n polyumi-pi -P -F '#{pane_id} #{window_id}' -c "$REPO_DIR")
 tmux send-keys -t "$PI_PANE" "ssh -t $POLYUMI_PI_HOST" C-m
-SHEEP_PANE="$(tmux split-window -t "$PI_PANE" -h -P -F '#{pane_id}' -c "$REPO_DIR")"
-tmux send-keys -t "$SHEEP_PANE" "$(remote_shell "$SHEEP_SSH_HOST" polyumi)" C-m
+GPU_PANE="$(tmux split-window -t "$PI_PANE" -h -P -F '#{pane_id}' -c "$REPO_DIR")"
+tmux send-keys -t "$GPU_PANE" "$(remote_shell "$GPU_SSH_HOST" polyumi)" C-m
 
 # ---------------------------------------------------------------------------
 # Window 3: this laptop — DDS env sourced, ready to launch the client.
@@ -379,13 +383,13 @@ fi
 # and no stream at all. The error still prints in the pane, so a real failure stays visible.
 tmux send-keys -t "$PI_PANE" "sudo systemctl stop polyumi-pi; polyumi-pi stream" C-m
 
-# --- Sheep: PRETYPE. The checkpoint changes every training run, so the path is yours to pick.
+# --- GPU box: PRETYPE. The checkpoint changes every training run, so the path is yours to pick.
 # --- The five most recent are listed above the prompt to save a hunt through dp_outputs/.
-if [ "$SHEEP_FRESH" = 1 ]; then
-  tmux send-keys -t "$SHEEP_PANE" "cd $SHEEP_REPO" C-m
-  tmux send-keys -t "$SHEEP_PANE" \
+if [ "$GPU_FRESH" = 1 ]; then
+  tmux send-keys -t "$GPU_PANE" "cd $GPU_REPO" C-m
+  tmux send-keys -t "$GPU_PANE" \
     "ls -t data/dp_outputs/*/*/checkpoints/latest.ckpt 2>/dev/null | head -5" C-m
-  pretype "$SHEEP_PANE" "CKPT=\$(ls -t $SHEEP_REPO/data/dp_outputs/*/*/checkpoints/latest.ckpt | head -1) ./serve_policy.sh"
+  pretype "$GPU_PANE" "CKPT=\$(ls -t $GPU_REPO/data/dp_outputs/*/*/checkpoints/latest.ckpt | head -1) ./serve_policy.sh"
 fi
 
 # --- Laptop: PRETYPE. Depends on every pane above being live, and there is no readiness gate
@@ -421,7 +425,7 @@ That ceiling is the hand, not a fault: see docs/crb-fr3-inference.md, "Gripper p
 tmux, minimum viable:
   C-b n / C-b p    next / previous window        C-b o     next pane
   C-b d            detach (everything keeps running)
-  C-b C-b          send a prefix to the INNER tmux on $NUC_SSH_HOST/$SHEEP_SSH_HOST
+  C-b C-b          send a prefix to the INNER tmux on $NUC_SSH_HOST/$GPU_SSH_HOST
 Re-attach any time with ./fr3_session.sh — remote panes pick up where they left off.
 
 EOF

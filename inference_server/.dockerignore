@@ -1,0 +1,7 @@
+# Build context for docker/polyumi_inference.Dockerfile. Only the source is wanted; .venv alone is
+# 104 MB and, being a venv, is not relocatable across machines let alone into a 3.9 container.
+.venv/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+*.egg-info/

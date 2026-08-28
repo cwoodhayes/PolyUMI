@@ -20,7 +20,6 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FORK_DIR="${REPO_ROOT}/external/polyumi_diffusion_policy"
 
 IMAGE="${IMAGE:-polyumi-dp}"
 DATASET="${DATASET:?set DATASET=/abs/path/to/exported.zarr.zip (produced by 'pingest export', or 'pingest export --type polyumi' for a dataset carrying audio)}"
@@ -58,8 +57,9 @@ fi
 
 mkdir -p "${OUTPUT_DIR}" "${HF_CACHE_DIR}"
 
-echo ">> building ${IMAGE} from ${FORK_DIR}"
-docker build -t "${IMAGE}" "${FORK_DIR}"
+# shellcheck source=build_policy_image.sh
+source "${REPO_ROOT}/build_policy_image.sh"
+build_policy_image "${REPO_ROOT}" "${IMAGE}"
 
 echo ">> training (dataset: ${DATASET}, output: ${OUTPUT_DIR})"
 # HOME and cache dirs point at /tmp so wandb/matplotlib/numba can write regardless of which uid
