@@ -53,13 +53,13 @@
     "3D!2sy03nw": {
       "cameraState": {
         "perspective": true,
-        "distance": 5.270401889302381,
-        "phi": 84.28482148462267,
-        "thetaOffset": 170.18743689844393,
+        "distance": 2.4417309747368683,
+        "phi": 81.03896103896366,
+        "thetaOffset": 2.72727272728001,
         "targetOffset": [
-          0.6616763636834138,
-          -2.705639512953976,
-          -2.0305485011794207e-17
+          0,
+          0,
+          0
         ],
         "target": [
           0,
@@ -79,46 +79,37 @@
       "followMode": "follow-pose",
       "scene": {},
       "transforms": {
-        "frame:fr3_hand": {
-          "visible": true
-        },
-        "frame:fr3_link8": {
-          "visible": false
-        },
-        "frame:fr3_link7": {
-          "visible": false
-        },
-        "frame:fr3_link6": {
-          "visible": false
-        },
-        "frame:fr3_link5": {
-          "visible": false
-        },
-        "frame:fr3_link4": {
-          "visible": false
-        },
-        "frame:fr3_link3": {
-          "visible": false
-        },
-        "frame:fr3_link2": {
+        "frame:fr3_link0": {
           "visible": false
         },
         "frame:fr3_link1": {
           "visible": false
         },
-        "frame:fr3_link0": {
+        "frame:fr3_link2": {
           "visible": false
         },
-        "frame:fr3_leftfinger": {
+        "frame:fr3_link3": {
           "visible": false
         },
-        "frame:fr3_rightfinger": {
+        "frame:fr3_link4": {
           "visible": false
         },
-        "frame:base": {
+        "frame:fr3_link5": {
+          "visible": false
+        },
+        "frame:fr3_link6": {
+          "visible": false
+        },
+        "frame:fr3_link7": {
+          "visible": false
+        },
+        "frame:fr3_link8": {
           "visible": false
         },
         "frame:fr3_hand_tcp": {
+          "visible": false
+        },
+        "frame:base": {
           "visible": false
         }
       },
@@ -128,14 +119,14 @@
         },
         "/polyumi/target_poses_preview": {
           "visible": true,
-          "axisScale": 0.1
+          "axisScale": 0.08
         }
       },
       "layers": {
         "grid": {
           "visible": true,
           "drawBehind": false,
-          "instanceId": "4de0cf7a-13de-48ba-b386-a4ac5ebde0c3",
+          "instanceId": "0e0bef36-9440-4f5d-9ebb-6a2136f56645",
           "layerId": "foxglove.Grid",
           "size": 10,
           "divisions": 10,
@@ -163,8 +154,7 @@
         "poseEstimateThetaDeviation": 0.26179939
       },
       "synchronize": false,
-      "imageMode": {},
-      "fixedFrame": "base"
+      "imageMode": {}
     },
     "Image!2gdeq90": {
       "cameraState": {
@@ -268,7 +258,7 @@
           "enabled": true,
           "color": "#4e98e2",
           "id": "2aa9f5b1-4de8-4841-92aa-435ddf0d7296",
-          "label": "Inference Latency (s)"
+          "label": "Inference RTT (s)"
         },
         {
           "timestampMethod": "receiveTime",
@@ -293,6 +283,14 @@
           "color": "#5cd6a9",
           "id": "d8e84f3a-30a8-4c4d-a388-b2b2a6378c86",
           "label": "GoPro capture -> inf. response time (s)"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/polyumi/diag/inference_model_s.data",
+          "enabled": true,
+          "color": "#61cbff",
+          "id": "07f2f42e-a267-4314-9c28-491cf15f0a47",
+          "label": "Model exectuion time (s)"
         }
       ],
       "foxglovePanelTitle": "System Latency",

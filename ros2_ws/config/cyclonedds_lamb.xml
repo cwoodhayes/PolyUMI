@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  CycloneDDS config for lamb standing in for the laptop on the FR3 link (ROS_SSH_HOST in
+  fr3_session.sh / CYCLONEDDS_CONFIG_FILE in setup_franka_env.sh).
+
+  lamb reaches the NUC over its own direct cable on the 192.168.100.x subnet, not the laptop's
+  10.0.0.x one — a separate file rather than a substituted copy of cyclonedds_laptop.xml, since
+  the peer addresses differ too, not just the interface name. Requires the NUC's own
+  ~/franka_ws/config/cyclonedds.xml to also list this link (its own NetworkInterface entry plus
+  both 192.168.100.x peers) — that file is NUC-local system config, not synced by this repo.
+
+  Pinned to lamb's wired NIC enp37s0f1, matching its NetworkManager profile "direct"
+  (192.168.100.1/24, pre-existing — see the "direct" profile check in setup_franka_env.sh).
+-->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain Id="any">
+    <General>
+      <Interfaces>
+        <NetworkInterface name="enp37s0f1" multicast="false" />
+      </Interfaces>
+      <AllowMulticast>false</AllowMulticast>
+    </General>
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>32</MaxAutoParticipantIndex>
+      <Peers>
+        <Peer address="192.168.100.1" />
+        <Peer address="192.168.100.2" />
+      </Peers>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

@@ -24,8 +24,16 @@ The following script at the root of the repo enables bringing up all of the func
 ./fr3_session.sh
 ```
 
-Safe commands run themselves; robot-moving ones are pre-typed for you to press Enter on. It
-rsyncs `nuc/` to the NUC and runs `./deploy.sh` for the Pi on every fresh start. 
+Safe commands run themselves; robot-moving ones are pre-typed for you to press Enter on. On
+every fresh start it rsyncs `nuc/` to the NUC, runs `./deploy.sh` for the Pi and
+`./deploy_lamb.sh` for lamb, so all three run this working copy (`SKIP_DEPLOY=1` skips it).
+
+**lamb runs both the ROS client and the policy server.** This laptop is only a terminal, so it
+can sleep mid-run: the NUC and lamb panes are tmux *on those hosts*, and re-running the script
+re-attaches. Per-host link settings — NIC, static IP, CycloneDDS config — live in
+`config/env.<hostname>.sh`, sourced by `setup_franka_env.sh`; lamb's are in
+`config/env.lamb.sh`. `./fr3_session.sh --kill` tears the whole wall down cleanly (a plain pane
+kill sends SIGHUP, which leaves the Pi's LED lit and the inference container running).
 
 The script is essentially performing the following steps for you:
 
@@ -57,10 +65,10 @@ Velocity scaling is only applicable if the arm is being controlled by moveit, wh
 
 ## 3. Inference server
 
-The GPU box (`lamb`) is on the far end of a dedicated cable, not on campus wifi, so it is
-addressed by IP: `129.105.69.10`, port 8002. `./deploy_gpu.sh` pushes this working copy's fork,
-entrypoints and `inference_server/` to it — it is deliberately NOT part of `fr3_session.sh`'s
-auto-deploy, because the GPU box tracks its own training branch.
+`lamb` runs the policy server (port 8002) *and* the ROS client, so the client reaches it at
+`http://localhost:8002` and the request never crosses the dedicated cable. `./deploy_lamb.sh`
+pushes this working copy and runs the three build steps a plain rsync leaves stale;
+`fr3_session.sh` calls it on every fresh start, so lamb runs what you have checked out.
 
 The dummy and the real server are the **same app** — `create_app` in the `polyumi_inference`
 library (`inference_server/`), which the ROS client imports too — with different backends. So a
@@ -69,9 +77,9 @@ one you would have seen in production. If you change anything about the request,
 both ends and both servers move together.
 
 ```bash
-# real policy, on the GPU box (see training-instructions.md):
+# real policy, on lamb (see training-instructions.md):
 CKPT=/abs/path/to/<name>.ckpt ./serve_policy.sh
-curl http://<gpu-host>:8000/health            # from the laptop
+curl http://localhost:8002/health             # from lamb, where the client also runs
 
 # or the dummy oscillator — no GPU, no checkpoint:
 cd inference_server && uv run dummy-server    # :8000

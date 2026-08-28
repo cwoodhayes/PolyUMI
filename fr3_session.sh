@@ -1,104 +1,99 @@
 #!/usr/bin/env bash
-# Bring up the whole FR3 inference wall — NUC, Pi, GPU box, laptop — as one tmux session.
-#
-# Replaces the seven-terminal ssh-and-remember dance in docs/crb-fr3-inference.md with:
+# Bring up the whole FR3 inference wall — NUC, Pi, lamb — as one tmux session.
 #
 #     ./fr3_session.sh                # create (or re-attach to) the session
-#     SKIP_DEPLOY=1 ./fr3_session.sh  # ...without re-syncing the NUC/Pi source trees first
+#     SKIP_DEPLOY=1 ./fr3_session.sh  # ...without re-syncing the remote source trees first
 #     ./fr3_session.sh --kill-local   # tear down the LOCAL session only (remote ones survive)
-#     ./fr3_session.sh --kill         # --kill-local, plus stop the remote sessions too
+#     ./fr3_session.sh --kill         # ...and stop the remote sessions too
 #
-# Both --kill forms interrupt what is running and wait KILL_GRACE_S (default 8) before killing
-# any pane: SIGHUP, what killing a pane delivers, leaves the Pi's LED lit and the GPU box's inference
-# container running.
+# This machine is only a terminal. ROS and the policy server both run on lamb, so the inference
+# request never leaves that box and the laptop can sleep mid-run without consequence.
 #
-# Every fresh start (not a re-attach) also makes each machine run this working copy — builds
-# polyumi_ros2 here, rsyncs nuc/ to the NUC, and calls ./deploy.sh for the Pi — so nothing runs
-# code you no longer have checked out. See the "Deploy" section below. The GPU box is the one
-# exception and has its own script, ./deploy_gpu.sh; the reason is in that section.
+# WHAT AUTO-RUNS, AND WHAT ONLY GETS TYPED
+# Commands that are safe and order-independent are RUN for you. Commands that need a decision
+# (which checkpoint, whether the arm is allowed to move) are PRE-TYPED at the prompt but not
+# executed — read the line, edit it, press Enter. Nothing here can move the robot on its own.
 #
 # WHERE TMUX RUNS, AND WHY IT MATTERS
-# The NUC and GPU-box panes run tmux *on the remote host* (`ssh -t host tmux new -A -s ...`),
-# not a bare ssh. Two reasons:
-#   1. A laptop sleep or wifi blip then costs you nothing — the arm session and the policy
-#      server keep running, and re-running this script re-attaches to them.
-#   2. It fixes the env trap in docs/crb-fr3-inference.md: a non-interactive shell does not
-#      source ~/.bashrc, so `ssh host 'cmd'` comes up without CYCLONEDDS_URI, on the wrong
-#      RMW, invisible to everything else. `ssh -t host tmux` gets an interactive shell, so the
-#      DDS env and the fr3-* aliases are simply there.
+# The remote panes run tmux *on the remote host* (`ssh -t host tmux new -A -s ...`), not a bare
+# ssh, so a laptop sleep or a wifi blip costs nothing — re-running this script re-attaches. It
+# also gets an interactive shell, so ~/.bashrc's DDS env and fr3-* aliases are simply there;
+# `ssh host 'cmd'` comes up without them, on the wrong RMW, invisible to everything else.
 # The Pi is a plain ssh: it is stateless and cheap to restart, so the extra layer buys nothing.
 #
 # WHERE THE LOGS GO
-# The three launches that can crash — NUC bringup, NUC inference, laptop policy client — tee their
-# console output to ~/.local/state/polyumi/<name>_<date>.log on the machine that ran them
-# ($XDG_STATE_HOME if set). ROS's own ~/.ros/log does not capture this: franka_bringup launches
-# with output='screen', and a C++ crash message is raw stderr rather than rcl logging, so the line
-# naming the fault reaches the terminal and nowhere else. Files older than REMOTE_LOG_KEEP_DAYS
-# are pruned on each fresh start.
+# The launches that can crash tee their console output to ~/.local/state/polyumi/<name>_<date>.log
+# on the machine that ran them. ROS's own ~/.ros/log does not capture this: franka_bringup
+# launches with output='screen', and a C++ crash message is raw stderr rather than rcl logging,
+# so the line naming the fault reaches the terminal and nowhere else.
 #
-# WHAT AUTO-RUNS, AND WHAT ONLY GETS TYPED
-# Commands that are safe and order-independent are run for you. Commands that need a decision
-# (which checkpoint, whether the arm is allowed to move) are *typed into the prompt but not
-# executed* — review the line, edit it, press Enter. Nothing in here can move the robot on its
-# own. See PRETYPE vs RUN at each pane below.
+# Every fresh start (not a re-attach) also makes each machine run this working copy. See "Deploy".
 
 set -euo pipefail
 
+ACTION="${1:-}"
 SESSION="${SESSION:-polyumi}"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Seconds to let a remote shell finish starting before typing into it. Pre-typing races the
 # ssh+tmux+shell startup; if lines land mangled or in the wrong pane, raise this.
 SHELL_SETTLE_S="${SHELL_SETTLE_S:-5}"
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# ssh aliases for the three remotes, and where the repo lives on each. All overridable together
-# — a host and its repo path travel as a pair, so parameterizing one without the other would let
-# you point NUC_REPO somewhere new while still ssh'ing to the old box.
-#   NUC_SSH_HOST=otherfranka NUC_REPO=~/src/PolyUMI ./fr3_session.sh
-# The repo paths are left unexpanded so the REMOTE shell resolves the tilde against its own
-# $HOME — franka on the NUC, xhy7159 on the GPU box.
+# A host and the repo path on it travel as a pair, so they are overridden as a pair — pointing
+# NUC_REPO somewhere new while still ssh'ing to the old box would be worse than not allowing it.
+# Repo paths are left unexpanded so the REMOTE shell resolves the tilde against its own $HOME.
 NUC_SSH_HOST="${NUC_SSH_HOST:-jailfranka}"
 NUC_REPO="${NUC_REPO:-~/Documents/PolyUMI}"
 # The NUC's franka_ros2 workspace. ~/franka_ws/src/polyumi_fr3_controllers is a symlink into
-# $NUC_REPO/nuc, so a build here picks up whatever the rsync above just landed.
+# $NUC_REPO/nuc, so a build there picks up whatever the rsync landed.
 NUC_FRANKA_WS="${NUC_FRANKA_WS:-~/franka_ws}"
-GPU_SSH_HOST="${GPU_SSH_HOST:-lamb}"
-GPU_REPO="${GPU_REPO:-~/repos/PolyUMI}"
 
-# ssh destination for the Pi — the same POLYUMI_PI_HOST that `pingest fetch` and the catalog's
-# Fetch button read, down to this same default, so all three agree with nothing exported and one
-# export in your shell rc covers all three. "polyumi-pi" is the alias other users are expected to
-# set up in their own ssh config; override if yours is named differently (mine is "conorpi"):
-#   POLYUMI_PI_HOST=conorpi ./fr3_session.sh
+# lamb runs both the ROS client and the policy server. One host, one checkout, one sync.
+ROS_SSH_HOST="${ROS_SSH_HOST:-lamb}"
+ROS_REPO="${ROS_REPO:-~/repos/PolyUMI}"
+# The Elgato's device node is lamb's USB enumeration, not this laptop's (which is /dev/video2,
+# the launch file's default). Confirm with `v4l2-ctl --list-devices` if a capture pane stalls.
+ROS_VIDEO_DEVICE="${ROS_VIDEO_DEVICE:-/dev/video0}"
+
+# The same POLYUMI_PI_HOST that `pingest fetch` and the catalog's Fetch button read, down to this
+# default, so one export in your shell rc covers all three.
 POLYUMI_PI_HOST="${POLYUMI_PI_HOST:-polyumi-pi}"
 
-# lamb sits on the far end of a dedicated cable, not on campus wifi, so this is an IP rather
-# than a name: the direct link has no DNS behind it. See docs/crb-fr3-inference.md.
-INFERENCE_URL="${INFERENCE_URL:-http://129.105.69.10:8002/predict_cartesian/}"
+# Client and server are the same machine now, so this is a loopback hop rather than a trip over
+# the direct link. Port matches serve_policy.sh's default.
+INFERENCE_URL="${INFERENCE_URL:-http://localhost:8002/predict_cartesian/}"
 # The Elgato's 1080p software convert runs ~200ms behind; the 50ms auto default drops every tick.
 MAX_IMAGE_AGE_S="${MAX_IMAGE_AGE_S:-0.3}"
-# Whether the laptop publishes chunks to the NUC bridges at all. Defaults true because the
-# line is only PRE-TYPED, never run — nothing moves until you press Enter on it, and the NUC
-# side has its own execute_arm/execute_gripper flags (both default false) in front of the arm.
-# EXECUTE_MOTION=false ./fr3_session.sh for a dry run: the preview topics still show every
-# commanded chunk in Foxglove, but /polyumi/target_poses_traj is never published.
+# Defaults true because the line is only PRE-TYPED, never run, and the NUC has its own
+# execute_arm/execute_gripper flags (both default false) in front of the arm. Set false for a
+# dry run: the preview topics still show every commanded chunk, but nothing is published.
 EXECUTE_MOTION="${EXECUTE_MOTION:-true}"
 
-if [ "${1:-}" = "--kill-local" ] || [ "${1:-}" = "--kill" ]; then
+# Every remote tmux session this script owns. Also spelled out in the pane table below; kept
+# separate because --kill must work without first resolving the Pi or building the table.
+REMOTE_SESSIONS=(
+  "$NUC_SSH_HOST fr3-bringup"
+  "$NUC_SSH_HOST fr3-inference"
+  "$ROS_SSH_HOST polyumi"
+  "$ROS_SSH_HOST polyumi-ros"
+)
+
+# ---------------------------------------------------------------------------
+# Teardown
+# ---------------------------------------------------------------------------
+if [ "$ACTION" = "--kill-local" ] || [ "$ACTION" = "--kill" ]; then
   # Interrupt everything, wait once, then kill. Killing a pane delivers SIGHUP, which none of
   # these clean up on: the Pi leaves the finger LED lit (its `finally:` only runs via
-  # KeyboardInterrupt), the GPU box's `docker run` CLI dies without forwarding it so the container and
-  # its port survive, and ros2 launch skips the shutdown that reports whether the FCI was
-  # released. 8s covers the Pi's worst case: stream() stops both child streamers (2s SIGTERM +
-  # 2s SIGKILL join each) before it touches the LED.
+  # KeyboardInterrupt), the GPU box's `docker run` CLI dies without forwarding it so the
+  # container and its port survive, and ros2 launch skips the shutdown that reports whether the
+  # FCI was released. 8s covers the Pi's worst case: stream() stops both child streamers
+  # (2s SIGTERM + 2s SIGKILL join each) before it touches the LED.
   KILL_GRACE_S="${KILL_GRACE_S:-8}"
   NEEDS_GRACE=0
 
-  # The Pi on BOTH paths, --kill-local included: that pane is a plain `ssh -t` with no remote
-  # tmux to survive into, so it dies either way — this only decides whether it dies cleanly.
-  # ^C into the pane rather than `pkill` over ssh: `polyumi-pi` is a zsh alias, so no remote
-  # cmdline contains the pattern. Addressed by window name because the kill path is a different
-  # invocation from the one that captured the pane IDs.
+  # The Pi on BOTH paths: that pane is a plain `ssh -t` with no remote tmux to survive into, so
+  # it dies either way — this only decides whether it dies cleanly. ^C into the pane rather than
+  # `pkill` over ssh, because `polyumi-pi` is a zsh alias and no remote cmdline matches it.
   PI_PANE="$(tmux list-panes -t "$SESSION:polyumi-pi" -F '#{pane_id}' 2>/dev/null | head -1 || true)"
   if [ -n "$PI_PANE" ]; then
     tmux send-keys -t "$PI_PANE" C-c
@@ -106,22 +101,18 @@ if [ "${1:-}" = "--kill-local" ] || [ "${1:-}" = "--kill" ]; then
     NEEDS_GRACE=1
   fi
 
-  # Same ^C, and it also spares a pre-typed line or anything started by hand. Every pane, in case
-  # one was split. has-session gates it so the exit status means "interrupted something" — xargs
-  # reports success either way.
-  interrupt_remote_session() {
-    local host="$1" sess="$2"
-    ssh -o ConnectTimeout=5 -o BatchMode=yes "$host" \
-      "tmux has-session -t $sess 2>/dev/null && tmux list-panes -s -t $sess -F '#{pane_id}' | xargs -r -I{} tmux send-keys -t {} C-c" \
-      2>/dev/null
-  }
-
-  if [ "${1:-}" = "--kill" ]; then
-    for sess in fr3-bringup fr3-inference; do
-      interrupt_remote_session "$NUC_SSH_HOST" "$sess" && NEEDS_GRACE=1
+  if [ "$ACTION" = "--kill" ]; then
+    # ^C every pane of the session, which spares a pre-typed line and anything started by hand.
+    # has-session gates it so the exit status means "interrupted something".
+    for hs in "${REMOTE_SESSIONS[@]}"; do
+      read -r host sess <<<"$hs"
+      if ssh -o ConnectTimeout=5 -o BatchMode=yes "$host" \
+          "tmux has-session -t $sess 2>/dev/null && tmux list-panes -s -t $sess -F '#{pane_id}' \
+           | xargs -r -I{} tmux send-keys -t {} C-c" 2>/dev/null; then
+        NEEDS_GRACE=1
+      fi
     done
-    interrupt_remote_session "$GPU_SSH_HOST" polyumi && NEEDS_GRACE=1
-    [ "$NEEDS_GRACE" = 1 ] && echo "Sent C-c to the remote sessions."
+    [ "$NEEDS_GRACE" = 1 ] && echo "Sent C-c to the remote sessions." || true
   fi
 
   if [ "$NEEDS_GRACE" = 1 ]; then
@@ -129,48 +120,44 @@ if [ "${1:-}" = "--kill-local" ] || [ "${1:-}" = "--kill" ]; then
     sleep "$KILL_GRACE_S"
   fi
 
-  tmux kill-session -t "$SESSION" 2>/dev/null && echo "Killed local session '$SESSION'."
-  if [ "${1:-}" = "--kill-local" ]; then
-    echo "NOTE: the remote tmux sessions on $NUC_SSH_HOST/$GPU_SSH_HOST are still running by design."
+  tmux kill-session -t "$SESSION" 2>/dev/null && echo "Killed local session '$SESSION'." || true
+
+  if [ "$ACTION" = "--kill-local" ]; then
+    echo "NOTE: the remote tmux sessions on $NUC_SSH_HOST/$ROS_SSH_HOST are still running by design."
     echo "      To stop those too:  ./fr3_session.sh --kill"
     exit 0
   fi
 
-  # --kill: also stop the specific remote sessions this script owns. kill-session, not
-  # kill-server — the remote might be running other tmux sessions unrelated to us.
-  kill_remote_session() {
-    local host="$1" sess="$2"
+  # kill-session, not kill-server — the remotes may run other tmux sessions unrelated to us.
+  for hs in "${REMOTE_SESSIONS[@]}"; do
+    read -r host sess <<<"$hs"
     if ssh -o ConnectTimeout=5 -o BatchMode=yes "$host" "tmux kill-session -t $sess" 2>/dev/null; then
       echo "Killed remote session '$sess' on $host."
     else
       echo "No remote session '$sess' on $host (already gone, or host unreachable)."
     fi
-  }
-  kill_remote_session "$NUC_SSH_HOST" fr3-bringup
-  kill_remote_session "$NUC_SSH_HOST" fr3-inference
-  kill_remote_session "$GPU_SSH_HOST" polyumi
+  done
   exit 0
 fi
 
-# Already up? Just re-attach — this is the normal path after a laptop sleep.
+# Already up? Just re-attach — the normal path after a laptop sleep.
 if tmux has-session -t "$SESSION" 2>/dev/null; then
   echo "Session '$SESSION' exists; attaching."
   exec tmux attach -t "$SESSION"
 fi
 
+# ---------------------------------------------------------------------------
+# Resolve the Pi
+# ---------------------------------------------------------------------------
 # The Pi is on DHCP and its address really does change between sessions, so resolve it from the
-# ssh config rather than baking in a literal that is wrong by next week. One source of truth.
+# ssh config rather than baking in a literal that is wrong by next week.
 #
 # Checking this for emptiness would prove nothing: with no matching Host block, `ssh -G foo`
-# still exits 0 and echoes back `hostname foo`, so a typo'd alias yields a non-empty PI_HOST
-# that is just the typo — and it would then ride all the way into `pi_host:=` on the laptop's
-# launch line. Actually connecting is the only check that distinguishes the two, and it catches
-# a powered-off Pi at the same time. Non-fatal, matching how the deploy section below treats an
-# unreachable machine: one box being down should not block bringing the others up.
+# still exits 0 and echoes back `hostname foo`, so a typo'd alias yields a non-empty PI_HOST that
+# is just the typo — and it would ride all the way into `pi_host:=` on the launch line. Actually
+# connecting is the only check that distinguishes the two, and it catches a powered-off Pi too.
+# Non-fatal: one box being down should not block bringing the others up.
 PI_HOST="$(ssh -G "$POLYUMI_PI_HOST" 2>/dev/null | awk '/^hostname /{print $2}')" || true
-# Remembered as PI_REACHABLE and reused by the deploy step below, so an unreachable Pi is a single
-# 5s probe rather than also eating whatever rsync's own (unset here) connect timeout turns out to
-# be — that one hangs well past 5s rather than failing fast.
 if ssh -o ConnectTimeout=5 -o BatchMode=yes "$POLYUMI_PI_HOST" true 2>/dev/null; then
   PI_REACHABLE=1
   echo "Pi resolved to $PI_HOST (ssh alias: $POLYUMI_PI_HOST)"
@@ -184,41 +171,21 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Deploy: bring the NUC and Pi source trees in line with this working copy before anything
-# runs against them — the fix for "I edited a launch file locally and the NUC ran the old one".
-# SKIP_DEPLOY=1 bypasses both for a fast re-launch once you know they're already current.
-# Non-fatal per target: a machine that's unreachable (Pi powered off, say) warns and is
-# skipped rather than blocking the machines that ARE up — the Pi is skipped up front on
-# PI_REACHABLE from the probe above, the NUC by letting rsync/ssh fail and warning after the
-# fact (it has no equivalent cheap up-front probe worth adding). The GPU box is deliberately not
-# included — it tracks its own training branch, not this one, so force-syncing it would be wrong.
-# Push to it explicitly with ./deploy_gpu.sh when you do want it running this working copy.
+# Deploy: bring the remote source trees in line with this working copy before anything runs
+# against them — the fix for "I edited a launch file locally and the NUC ran the old one".
+# SKIP_DEPLOY=1 bypasses it for a fast re-launch. Non-fatal per target: a machine that is
+# unreachable warns and is skipped rather than blocking the machines that are up.
 # ---------------------------------------------------------------------------
 if [ "${SKIP_DEPLOY:-0}" = 1 ]; then
-  echo "SKIP_DEPLOY=1 — leaving the laptop build and the NUC/Pi source trees as they are."
+  echo "SKIP_DEPLOY=1 — leaving the remote source trees as they are."
 else
-  # The laptop needs this as much as the remotes do, and it is easier to forget: colcon COPIES
-  # sources into install/, so an edited node keeps running the old code until you rebuild, with
-  # no error and no clue — a stale `eef_frame` default cost an on-arm debugging session once.
-  # Only polyumi_ros2: it holds the nodes this session launches, and the two msgs packages are
-  # slow to build and change roughly never.
-  echo "==> Building polyumi_ros2 (this laptop) ..."
-  if ! (unset VIRTUAL_ENV; cd "$REPO_DIR/ros2_ws" \
-      && source /opt/ros/kilted/setup.bash && colcon build --packages-select polyumi_ros2); then
-    echo "WARNING: colcon build failed — the laptop may run stale polyumi_ros2 code." >&2
-  fi
-
   echo "==> Syncing nuc/ to $NUC_SSH_HOST:$NUC_REPO ..."
   if rsync -a --delete --mkpath --exclude='__pycache__/' --exclude='*.pyc' \
       nuc "${NUC_SSH_HOST}:${NUC_REPO}/"; then
-    echo "    done."
-
-    # fr3_home_service is a plain script and runs straight from the synced tree, but
-    # polyumi_fr3_controllers is C++: rsync only updates the source that ~/franka_ws/src symlinks
-    # at, so without this the NUC keeps running the previously built artifacts. That is the worst
-    # kind of stale — one is a torque controller and the other drives the hand, and the old build's
-    # behaviour includes the old build's error messages. Sourcing is explicit because
-    # `ssh host 'cmd'` gets no ~/.bashrc.
+    # fr3_home_service runs straight from the synced tree, but polyumi_fr3_controllers is C++:
+    # rsync only updates the source that ~/franka_ws/src symlinks at, so without this the NUC
+    # keeps running the previously built artifacts. One is a torque controller and the other
+    # drives the hand. Sourcing is explicit because `ssh host 'cmd'` gets no ~/.bashrc.
     echo "==> Rebuilding polyumi_fr3_controllers on $NUC_SSH_HOST ..."
     if ssh -o ConnectTimeout=10 "$NUC_SSH_HOST" \
         "source /opt/ros/humble/setup.bash \
@@ -226,13 +193,11 @@ else
          && cd $NUC_FRANKA_WS \
          && colcon build --packages-select polyumi_fr3_controllers \
               --cmake-args -DCMAKE_BUILD_TYPE=Release"; then
-      echo "    done. NOTE: this build has two consumers and they pick it up at different times."
-      echo "    The impedance controller is a pluginlib .so that controller_manager keeps mapped, so"
-      echo "    it runs the OLD build until fr3_bringup restarts. franka_hand_node is an executable"
-      echo "    fr3_inference spawns, so it needs fr3_inference restarted. Re-attaching to either"
-      echo "    live session picks up neither."
+      echo "    done. NOTE: the impedance controller is a pluginlib .so that controller_manager"
+      echo "    keeps mapped, so it runs the OLD build until fr3_bringup restarts; franka_hand_node"
+      echo "    needs fr3_inference restarted. Re-attaching to either live session picks up neither."
     else
-      echo "WARNING: colcon build on $NUC_SSH_HOST failed — $NUC_SSH_HOST may run a stale impedance" >&2
+      echo "WARNING: colcon build on $NUC_SSH_HOST failed — it may run a stale impedance" >&2
       echo "         controller or a stale franka_hand_node." >&2
     fi
   else
@@ -247,177 +212,159 @@ else
   else
     echo "==> Skipping Pi deploy — already confirmed unreachable above." >&2
   fi
+
+  # Whole tree, both builds, one script — also runnable by hand for a training-only push.
+  echo "==> Deploying to $ROS_SSH_HOST via ./deploy_lamb.sh ..."
+  if ! (cd "$REPO_DIR" && ./deploy_lamb.sh "$ROS_SSH_HOST" "$ROS_REPO"); then
+    echo "WARNING: deploy_lamb.sh failed — $ROS_SSH_HOST may run stale code, or fail to import" >&2
+    echo "         polyumi_inference in policy_client_node." >&2
+  fi
 fi
 
-# Is a remote session already running? Probed BEFORE any pane is opened, because attaching
-# creates it. This is the re-attach case: the laptop went away but the NUC kept working.
-remote_session_exists() {
-  ssh -o ConnectTimeout=5 -o BatchMode=yes "$1" "tmux has-session -t $2" 2>/dev/null
-}
-
-# A live remote session must NOT be typed into. Its shell may be mid-run (bringup), or holding
-# a pre-typed line the operator has not pressed Enter on yet — and send-keys appends to that
-# readline buffer rather than replacing it, so a second pass concatenates two commands and
-# submits the result. Re-attaching is supposed to hand the pane back exactly as it was.
-NUC_BRINGUP_FRESH=1; remote_session_exists "$NUC_SSH_HOST" fr3-bringup   && NUC_BRINGUP_FRESH=0
-NUC_INFER_FRESH=1;   remote_session_exists "$NUC_SSH_HOST" fr3-inference && NUC_INFER_FRESH=0
-GPU_FRESH=1;       remote_session_exists "$GPU_SSH_HOST" polyumi     && GPU_FRESH=0
-if [ "$NUC_BRINGUP_FRESH$NUC_INFER_FRESH$GPU_FRESH" != "111" ]; then
-  echo "Re-attaching to remote sessions that are already running; leaving those panes untouched."
-fi
-
-# Type a command into a pane and leave the cursor on it, unexecuted. The point is that the
-# operator reads and confirms the line — this is how every robot-moving command gets in.
-pretype() { tmux send-keys -t "$1" "$2"; }
-
-# Wrap a launch so its console output also lands on disk. See "WHERE THE LOGS GO" above for why
-# ~/.ros/log is not enough. Written to $XDG_STATE_HOME (~/.local/state) — the spec's home for
-# state that persists across restarts but is not precious — so this stays out of $HOME and out of
-# ROS's tree. Left unexpanded so the REMOTE shell resolves it against its own $HOME.
+# ---------------------------------------------------------------------------
+# The pane table
+# ---------------------------------------------------------------------------
+# Wrap a launch so its console output also lands on disk (see "WHERE THE LOGS GO"). Written to
+# $XDG_STATE_HOME (~/.local/state), left unexpanded so the REMOTE shell resolves it.
 REMOTE_LOG_DIR='"${XDG_STATE_HOME:-$HOME/.local/state}"/polyumi'
-#: Logs older than this are pruned on each fresh start. Scoped by -maxdepth 1 and a name glob to
-#: the directory we create and the files we write, so it cannot reach anything else.
 REMOTE_LOG_KEEP_DAYS="${REMOTE_LOG_KEEP_DAYS:-14}"
 
 logged() {
   # $1 = short name for the log file, $2 = the command to run.
   #
-  # `trap '' INT` in the tee subshell is load-bearing, not tidiness. Ctrl-C goes to the whole
-  # foreground process group, so a bare `| tee` would kill tee first; ros2 launch then writes its
-  # teardown into a closed pipe. Ignoring INT there lets tee outlive the launch and read until
-  # stdout closes on its own — which also means the shutdown sequence, the part that says whether
-  # bringup released the FCI cleanly, is the part that actually gets recorded.
-  local dir="$REMOTE_LOG_DIR"
+  # `trap '' INT` in the tee subshell is load-bearing. Ctrl-C goes to the whole foreground
+  # process group, so a bare `| tee` would kill tee first and ros2 launch would then write its
+  # teardown into a closed pipe. Ignoring INT there lets tee read until stdout closes on its own,
+  # which is how the shutdown sequence — the part that says whether bringup released the FCI —
+  # ends up in the file. The find is scoped by -maxdepth 1 and a name glob to files we write.
   printf 'mkdir -p %s && find %s -maxdepth 1 -name "%s_*.log" -mtime +%s -delete 2>/dev/null; %s 2>&1 | { trap "" INT; tee -a %s/%s_$(date +%%F).log; }' \
-    "$dir" "$dir" "$1" "$REMOTE_LOG_KEEP_DAYS" "$2" "$dir" "$1"
+    "$REMOTE_LOG_DIR" "$REMOTE_LOG_DIR" "$1" "$REMOTE_LOG_KEEP_DAYS" "$2" "$REMOTE_LOG_DIR" "$1"
 }
 
-# Build the command that opens a durable shell on a remote host.
-#
-# Prefers a tmux ON THE REMOTE, so the pane survives a laptop sleep or a dropped link — but
-# degrades to a plain ssh when the host has no tmux or is not answering, rather than handing
-# back a pane that opens and then silently does nothing. Degrading beats failing here: one
-# machine being down should not block bringing the others up.
-remote_shell() {
-  local host="$1" session="$2"
-  if ssh -o ConnectTimeout=5 -o BatchMode=yes "$host" 'command -v tmux >/dev/null' 2>/dev/null; then
-    echo "ssh -t $host 'tmux new-session -A -s $session'"
-  else
-    echo "WARNING: $host has no remote tmux (not installed, or host unreachable)." >&2
-    echo "         Using a plain ssh — this pane will NOT survive a disconnect." >&2
-    echo "         Fix with:  ssh $host 'sudo apt install tmux'" >&2
-    echo "ssh -t $host"
-  fi
+P_NAME=(); P_HOST=(); P_SESS=(); P_LAYOUT=(); P_RUN=(); P_PRE=()
+add_pane() {
+  # name  ssh_host  remote_tmux_session ("" = plain ssh)  layout(window|split)  run  pretype
+  P_NAME+=("$1"); P_HOST+=("$2"); P_SESS+=("$3"); P_LAYOUT+=("$4"); P_RUN+=("$5"); P_PRE+=("$6")
 }
 
-# Every pane below is addressed by the pane ID tmux hands back from -P -F (%0, %7, ...), never
-# by a "window.index" string. Indices are not ours to predict: `pane-base-index 1` in the
-# operator's ~/.tmux.conf — a common setting — makes every ".0" target here miss, and the script
-# would then type robot commands into whatever pane it did find. IDs are assigned by tmux,
-# unique for the life of the server, and immune to both that option and to later splits.
-#
-# Window IDs (@0, @1, ...) are captured alongside the pane IDs where a window gets used as an
-# anchor: `new-window -t` and `select-window -t` take a target-WINDOW and reject a pane spec
-# outright ("can't specify pane here"), so a pane ID cannot stand in for one.
-#
-# ---------------------------------------------------------------------------
-# Window 1: the NUC — hardware session and inference stack, one pane each.
-# Split because bringup is the piece that crashes mid-session and needs restarting on its own
-# (docs/crb-fr3-inference.md, "When it doesn't come up"), which is also why they are two launch files.
-# ---------------------------------------------------------------------------
-read -r NUC_BRINGUP_PANE NUC_WINDOW < <(
-  tmux new-session -d -P -F '#{pane_id} #{window_id}' -s "$SESSION" -n nuc -c "$REPO_DIR")
-tmux send-keys -t "$NUC_BRINGUP_PANE" "$(remote_shell "$NUC_SSH_HOST" fr3-bringup)" C-m
-NUC_INFER_PANE="$(tmux split-window -t "$NUC_BRINGUP_PANE" -h -P -F '#{pane_id}' -c "$REPO_DIR")"
-tmux send-keys -t "$NUC_INFER_PANE" "$(remote_shell "$NUC_SSH_HOST" fr3-inference)" C-m
+# The NUC's two launch files get a pane each. Bringup is the crash-prone, FCI-gated piece and
+# must be restartable on its own (docs/crb-fr3-inference.md, "When it doesn't come up").
+# RUN: safe, moves nothing, and everything else waits on it. If FCI is not enabled on the Desk
+# UI it fails loudly and you re-run it; that is cheap.
+add_pane nuc "$NUC_SSH_HOST" fr3-bringup window \
+  "cd $NUC_REPO && $(logged fr3_bringup 'ros2 launch nuc/launch/fr3_bringup.launch.py')" ""
 
-# ---------------------------------------------------------------------------
-# Window 2: the Pi (camera/audio stream) and the GPU box (policy server).
-# ---------------------------------------------------------------------------
-# `-a -t "$NUC_WINDOW"` (a WINDOW target), not `-t "$SESSION"` (a session target). tmux resolves
-# a bare session target to its CURRENT ACTIVE window and tries to create the new window there —
-# and by this point that's the "nuc" window, still active since nothing has switched off it.
-# Without -a that fails outright with "index N in use" the moment two windows exist; -a instead
-# means "insert right after this window, shifting later ones if needed", which is what we
-# actually want and cannot fail this way. Verified empirically: the plain `-t "$SESSION"` form
-# intermittently threw exactly that error once >= 2 windows existed.
-read -r PI_PANE PI_WINDOW < <(
-  tmux new-window -a -t "$NUC_WINDOW" -n polyumi-pi -P -F '#{pane_id} #{window_id}' -c "$REPO_DIR")
-tmux send-keys -t "$PI_PANE" "ssh -t $POLYUMI_PI_HOST" C-m
-GPU_PANE="$(tmux split-window -t "$PI_PANE" -h -P -F '#{pane_id}' -c "$REPO_DIR")"
-tmux send-keys -t "$GPU_PANE" "$(remote_shell "$GPU_SSH_HOST" polyumi)" C-m
+# PRETYPE: carries the execute flags, so it is yours to press Enter on.
+add_pane nuc-inference "$NUC_SSH_HOST" fr3-inference split "" \
+  "cd $NUC_REPO && $(logged fr3_inference 'ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true execute_arm:=true')"
 
-# ---------------------------------------------------------------------------
-# Window 3: this laptop — DDS env sourced, ready to launch the client.
-# ---------------------------------------------------------------------------
-LAPTOP_PANE="$(tmux new-window -a -t "$PI_WINDOW" -n laptop -P -F '#{pane_id}' -c "$REPO_DIR")"
-tmux send-keys -t "$LAPTOP_PANE" "source setup_franka_env.sh" C-m
-
-# Everything above only opened shells. Let them finish before typing into them.
-sleep "$SHELL_SETTLE_S"
-
-# --- NUC, left pane: RUN bringup. Safe (no motion) and everything else waits on it. If FCI is
-# --- not enabled on the Desk UI it fails loudly and you re-run it; that is cheap.
-if [ "$NUC_BRINGUP_FRESH" = 1 ]; then
-  tmux send-keys -t "$NUC_BRINGUP_PANE" \
-    "cd $NUC_REPO && $(logged fr3_bringup 'ros2 launch nuc/launch/fr3_bringup.launch.py')" C-m
-fi
-
-# --- NUC, right pane: PRETYPE. Carries the execute flags, so it is yours to press Enter on.
-if [ "$NUC_INFER_FRESH" = 1 ]; then
-  tmux send-keys -t "$NUC_INFER_PANE" "cd $NUC_REPO" C-m
-  pretype "$NUC_INFER_PANE" \
-    "$(logged fr3_inference 'ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true execute_arm:=true')"
-fi
-
-# --- Pi: RUN the stream. Stateless, moves nothing, and the laptop warns without it.
+# RUN: stateless, moves nothing, and the client warns without it.
 #
 # Stop polyumi-pi.service first. It runs `start-scene` on boot, and start-scene and stream both
 # construct an LEDManager on the same hardware PWM channel; whoever constructs one last wins,
 # because HardwarePWM.start(0) zeroes the duty cycle, and the loser goes on believing its LED is
-# lit. Restart=on-failure means the service retries all through a stream that holds the camera,
-# darkening the finger LED each time. Nothing in the stream path can defend against this — the
-# other process owns the pin just as legitimately. See docs/crb-fr3-inference.md.
-#
-# `;` not `&&`: a Pi without this unit would otherwise get "Unit not loaded", a non-zero exit,
-# and no stream at all. The error still prints in the pane, so a real failure stays visible.
-tmux send-keys -t "$PI_PANE" "sudo systemctl stop polyumi-pi; polyumi-pi stream" C-m
+# lit. Restart=on-failure means the service retries all through a stream that holds the camera.
+# Nothing in the stream path can defend against this — the other process owns the pin just as
+# legitimately. `;` not `&&`, so a Pi without the unit still gets a stream.
+add_pane polyumi-pi "$POLYUMI_PI_HOST" "" window \
+  "sudo systemctl stop polyumi-pi; polyumi-pi stream" ""
 
-# --- GPU box: PRETYPE. The checkpoint changes every training run, so the path is yours to pick.
-# --- The five most recent are listed above the prompt to save a hunt through dp_outputs/.
-if [ "$GPU_FRESH" = 1 ]; then
-  tmux send-keys -t "$GPU_PANE" "cd $GPU_REPO" C-m
-  tmux send-keys -t "$GPU_PANE" \
-    "ls -t data/dp_outputs/*/*/checkpoints/latest.ckpt 2>/dev/null | head -5" C-m
-  pretype "$GPU_PANE" "CKPT=\$(ls -t $GPU_REPO/data/dp_outputs/*/*/checkpoints/latest.ckpt | head -1) ./serve_policy.sh"
-fi
+# PRETYPE: the checkpoint changes every training run, so the path is yours to pick. The five most
+# recent are listed above the prompt to save a hunt through dp_outputs/.
+add_pane policy-server "$ROS_SSH_HOST" polyumi split \
+  "cd $ROS_REPO && ls -t data/dp_outputs/*/*/checkpoints/latest.ckpt 2>/dev/null | head -5" \
+  "CKPT=\$(ls -t $ROS_REPO/data/dp_outputs/*/*/checkpoints/latest.ckpt | head -1) ./serve_policy.sh"
 
-# --- Laptop: PRETYPE. Depends on every pane above being live, and there is no readiness gate
-# --- here, so this is the one you press Enter on last.
-#
-# The line re-sources setup_franka_env.sh even though the pane already did so above, and that
-# redundancy is the point: this is the command that lands in shell history, so every later
-# recall of it carries its own DDS env instead of inheriting whatever the shell happened to
-# have. An interactive rc exporting its own ROS_DOMAIN_ID silently beats tmux's inherited
-# environment, and the only symptom is policy_client_node never seeing fr3_link0.
-pretype "$LAPTOP_PANE" \
-  "source setup_franka_env.sh >/dev/null && $(logged policy_client "ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=$INFERENCE_URL execute_motion:=$EXECUTE_MOTION max_image_age_s:=$MAX_IMAGE_AGE_S pi_host:=$PI_HOST")"
+# PRETYPE: depends on every pane above being live, and there is no readiness gate, so this is the
+# one you press Enter on last. It sources setup_franka_env.sh even though the shell already has
+# the env, because this is the line that lands in shell history — every later recall of it then
+# carries its own DDS env instead of inheriting whatever the shell happened to have. An
+# interactive rc exporting its own ROS_DOMAIN_ID silently beats tmux's inherited environment, and
+# the only symptom is policy_client_node never seeing fr3_link0.
+add_pane ros-client "$ROS_SSH_HOST" polyumi-ros window "" \
+  "cd $ROS_REPO && source setup_franka_env.sh >/dev/null && $(logged policy_client "ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=$INFERENCE_URL execute_motion:=$EXECUTE_MOTION max_image_age_s:=$MAX_IMAGE_AGE_S pi_host:=$PI_HOST video_device:=$ROS_VIDEO_DEVICE")"
 
-tmux select-window -t "$NUC_WINDOW"
+# ---------------------------------------------------------------------------
+# Probe, open, type
+# ---------------------------------------------------------------------------
+# One ssh per remote pane answering both questions at once. Does the host have tmux — if not we
+# degrade to a plain ssh rather than hand back a pane that opens and then silently does nothing,
+# because one machine being down should not block the others. And is the session already live —
+# a live session must NOT be typed into: its shell may be mid-run, or holding a pre-typed line
+# nobody has pressed Enter on yet, and send-keys APPENDS to that readline buffer rather than
+# replacing it, so a second pass would concatenate two commands and submit the result.
+P_FRESH=(); P_CMD=(); P_PANE=()
+for i in "${!P_NAME[@]}"; do
+  P_FRESH[i]=1
+  P_CMD[i]="ssh -t ${P_HOST[i]}"
+  if [ -n "${P_SESS[i]}" ]; then
+    probe="$(ssh -o ConnectTimeout=5 -o BatchMode=yes "${P_HOST[i]}" \
+      "command -v tmux >/dev/null && echo has-tmux; tmux has-session -t ${P_SESS[i]} 2>/dev/null && echo live" \
+      2>/dev/null || true)"
+    case "$probe" in
+      *has-tmux*) P_CMD[i]="ssh -t ${P_HOST[i]} 'tmux new-session -A -s ${P_SESS[i]}'" ;;
+      *) echo "WARNING: ${P_HOST[i]} has no remote tmux (not installed, or host unreachable)." >&2
+         echo "         Pane '${P_NAME[i]}' will use a plain ssh and will NOT survive a disconnect." >&2
+         echo "         Fix with:  ssh ${P_HOST[i]} 'sudo apt install tmux'" >&2 ;;
+    esac
+    case "$probe" in *live*) P_FRESH[i]=0; echo "Re-attaching to '${P_SESS[i]}' on ${P_HOST[i]}; leaving that pane untouched." ;; esac
+  fi
+done
+
+# Panes are addressed by the ID tmux hands back from -P -F (%0, %7, ...), never by a
+# "window.index" string. Indices are not ours to predict: `pane-base-index 1` in the operator's
+# ~/.tmux.conf — a common setting — makes every ".0" target miss, and the script would then type
+# robot commands into whatever pane it did find. Window IDs (@0, @1, ...) are captured too where
+# a window is used as an anchor: new-window/select-window take a target-WINDOW and reject a pane
+# spec outright.
+LAST_WINDOW=""; LAST_PANE=""
+for i in "${!P_NAME[@]}"; do
+  if [ "${P_LAYOUT[i]}" = window ] && [ -z "$LAST_WINDOW" ]; then
+    read -r pane win < <(tmux new-session -d -P -F '#{pane_id} #{window_id}' \
+      -s "$SESSION" -n "${P_NAME[i]}" -c "$REPO_DIR")
+  elif [ "${P_LAYOUT[i]}" = window ]; then
+    # `-a -t <window>`, not `-t <session>`: tmux resolves a bare session target to its CURRENT
+    # active window and tries to create there, which fails "index N in use" once two windows
+    # exist. -a means "insert right after this window, shifting later ones", which cannot.
+    read -r pane win < <(tmux new-window -a -t "$LAST_WINDOW" -n "${P_NAME[i]}" \
+      -P -F '#{pane_id} #{window_id}' -c "$REPO_DIR")
+  else
+    pane="$(tmux split-window -t "$LAST_PANE" -h -P -F '#{pane_id}' -c "$REPO_DIR")"
+    win="$LAST_WINDOW"
+  fi
+  P_PANE[i]="$pane"; LAST_WINDOW="$win"; LAST_PANE="$pane"
+  tmux send-keys -t "$pane" "${P_CMD[i]}" C-m
+done
+FIRST_WINDOW="$(tmux list-windows -t "$SESSION" -F '#{window_id}' | head -1)"
+
+# Everything above only opened shells. Let them finish before typing into them.
+sleep "$SHELL_SETTLE_S"
+
+for i in "${!P_NAME[@]}"; do
+  if [ "${P_FRESH[i]}" = 1 ]; then
+    [ -n "${P_RUN[i]}" ] && tmux send-keys -t "${P_PANE[i]}" "${P_RUN[i]}" C-m || true
+    # No C-m: the operator reads the line and presses Enter. This is how every robot-moving
+    # command gets in.
+    [ -n "${P_PRE[i]}" ] && tmux send-keys -t "${P_PANE[i]}" "${P_PRE[i]}" || true
+  fi
+done
+
+tmux select-window -t "$FIRST_WINDOW"
 cat <<EOF
 
-Session '$SESSION' is up. Order to press Enter in:
-  1. nuc, left      already running bringup (enable FCI on the Desk UI first if it errors)
-  2. nuc, right     the inference stack — check the execute flags on the line before you run it
+Session '$SESSION' is up ($ROS_SSH_HOST runs both the ROS client and the policy server).
+Order to press Enter in:
+  1. nuc, left           already running bringup (enable FCI on the Desk UI first if it errors)
+  2. nuc, right          the inference stack — check the execute flags on the line before you run it
   3. polyumi-pi, right   the policy server — edit CKPT to the checkpoint you want
-  4. laptop         the client, last
+  4. ros-client          the client, last
 
 Send the arm home (needs pane 2 running; MOVES THE ARM even in plan-only mode):
   ros2 service call /polyumi/home std_srvs/srv/Trigger "{}"
 
 Gripper only, for a first run on the hand — edit pane 2's line down to:
   ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true
-Then, from the laptop pane, the acceptance test (MOVES THE FINGERS):
+Then, from the ros-client pane, the acceptance test (MOVES THE FINGERS):
   ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper_chirp
 franka_hand_node logs every move(width, speed) it plans in pane 2, at 0.7-1.7 Hz.
 That ceiling is the hand, not a fault: see docs/crb-fr3-inference.md, "Gripper problems".
@@ -425,7 +372,7 @@ That ceiling is the hand, not a fault: see docs/crb-fr3-inference.md, "Gripper p
 tmux, minimum viable:
   C-b n / C-b p    next / previous window        C-b o     next pane
   C-b d            detach (everything keeps running)
-  C-b C-b          send a prefix to the INNER tmux on $NUC_SSH_HOST/$GPU_SSH_HOST
+  C-b C-b          send a prefix to the INNER tmux on $NUC_SSH_HOST/$ROS_SSH_HOST
 Re-attach any time with ./fr3_session.sh — remote panes pick up where they left off.
 
 EOF

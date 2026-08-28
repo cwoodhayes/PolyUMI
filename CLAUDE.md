@@ -147,12 +147,15 @@ spawner immediately makes it unretryable and a wrong gravity model is easy to mi
 message is only in the `/service_server` log. Full procedure in
 [docs/calibration-instructions.md](docs/calibration-instructions.md).
 
-**`./fr3_session.sh`** (repo root) builds the whole wall — NUC, Pi, GPU box, laptop — as one
+**`./fr3_session.sh`** (repo root) builds the whole wall — NUC, Pi, lamb — as one
 tmux session, running the safe commands and pre-typing the robot-moving ones for you to
-confirm. Every fresh start (not a re-attach) also rsyncs `nuc/` to the NUC and runs
-`./deploy.sh` for the Pi, so both run this working copy rather than whatever they last had —
-`SKIP_DEPLOY=1` skips that for a faster re-launch. Re-run to re-attach after a disconnect; the
-NUC/GPU-box panes are remote tmux, so they survive. Full reference and the exact
+confirm. **lamb runs both halves** — the ROS client and the policy server — so the laptop is
+only a terminal and the inference request stays on loopback. Every fresh start (not a re-attach)
+rsyncs `nuc/` to the NUC, runs `./deploy.sh` for the Pi and `./deploy_lamb.sh` for lamb, so all
+three run this working copy rather than whatever they last had — `SKIP_DEPLOY=1` skips that for a
+faster re-launch. Re-run to re-attach after a disconnect; the NUC/lamb panes are remote tmux, so
+they survive. Per-host link settings (NIC, static IP, CycloneDDS config) live in
+`config/env.<hostname>.sh`, sourced by `setup_franka_env.sh`. Full reference and the exact
 environment assumptions live in [docs/crb-fr3-inference.md](docs/crb-fr3-inference.md).
 
 **Clock sync (this setup):** the NUC and laptop must agree on wall time or TF lookups fail
