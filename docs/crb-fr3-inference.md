@@ -123,32 +123,36 @@ server's access log carries its own total alongside (`... in NNN ms, model NN ms
 **Do not compute this from the server's total instead.** The server starts its clock in the
 HTTP middleware but FastAPI reads the request body inside the endpoint, so a large upload is
 still arriving while the server times itself — its total quietly absorbs link time. Measured
-against a do-nothing echo server over this link, an 0.40 MB request reported 36 ms of "server"
-time on a box doing nothing but a base64 decode. The forward pass is the only term measured
-cleanly on either side, which is why the split hangs off it.
+against a do-nothing echo server over this link, at the base64-encoded-uint8 stage this format
+went through before the raw-frame rewrite, a 0.40 MB request reported 36 ms of "server" time on
+a box doing nothing but a base64 decode — a cost the current raw-frame format doesn't have, since
+it decodes nothing to get at the bytes. The forward pass is the only term measured cleanly on
+either side, which is why the split hangs off it.
 
 **The link is the thing to check first when `inference_overhead_s` is large.** The observation is
-~0.4 MB of base64 (`n_obs_steps` frames of 224x224x3 uint8), so the wire time is set entirely by
-how fast the laptop can push that. The laptop's USB ethernet adapter is an ASIX AX88772 — a USB
-2.0 Fast Ethernet part, hard-capped at 100 Mbit, which puts a floor of ~32 ms under every
-inference. `cat /sys/class/net/<iface>/speed` says which side you are on; a gigabit adapter takes
-that floor to ~3 ms and is the cheapest latency fix available.
+~0.30 MB of raw bytes (`n_obs_steps` frames of 224x224x3 uint8, no base64 — see `wire.py`), so the
+wire time is set entirely by how fast the laptop can push that. The laptop's USB ethernet adapter
+is an ASIX AX88772 — a USB 2.0 Fast Ethernet part, hard-capped at 100 Mbit, which puts a floor of
+~24 ms under every inference. `cat /sys/class/net/<iface>/speed` says which side you are on; a
+gigabit adapter takes that floor to ~2.4 ms and is the cheapest latency fix available.
 
-Sending the frames as `uint8` rather than `float32` is what got the payload to 0.4 MB — the
-`/255` happens server-side in `serve_obs.wire_to_obs_dict`, which is bit-identical, and the
-dataset stores `camera0_rgb` as uint8 anyway. Don't widen it again on the way out.
+Sending the frames as `uint8` rather than `float32`, and raw rather than base64, is what got the
+payload down from 1.6 MB to 0.30 MB — the `/255` happens server-side in
+`serve_obs.wire_to_obs_dict`, which is bit-identical, and the dataset stores `camera0_rgb` as
+uint8 anyway. Don't widen it again on the way out.
 
 Measured over the 100 Mbit link against a stdlib echo server (no model, so this is overhead
-alone), 12 requests each on a warm connection:
+alone), 12 requests each on a warm connection, at the uint8-but-still-base64 stage this format
+went through en route to the current raw frame:
 
 | Request | Body | Overhead p50 |
 |---|---|---|
 | `float32` (before) | 1.61 MB | 196 ms |
-| `uint8` (after) | 0.40 MB | **81 ms** |
+| `uint8` base64 (intermediate) | 0.40 MB | 81 ms |
 
-At 84 Mbit/s of real throughput the 0.40 MB body is ~38 ms of that 81; the rest is HTTP framing
-and JSON/base64 handling on both ends. So a gigabit adapter takes the overhead to roughly 45 ms,
-and past that the remaining cost is the base64+JSON envelope itself, not the link.
+The current raw-frame format carries the same uint8 bytes with no base64 wrapper (~0.30 MB, a
+further 4/3 cut) and was not independently re-benchmarked on this link — expect the overhead to
+drop below the intermediate row's 81 ms by roughly that same factor, not to match it exactly.
 
 ## Architecture on the NUC
 

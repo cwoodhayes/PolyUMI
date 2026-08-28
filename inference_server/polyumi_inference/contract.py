@@ -15,15 +15,13 @@ from __future__ import annotations
 from typing import Iterable
 
 from polyumi_inference.errors import WireFormatError
-from polyumi_inference.types import Observation
+from polyumi_inference.types import AGENT_POS_DIM, Observation
 
 #: The wrist camera, named for the dataset field it comes from.
 CAMERA_CHANNEL = 'camera0_rgb'
 #: Absolute end-effector pose ``[x, y, z, qx, qy, qz, qw, gripper]``. A wire concept: the server
 #: splits it into three separate ``shape_meta`` fields before the policy sees it.
 AGENT_POS_CHANNEL = 'agent_pos'
-
-AGENT_POS_DIM = 8
 
 #: Channels the policy cannot run without. Named for the dataset's own fields, so wiring a new
 #: modality is adding a name here and in shape_meta rather than reshaping the request.
@@ -41,10 +39,12 @@ def validate_observation(obs: Observation, required: Iterable[str] = REQUIRED_CH
 
     # The header's window length and each array's leading dim are two independent claims about the
     # same thing; a mismatch means the client packed something other than what it says it packed.
+    # ndim first: a 0-d channel (shape ()) has no [0] to read, and shape[0] on it raises IndexError
+    # rather than the WireFormatError this is supposed to turn a bad frame into.
     for name in required:
         arr = obs[name]
-        if arr.shape[0] != obs.n_obs_steps:
-            raise WireFormatError(f'{name} leading dim must be n_obs_steps={obs.n_obs_steps}, got {arr.shape[0]}')
+        if arr.ndim == 0 or arr.shape[0] != obs.n_obs_steps:
+            raise WireFormatError(f'{name} leading dim must be n_obs_steps={obs.n_obs_steps}, got {list(arr.shape)}')
 
     if CAMERA_CHANNEL in obs:
         image = obs[CAMERA_CHANNEL]

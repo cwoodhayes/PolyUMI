@@ -382,6 +382,11 @@ class PolicyClientNode(Node):
         # superseded before the worker picks it up is discarded rather than queued: by the time a
         # backlog could deliver it, _n_stale_actions would drop the whole chunk it produced.
         self._pending: tuple[Observation, rclpy.time.Time] | None = None
+        # Episode-start pose waiting to be POSTed to /reset. Same mailbox discipline as _pending,
+        # on the same condition variable, but the worker checks this first: a reset that lands
+        # late makes every wrt_start pose in the episode wrong, where a late inference tick just
+        # runs open-loop one tick longer.
+        self._pending_reset: np.ndarray | None = None
         self._pending_cv = threading.Condition()
         self._stopping = False
         self._infer_thread = threading.Thread(target=self._inference_worker, name='policy_infer', daemon=True)
@@ -671,7 +676,7 @@ class PolicyClientNode(Node):
         # First full observation marks the episode start: tell the server the start pose once
         # (used for robot0_eef_rot_axis_angle_wrt_start). Retried on failure until it lands.
         if not self._episode_reset_done:
-            self._reset_episode(agent_pos)
+            self._submit_reset(agent_pos)
 
         # Receding-horizon stride: only the every-steps_per_inference-th tick actually runs
         # inference. The obs buffer was still appended above, so the next inference sees a
@@ -875,7 +880,12 @@ class PolicyClientNode(Node):
         return max(0, math.ceil(total_latency / self._action_dt))
 
     def _reset_episode(self, agent_pos: np.ndarray) -> None:
-        """Send the episode-start pose to the server's /reset once; retried each tick until it lands."""
+        """
+        POST the episode-start pose to /reset. Runs on the inference worker thread.
+
+        _control_tick submits a fresh pose here every tick until _episode_reset_done — this is
+        what makes it a retry.
+        """
         try:
             self._client.reset(agent_pos)
         except TransportError as e:
@@ -884,6 +894,18 @@ class PolicyClientNode(Node):
             return
         self._episode_reset_done = True
         self.get_logger().info(f'episode /reset sent (start pose set): {self._reset_url}')
+
+    def _submit_reset(self, agent_pos: np.ndarray) -> None:
+        """
+        Leave an episode-start pose for the worker to POST, replacing any not yet sent.
+
+        Off the control thread for the same reason inference is: /reset can block for up to
+        post_timeout_s, and every retry while the server is slow or unreachable would otherwise
+        stall the whole control loop, not just this one request.
+        """
+        with self._pending_cv:
+            self._pending_reset = agent_pos
+            self._pending_cv.notify()
 
     def _submit_inference(self, obs: Observation, t_obs: rclpy.time.Time) -> None:
         """
@@ -907,23 +929,32 @@ class PolicyClientNode(Node):
 
     def _inference_worker(self) -> None:
         """
-        Run the request/publish half of the loop on its own thread, one observation at a time.
+        Run every /reset and /predict_cartesian/ request on its own thread, one at a time.
 
-        The body is guarded because this thread is the only thing that ever issues a request:
-        letting an exception escape would end inference for the life of the process while the
-        timer went on ticking, the arm went on executing a chunk from before the fault, and
+        A pending reset is always taken before a pending observation: a late reset makes every
+        wrt_start pose in the episode wrong, where a late inference tick just runs open-loop one
+        tick longer. The body is guarded because this thread is the only thing that ever issues a
+        request: letting an exception escape would end inference for the life of the process while
+        the timer went on ticking, the arm went on executing a chunk from before the fault, and
         nothing anywhere said so.
         """
         while True:
             with self._pending_cv:
-                while self._pending is None and not self._stopping:
+                while self._pending is None and self._pending_reset is None and not self._stopping:
                     self._pending_cv.wait()
                 if self._stopping:
                     return
-                obs, t_obs = self._pending
-                self._pending = None
+                reset_pose = self._pending_reset
+                self._pending_reset = None
+                obs_item = None
+                if reset_pose is None:
+                    obs_item = self._pending
+                    self._pending = None
             try:
-                self._post_and_act(obs, t_obs)
+                if reset_pose is not None:
+                    self._reset_episode(reset_pose)
+                elif obs_item is not None:
+                    self._post_and_act(*obs_item)
             except Exception as e:  # noqa: BLE001 - see the docstring
                 self.get_logger().error(f'Inference worker error (loop continues): {e!r}')
 

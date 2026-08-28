@@ -106,6 +106,14 @@ class Observation:
         return sorted(self.channels)
 
 
+#: Width of a wire pose, ``[x, y, z, qx, qy, qz, qw, gripper]`` -- an :class:`ActionChunk` row and
+#: an :class:`Observation`'s ``agent_pos`` channel are both this wide. Defined here, not in
+#: :mod:`polyumi_inference.contract`, because :class:`ActionChunk` needs it and importing it from
+#: ``contract`` would be circular (``contract`` already imports :class:`Observation` from this
+#: module); ``contract`` imports it back from here instead of holding its own copy.
+AGENT_POS_DIM = 8
+
+
 @dataclass(frozen=True, eq=False)
 class ActionChunk:
     """
@@ -130,8 +138,13 @@ class ActionChunk:
         # Backends build these from lists as readily as from arrays; normalize once here so every
         # consumer can rely on .shape rather than guessing.
         actions = np.asarray(self.actions, dtype=np.float64)
-        if actions.ndim != 2:
-            raise ValueError(f'actions must be [Ta, action_dim], got shape {list(actions.shape)}')
+        if actions.ndim != 2 or actions.shape[1] != AGENT_POS_DIM:
+            raise ValueError(f'actions must be [Ta,{AGENT_POS_DIM}], got shape {list(actions.shape)}')
+        # This is the last stop before the ROS side indexes columns 0-7 straight into pose/gripper
+        # commands -- a NaN or Inf here (a starved forward pass, a bad checkpoint) must not reach
+        # the robot as a number that merely looks like a pose.
+        if not np.isfinite(actions).all():
+            raise ValueError('actions contains a NaN or Inf value')
         object.__setattr__(self, 'actions', actions)
 
     @property
@@ -167,7 +180,9 @@ class ActionChunk:
             raise WireFormatError(f"Response has no 'actions'; it carried {sorted(doc)}")
         try:
             chunk = cls(
-                np.asarray(actions, dtype=np.float64).reshape(len(actions), -1) if len(actions) else np.empty((0, 0)),
+                np.asarray(actions, dtype=np.float64).reshape(len(actions), -1)
+                if len(actions)
+                else np.empty((0, AGENT_POS_DIM)),
                 model_ms=_opt_float(doc.get('model_ms')),
                 server_total_ms=_opt_float(doc.get('server_total_ms')),
             )

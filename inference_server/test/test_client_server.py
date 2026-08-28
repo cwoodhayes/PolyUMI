@@ -10,6 +10,10 @@ Everything here goes through :func:`create_app`, so it holds for *every* backend
 accept, and the two share the code that decides.
 """
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import pytest
 
@@ -108,6 +112,20 @@ def test_reset_reaches_the_backend(client, backend):
     assert np.allclose(backend.reset_with, [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0, 0.05])
 
 
+def test_reset_rejects_the_right_length_but_wrong_shape(client, backend):
+    """
+    8 nested singleton lists have the right outer length but are not a [8] pose.
+
+    Checking only len(agent_pos) let a (8, 1)-shaped value reach the backend as something other
+    than the documented (8,) vector.
+    """
+    with pytest.raises(TransportError) as excinfo:
+        client.reset([[0.1], [0.2], [0.3], [0.0], [0.0], [0.0], [1.0], [0.05]])
+
+    assert excinfo.value.status_code == 422
+    assert backend.reset_with is None
+
+
 def test_reset_url_derives_from_the_predict_url(client):
     """One parameter configures all three endpoints, which is how the ROS node is parameterized."""
     assert client.reset_url == 'http://testserver/reset'
@@ -160,6 +178,20 @@ def test_wrong_agent_pos_width_is_refused(client):
 
     assert excinfo.value.status_code == 422
     assert 'agent_pos must be [To,8]' in str(excinfo.value)
+
+
+def test_a_scalar_channel_is_refused_not_a_500(client):
+    """
+    A 0-d channel is a valid frame but not a valid observation.
+
+    wire.py's shape:[] means "one scalar value" and decodes fine; contract.py must refuse it with
+    a 422, not crash the leading-dim check with an IndexError on the shape it doesn't have.
+    """
+    with pytest.raises(TransportError) as excinfo:
+        client.predict(_observation(agent_pos=np.array(5.0)))
+
+    assert excinfo.value.status_code == 422
+    assert 'leading dim' in str(excinfo.value)
 
 
 def test_a_non_image_camera_channel_is_refused(client):
@@ -247,3 +279,63 @@ def test_the_dummy_refuses_exactly_what_a_checkpoint_would():
 
     assert dummy == checkpoint_stand_in
     assert all(status == 422 for status, _ in dummy)
+
+
+def test_client_rejects_a_non_2xx_reply_even_with_a_json_body():
+    """
+    Only 200-299 counts as success -- a 3xx whose body happens to parse as JSON is not a reply.
+
+    A bare `>= 400` check would let a redirect or an informational status through as if it were
+    the real answer, which for /reset can latch the episode-start pose on a request that never
+    actually completed.
+    """
+    from polyumi_inference.client import PolicyClient, Reply, Transport
+
+    class WeirdStatusTransport(Transport):
+        def request(self, method, url, *, content=None, json=None, timeout_s=None):
+            return Reply(status_code=304, text='{"status": "ok", "episode_start_set": true}')
+
+    client = PolicyClient('http://testserver/predict_cartesian/', transport=WeirdStatusTransport())
+
+    with pytest.raises(TransportError) as excinfo:
+        client.reset([0.0] * 8)
+
+    assert excinfo.value.status_code == 304
+
+
+def test_predict_is_serialized_across_concurrent_requests():
+    """
+    Two concurrent /predict_cartesian/ requests must not run the backend's predict() at once.
+
+    predict_cartesian is a sync def, so FastAPI runs it in a threadpool: without something
+    serializing entry to the backend, two overlapping requests could run two forward passes at
+    once, which neither SineBackend's unguarded _call_count nor a real GPU backend is safe for.
+    """
+    lock = threading.Lock()
+    active = 0
+    saw_overlap = False
+
+    class BlockingBackend:
+        def predict(self, obs):
+            nonlocal active, saw_overlap
+            with lock:
+                active += 1
+                saw_overlap = saw_overlap or active > 1
+            time.sleep(0.1)  # ample window for a race to show up if nothing prevents it
+            with lock:
+                active -= 1
+            return ActionChunk(np.zeros((1, 8)))
+
+        def reset(self, agent_pos):
+            pass
+
+        def describe(self):
+            return {'status': 'ready'}
+
+    app = create_app(BlockingBackend(), title='test')
+    with in_process_client(app) as c, ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(c.predict, _observation()) for _ in range(2)]
+        for f in futures:
+            f.result(timeout=5.0)
+
+    assert not saw_overlap

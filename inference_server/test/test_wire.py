@@ -130,6 +130,35 @@ def test_object_dtype_is_refused():
         unpack_frame(corrupted)
 
 
+def test_encoder_refuses_object_dtype_before_serializing_it():
+    """
+    The encoder must refuse an object-dtype channel itself, not rely on the decoder to catch it.
+
+    tobytes() on an object array emits raw PyObject* pointer values -- refusing only on the way
+    back in means those pointer bytes already went out over HTTP.
+    """
+    with pytest.raises(WireFormatError, match='object dtype'):
+        pack_frame({'agent_pos': np.array([object()])}, n_obs_steps=1, n_action_steps=8)
+
+
+def test_huge_shape_is_refused_not_overflowed():
+    """
+    A shape like [2**32, 2**32] must fail the byte-count check, not silently pass it.
+
+    np.prod on a plain list defaults to int64 and wraps such a shape's element count to 0; with a
+    matching nbytes:0 that used to sail through this check and crash reshape() uncaught instead of
+    raising a WireFormatError.
+    """
+    huge = 1 << 32
+    corrupted = _reframe(
+        _observation().to_frame(),
+        channels={'camera0_rgb': {'dtype': '|u1', 'shape': [huge, huge], 'offset': 0, 'nbytes': 0}},
+    )
+
+    with pytest.raises(WireFormatError, match='needs'):
+        Observation.from_frame(corrupted)
+
+
 def test_omitted_channel_is_refused_with_the_reason():
     """
     Omission is expressible on purpose, and refused on purpose.
@@ -176,6 +205,33 @@ def test_action_chunk_rejects_a_ragged_reply():
     """Everything downstream indexes positionally -- the gripper is column 7 -- so this fails here."""
     with pytest.raises(WireFormatError, match='actions'):
         ActionChunk.from_json({'actions': [[0.0] * 8, [1.0] * 3]})
+
+
+def test_action_chunk_rejects_the_wrong_width():
+    """[Ta, 7] is not documented and not valid -- the gripper column would not exist."""
+    with pytest.raises(ValueError, match=r'\[Ta,8\]'):
+        ActionChunk(np.zeros((3, 7)))
+
+
+def test_action_chunk_rejects_nan_and_inf():
+    """
+    A NaN/Inf action must not reach the robot as a number that merely looks like a pose.
+
+    This is the last stop before the ROS side indexes these columns straight into pose/gripper
+    commands -- a starved forward pass or a bad checkpoint must fail here, not at the hand.
+    """
+    bad = np.zeros((1, 8))
+    bad[0, 2] = float('nan')
+    with pytest.raises(ValueError, match='NaN or Inf'):
+        ActionChunk(bad)
+
+
+def test_action_chunk_from_json_accepts_an_empty_chunk():
+    """An empty actions list is a legitimate zero-row chunk, not a width-8 violation."""
+    chunk = ActionChunk.from_json({'actions': []})
+
+    assert chunk.actions.shape == (0, 8)
+    assert chunk.n_action_steps == 0
 
 
 def test_absent_timings_stay_absent():

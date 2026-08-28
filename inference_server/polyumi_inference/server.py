@@ -13,6 +13,7 @@ rather than a convention two files have to keep matching by hand.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Annotated, Callable, Iterable, Optional, Protocol, Union, runtime_checkable
 
@@ -95,6 +96,12 @@ def create_app(
         yield
 
     app = FastAPI(title=title, lifespan=lifespan)
+    # predict_cartesian and reset are sync defs, so FastAPI runs each call in its threadpool --
+    # multiple in-flight requests can therefore call into the backend concurrently even though
+    # the protocol never asks a backend to be thread-safe (SineBackend's _call_count isn't, and a
+    # GPU backend running two forward passes at once is its own kind of wrong). One lock around
+    # both entry points serializes them regardless of how many requests are actually in flight.
+    backend_lock = threading.Lock()
 
     @app.middleware('http')
     async def _log_request_time(request: Request, call_next):
@@ -135,12 +142,22 @@ def create_app(
     @app.post('/reset')
     def reset(req: ResetRequest) -> dict:
         """Cache the episode-start EEF pose. Call once at the start of each rollout."""
-        if len(req.agent_pos) != AGENT_POS_DIM:
-            raise HTTPException(status_code=422, detail=f'agent_pos must have length {AGENT_POS_DIM}')
+        try:
+            agent_pos = np.asarray(req.agent_pos, dtype=np.float64)
+        except (ValueError, TypeError) as e:
+            raise HTTPException(status_code=422, detail=f'agent_pos must be numeric: {e}') from e
+        # Checked on the converted array, not len(req.agent_pos): a list of 8 nested singletons
+        # ([[1], [2], ...]) has the right outer length but the wrong shape, and would otherwise
+        # reach the backend as (8, 1) rather than the documented (8,).
+        if agent_pos.shape != (AGENT_POS_DIM,):
+            raise HTTPException(
+                status_code=422, detail=f'agent_pos must have shape ({AGENT_POS_DIM},), got {list(agent_pos.shape)}'
+            )
         # A malformed pose (e.g. a zero-norm quaternion) makes the backend's rotation maths raise;
         # that is a bad request, not a server fault, so surface it as 422 rather than letting it 500.
         try:
-            app.state.backend.reset(np.asarray(req.agent_pos, dtype=np.float64))
+            with backend_lock:
+                app.state.backend.reset(agent_pos)
         except (ValueError, TypeError) as e:
             raise HTTPException(status_code=422, detail=f'Invalid agent_pos: {e}') from e
         return {'status': 'ok', 'episode_start_set': True}
@@ -160,7 +177,8 @@ def create_app(
             # A frame this server cannot read or cannot serve is a bad request, not a fault here.
             raise HTTPException(status_code=422, detail=str(e)) from e
 
-        chunk = app.state.backend.predict(obs)
+        with backend_lock:
+            chunk = app.state.backend.predict(obs)
         # Return at most what was asked for; further truncation is the client's job (UMI's policy
         # emits the full horizon with no offset).
         chunk = chunk.truncate(obs.n_action_steps)

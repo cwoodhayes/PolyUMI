@@ -1006,3 +1006,68 @@ def test_tick_does_not_block_on_the_request(make_node):
         node._submit_inference({}, _t(100.1))
         assert time.monotonic() - t0 < 0.5
         release.set()
+
+
+def test_control_tick_does_not_block_on_reset(make_node):
+    """
+    The episode-start /reset also runs on the worker thread, not the control tick.
+
+    A tick that dispatches it inline would stall the whole loop (buffer included) for up to
+    post_timeout_s on every retry while the server is slow or unreachable — the same failure
+    mode _submit_inference exists to avoid for /predict_cartesian/.
+    """
+    node = make_node(control_hz=10.0)
+    now = _t(100.0)
+    node._latest_image = np.zeros((4, 4, 3), dtype=np.uint8)
+    node._latest_image_stamp = now
+    for _ in range(node._n_obs_steps):
+        node._obs_buffer.append((node._latest_image, np.zeros(8)))
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def _slow_reset(agent_pos):
+        started.set()
+        release.wait(timeout=5.0)
+
+    with (
+        patch.object(node, 'get_clock', return_value=_FakeClock(now)),
+        patch.object(node, '_lookup_agent_pos', return_value=np.zeros(8)),
+        patch.object(node._client, 'reset', side_effect=_slow_reset),
+    ):
+        t0 = time.monotonic()
+        node._control_tick()
+        assert time.monotonic() - t0 < 0.5, '_control_tick blocked on the reset request'
+        assert started.wait(timeout=5.0), 'worker never picked up the reset'
+        release.set()
+
+
+def test_worker_does_a_pending_reset_before_a_pending_observation(make_node):
+    """A late reset makes every wrt_start pose in the episode wrong; a late inference tick doesn't."""
+    node = make_node(control_hz=10.0)
+    order = []
+    reset_started = threading.Event()
+    release_reset = threading.Event()
+
+    def _slow_reset(agent_pos):
+        reset_started.set()
+        release_reset.wait(timeout=5.0)
+        order.append('reset')
+
+    with (
+        patch.object(node, '_post_and_act', side_effect=lambda *a, **k: order.append('predict')),
+        patch.object(node._client, 'reset', side_effect=_slow_reset),
+    ):
+        node._submit_reset(np.zeros(8))
+        assert reset_started.wait(timeout=5.0), 'worker never picked up the reset'
+        # The worker is now blocked inside the reset call; submitting an observation here can
+        # only land in the mailbox, never jump ahead of it.
+        node._submit_inference(_OBS, _t(100.0))
+        release_reset.set()
+
+        for _ in range(50):
+            if len(order) >= 2:
+                break
+            time.sleep(0.05)
+
+    assert order == ['reset', 'predict']

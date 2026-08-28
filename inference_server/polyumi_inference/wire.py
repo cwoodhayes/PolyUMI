@@ -34,6 +34,7 @@ policy needs. That is :mod:`polyumi_inference.contract`. Most callers want
 from __future__ import annotations
 
 import json
+import math
 import struct
 from typing import Any, Dict, Mapping, Tuple
 
@@ -69,6 +70,11 @@ def pack_frame(channels: Mapping[str, np.ndarray], *, n_obs_steps: int, n_action
         # ascontiguousarray, not tobytes() alone: a sliced or transposed view would otherwise be
         # serialized in an order the shape no longer describes.
         contiguous = np.ascontiguousarray(array)
+        # Reject before tobytes(), not after: an object array's bytes are raw PyObject* pointer
+        # values, and unpack_frame's own hasobject guard only runs once those bytes are already
+        # on the wire.
+        if contiguous.dtype.hasobject:
+            raise WireFormatError(f'Channel {name!r} has object dtype {contiguous.dtype.str!r}, which is refused')
         raw = contiguous.tobytes()
         meta[name] = {
             # dtype.str carries byte order explicitly ('<f8', not 'float64'), so the format stays
@@ -176,12 +182,14 @@ def _channel_array(name: str, spec: Any, blobs: memoryview) -> np.ndarray:
     if offset + nbytes > len(blobs):
         raise WireFormatError(f'Channel {name!r} runs to byte {offset + nbytes} but the body holds {len(blobs)}')
 
-    # The shape is what the reader will trust, so it has to agree with the byte count. Without
-    # this a truncated blob reshapes into a plausible array of the wrong contents.
-    expected = int(np.prod(shape)) * dtype.itemsize if shape else dtype.itemsize
+    # math.prod, not np.prod: np.prod on a plain list defaults to a fixed-width (int64) result and
+    # silently wraps on a hostile shape like [2**32, 2**32] -- e.g. to 0, which then sails through
+    # the byte-count check below and blows up reshape() uncaught. Python ints have no such ceiling.
+    element_count = math.prod(shape) if shape else 1
+    expected = element_count * dtype.itemsize
     if nbytes != expected:
         raise WireFormatError(
             f'Channel {name!r} declares {nbytes} bytes but shape {shape} of {dtype.str} needs {expected}'
         )
 
-    return np.frombuffer(blobs, dtype=dtype, count=int(np.prod(shape)) if shape else 1, offset=offset).reshape(shape)
+    return np.frombuffer(blobs, dtype=dtype, count=element_count, offset=offset).reshape(shape)

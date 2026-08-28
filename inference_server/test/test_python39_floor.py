@@ -44,9 +44,16 @@ def test_module_defers_annotations(path):
 
 
 @pytest.mark.parametrize('path', MODULES, ids=lambda p: p.name)
-def test_module_has_no_match_statement(path):
-    """`match` is 3.10+ and is a syntax error on 3.9, which deferred annotations cannot help with."""
-    tree = ast.parse(path.read_text())
-    assert not any(isinstance(node, getattr(ast, 'Match', ())) for node in ast.walk(tree)), (
-        f'{path.name} uses a match statement, which does not parse on Python 3.9'
-    )
+def test_module_parses_on_python_3_9(path):
+    """
+    No syntax newer than 3.9 -- deferred annotations cannot help with a parse-time SyntaxError.
+
+    ``feature_version`` rather than a hand-picked node type (``ast.Match`` alone used to be all
+    this checked): it rejects every version-gated construct the parser knows about -- ``match``
+    (3.10), ``except*`` (3.11), the ``type`` alias statement (3.12) -- not just the one a reviewer
+    thought to name.
+    """
+    try:
+        ast.parse(path.read_text(), feature_version=(3, 9))
+    except SyntaxError as e:
+        pytest.fail(f'{path.name} does not parse on Python 3.9: {e}')

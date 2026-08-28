@@ -191,7 +191,7 @@ class PolicyClient:
         A 4xx body carries the reason -- a malformed frame, a missing channel -- and that reason is
         the whole diagnostic; without it this is just "422".
         """
-        if reply.status_code >= 400:
+        if not 200 <= reply.status_code < 300:
             raise TransportError(
                 f'{method} {url} failed',
                 url=url,
