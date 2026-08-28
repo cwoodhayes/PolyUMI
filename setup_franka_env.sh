@@ -47,7 +47,17 @@ POLYUMI_ROOT="$(cd "$(dirname "$_polyumi_self")" && pwd)"
 unset _polyumi_self
 
 # --- Wired link to the NUC ---
-# Override by exporting these before sourcing if your hardware differs.
+# Host-specific: a machine other than this laptop is on a different NIC and usually a different
+# subnet entirely. Each such host keeps its values in config/env.<hostname>.sh (see
+# config/env.lamb.sh); the defaults below are this laptop's. Exported vars still win over both,
+# so a one-off override works without editing anything.
+_polyumi_host_env="${POLYUMI_ROOT}/config/env.$(hostname).sh"
+if [ -f "$_polyumi_host_env" ]; then
+  echo "[setup_franka_env] host config: $_polyumi_host_env"
+  . "$_polyumi_host_env"
+fi
+unset _polyumi_host_env
+
 : "${FR3_IFACE:=enp0s31f6}"
 : "${FR3_LAPTOP_IP:=10.0.0.1/24}"
 : "${FR3_NM_PROFILE:=fr3-link}"
@@ -107,11 +117,9 @@ unset _polyumi_pwd
 # --- DDS: match the NUC (CycloneDDS, domain 0, unicast peers) ---
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export ROS_DOMAIN_ID=0
-# Interface name AND peer addresses are both host-specific (a different machine is typically on
-# a different link/subnet entirely, not just a differently-named NIC), so this points at a whole
-# config file rather than patching one field of a shared one. cyclonedds_laptop.xml is this
-# machine's own file; ROS_SSH_HOST callers (fr3_session.sh) override with their own, e.g.
-# cyclonedds_lamb.xml.
+# Interface name AND peer addresses are both host-specific, so this points at a whole config file
+# rather than patching one field of a shared one. cyclonedds_laptop.xml is this machine's own;
+# other hosts set CYCLONEDDS_CONFIG_FILE in their config/env.<hostname>.sh.
 : "${CYCLONEDDS_CONFIG_FILE:=${POLYUMI_ROOT}/ros2_ws/config/cyclonedds_laptop.xml}"
 export CYCLONEDDS_URI="file://${CYCLONEDDS_CONFIG_FILE}"
 
