@@ -103,8 +103,9 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 'execute_gripper',
                 default_value='false',
-                description='Let franka_hand_node issue Moves (MOVES THE FINGERS). False still '
-                'plans and logs every command at the real cadence.',
+                description='Start franka_hand_node and let it issue Moves (MOVES THE FINGERS). '
+                'False does not start the node at all — there is no hand to connect to on a '
+                'gripper-less run, and franka_hand_node treats a missing Hand as fatal.',
             ),
             DeclareLaunchArgument(
                 'max_acceleration',
@@ -170,11 +171,17 @@ def generate_launch_description():
             # load_gripper:=false (its default) or the two fight over the hand. Named fr3_gripper
             # so ~/joint_states resolves to /fr3_gripper/joint_states, exactly as franka_gripper's
             # did — every existing consumer of that topic keeps working unchanged.
+            #
+            # Gated on execute_gripper, not just started with 'execute' param false: the node
+            # connects to the physical Hand unconditionally on startup, and that connection is
+            # fatal (franka::NetworkException) when no Hand is attached — a gripper-less run has
+            # no such thing as a dry-run for this node, only "don't start it".
             Node(
                 package='polyumi_fr3_controllers',
                 executable='franka_hand_node',
                 name='fr3_gripper',
                 output='screen',
+                condition=IfCondition(execute_gripper),
                 parameters=[
                     {
                         # value_type is not optional: a LaunchConfiguration resolves to a STRING,

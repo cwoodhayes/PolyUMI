@@ -5,6 +5,7 @@
 #
 #     ./fr3_session.sh                # create (or re-attach to) the session
 #     SKIP_DEPLOY=1 ./fr3_session.sh  # ...without re-syncing the NUC/Pi source trees first
+#     ROS_SSH_HOST=lamb ./fr3_session.sh  # run the laptop/ROS-client window on lamb instead
 #     ./fr3_session.sh --kill-local   # tear down the LOCAL session only (remote ones survive)
 #     ./fr3_session.sh --kill         # --kill-local, plus stop the remote sessions too
 #
@@ -65,6 +66,24 @@ NUC_FRANKA_WS="${NUC_FRANKA_WS:-~/franka_ws}"
 GPU_SSH_HOST="${GPU_SSH_HOST:-lamb}"
 GPU_REPO="${GPU_REPO:-~/repos/PolyUMI}"
 
+# Where the "laptop" window (the ROS client: policy_client_node etc.) actually runs. Empty
+# (default) means right here. Set to an ssh alias to run it remotely instead — the whole repo
+# gets rsynced there first (like the NUC's nuc/ sync above, but the full tree, since the ROS
+# client needs ros2_ws built and setup_franka_env.sh) and the window ssh's in instead of using
+# this shell directly.
+#   ROS_SSH_HOST=lamb ./fr3_session.sh
+ROS_SSH_HOST="${ROS_SSH_HOST:-}"
+ROS_REPO="${ROS_REPO:-~/repos/PolyUMI}"
+# setup_franka_env.sh's host-specific settings, for the ROS_SSH_HOST case: the laptop's own
+# defaults (fr3-link / enp0s31f6 / 10.0.0.x) are that machine's link, not lamb's. lamb already
+# has its own NetworkManager profile named "direct" bound to its NUC-facing NIC (enp37s0f1), on
+# a separate 192.168.100.x subnet — see ros2_ws/config/cyclonedds_lamb.xml. Override any of these
+# if yours differ, or if ROS_SSH_HOST points somewhere else entirely.
+ROS_NM_PROFILE="${ROS_NM_PROFILE:-direct}"
+ROS_FR3_IFACE="${ROS_FR3_IFACE:-enp37s0f1}"
+ROS_FR3_LAPTOP_IP="${ROS_FR3_LAPTOP_IP:-192.168.100.1/24}"
+ROS_CYCLONEDDS_CONFIG="${ROS_CYCLONEDDS_CONFIG:-ros2_ws/config/cyclonedds_lamb.xml}"
+
 # ssh destination for the Pi — the same POLYUMI_PI_HOST that `pingest fetch` and the catalog's
 # Fetch button read, down to this same default, so all three agree with nothing exported and one
 # export in your shell rc covers all three. "polyumi-pi" is the alias other users are expected to
@@ -121,6 +140,7 @@ if [ "${1:-}" = "--kill-local" ] || [ "${1:-}" = "--kill" ]; then
       interrupt_remote_session "$NUC_SSH_HOST" "$sess" && NEEDS_GRACE=1
     done
     interrupt_remote_session "$GPU_SSH_HOST" polyumi && NEEDS_GRACE=1
+    [ -n "$ROS_SSH_HOST" ] && interrupt_remote_session "$ROS_SSH_HOST" polyumi-ros && NEEDS_GRACE=1
     [ "$NEEDS_GRACE" = 1 ] && echo "Sent C-c to the remote sessions."
   fi
 
@@ -149,6 +169,7 @@ if [ "${1:-}" = "--kill-local" ] || [ "${1:-}" = "--kill" ]; then
   kill_remote_session "$NUC_SSH_HOST" fr3-bringup
   kill_remote_session "$NUC_SSH_HOST" fr3-inference
   kill_remote_session "$GPU_SSH_HOST" polyumi
+  [ -n "$ROS_SSH_HOST" ] && kill_remote_session "$ROS_SSH_HOST" polyumi-ros
   exit 0
 fi
 
@@ -247,6 +268,37 @@ else
   else
     echo "==> Skipping Pi deploy — already confirmed unreachable above." >&2
   fi
+
+  if [ -n "$ROS_SSH_HOST" ]; then
+    # Full tree, not just ros2_ws/ — setup_franka_env.sh lives at the repo root. Excludes mirror
+    # .gitignore's big/generated dirs (recordings/ alone is ~95G) plus the ROS build dirs, which
+    # this rebuilds fresh below anyway.
+    echo "==> Syncing repo to $ROS_SSH_HOST:$ROS_REPO ..."
+    if rsync -a --delete --mkpath \
+        --exclude='.git/' --exclude='__pycache__/' --exclude='*.pyc' \
+        --exclude='.venv/' --exclude='external/' --exclude='recordings/' --exclude='data/' \
+        --exclude='ros2_ws/build/' --exclude='ros2_ws/install/' --exclude='ros2_ws/log/' \
+        "$REPO_DIR/" "${ROS_SSH_HOST}:${ROS_REPO}/"; then
+      echo "    done."
+      echo "==> Building polyumi_ros2 on $ROS_SSH_HOST ..."
+      if ! ssh -o ConnectTimeout=10 "$ROS_SSH_HOST" \
+          "unset VIRTUAL_ENV; cd $ROS_REPO/ros2_ws && source /opt/ros/kilted/setup.bash \
+           && colcon build --packages-select polyumi_ros2"; then
+        echo "WARNING: colcon build on $ROS_SSH_HOST failed — it may run stale polyumi_ros2 code." >&2
+      fi
+
+      # policy_client_node imports polyumi_inference directly (see CLAUDE.md "The Inference
+      # Protocol Lives in One Library") — --user/--no-deps, same as the documented ROS-node
+      # install, so it lands in this ROS distro's site-packages without touching apt/system deps.
+      echo "==> Installing polyumi_inference for the ROS node on $ROS_SSH_HOST ..."
+      if ! ssh -o ConnectTimeout=10 "$ROS_SSH_HOST" \
+          "cd $ROS_REPO && pip install --user --break-system-packages --no-deps -e inference_server/"; then
+        echo "WARNING: polyumi_inference install on $ROS_SSH_HOST failed — policy_client_node will fail to import it." >&2
+      fi
+    else
+      echo "WARNING: rsync to $ROS_SSH_HOST failed — it may be running stale code." >&2
+    fi
+  fi
 fi
 
 # Is a remote session already running? Probed BEFORE any pane is opened, because attaching
@@ -262,6 +314,8 @@ remote_session_exists() {
 NUC_BRINGUP_FRESH=1; remote_session_exists "$NUC_SSH_HOST" fr3-bringup   && NUC_BRINGUP_FRESH=0
 NUC_INFER_FRESH=1;   remote_session_exists "$NUC_SSH_HOST" fr3-inference && NUC_INFER_FRESH=0
 GPU_FRESH=1;       remote_session_exists "$GPU_SSH_HOST" polyumi     && GPU_FRESH=0
+ROS_FRESH=1
+[ -n "$ROS_SSH_HOST" ] && remote_session_exists "$ROS_SSH_HOST" polyumi-ros && ROS_FRESH=0
 if [ "$NUC_BRINGUP_FRESH$NUC_INFER_FRESH$GPU_FRESH" != "111" ]; then
   echo "Re-attaching to remote sessions that are already running; leaving those panes untouched."
 fi
@@ -351,7 +405,11 @@ tmux send-keys -t "$GPU_PANE" "$(remote_shell "$GPU_SSH_HOST" polyumi)" C-m
 # Window 3: this laptop — DDS env sourced, ready to launch the client.
 # ---------------------------------------------------------------------------
 LAPTOP_PANE="$(tmux new-window -a -t "$PI_WINDOW" -n laptop -P -F '#{pane_id}' -c "$REPO_DIR")"
-tmux send-keys -t "$LAPTOP_PANE" "source setup_franka_env.sh" C-m
+if [ -n "$ROS_SSH_HOST" ]; then
+  tmux send-keys -t "$LAPTOP_PANE" "$(remote_shell "$ROS_SSH_HOST" polyumi-ros)" C-m
+else
+  tmux send-keys -t "$LAPTOP_PANE" "source setup_franka_env.sh" C-m
+fi
 
 # Everything above only opened shells. Let them finish before typing into them.
 sleep "$SHELL_SETTLE_S"
@@ -400,8 +458,24 @@ fi
 # recall of it carries its own DDS env instead of inheriting whatever the shell happened to
 # have. An interactive rc exporting its own ROS_DOMAIN_ID silently beats tmux's inherited
 # environment, and the only symptom is policy_client_node never seeing fr3_link0.
-pretype "$LAPTOP_PANE" \
-  "source setup_franka_env.sh >/dev/null && $(logged policy_client "ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=$INFERENCE_URL execute_motion:=$EXECUTE_MOTION max_image_age_s:=$MAX_IMAGE_AGE_S pi_host:=$PI_HOST")"
+# On ROS_SSH_HOST, the host-specific link vars are exported ahead of the source so
+# setup_franka_env.sh picks up that host's link config instead of the laptop's own defaults.
+ROS_ENV_PREFIX=""
+if [ -n "$ROS_SSH_HOST" ]; then
+  ROS_ENV_PREFIX="export FR3_NM_PROFILE=$ROS_NM_PROFILE FR3_IFACE=$ROS_FR3_IFACE FR3_LAPTOP_IP=$ROS_FR3_LAPTOP_IP CYCLONEDDS_CONFIG_FILE=$ROS_REPO/$ROS_CYCLONEDDS_CONFIG && "
+fi
+# video_device likewise: inference_demo.launch.xml defaults to /dev/video2, which is only where
+# the Elgato lands on THIS laptop's USB enumeration — a different host's is a different device
+# node, unrelated to the DDS link config above. Verified via v4l2-ctl --list-devices on lamb.
+ROS_VIDEO_DEVICE_ARG=""
+[ -n "$ROS_SSH_HOST" ] && ROS_VIDEO_DEVICE_ARG=" video_device:=${ROS_VIDEO_DEVICE:-/dev/video0}"
+ROS_LAUNCH_CMD="${ROS_ENV_PREFIX}source setup_franka_env.sh >/dev/null && $(logged policy_client "ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=$INFERENCE_URL execute_motion:=$EXECUTE_MOTION max_image_age_s:=$MAX_IMAGE_AGE_S pi_host:=$PI_HOST${ROS_VIDEO_DEVICE_ARG}")"
+if [ -z "$ROS_SSH_HOST" ]; then
+  pretype "$LAPTOP_PANE" "$ROS_LAUNCH_CMD"
+elif [ "$ROS_FRESH" = 1 ]; then
+  tmux send-keys -t "$LAPTOP_PANE" "cd $ROS_REPO" C-m
+  pretype "$LAPTOP_PANE" "$ROS_LAUNCH_CMD"
+fi
 
 tmux select-window -t "$NUC_WINDOW"
 cat <<EOF
@@ -410,7 +484,7 @@ Session '$SESSION' is up. Order to press Enter in:
   1. nuc, left      already running bringup (enable FCI on the Desk UI first if it errors)
   2. nuc, right     the inference stack — check the execute flags on the line before you run it
   3. polyumi-pi, right   the policy server — edit CKPT to the checkpoint you want
-  4. laptop         the client, last
+  4. laptop         the client, last${ROS_SSH_HOST:+ (running on $ROS_SSH_HOST)}
 
 Send the arm home (needs pane 2 running; MOVES THE ARM even in plan-only mode):
   ros2 service call /polyumi/home std_srvs/srv/Trigger "{}"
