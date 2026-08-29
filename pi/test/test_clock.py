@@ -1,7 +1,7 @@
 """Unit tests for the outbound audio stream's capture-instant timestamps."""
 
 import pytest
-from polyumi_pi.clock import LAG_EMA_ALPHA, MAX_PLAUSIBLE_LAG_S, AudioStreamClock
+from polyumi_pi.clock import MAX_PLAUSIBLE_LAG_S, AudioStreamClock
 
 BLOCKSIZE = 320
 SAMPLE_RATE = 16000
@@ -31,19 +31,24 @@ def test_starts_with_one_block_of_lag():
 
 
 def test_first_usable_sample_is_adopted_whole():
-    """The first usable reading is taken as-is, with no EMA ramp from the block model."""
+    """The first usable reading is taken as-is, not blended with the block model."""
     clock = make_clock()
     stamped = clock.stamp(current_time_s=STREAM_T0 + 0.05, adc_time_s=STREAM_T0, epoch_ns=EPOCH_NS)
     assert clock.lag_s == pytest.approx(0.05)
     assert stamped == EPOCH_NS - round(0.05 * 1e9)
 
 
-def test_lag_is_smoothed_towards_new_samples():
-    """Subsequent samples move the tracked lag by the EMA weight, not all the way."""
+def test_each_reading_is_applied_in_full():
+    """
+    A callback that ran late really was holding a fuller buffer, so its own lag is the answer.
+
+    Smoothing here would stamp the late block early by most of the jump.
+    """
     clock = make_clock()
-    clock.stamp(current_time_s=STREAM_T0 + 0.05, adc_time_s=STREAM_T0, epoch_ns=0)
-    clock.stamp(current_time_s=STREAM_T0 + 1.07, adc_time_s=STREAM_T0 + 1.0, epoch_ns=0)
-    assert clock.lag_s == pytest.approx(0.05 + LAG_EMA_ALPHA * (0.07 - 0.05))
+    clock.stamp(current_time_s=STREAM_T0 + 0.02, adc_time_s=STREAM_T0, epoch_ns=0)
+    late = clock.stamp(current_time_s=STREAM_T0 + 1.09, adc_time_s=STREAM_T0 + 1.0, epoch_ns=EPOCH_NS)
+    assert clock.lag_s == pytest.approx(0.09)
+    assert late == EPOCH_NS - round(0.09 * 1e9)
 
 
 @pytest.mark.parametrize(
@@ -93,7 +98,7 @@ def test_stamps_are_continuous_across_a_dropout():
     def adc(i: float) -> float:
         return STREAM_T0 + i * 0.02
 
-    for i in range(20):  # settle the tracked lag
+    for i in range(20):
         clock.stamp(current_time_s=adc(i) + 0.031, adc_time_s=adc(i), epoch_ns=EPOCH_NS + i * interval_ns)
 
     good = clock.stamp(current_time_s=adc(20) + 0.031, adc_time_s=adc(20), epoch_ns=EPOCH_NS + 20 * interval_ns)
