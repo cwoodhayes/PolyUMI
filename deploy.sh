@@ -83,6 +83,25 @@ ssh "${PI_HOST}" "sudo alsactl restore -f ~/PolyUMI/pi/alsa_preset || true"
 echo "==> Updating WM8960 ALSA state file..."
 ssh "${PI_HOST}" "sudo cp ~/PolyUMI/pi/alsa_preset /etc/wm8960-soundcard/wm8960_asound.state"
 
+# The Pi's stream timestamps are epoch nanoseconds (see camera_frame.proto / audio_chunk.proto),
+# so they are only as good as the Pi's agreement with the host consuming them. Warn, never
+# configure: the NTP server to point at is specific to your lab's network.
+echo "==> Checking the Pi's clock sync..."
+TRACKING="$(ssh "${PI_HOST}" 'chronyc tracking 2>/dev/null' || true)"
+if [ -z "${TRACKING}" ]; then
+    echo "    WARNING: could not read 'chronyc tracking' on ${PI_HOST} (chrony not installed?)." >&2
+    echo "             The Pi's stream timestamps will not line up with the ROS host." >&2
+    echo "             See docs/pi-provisioning.md, \"Clock sync\"." >&2
+elif echo "${TRACKING}" | grep -q '^Leap status.*Normal'; then
+    echo "    $(echo "${TRACKING}" | grep '^Reference ID' || true)"
+    echo "    $(echo "${TRACKING}" | grep '^System time' || true)"
+else
+    echo "    WARNING: ${PI_HOST} has no synchronised time source." >&2
+    echo "${TRACKING}" | sed 's/^/             /' >&2
+    echo "             Stream timestamps will be off by however far the Pi's clock has drifted." >&2
+    echo "             See docs/pi-provisioning.md, \"Clock sync\"." >&2
+fi
+
 echo "==> Done. Deployed commit ${COMMIT_HASH} to ${PI_HOST}."
 echo "    Restart the service to pick up code changes:"
 echo "      sudo systemctl restart polyumi-pi"

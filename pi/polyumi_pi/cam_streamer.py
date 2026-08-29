@@ -14,6 +14,7 @@ from libcamera import controls  # type: ignore
 from picamera2 import Picamera2
 from polyumi_pi_msgs import camera_frame_pb2
 
+from polyumi_pi.clock import boottime_to_epoch_ns
 from polyumi_pi.files.session import SessionFiles
 
 log = logging.getLogger('pi_cam_process')
@@ -136,8 +137,15 @@ class CameraStreamer:
                             self.first_frame_event.set()
                     log.debug(metadata)
 
+                    # libcamera reports SensorTimestamp on CLOCK_BOOTTIME. The wire contract is
+                    # epoch nanoseconds (see camera_frame.proto), so it is converted here; the
+                    # sidecar CSV keeps the raw counter, since ingest anchors that against the
+                    # first frame and a chrony step mid-recording must not break its monotonicity.
+                    # Two representations of one instant, not two sources of truth.
+                    sensor_ts_ns = metadata['SensorTimestamp']
+
                     msg = camera_frame_pb2.CameraFrame()
-                    msg.timestamp_ns = metadata['SensorTimestamp']
+                    msg.timestamp_ns = boottime_to_epoch_ns(sensor_ts_ns)
                     msg.jpeg_data = data.getvalue()
                     msg.width = self.VIEW_WIDTH
                     msg.height = self.VIEW_HEIGHT
@@ -151,10 +159,10 @@ class CameraStreamer:
                             dropped_this_window += 1
 
                     if video_recorder is not None:
-                        video_recorder.write_frame(data.getvalue(), msg.timestamp_ns)
+                        video_recorder.write_frame(data.getvalue(), sensor_ts_ns)
                         n_video_frames += 1
 
-                    log.debug(f'Captured frame at {msg.timestamp_ns} ns, size={len(msg.jpeg_data)} bytes')
+                    log.debug(f'Captured frame at {msg.timestamp_ns} ns (epoch), size={len(msg.jpeg_data)} bytes')
 
                     now = time.monotonic()
                     if socket is not None and now - last_stats >= 1.0:

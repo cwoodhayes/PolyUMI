@@ -130,6 +130,16 @@ Each stream has its own 1D `float64` timestamp array under `episode_N/timestamps
 
 The shared-time window for an episode is bracketed by `annotations/episode_start` and `annotations/episode_end`, both stored as zarr scalar arrays.
 
+**The finger audio anchor is the ADC capture instant.** `timestamps/finger_air` and
+`timestamps/finger_piezo` are built from `metadata.json`'s `audio_start_time_ns`, which the Pi
+records as the instant the first sample hit the converter — not the instant the block reached
+userspace, which is at least one 20 ms callback later. Recordings made before this changed carry
+the delivery instant instead, so their finger audio sits ~20 ms late against `timestamps/finger`
+(the video, anchored independently on `FrameWallClock`). This does **not** affect anything routed
+through the chirp: `annotations/time_sync/gopro_to_finger_offset_s` is measured against the same
+timeline, so it absorbs the shift exactly. Only direct finger-audio-to-finger-video comparisons
+see it, and only in a dataset mixing recordings from both sides of the change.
+
 GoPro's GPMF telemetry contains multiple substreams (accl, gyro, GPS) at differing native rates. Timestamps are synthesized uniformly from the recording start time and actual sample count (`recording_start_s + arange(n) / (n / duration_s)`), so the effective rate is derived from the data rather than assumed.
 
 ## Clock alignment (time sync step)

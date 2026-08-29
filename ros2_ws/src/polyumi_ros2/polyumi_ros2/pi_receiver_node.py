@@ -38,6 +38,10 @@ ZMQ_RECV_TIMEOUT_MS = 1000
 # Minimum interval between idle warnings, per stream (nanoseconds).
 IDLE_WARN_INTERVAL_NS = 1_000_000_000
 
+# Minimum interval between clock-skew warnings, per stream (nanoseconds). Shares the idle
+# throttle's cadence: both are "the Pi link is wrong", once a second is plenty.
+SKEW_WARN_INTERVAL_NS = IDLE_WARN_INTERVAL_NS
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -45,7 +49,15 @@ IDLE_WARN_INTERVAL_NS = 1_000_000_000
 
 
 def ns_to_ros_time(t_ns: int) -> Time:
-    """Convert a Unix timestamp in nanoseconds to a ROS2 Time message."""
+    """
+    Convert an epoch-nanosecond capture instant to a ROS2 Time message.
+
+    This is a reinterpretation, not a conversion: the Pi already stamps both streams in epoch
+    nanoseconds at the capture instant, which is the documented contract on ``timestamp_ns``
+    in ``camera_frame.proto`` / ``audio_chunk.proto``. Nothing here may adjust the value —
+    a stamp that does not line up with this host's clock is a Pi-side bug or a clock-sync
+    failure, and :meth:`PiReceiverNode._warn_skew` exists to say so rather than paper over it.
+    """
     msg = Time()
     msg.sec = t_ns // 1_000_000_000
     msg.nanosec = t_ns % 1_000_000_000
@@ -67,10 +79,15 @@ class PiReceiverNode(Node):
         self.declare_parameter('pi_host', '10.106.10.62')
         self.declare_parameter('port', 5555)
         self.declare_parameter('audio_port', 5556)
+        # |now - stamp| above which the Pi link is reported as mis-clocked. Well above the real
+        # transport delay (tens of ms) and well below the failures worth catching: an
+        # unsynchronised Pi clock, or a stamp that never left its device time base at all.
+        self.declare_parameter('max_clock_skew_s', 0.5)
 
         self._pi_host = self.get_parameter('pi_host').get_parameter_value().string_value
         self._port = self.get_parameter('port').get_parameter_value().integer_value
         self._audio_port = self.get_parameter('audio_port').get_parameter_value().integer_value
+        self._max_clock_skew_s = self.get_parameter('max_clock_skew_s').get_parameter_value().double_value
 
         self.camera_pub = self.create_publisher(
             CompressedImage,
@@ -87,6 +104,8 @@ class PiReceiverNode(Node):
 
         # Per-stream timestamps for throttling the "waiting for the Pi" warning.
         self._last_idle_warn: dict[str, rclpy.time.Time] = {}
+        # Same, for the clock-skew warning.
+        self._last_skew_warn: dict[str, rclpy.time.Time] = {}
 
         recv_thread = threading.Thread(target=self._camera_recv_loop, daemon=True)
         recv_thread.start()
@@ -118,6 +137,8 @@ class PiReceiverNode(Node):
             self.get_logger().debug(f'Received {len(raw)} bytes from ZMQ')
             proto = camera_frame_pb2.CameraFrame()
             proto.ParseFromString(raw)
+
+            self._warn_skew('camera', proto.timestamp_ns)
 
             ros_msg = CompressedImage()
             ros_msg.header.stamp = ns_to_ros_time(proto.timestamp_ns)
@@ -168,6 +189,8 @@ class PiReceiverNode(Node):
             last_ts_ns = proto.timestamp_ns
             chunks += 1
 
+            self._warn_skew('audio', proto.timestamp_ns)
+
             ros_msg = RawAudio()
             ros_msg.timestamp = ns_to_ros_time(proto.timestamp_ns)
             ros_msg.data = proto.pcm_data
@@ -182,6 +205,29 @@ class PiReceiverNode(Node):
                 chunks = 0
                 gap_warnings = 0
                 last_stats_t = now_ns
+
+    def _warn_skew(self, stream: str, stamp_ns: int) -> None:
+        """
+        Warn (throttled per stream) that a Pi stamp is too far from this host's clock.
+
+        Warns only — the stamp is published unchanged. Silently correcting it would hide the two
+        failures this catches: a Pi whose clock has drifted off the ROS host, and a stamp still
+        carrying a device time base (a boottime counter reads as ~1970 here). Both make every
+        downstream latency figure meaningless, so they have to be loud.
+        """
+        now = self.get_clock().now()
+        skew_s = (now.nanoseconds - stamp_ns) / 1e9
+        if abs(skew_s) <= self._max_clock_skew_s:
+            return
+        last = self._last_skew_warn.get(stream)
+        if last is None or (now - last).nanoseconds >= SKEW_WARN_INTERVAL_NS:
+            self.get_logger().error(
+                f"Pi {stream} stamps are {skew_s:+.3f}s off this host's clock "
+                f'(limit {self._max_clock_skew_s:.3f}s). The stream is being published unchanged, '
+                f'but every latency derived from it is wrong. Check the Pi is chrony-synced to '
+                f'this host — see docs/pi-provisioning.md, "Clock sync".'
+            )
+            self._last_skew_warn[stream] = now
 
     def _warn_idle(self, stream: str, kind: str, port: int) -> None:
         """Warn (throttled per stream) that no Pi frames are arriving."""

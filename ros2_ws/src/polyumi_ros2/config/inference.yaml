@@ -44,13 +44,18 @@
 
       # Finger camera latency. Declared but never consumed — the policy has no tactile input
       # yet (see "What's left" in docs/franka-inference-bringup.md). Left at 0 so it cannot skew
-      # anything until it is wired. Deferred, not merely unmeasured: the Pi sends camera frames
-      # stamped with a monotonic SensorTimestamp and audio stamped with epoch time, and
-      # pi_receiver_node republishes both as if they shared a clock. That has to be resolved
-      # before any number here could mean anything. See the doc.
+      # anything until it is wired.
+      #
+      # Unmeasured, no longer blocked: both Pi streams now arrive stamped in epoch nanoseconds at
+      # the capture instant, so a number here would mean something as soon as someone measures
+      # one. It still needs a rig — the span from photon to ROS header stamp covers the Pi's
+      # sensor, JPEG encode, ZMQ hop and receive loop, and none of that is observable from
+      # inside the node.
       finger_cam: 0.0
-      # Piezo mic latency. Declared but never consumed, and blocked on the same clock-domain
-      # issue as finger_cam.
+      # Piezo mic latency. Same status as finger_cam: unwired, unmeasured, and 0 until it is
+      # both. Note the Pi already removes the audio driver's own buffering from the stamp
+      # (polyumi_pi/clock.py), so this covers transport and the receive loop, not the ADC lag —
+      # unless the Pi logs `clock=fixed`, in which case the residual driver buffering lands here.
       piezo_mic: 0.0
       # Delay from the arm's true EE pose to its measurement appearing on TF.
       #
