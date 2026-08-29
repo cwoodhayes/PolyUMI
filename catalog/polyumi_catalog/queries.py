@@ -289,6 +289,27 @@ def task_detail(db: DBSession, task_key: str) -> dict:
     }
 
 
+def _scene_time(scene: Scene, sessions: list[Session]) -> dict:
+    """
+    Scene wall-clock span vs. time actually recording, the collection-productivity numbers.
+
+    ``scene_seconds`` spans the whole run including the dead time between episodes;
+    ``recorded_seconds`` sums every session's own length (episodes *and* mapping passes),
+    and ``usable_recorded_seconds`` drops the ones an export would skip. ``recorded_frac``
+    is the ratio the pane shows: how much of the time at the rig was camera-rolling.
+    """
+    span = None
+    if scene.started_at is not None and scene.ended_at is not None:
+        span = (scene.ended_at - scene.started_at).total_seconds()
+    recorded = sum(s.duration_s or 0.0 for s in sessions)
+    return {
+        'scene_seconds': span,
+        'recorded_seconds': recorded,
+        'usable_recorded_seconds': sum(s.duration_s or 0.0 for s in sessions if _is_usable(s)),
+        'recorded_frac': (recorded / span) if span else None,
+    }
+
+
 def scene_detail(db: DBSession, scene_id: str) -> dict:
     """Return the detail-panel view model for a Scenes-column selection."""
     scene = db.get(Scene, scene_id)
@@ -315,6 +336,7 @@ def scene_detail(db: DBSession, scene_id: str) -> dict:
         'archived': scene.archived,
         'created_at': scene.created_at,
         'synced_at': scene.synced_at,
+        **_scene_time(scene, sessions),
         'n_sessions': len(sessions),
         'n_episodes': len(episodes),
         # so the pane agrees with the scene's Scenes-column badge, which is usable/total
@@ -390,6 +412,9 @@ def dataset_detail(db: DBSession, dataset_id: int) -> dict:
         'polyumi_version': d.polyumi_version,
         'exporter_type': d.exporter_type,
         'created_at': d.created_at,
+        'scene_seconds': d.scene_seconds,
+        'episode_seconds': d.episode_seconds,
+        'exported_seconds': d.exported_seconds,
         'members': [
             {'scene_id': m.scene_id, 'name': scene_names.get(m.scene_id, m.scene_id), 'episodes': m.episodes}
             for m in members

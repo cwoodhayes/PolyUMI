@@ -28,7 +28,7 @@ import json
 import logging
 import pathlib
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from polyumi_pi.files.metadata import SessionMetadata
 from sqlmodel import Session as DBSession
@@ -176,6 +176,13 @@ def _sync_scene(db: DBSession, scene_dir: pathlib.Path, now: datetime, force: bo
             stats.tasks_created += 1
     created_ats = [m.created_at for _, m in metas if m.created_at is not None]
     scene_created = min(created_ats) if created_ats else None
+    # The scene's span. `scene_started_at` predates the first session (it is stamped when
+    # start-scene begins), so it includes the setup; scenes recorded before that field existed
+    # fall back to the first session and simply lose that lead-in. The end is derived rather
+    # than recorded: the Pi writes nothing when a scene stops, and every session's end is
+    # `created_at + duration_s`.
+    starts = [m.scene_started_at for _, m in metas if m.scene_started_at is not None]
+    ends = [m.created_at + timedelta(seconds=m.duration_s) for _, m in metas if m.duration_s is not None]
 
     # retire a stale row left behind if this scene's resolved identity has changed since
     # the last sync (e.g. metadata previously failed to parse everywhere, so scene_id fell
@@ -190,6 +197,8 @@ def _sync_scene(db: DBSession, scene_dir: pathlib.Path, now: datetime, force: bo
     scene.notes = manifest.notes if manifest else scene.notes
     scene.archived = _is_archived(scene_dir)
     scene.created_at = scene_created
+    scene.started_at = min(starts) if starts else scene_created
+    scene.ended_at = max(ends) if ends else None
     scene.synced_at = now
     db.add(scene)
 
@@ -291,6 +300,9 @@ def _sync_dataset_manifest(
     dataset.n_episodes = manifest.n_episodes
     dataset.polyumi_version = manifest.polyumi_version
     dataset.exporter_type = manifest.exporter_type
+    dataset.scene_seconds = manifest.scene_seconds
+    dataset.episode_seconds = manifest.episode_seconds
+    dataset.exported_seconds = manifest.exported_seconds
     db.add(dataset)
     db.flush()  # assign dataset.id if new
 

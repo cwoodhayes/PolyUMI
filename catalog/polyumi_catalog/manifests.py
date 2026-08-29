@@ -73,6 +73,14 @@ class DatasetManifest:
     #: embedded in the .zarr.zip's meta attrs; kept here too so it's readable without opening
     #: the buffer.
     pose_provenance: list[dict] = field(default_factory=list)
+    #: Time accounting, from ``polyumi_ingest.timing.dataset_time_totals``: the wall-clock span
+    #: of every member scene, the recorded length of the sessions that made it in, and the
+    #: seconds actually in the buffer once trimming and segmentation have had their say. The
+    #: three together say how much time at the rig became training data. None on manifests
+    #: written before these fields existed.
+    scene_seconds: float | None = None
+    episode_seconds: float | None = None
+    exported_seconds: float | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     file_version: int = 1
 
@@ -93,6 +101,9 @@ class DatasetManifest:
             export_params=data.get('export_params', {}),
             members=[DatasetMemberSpec.from_dict(m) for m in data.get('members', [])],
             pose_provenance=data.get('pose_provenance', []),
+            scene_seconds=data.get('scene_seconds'),
+            episode_seconds=data.get('episode_seconds'),
+            exported_seconds=data.get('exported_seconds'),
             created_at=datetime.fromisoformat(data['created_at']),
             file_version=version,
         )
@@ -110,6 +121,9 @@ class DatasetManifest:
             'pose_provenance': self.pose_provenance,
             'output': self.output,
             'n_episodes': self.n_episodes,
+            'scene_seconds': self.scene_seconds,
+            'episode_seconds': self.episode_seconds,
+            'exported_seconds': self.exported_seconds,
             'file_version': self.file_version,
         }
 

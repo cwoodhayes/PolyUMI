@@ -5,6 +5,7 @@ from __future__ import annotations
 import pathlib
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
 import zarr
 from fastapi.testclient import TestClient
@@ -347,6 +348,34 @@ def test_select_scene_includes_assign_task_dropdown(tmp_path: pathlib.Path):
     resp = _client(tmp_path).get('/select/scene/scene-1')
     assert 'name="task_id"' in resp.text
     assert '>fold_towel<' in resp.text
+
+
+def test_select_scene_shows_scene_time_beyond_recording_time(tmp_path: pathlib.Path):
+    """The scene pane's productivity numbers: the whole run, and the part of it that recorded."""
+    rec = tmp_path / 'recordings'
+    scene_dir = rec / 'scene_2026-07-26_10-00-00_abcd'
+    scene_dir.mkdir(parents=True)
+    SceneManifest(scene_id='scene-1').write_to_scene_dir(scene_dir)
+    started = datetime(2026, 7, 26, 10, 0, 0, tzinfo=timezone.utc)
+    for i, offset in enumerate((30, 630)):  # ten minutes apart, one minute of recording each
+        sd = scene_dir / f'session_{i}'
+        sd.mkdir()
+        SessionMetadata(
+            path=sd / 'metadata.json',
+            scene_id='scene-1',
+            session_type=SessionType.EPISODE,
+            created_at=started + timedelta(seconds=offset),
+            duration_s=60,
+            scene_started_at=started,
+        ).to_file()
+
+    engine = get_engine(tmp_path / 'catalog.db')
+    sync_recordings(rec, engine)
+    resp = TestClient(create_app(engine, recordings_dir=rec)).get('/select/scene/scene-1')
+
+    assert '0:11:30' in resp.text  # scene span: start -> end of the second session
+    assert '0:02:00' in resp.text  # recorded: two one-minute sessions
+    assert '17% of scene' in resp.text
 
 
 def test_post_create_task_redirects_and_persists(tmp_path: pathlib.Path):

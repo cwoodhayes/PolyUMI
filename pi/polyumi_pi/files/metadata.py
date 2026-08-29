@@ -63,6 +63,11 @@ class SessionMetadata(base.SessionDataABC):
     first_frame_metadata: dict | None = None
     sync_chirp_play_time_ns: int | None = None
     optitrack_start_time: datetime | None = None
+    #: When the enclosing scene began, copied in by SceneFiles.create_session. Carries the
+    #: scene's wall-clock start on a file the fetch actually transfers (fetch moves session
+    #: directories, never scene-level files), so the host can measure a scene's full span
+    #: including the dead time before and between episodes.
+    scene_started_at: datetime | None = None
     notes: str | None = None
     task: str | None = None
     robot: str | None = None
@@ -104,6 +109,7 @@ class SessionMetadata(base.SessionDataABC):
             'optitrack_start_time': (
                 self.optitrack_start_time.isoformat() if self.optitrack_start_time is not None else None
             ),
+            'scene_started_at': (self.scene_started_at.isoformat() if self.scene_started_at is not None else None),
             'notes': self.notes,
             'task': self.task,
             'robot': self.robot,
@@ -126,5 +132,7 @@ class SessionMetadata(base.SessionDataABC):
             data['gopro_sync_time'] = datetime.fromisoformat(data['gopro_sync_time'])
         if data.get('optitrack_start_time') is not None:
             data['optitrack_start_time'] = datetime.fromisoformat(data['optitrack_start_time'])
+        if data.get('scene_started_at') is not None:
+            data['scene_started_at'] = datetime.fromisoformat(data['scene_started_at'])
         data['session_type'] = SessionType(data['session_type'])
         return cls(**data)

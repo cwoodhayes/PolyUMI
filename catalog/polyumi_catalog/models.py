@@ -42,6 +42,12 @@ class Scene(SQLModel, table=True):
     notes: str | None = None
     archived: bool = False
     created_at: datetime | None = None
+    #: Wall-clock span of the whole collection run: ``started_at`` is the Pi's scene start
+    #: (metadata.json's ``scene_started_at``, falling back to the first session for scenes
+    #: recorded before that field existed), ``ended_at`` the end of the last session. The
+    #: gap between the two and the summed session durations is the dead time.
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
     synced_at: datetime | None = None
 
 
@@ -104,6 +110,12 @@ class Dataset(SQLModel, table=True):
     #: modalities). Mirrors
     #: ``DatasetManifest.exporter_type``, which is the source of truth on re-sync.
     exporter_type: str = 'dp'
+    #: Time accounting for the export, mirroring ``DatasetManifest``: wall-clock span of every
+    #: member scene, recorded length of the sessions that made it in, and seconds actually in
+    #: the buffer after trimming and segmentation.
+    scene_seconds: float | None = None
+    episode_seconds: float | None = None
+    exported_seconds: float | None = None
     created_at: datetime = Field(default_factory=_utcnow)
 
 
