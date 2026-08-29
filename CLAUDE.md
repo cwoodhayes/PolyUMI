@@ -41,7 +41,7 @@ group, since the `dev` group's picamera2 is Pi-only and will not build on a runn
 ### Tests
 ```bash
 cd pi
-pytest test/files/
+pytest test/
 # Single test file:
 pytest test/files/test_session.py
 ```
@@ -170,6 +170,13 @@ off `10.0.0.1` when the NUC booted (the NUC then falls back to its own `local st
 clock); `ssh jailfranka 'sudo chronyc makestep'` once the link is up re-steps it. With this in
 place, `tf_use_latest` is no longer needed for real runs — it was only a stationary-dry-run
 crutch for the old skew.
+
+**The Pi needs the same treatment, against a different host.** Its camera and audio streams are
+stamped in epoch nanoseconds at the capture instant and `pi_receiver_node` republishes those
+verbatim as ROS headers, so the Pi has to agree with whichever machine runs the ROS nodes
+(`lamb`, not the laptop). This is lab-specific and not provisioned by cloud-init — the drop-ins
+and the verification are step 6 of [docs/pi-provisioning.md](docs/pi-provisioning.md), and
+`./deploy.sh` warns on every deploy when the Pi has no synchronised source.
 
 **The gripper driver is selectable, and `faulhaber` is the supported one.**
 `fr3_inference.launch.py` takes `gripper:=faulhaber|hand|none` (default `faulhaber`);

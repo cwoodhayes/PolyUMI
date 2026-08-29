@@ -130,6 +130,16 @@ Each stream has its own 1D `float64` timestamp array under `episode_N/timestamps
 
 The shared-time window for an episode is bracketed by `annotations/episode_start` and `annotations/episode_end`, both stored as zarr scalar arrays.
 
+**The finger audio anchor is the ADC capture instant.** `timestamps/finger_air` and
+`timestamps/finger_piezo` are built from `metadata.json`'s `audio_start_time_ns`, which the Pi
+records as the instant the first sample hit the converter — not the instant the block reached
+userspace, which is at least one 20 ms callback later. Recordings made before this changed carry
+the delivery instant instead, so their finger audio sits ~20 ms late against `timestamps/finger`
+(the video, anchored independently on `FrameWallClock`). This does **not** affect anything routed
+through the chirp: `annotations/time_sync/gopro_to_finger_offset_s` is measured against the same
+timeline, so it absorbs the shift exactly. Only direct finger-audio-to-finger-video comparisons
+see it, and only in a dataset mixing recordings from both sides of the change.
+
 GoPro's GPMF telemetry contains multiple substreams (accl, gyro, GPS) at differing native rates. Timestamps are synthesized uniformly from the recording start time and actual sample count (`recording_start_s + arange(n) / (n / duration_s)`), so the effective rate is derived from the data rather than assumed.
 
 ## Clock alignment (time sync step)
@@ -273,7 +283,7 @@ The gripper mount occludes a fixed strip of the finger camera's view, so this co
 - an optional `output_size` resize with `cv2.INTER_AREA`. **Default `null`** — the crop ships at native size and the choice of encoder input size stays with whoever builds the policy;
 - bounds that don't fit the frame **raise**. Silently clipping would produce a plausible-looking image that isn't the one the contract names.
 
-The crop **is** the `finger_rgb` contract: a policy trained on one crop cannot be served frames from another, so retuning it invalidates existing checkpoints. The resolved bounds go into the buffer's `meta.attrs` so a checkpoint says which crop it trained under. Nothing on the inference side calls this yet — `policy_client_node` has no finger-camera subscription and cannot gain one until the clock-domain issue in `ros2_ws/.../config/inference.yaml` is resolved — but the transform is mirrored now so that wiring is a subscription rather than a second derivation.
+The crop **is** the `finger_rgb` contract: a policy trained on one crop cannot be served frames from another, so retuning it invalidates existing checkpoints. The resolved bounds go into the buffer's `meta.attrs` so a checkpoint says which crop it trained under. Nothing on the inference side calls this yet — `policy_client_node` has no finger-camera subscription — but the transform is mirrored now so that wiring is a subscription rather than a second derivation.
 
 ### Why it's implemented twice
 

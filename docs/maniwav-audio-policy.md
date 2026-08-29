@@ -250,27 +250,22 @@ passthrough override.
 
 ---
 
-## 6. Inference is blocked, and not on you
+## 6. Inference is not wired yet
 
-Do not wire `mic_0` or `finger_rgb` into `serve_policy.py` expecting it to run on the arm. Two
-independent blockers:
+Do not wire `mic_0` or `finger_rgb` into `serve_policy.py` expecting it to run on the arm.
 
-1. **A clock-domain bug on the ROS side.** `pi_receiver_node` republishes camera frames stamped
-   with the Pi's monotonic `SensorTimestamp` and audio stamped with epoch time *as if they shared
-   a clock*. Until that is fixed, `latency.piezo_mic` in
-   `ros2_ws/src/polyumi_ros2/config/inference.yaml` cannot be given a meaningful value — it is
-   declared and deliberately left at 0. An observation is only as fresh as its slowest signal, so
-   adding audio also makes the capture instant the oldest across streams.
+`latency.piezo_mic` and `latency.finger_cam` in
+`ros2_ws/src/polyumi_ros2/config/inference.yaml` are 0 because they are unmeasured: measuring
+either needs a rig, and both depend on the Pi being chrony-synced to the ROS host (step 6 of
+[pi-provisioning.md](pi-provisioning.md)). Note that an observation is only as fresh as its
+slowest signal, so adding audio makes the capture instant the oldest across streams.
 
-   The same bug blocks the finger camera: `latency.finger_cam` sits at 0 in that file for exactly
-   this reason.
-
-   (this should not be an issue to bring up training, but I need to fix it before we train a real model intended for actual inference)
-2. **The per-stream conventions have to be reproduced exactly at serve time**, from live streams
-   rather than stored arrays — the block alignment for `mic_0` (§1), and the crop for `finger_rgb`
-   (§1.5). The crop half is already done: `ros2_ws/.../polyumi_ros2/camera_preproc.py` carries the
-   same `crop_finger_rgb` the exporter uses, with both test suites asserting the same digests, so
-   wiring the finger camera is a subscription rather than a re-derivation.
+What remains is that **the per-stream conventions have to be reproduced exactly at serve time**,
+from live streams rather than stored arrays — the block alignment for `mic_0` (§1), and the crop
+for `finger_rgb` (§1.5). The crop half is already done:
+`ros2_ws/.../polyumi_ros2/camera_preproc.py` carries the same `crop_finger_rgb` the exporter uses,
+with both test suites asserting the same digests, so wiring the finger camera is a subscription
+rather than a re-derivation.
 
 Worth doing now regardless: make the server raise at load time if a checkpoint expects a modality
 it cannot supply, so an audio- or finger-camera checkpoint fails loudly instead of being served with

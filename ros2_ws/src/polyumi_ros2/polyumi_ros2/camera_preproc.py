@@ -13,11 +13,9 @@ Python import (ROS venv vs. uv workspace), so the contracts are duplicated here 
   is applied by the node after this, not here.
 * ``finger_rgb`` (:func:`crop_finger_rgb`) — the finger camera, cropped to given bounds because
   the gripper mount occludes a fixed strip of its view. **Nothing in this package calls it
-  yet:** ``policy_client_node`` has no finger-camera subscription, and cannot gain one until
-  the clock-domain issue recorded in ``config/inference.yaml`` (camera frames stamped with the
-  Pi's monotonic ``SensorTimestamp``, audio with epoch time, republished as if they shared a
-  clock) is resolved. It is mirrored here now so that wiring is a subscription rather than a
-  second derivation of a transform the exporter already pinned.
+  yet:** ``policy_client_node`` has no finger-camera subscription. It is mirrored here now so
+  that wiring is a subscription rather than a second derivation of a transform the exporter
+  already pinned.
 """
 
 import cv2

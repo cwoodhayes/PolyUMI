@@ -372,12 +372,11 @@ measurement taken against the wrong one is not merely stale, it is meaningless.
   it is ~1 ms; UMI hit the identical wall and hardcodes `robot_obs_latency: 0.0001`. The `arm_exec`
   measurement returns `arm_exec + proprio`, and at 1 ms that is well inside its own noise floor.
   Building a rig to split them is not worth it.
-- **`latency.finger_cam` and `latency.piezo_mic` are blocked, not just unmeasured.** Neither stream
-  is subscribed by the inference path yet, and underneath there is a clock-domain bug waiting:
-  `cam_streamer.py` sends picamera2's *monotonic* `SensorTimestamp` while `audio_streamer.py` sends
-  *epoch* `time.time_ns()`, and `pi_receiver_node` republishes both as ROS stamps as if they shared
-  a clock. Ingest repairs this offline via `FrameWallClock`; the live path does not. Fix that first —
-  until then no latency number for those streams can mean anything.
+- **`latency.finger_cam` and `latency.piezo_mic` are unmeasured.** Neither stream is subscribed by
+  the inference path yet, so neither value is consumed. Measuring either needs a rig: the span
+  from photon (or contact) to ROS header stamp is not observable from inside the node. **Both
+  depend on the Pi being chrony-synced to the ROS host** — see "Clock sync" in
+  [pi-provisioning.md](pi-provisioning.md).
 - **Don't run any probe mode while `policy_client_node` is up.** The arm and gripper modes publish to
   the same topics the policy does, and the bridges act on whichever chunk arrived last.
 - **Monitor scanout is inside `latency.gopro`.** The probe subtracts its own render time but cannot

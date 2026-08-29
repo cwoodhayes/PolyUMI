@@ -46,9 +46,9 @@ gripper obs + width calibration, and the receding-horizon stride.
 1. **Finger cam + piezo are unwired on the inference side.** Params exist and are never consumed.
    The piezo is now exported — `pingest export --type polyumi` carries it as `data/mic_0`, see
    [maniwav-audio-policy.md](maniwav-audio-policy.md) — so the export half of this is done and the
-   finger camera is what remains. Consuming either as an observation is still blocked here: the Pi
-   sends camera frames stamped with a monotonic `SensorTimestamp` and audio stamped with epoch
-   time, and `pi_receiver_node` republishes both as if they shared a clock, so neither
-   `latency.finger_cam` nor `latency.piezo_mic` can be given a meaningful value. Note also that
-   once either feeds the policy, the capture instant becomes the *oldest* across streams — an
-   observation is only as fresh as its slowest signal.
+   finger camera is what remains. What is left is the subscription itself, plus measuring
+   `latency.finger_cam` and `latency.piezo_mic` with a rig. **This depends on the Pi being
+   chrony-synced to the ROS host**; see "Clock sync" in [pi-provisioning.md](pi-provisioning.md),
+   and note `./deploy.sh` warns when it is not. Note also that once either feeds the policy, the
+   capture instant becomes the *oldest* across streams — an observation is only as fresh as its
+   slowest signal.

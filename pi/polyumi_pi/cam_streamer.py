@@ -136,8 +136,15 @@ class CameraStreamer:
                             self.first_frame_event.set()
                     log.debug(metadata)
 
+                    # libcamera stamps every frame with FrameWallClock, already the epoch
+                    # nanoseconds the wire contract calls for (see camera_frame.proto). The
+                    # sidecar CSV keeps the raw CLOCK_BOOTTIME SensorTimestamp instead: ingest
+                    # anchors that against the first frame, so a chrony step mid-recording must
+                    # not break its monotonicity.
+                    sensor_ts_ns = metadata['SensorTimestamp']
+
                     msg = camera_frame_pb2.CameraFrame()
-                    msg.timestamp_ns = metadata['SensorTimestamp']
+                    msg.timestamp_ns = metadata['FrameWallClock']
                     msg.jpeg_data = data.getvalue()
                     msg.width = self.VIEW_WIDTH
                     msg.height = self.VIEW_HEIGHT
@@ -151,10 +158,10 @@ class CameraStreamer:
                             dropped_this_window += 1
 
                     if video_recorder is not None:
-                        video_recorder.write_frame(data.getvalue(), msg.timestamp_ns)
+                        video_recorder.write_frame(data.getvalue(), sensor_ts_ns)
                         n_video_frames += 1
 
-                    log.debug(f'Captured frame at {msg.timestamp_ns} ns, size={len(msg.jpeg_data)} bytes')
+                    log.debug(f'Captured frame at {msg.timestamp_ns} ns (epoch), size={len(msg.jpeg_data)} bytes')
 
                     now = time.monotonic()
                     if socket is not None and now - last_stats >= 1.0:

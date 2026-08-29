@@ -2,6 +2,12 @@ syntax = "proto3";
 
 // segment of audio stream
 message AudioChunk {
+  // Capture instant of this chunk's FIRST sample, in EPOCH NANOSECONDS (CLOCK_REALTIME) --
+  // not the instant the block was delivered to userspace, serialized, or sent. Recovered from
+  // PortAudio's stream clock by polyumi_pi/clock.py, so a consumer stamps message headers
+  // straight through and converts nothing.
+  //
+  // Same clock-sync caveat as CameraFrame.timestamp_ns; see camera_frame.proto.
   uint64 timestamp_ns = 1;
   bytes pcm_data = 2;
   uint32 sample_rate = 3;

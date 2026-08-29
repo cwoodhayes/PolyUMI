@@ -14,6 +14,7 @@ import zmq
 from polyumi_pi_msgs.audio_chunk_pb2 import AudioChunk
 
 from polyumi_pi import sync_chirp
+from polyumi_pi.clock import AudioStreamClock
 from polyumi_pi.constants import AUDIO_DEVICE
 from polyumi_pi.files.audio import AudioFile
 from polyumi_pi.files.session import SessionFiles
@@ -136,6 +137,9 @@ class AudioStreamer:
         last_stats = time.monotonic()
         stop_event = threading.Event()
 
+        # Maps each callback onto the epoch instant its first sample was captured.
+        stream_clock = AudioStreamClock(blocksize=blocksize, sample_rate=self.sample_rate)
+
         def handle_shutdown(signum, _frame):
             signal_name = signal.Signals(signum).name
             log.info(f'Received signal {signal_name}, shutting down.')
@@ -154,7 +158,14 @@ class AudioStreamer:
             nonlocal audio_start_time_ns
             if status:
                 log.warning(f'[sounddevice] {status}')
-            ts = time.time_ns()
+            # Stamp the capture instant, not this delivery instant: the two differ by a block of
+            # buffering, and the wire contract (see audio_chunk.proto) is capture time. Both
+            # clock readings have to come from time_info — see AudioStreamClock.
+            ts = stream_clock.stamp(
+                current_time_s=time_info.currentTime,
+                adc_time_s=time_info.inputBufferAdcTime,
+                epoch_ns=time.time_ns(),
+            )
             pcm_bytes = bytes(indata)
             if streaming_enabled:
                 try:
@@ -189,7 +200,7 @@ class AudioStreamer:
 
         # Publisher thread - keeps ZMQ sends off the audio callback
         def publisher(socket: zmq.Socket):
-            nonlocal callback_drops, sent_chunks, last_stats
+            nonlocal sent_chunks
             while not stop_event.is_set() or not audio_queue.empty():
                 try:
                     pcm_bytes, ts = audio_queue.get(timeout=1.0)
@@ -198,15 +209,6 @@ class AudioStreamer:
                 msg = self.build_chunk(pcm_bytes, self.sample_rate, self.channels, ts)
                 socket.send(msg)
                 sent_chunks += 1
-
-                now = time.monotonic()
-                if now - last_stats >= 1.0:
-                    log.info(
-                        f'Audio tx stats: sent={sent_chunks}/s queue={audio_queue.qsize()} cb_drops={callback_drops}'
-                    )
-                    sent_chunks = 0
-                    callback_drops = 0
-                    last_stats = now
 
         pub_thread = None
         if streaming_enabled:
@@ -260,6 +262,16 @@ class AudioStreamer:
                 try:
                     while not stop_event.is_set():
                         time.sleep(0.1)
+                        now = time.monotonic()
+                        if now - last_stats >= 1.0:
+                            log.info(
+                                f'Audio stats: sent={sent_chunks}/s queue={audio_queue.qsize()} '
+                                f'cb_drops={callback_drops} lag={stream_clock.lag_s * 1e3:.2f}ms '
+                                f'adc_rejected={stream_clock.n_rejected}'
+                            )
+                            sent_chunks = 0
+                            callback_drops = 0
+                            last_stats = now
                 except KeyboardInterrupt:
                     log.info('\nStopping.')
                     stop_event.set()
