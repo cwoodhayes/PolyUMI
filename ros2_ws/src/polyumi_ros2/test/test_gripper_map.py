@@ -9,7 +9,7 @@ to flip) and the clamping behaviour.
 
 import pytest
 
-from polyumi_ros2.gripper_map import policy_to_robot_width, robot_to_policy_width
+from polyumi_ros2.gripper_map import aperture_from_joint_state, policy_to_robot_width, robot_to_policy_width
 
 #: A hypothetical set of fingers whose tips meet before the mechanism bottoms out. The real ones
 #: measure 0.0 (see test_current_hardware_is_a_passthrough), which would make every test here pass
@@ -102,3 +102,60 @@ def test_current_hardware_is_a_passthrough():
     """
     assert policy_to_robot_width(0.03, 0.0, MAX_WIDTH) == pytest.approx(0.03)
     assert robot_to_policy_width(0.03, 0.0) == pytest.approx(0.03)
+
+
+def _state(names, positions):
+    """Build a JointState carrying these joint names and positions."""
+    from sensor_msgs.msg import JointState
+
+    msg = JointState()
+    msg.name = list(names)
+    msg.position = list(positions)
+    return msg
+
+
+def test_finger_joints_are_summed():
+    """franka_hand_node follows franka_gripper: each finger joint carries half the aperture."""
+    msg = _state(['fr3_finger_joint1', 'fr3_finger_joint2'], [0.0406, 0.0406])
+    assert aperture_from_joint_state(msg) == pytest.approx(0.0812)
+
+
+def test_width_joint_is_the_whole_aperture():
+    """franka_gripper_control publishes one joint, fr3_gripper_width, already the full width."""
+    msg = _state(['fr3_gripper_width'], [0.0812])
+    assert aperture_from_joint_state(msg) == pytest.approx(0.0812)
+
+
+def test_width_joint_is_found_by_name_not_by_position():
+    """A driver may order or pad its joints however it likes; the name is what selects the width."""
+    msg = _state(['some_other_joint', 'fr3_gripper_width'], [1.234, 0.0812])
+    assert aperture_from_joint_state(msg) == pytest.approx(0.0812)
+
+
+def test_one_finger_joint_alone_is_not_an_aperture():
+    """
+    A truncated Hand message must be dropped, not read as half the width.
+
+    Half an aperture is indistinguishable from a nearly-closed gripper, so returning it would feed
+    the policy a plausible wrong number rather than an obvious absence.
+    """
+    msg = _state(['fr3_finger_joint1'], [0.0406])
+    assert aperture_from_joint_state(msg) is None
+
+
+def test_finger_joints_are_read_by_name_in_any_order():
+    """Position within the message carries no meaning; only the joint name does."""
+    msg = _state(['fr3_finger_joint2', 'other', 'fr3_finger_joint1'], [0.0406, 9.9, 0.0406])
+    assert aperture_from_joint_state(msg) == pytest.approx(0.0812)
+
+
+def test_a_name_without_a_matching_position_is_none():
+    """A message naming a joint it did not publish a position for is unusable, not zero."""
+    msg = _state(['fr3_gripper_width'], [])
+    assert aperture_from_joint_state(msg) is None
+
+
+def test_unknown_joints_are_none_not_zero():
+    """A message naming no width joint must not read as a closed gripper."""
+    assert aperture_from_joint_state(_state([], [])) is None
+    assert aperture_from_joint_state(_state(['elbow'], [0.5])) is None

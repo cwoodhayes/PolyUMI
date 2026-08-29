@@ -19,10 +19,9 @@
 //
 // It also republishes /fr3_gripper/joint_states: with load_gripper:=false nothing else does, and
 // six consumers need it (policy_client_node's agent_pos[7] among them). That stream costs the
-// libfranka connection, which only one process may hold, so it is tied to `execute`. With
-// execute:=false the node neither connects nor publishes state, and an arm-only session can run
-// with the hand unplugged; policy_client_node then falls back to the closed width unless
-// require_gripper_state is set.
+// libfranka connection, which only one process may hold, so this node must not run unless the
+// hand is actually attached and wanted -- which is why the launch file starts it only for
+// `gripper:=hand execute_gripper:=true`, and `gripper:=none` is how an arm-only session opts out.
 
 #include <polyumi_fr3_controllers/gripper_trajectory_interpolator.hpp>
 
@@ -70,12 +69,10 @@ constexpr double kDivergenceWarn = 0.005;
 class FrankaHandNode : public rclcpp::Node {
  public:
   FrankaHandNode() : rclcpp::Node("fr3_gripper") {
-    execute_ = declare_parameter("execute", false);
     const auto robot_ip = declare_parameter("robot_ip", std::string("192.168.51.20"));
     const auto target_topic = declare_parameter("target_topic", std::string("/polyumi/target_gripper"));
     const auto state_topic = declare_parameter("state_topic", std::string("~/joint_states"));
-    // 0.0 means "ask the hand", which is better than the guessed constant the launch file used to
-    // have to supply. Anything else is a backstop clamp.
+    // 0.0 means "ask the hand", which is the right answer. Anything else is a backstop clamp.
     max_width_ = declare_parameter("max_width_m", 0.0);
     // A time budget, not a position tolerance: the smallest stroke worth 0.6 s of deafness.
     deadband_ = declare_parameter("width_deadband_m", 0.005);
@@ -97,37 +94,29 @@ class FrankaHandNode : public rclcpp::Node {
           onTarget(*msg);
         });
 
-    // Connecting is what CLAIMS the hand -- only one process may hold it -- so it is gated on
-    // execute rather than done unconditionally. An arm-only session therefore needs neither a
-    // reachable nor a homed hand, and no state stream is published (see the file header).
-    if (execute_) {
-      gripper_ = std::make_unique<franka::Gripper>(robot_ip);
-      if (home_on_start) {
-        RCLCPP_INFO(get_logger(), "Homing (sweeps the full stroke)...");
-        gripper_->homing();
-      }
-      const franka::GripperState state = gripper_->readOnce();
-      if (state.max_width <= 0.0) {
-        // An unhomed hand reports max_width 0 and move() returns TRUE while doing nothing at all.
-        // Refusing here is the only way that failure is ever visible. The connection stays open so
-        // the state stream keeps running; it is only execution that is refused.
-        RCLCPP_ERROR(get_logger(),
-                     "Hand reports max_width=0: it is NOT HOMED. Refusing to execute. Relaunch with "
-                     "home_on_start:=true, or home it from Desk.");
-        execute_ = false;
-      }
-      if (max_width_ <= 0.0) {
-        max_width_ = state.max_width;
-      }
-      // Write the resolved width back, so the PARAMETER reports the clamp actually in force rather
-      // than the 0.0 "ask the hand" sentinel. gripper_range_probe reads it to tell a physical stop
-      // from a software one, and 0.0 makes every open endpoint look like a clamp.
-      set_parameter(rclcpp::Parameter("max_width_m", max_width_));
-      reader_ = std::thread(&FrankaHandNode::readLoop, this);
+    // Connecting CLAIMS the hand, and only one process may hold it. Unconditional: this node runs
+    // only when the operator asked for the hand (see the file header).
+    gripper_ = std::make_unique<franka::Gripper>(robot_ip);
+    if (home_on_start) {
+      RCLCPP_INFO(get_logger(), "Homing (sweeps the full stroke)...");
+      gripper_->homing();
     }
-    RCLCPP_INFO(get_logger(), "Franka Hand %s: max_width %.4f m, execute=%s",
-                gripper_ ? "connected" : "NOT CONNECTED (no /fr3_gripper/joint_states)", max_width_,
-                execute_ ? "TRUE (MOVES THE FINGERS)" : "false (plans and logs only)");
+    const franka::GripperState state = gripper_->readOnce();
+    if (state.max_width <= 0.0) {
+      // An unhomed hand reports max_width 0 and move() returns TRUE while doing nothing at all.
+      // Refusing here is the only way that failure is ever visible. The connection stays open so
+      // the state stream keeps running; it is only motion that is refused.
+      RCLCPP_ERROR(get_logger(),
+                   "Hand reports max_width=0: it is NOT HOMED. Refusing to move the fingers. "
+                   "Relaunch with home_on_start:=true, or home it from Desk.");
+      homed_ = false;
+    }
+    if (max_width_ <= 0.0) {
+      max_width_ = state.max_width;
+    }
+    reader_ = std::thread(&FrankaHandNode::readLoop, this);
+    RCLCPP_INFO(get_logger(), "Franka Hand connected: max_width %.4f m%s", max_width_,
+                homed_ ? " (MOVES THE FINGERS)" : " -- NOT HOMED, motion refused");
 
     mover_ = std::thread(&FrankaHandNode::moveLoop, this);
   }
@@ -259,24 +248,12 @@ class FrankaHandNode : public rclcpp::Node {
 
       const double predicted =
           blockedDuration(std::abs(cmd->width - x.value_or(cmd->width)), cmd->speed, limits_);
-      RCLCPP_INFO(get_logger(), "move(%.4f m, %.4f m/s) %s, ~%.0f ms%s", cmd->width, cmd->speed,
-                  cmd->on_time ? "on time" : "CHASING", predicted * 1e3,
-                  execute_ ? "" : " [dry run]");
+      RCLCPP_INFO(get_logger(), "move(%.4f m, %.4f m/s) %s, ~%.0f ms", cmd->width, cmd->speed,
+                  cmd->on_time ? "on time" : "CHASING", predicted * 1e3);
 
-      if (!execute_) {
-        // Sleep the predicted block so the dry run reproduces the real command cadence. There is no
-        // real hand to read back, so commanded_ doubles as a SIMULATED position -- set here exactly
-        // as runMove sets it on success -- rather than left at the disconnected nullopt. Without
-        // this, x stays nullopt forever: predicted collapses to a flat fixed_cost (distance zero
-        // every time) and selectMove never leaves its no-state branch, so the log would show the
-        // same first waypoint chosen over and over rather than the sequence a real run produces.
-        // Set before the sleep, not after, and without holding the lock across it -- same reason
-        // runMove doesn't: a chunk arriving mid-"move" must still be able to splice into the
-        // horizon.
-        {
-          std::lock_guard<std::mutex> lock(mutex_);
-          commanded_ = cmd->width;
-        }
+      if (!homed_) {
+        // Sleep the block a real move would have cost, so an unhomed hand still drains the horizon
+        // at the true cadence instead of spinning through every waypoint in one pass.
         std::this_thread::sleep_for(std::chrono::duration<double>(predicted));
         continue;
       }
@@ -321,7 +298,8 @@ class FrankaHandNode : public rclcpp::Node {
   rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr target_sub_;
 
   HandLimits limits_;
-  bool execute_ = false;
+  // Cleared when the hand reports max_width 0, i.e. it is not homed and move() would lie.
+  bool homed_ = true;
   double max_width_ = 0.0;
   double deadband_ = 0.005;
   double min_speed_ = 0.005;

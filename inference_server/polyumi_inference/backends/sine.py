@@ -29,8 +29,8 @@ OSCILLATION_PERIOD_STEPS = 20  # full cycle over this many /predict calls
 # <= that to stay non-negative.
 GRIPPER_OSCILLATION_AMPLITUDE_M = 0.04
 DEFAULT_HOME_POSE = '0.56 0.13 0.25 -1 0 0 0 0.05'  # xyz qxqyqzqw gripper
-# Sanity bound on the home gripper width. The Franka Hand tops out near 0.0817 m and the handheld
-# gripper's tags separate to ~0.1 m, so anything past this is a units error.
+# Sanity bound on the home gripper width. The jaws top out near 0.0812 m and the handheld gripper's
+# tags separate to ~0.1 m, so anything past this is a units error.
 MAX_PLAUSIBLE_GRIPPER_M = 0.2
 #: The horizon a trained checkpoint emits. Matched here so the dummy's chunks are the same length
 #: the client will see in production, which is what the stale-action arithmetic is tuned against.

@@ -53,6 +53,7 @@ from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
+from polyumi_ros2.gripper_map import aperture_from_joint_state
 from polyumi_ros2.target_chunk import CONSUMER_HINT, TargetChunkPublisher
 from tf2_ros import Buffer, TransformListener
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
@@ -202,10 +203,11 @@ class TcpPivotTest(Node):
         self._tf_listener = TransformListener(self._tf_buffer, self)
 
     def _on_gripper_state(self, msg: JointState) -> None:
-        """Cache the aperture; each FR3 finger reports half of it."""
-        if len(msg.position) >= 2:
+        """Cache the aperture, however the running gripper driver spells it."""
+        aperture = aperture_from_joint_state(msg)
+        if aperture is not None:
             with self._gripper_lock:
-                self._gripper_actual = float(msg.position[0] + msg.position[1])
+                self._gripper_actual = aperture
 
     def close_gripper(self) -> bool:
         """

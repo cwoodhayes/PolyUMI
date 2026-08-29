@@ -290,7 +290,7 @@
           "enabled": true,
           "color": "#61cbff",
           "id": "07f2f42e-a267-4314-9c28-491cf15f0a47",
-          "label": "Model exectuion time (s)"
+          "label": "Model execution time (s)"
         }
       ],
       "foxglovePanelTitle": "System Latency",

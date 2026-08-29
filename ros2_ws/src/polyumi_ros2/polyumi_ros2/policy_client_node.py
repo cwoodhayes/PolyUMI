@@ -57,7 +57,7 @@ from polyumi_ros2.camera_preproc import (
 from polyumi_inference import Observation, TransportError, WireFormatError
 from polyumi_inference.client import PolicyClient
 
-from polyumi_ros2.gripper_map import policy_to_robot_width, robot_to_policy_width
+from polyumi_ros2.gripper_map import aperture_from_joint_state, policy_to_robot_width, robot_to_policy_width
 from polyumi_ros2.target_chunk import CONSUMER_HINT, TargetChunkPublisher, pose_array
 
 # Name used for the single "joint" in the gripper trajectory chunk. Deliberately NOT a real joint
@@ -207,15 +207,14 @@ class PolicyClientNode(Node):
         # the worst observed publish interval (the topic jitters 24-100ms) so ordinary jitter
         # cannot trip it, and well short of the ~2.3s the buffer can hold. <= 0 disables the check.
         self.declare_parameter('max_gripper_age_s', 0.5)
-        # Measured reachable aperture (`ros2 run polyumi_ros2 gripper_range_probe`), not the Franka
-        # Hand's nominal range: max_width is published on no topic, so neither end is readable at
-        # runtime. 0.0816 is the hand's own maximum here; the fingers limit neither end.
+        # Caliper-measured jaw aperture at full open. The PolyUMI fingers set both ends, so this is
+        # the same number whichever gripper driver is running; neither end is readable at runtime.
         #
         # gripper_min_width_m doubles as the policy->robot offset — policy width 0 is "fully
         # closed", which on the arm is this aperture. There is deliberately no separate
         # gripper_offset_m: it was always exactly -gripper_min_width_m, and two knobs for one
         # measurement could be set inconsistently. See gripper_map.
-        self.declare_parameter('gripper_max_width_m', 0.0816)
+        self.declare_parameter('gripper_max_width_m', 0.0812)
         self.declare_parameter('gripper_min_width_m', 0.0)
         # How far back (seconds) the EE-pose TF buffer retains history — must be >= the
         # largest latency being compensated for (see _lookup_agent_pos).
@@ -549,15 +548,11 @@ class PolicyClientNode(Node):
             self._latest_image_stamp = rclpy.time.Time.from_msg(msg.header.stamp)
 
     def _gripper_cb(self, msg: JointState) -> None:
-        """Cache the gripper aperture with its stamp, summing the two finger joints."""
-        if len(msg.position) < 2:
-            self._warn_throttled(
-                f'Ignoring gripper state with {len(msg.position)} position(s); expected 2 (names: {list(msg.name)})'
-            )
+        """Cache the gripper aperture with its stamp, whichever driver published it."""
+        width = aperture_from_joint_state(msg)
+        if width is None:
+            self._warn_throttled(f'Ignoring gripper state naming no known width joint: {list(msg.name)}')
             return
-        # Each FR3 finger reports HALF the aperture, so the full opening is their sum. Summing
-        # rather than doubling position[0] keeps this honest if the fingers are ever asymmetric.
-        width = float(msg.position[0] + msg.position[1])
         with self._gripper_lock:
             self._gripper_buffer.append((rclpy.time.Time.from_msg(msg.header.stamp), width))
 
