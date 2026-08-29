@@ -1,72 +1,48 @@
 """
-Clock-domain conversions for the Pi's outbound sensor streams.
+Capture-instant timestamps for the Pi's outbound audio stream.
 
 Everything ``polyumi-pi`` puts on the wire is stamped in epoch nanoseconds (``CLOCK_REALTIME``)
 at the instant the sample was *captured*, so the ROS side can stamp message headers straight
 through with no conversion. That contract is written down on ``timestamp_ns`` in
-``camera_frame.proto`` and ``audio_chunk.proto``; this module is the only place either stream
-converts into it.
+``camera_frame.proto`` and ``audio_chunk.proto``. The camera reaches it for free — libcamera
+stamps every frame with ``FrameWallClock``, already in that domain — so only audio needs work.
 
-Two device clocks have to be mapped in:
-
-* the camera's ``SensorTimestamp``, which libcamera reports on ``CLOCK_BOOTTIME``;
-* the audio ADC instant, which PortAudio reports in its own arbitrary stream timebase.
-
-Deliberately free of picamera2 and sounddevice imports, so it runs — and is tested — off the Pi.
+Deliberately free of sounddevice imports, so it runs — and is tested — off the Pi.
 """
 
-import time
-
-# Above this, a measured audio buffering lag is not a lag but a bad clock reading.
+# Above this, a measured buffering lag is not a lag but a bad clock reading.
 MAX_PLAUSIBLE_LAG_S = 1.0
 
-# EMA weight for new lag samples. Low: the physical buffering lag is near-constant, so most of
-# the per-callback variation is sampling noise between stream.time and time.time_ns().
+# EMA weight for new lag samples. Low: the lag is the capture buffer's occupancy, which is
+# near-constant, so most of the per-callback variation is frame quantisation.
 LAG_EMA_ALPHA = 0.1
-
-
-def boottime_to_epoch_ns(boottime_ns: int) -> int:
-    """
-    Convert a ``CLOCK_BOOTTIME`` nanosecond timestamp to epoch nanoseconds.
-
-    The offset is sampled on every call rather than cached at startup, and that is load-bearing:
-    chrony steps ``CLOCK_REALTIME`` (at boot, and again on ``chronyc makestep``) without touching
-    ``CLOCK_BOOTTIME``, so a cached offset silently goes wrong the moment the clock is stepped.
-    Two ``clock_gettime`` calls per frame at 10 fps cost nothing.
-
-    Uses the ``_ns`` variants because the float seconds returned by ``time.clock_gettime`` only
-    resolve to about a microsecond at present-day epoch magnitudes.
-    """
-    offset_ns = time.clock_gettime_ns(time.CLOCK_REALTIME) - time.clock_gettime_ns(time.CLOCK_BOOTTIME)
-    return boottime_ns + offset_ns
 
 
 class AudioStreamClock:
     """
-    Map an audio callback onto the epoch instant its first sample hit the ADC.
+    Map an audio callback onto the epoch instant its first sample was captured.
 
     PortAudio reports the ADC instant in stream time, an arbitrary origin, so it is useless
-    alone. What it gives us is the *lag* — how long ago the buffer was captured,
-    ``stream.time - inputBufferAdcTime`` — which anchors against a ``time.time_ns()`` sampled in
-    the same callback::
+    alone. What it gives us is the *lag* — how long ago the block was captured — which anchors
+    against a ``time.time_ns()`` sampled in the same callback::
 
-        capture_epoch_ns = epoch_ns - lag_ns
+        lag_s = current_time_s - adc_time_s
+        capture_epoch_ns = epoch_ns - lag_s * 1e9
 
-    The lag is tracked with an EMA rather than used raw: it is a near-constant property of the
-    driver's buffering, so most of the per-callback variation is noise in when the two clocks
-    were read. Re-anchoring on ``time.time_ns()`` every callback is also why nothing here has to
-    worry about the sound card's clock drifting against ``CLOCK_REALTIME`` — only the lag is
-    carried between callbacks, never an absolute origin.
+    **Both readings must come from the callback's ``time_info``.** PortAudio's ALSA backend
+    derives ``inputBufferAdcTime`` from ``currentTime`` by subtracting the capture buffer's
+    occupancy, so their difference is the lag exactly. Measuring against ``stream.time`` instead
+    re-reads the clock ~0.4 ms later and folds the callback's own startup cost into every
+    timestamp.
 
-    A callback whose ADC time is unusable reuses the tracked lag instead of switching to a
-    different formula, so the timestamps stay continuous across the gap. If ADC time is *never*
-    usable — some PortAudio backends do not fill it in — the clock stays in ``fixed`` mode and
-    models the lag as one block, leaving the driver's own buffering to be absorbed by whatever
-    ``latency.piezo_mic`` is eventually measured to be.
+    A reading outside the plausible band reuses the tracked lag, so timestamps stay continuous
+    across the gap; before any usable reading the lag is modelled as one block. Measured on the
+    WM8960 HAT, 2026-08-29, 44.1 kHz / 20 ms blocks: 20.0027 ms, stdev 0.011 ms. The one-block
+    model is not a degraded fallback there, it is the same answer to within the two-frame
+    quantisation of the ALSA delay.
 
-    Measured on the WM8960 HAT, 2026-08-29, 44.1 kHz / 20 ms blocks: ADC time is reported on
-    every callback, and the true lag is 20.29-20.58 ms against the 20 ms one-block model. So on
-    this hardware ``adc`` mode is what runs, and ``fixed`` would only be ~0.4 ms optimistic.
+    The lag is the capture buffer's occupancy, not the codec's own conversion delay — that
+    remains for ``latency.piezo_mic`` to cover.
     """
 
     def __init__(self, blocksize: int, sample_rate: int) -> None:
@@ -76,40 +52,38 @@ class AudioStreamClock:
         Parameters
         ----------
         blocksize:
-            Frames per callback, used for the fixed-mode lag model.
+            Frames per callback, used to model the lag until a usable reading arrives.
         sample_rate:
             Stream sample rate in Hz.
 
         """
         if blocksize <= 0 or sample_rate <= 0:
             raise ValueError(f'blocksize and sample_rate must be positive, got {blocksize}, {sample_rate}')
-        self._fixed_lag_s = blocksize / sample_rate
+        self._block_lag_s = blocksize / sample_rate
         self._lag_s: float | None = None
-        self.n_unusable = 0
-
-    @property
-    def mode(self) -> str:
-        """``'adc'`` once a usable ADC time has been seen, else ``'fixed'``."""
-        return 'fixed' if self._lag_s is None else 'adc'
+        self.n_rejected = 0
 
     @property
     def lag_s(self) -> float:
         """The lag currently being applied, in seconds."""
-        return self._fixed_lag_s if self._lag_s is None else self._lag_s
+        return self._block_lag_s if self._lag_s is None else self._lag_s
 
-    def stamp(self, stream_time_s: float, adc_time_s: float, epoch_ns: int) -> int:
+    def stamp(self, current_time_s: float, adc_time_s: float, epoch_ns: int) -> int:
         """
         Return the epoch-nanosecond capture instant of this callback's first sample.
 
-        ``stream_time_s`` is PortAudio's current stream time, ``adc_time_s`` its
-        ``inputBufferAdcTime``, and ``epoch_ns`` a ``time.time_ns()`` read in the same callback.
+        ``current_time_s`` and ``adc_time_s`` are the callback's ``time_info.currentTime`` and
+        ``time_info.inputBufferAdcTime``; ``epoch_ns`` is a ``time.time_ns()`` read in the same
+        callback. A lag of exactly zero is rejected along with the implausible ones — no capture
+        buffer delivers a block it has not yet buffered, so it means the backend filled in
+        neither reading.
         """
-        lag_s = stream_time_s - adc_time_s
-        if adc_time_s > 0.0 and 0.0 <= lag_s <= MAX_PLAUSIBLE_LAG_S:
+        lag_s = current_time_s - adc_time_s
+        if 0.0 < lag_s <= MAX_PLAUSIBLE_LAG_S:
             if self._lag_s is None:
                 self._lag_s = lag_s
             else:
                 self._lag_s += LAG_EMA_ALPHA * (lag_s - self._lag_s)
         else:
-            self.n_unusable += 1
+            self.n_rejected += 1
         return epoch_ns - round(self.lag_s * 1e9)

@@ -30,9 +30,6 @@ class AudioStreamer:
     #: guards against a hung/crashed camera or GoPro leaving the chirp (and thus this episode's
     #: time-sync) never played.
     CHIRP_GATE_TIMEOUT_S = 10.0
-    # Callbacks to wait for a usable inputBufferAdcTime before reporting the clock as 'fixed'.
-    # 50 x 20 ms chunks = one second, long enough that a slow-starting backend is not misreported.
-    CLOCK_PROBE_CALLBACKS = 50
 
     def __init__(
         self,
@@ -140,11 +137,8 @@ class AudioStreamer:
         last_stats = time.monotonic()
         stop_event = threading.Event()
 
-        # Maps each callback onto the epoch instant its first sample hit the ADC. Bound below,
-        # once the stream exists; callbacks that beat that binding fall back to its fixed model.
+        # Maps each callback onto the epoch instant its first sample was captured.
         stream_clock = AudioStreamClock(blocksize=blocksize, sample_rate=self.sample_rate)
-        audio_stream: sd.RawInputStream | None = None
-        clock_logged = False
 
         def handle_shutdown(signum, _frame):
             signal_name = signal.Signals(signum).name
@@ -161,28 +155,17 @@ class AudioStreamer:
             status: sd.CallbackFlags,
         ):
             nonlocal callback_drops, total_callback_drops, n_audio_chunks
-            nonlocal audio_start_time_ns, clock_logged
+            nonlocal audio_start_time_ns
             if status:
                 log.warning(f'[sounddevice] {status}')
-            # Stamp the ADC capture instant, not this delivery instant: the two differ by at
-            # least one blocksize, and the wire contract (see audio_chunk.proto) is capture time.
-            stream_time_s = audio_stream.time if audio_stream is not None else 0.0
+            # Stamp the capture instant, not this delivery instant: the two differ by a block of
+            # buffering, and the wire contract (see audio_chunk.proto) is capture time. Both
+            # clock readings have to come from time_info — see AudioStreamClock.
             ts = stream_clock.stamp(
-                stream_time_s=stream_time_s,
+                current_time_s=time_info.currentTime,
                 adc_time_s=time_info.inputBufferAdcTime,
                 epoch_ns=time.time_ns(),
             )
-            # Which mode won is the difference between a measured capture instant and a modelled
-            # one, so say it once even when nothing is streaming (the tx stats below only run
-            # with ZMQ enabled). 'fixed' means this backend never filled in inputBufferAdcTime,
-            # and the driver's buffering is left in the timestamp.
-            probed = stream_clock.mode == 'adc' or stream_clock.n_unusable >= self.CLOCK_PROBE_CALLBACKS
-            if not clock_logged and probed:
-                clock_logged = True
-                log.info(
-                    f'Audio capture clock: mode={stream_clock.mode} '
-                    f'lag={stream_clock.lag_s * 1e3:.2f}ms after {stream_clock.n_unusable} unusable ADC readings.'
-                )
             pcm_bytes = bytes(indata)
             if streaming_enabled:
                 try:
@@ -217,7 +200,7 @@ class AudioStreamer:
 
         # Publisher thread - keeps ZMQ sends off the audio callback
         def publisher(socket: zmq.Socket):
-            nonlocal callback_drops, sent_chunks, last_stats
+            nonlocal sent_chunks
             while not stop_event.is_set() or not audio_queue.empty():
                 try:
                     pcm_bytes, ts = audio_queue.get(timeout=1.0)
@@ -226,17 +209,6 @@ class AudioStreamer:
                 msg = self.build_chunk(pcm_bytes, self.sample_rate, self.channels, ts)
                 socket.send(msg)
                 sent_chunks += 1
-
-                now = time.monotonic()
-                if now - last_stats >= 1.0:
-                    log.info(
-                        f'Audio tx stats: sent={sent_chunks}/s queue={audio_queue.qsize()} cb_drops={callback_drops} '
-                        f'clock={stream_clock.mode} lag={stream_clock.lag_s * 1e3:.1f}ms '
-                        f'adc_unusable={stream_clock.n_unusable}'
-                    )
-                    sent_chunks = 0
-                    callback_drops = 0
-                    last_stats = now
 
         pub_thread = None
         if streaming_enabled:
@@ -255,7 +227,7 @@ class AudioStreamer:
                 dtype='int16',
                 blocksize=blocksize,
                 callback=callback,
-            ) as audio_stream:
+            ):
                 if self.play_sync_chirp:
                     gate_events = [
                         (event, desc)
@@ -290,6 +262,16 @@ class AudioStreamer:
                 try:
                     while not stop_event.is_set():
                         time.sleep(0.1)
+                        now = time.monotonic()
+                        if now - last_stats >= 1.0:
+                            log.info(
+                                f'Audio stats: sent={sent_chunks}/s queue={audio_queue.qsize()} '
+                                f'cb_drops={callback_drops} lag={stream_clock.lag_s * 1e3:.2f}ms '
+                                f'adc_rejected={stream_clock.n_rejected}'
+                            )
+                            sent_chunks = 0
+                            callback_drops = 0
+                            last_stats = now
                 except KeyboardInterrupt:
                     log.info('\nStopping.')
                     stop_event.set()

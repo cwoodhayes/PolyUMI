@@ -245,10 +245,10 @@ afterwards.)
 - **The Pi has the same requirement**, for a different reason: it stamps its camera and audio
   streams in epoch nanoseconds and `pi_receiver_node` publishes those as ROS headers verbatim, so
   a drifted Pi clock silently offsets every Pi-derived timestamp. It syncs to the ROS host, not to
-  the laptop — `ssh polyumi-pi chronyc sources` → `^* lamb`. The symptom is
-  `pi_receiver_node` logging "Pi camera/audio stamps are N.NNNs off this host's clock"; the setup
-  is step 6 of [pi-provisioning.md](pi-provisioning.md), and `./deploy.sh` warns when it is
-  missing.
+  the laptop — `ssh polyumi-pi chronyc sources` → `^* lamb`. The symptom is `pi_receiver_node`
+  logging "Pi camera/audio stamps are N.NNNs off this host's clock"; the setup is step 6 of
+  [pi-provisioning.md](pi-provisioning.md), and `./deploy.sh` warns when the Pi has not selected
+  a source, or has fallen back to its own clock.
 - **The chunk has to outlast the latency budget**:
   `obs age + latency.<device>_exec < n_action_steps * action_dt`. If it doesn't, every action has
   already elapsed on arrival and *nothing moves at all* while every other indicator looks healthy.

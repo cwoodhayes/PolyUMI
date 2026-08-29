@@ -44,7 +44,12 @@ def play(sample_rate: int, device: int | str | None = None) -> int:
     """
     Play the sync chirp on the given device (non-blocking).
 
-    Returns time.time_ns() captured just before playback starts.
+    Returns the epoch nanoseconds at which playback was *requested* — one output buffer ahead of
+    the chirp actually sounding, and so not directly comparable to the capture instants stamped
+    on the streams. That is fine because nothing measures against it: ``ChirpTimeSyncStep`` uses
+    it only to centre a +/-3 s search window, and recovers the real onset by matched-filtering
+    the recorded audio.
+
     The WM8960 requires stereo output, so the mono chirp is duplicated.
     """
     import sounddevice as sd

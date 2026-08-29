@@ -254,14 +254,11 @@ passthrough override.
 
 Do not wire `mic_0` or `finger_rgb` into `serve_policy.py` expecting it to run on the arm.
 
-The clock-domain bug that used to block this is **fixed**: the Pi now stamps both streams in epoch
-nanoseconds at the capture instant, and `pi_receiver_node` warns rather than silently republishing
-a stamp that disagrees with the host clock. `latency.piezo_mic` and `latency.finger_cam` in
-`ros2_ws/src/polyumi_ros2/config/inference.yaml` are still 0, but they are now merely *unmeasured*
-rather than unmeasurable — measuring either needs a rig, and both depend on the Pi being
-chrony-synced to the ROS host (step 6 of [pi-provisioning.md](pi-provisioning.md)). Note that an
-observation is only as fresh as its slowest signal, so adding audio makes the capture instant the
-oldest across streams.
+`latency.piezo_mic` and `latency.finger_cam` in
+`ros2_ws/src/polyumi_ros2/config/inference.yaml` are 0 because they are unmeasured: measuring
+either needs a rig, and both depend on the Pi being chrony-synced to the ROS host (step 6 of
+[pi-provisioning.md](pi-provisioning.md)). Note that an observation is only as fresh as its
+slowest signal, so adding audio makes the capture instant the oldest across streams.
 
 What remains is that **the per-stream conventions have to be reproduced exactly at serve time**,
 from live streams rather than stored arrays — the block alignment for `mic_0` (§1), and the crop

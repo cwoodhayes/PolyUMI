@@ -2,11 +2,9 @@ syntax = "proto3";
 
 // single frame of jpeg video stream from camera, with timestamp
 message CameraFrame {
-  // Frame capture instant, in EPOCH NANOSECONDS (CLOCK_REALTIME). This is libcamera's
-  // SensorTimestamp converted out of CLOCK_BOOTTIME -- not the instant the frame was
-  // encoded, serialized, or sent.
-  // The Pi converts into this domain itself (polyumi_pi/clock.py), so a consumer stamps
-  // message headers straight through and converts nothing.
+  // Frame capture instant, in EPOCH NANOSECONDS (CLOCK_REALTIME) -- not the instant the frame
+  // was encoded, serialized, or sent. This is libcamera's FrameWallClock, which is already in
+  // that domain, so a consumer stamps message headers straight through and converts nothing.
   //
   // Only as good as the Pi's clock discipline: this assumes the Pi is chrony-synced to the
   // host consuming the stream. See docs/pi-provisioning.md, "Clock sync".

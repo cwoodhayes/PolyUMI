@@ -372,13 +372,10 @@ measurement taken against the wrong one is not merely stale, it is meaningless.
   it is ~1 ms; UMI hit the identical wall and hardcodes `robot_obs_latency: 0.0001`. The `arm_exec`
   measurement returns `arm_exec + proprio`, and at 1 ms that is well inside its own noise floor.
   Building a rig to split them is not worth it.
-- **`latency.finger_cam` and `latency.piezo_mic` are unmeasured, not blocked.** Neither stream is
-  subscribed by the inference path yet, so neither value is consumed. The clock-domain bug that
-  used to make them unmeasurable is fixed: the Pi now stamps both streams in epoch nanoseconds at
-  the capture instant, and `pi_receiver_node` warns rather than silently republishing a stamp that
-  disagrees with this host's clock. Measuring either still needs a rig, since the span from photon
-  (or contact) to ROS header stamp is not observable from inside the node. **Both depend on the Pi
-  being chrony-synced to the ROS host** — see "Clock sync" in
+- **`latency.finger_cam` and `latency.piezo_mic` are unmeasured.** Neither stream is subscribed by
+  the inference path yet, so neither value is consumed. Measuring either needs a rig: the span
+  from photon (or contact) to ROS header stamp is not observable from inside the node. **Both
+  depend on the Pi being chrony-synced to the ROS host** — see "Clock sync" in
   [pi-provisioning.md](pi-provisioning.md).
 - **Don't run any probe mode while `policy_client_node` is up.** The arm and gripper modes publish to
   the same topics the policy does, and the bridges act on whichever chunk arrived last.
