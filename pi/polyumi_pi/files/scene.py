@@ -87,4 +87,7 @@ class SceneFiles(SessionDataABC):
                     log.exception(err)
                     pass
 
-        return cls(path=path, scene_id=scene_id, sessions=sessions)
+        # Recovered from the sessions rather than a scene-level file: that is the only place
+        # it was ever written (see create_session).
+        starts = [s.metadata.scene_started_at for s in sessions if s.metadata.scene_started_at is not None]
+        return cls(path=path, scene_id=scene_id, sessions=sessions, started_at=min(starts) if starts else None)

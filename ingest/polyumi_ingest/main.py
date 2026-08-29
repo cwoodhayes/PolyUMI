@@ -796,8 +796,9 @@ def _run_export(
     sidecar_path = _write_provenance_sidecar(output_path, provenance)
     log.info(f'Exported {n} episode(s) from {len(scene_paths)} scene(s) → {output_path} (provenance: {sidecar_path})')
     totals = timing.dataset_time_totals(scene_paths, provenance)
+    at_rig = totals['scene_seconds']
     log.info(
-        f'  time: {totals["scene_seconds"] / 60:.1f} min at the rig, '
+        f'  time: {"unknown" if at_rig is None else f"{at_rig / 60:.1f} min"} at the rig, '
         f'{totals["episode_seconds"] / 60:.1f} min recorded, '
         f'{totals["exported_seconds"] / 60:.1f} min in the dataset'
     )

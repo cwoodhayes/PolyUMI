@@ -42,10 +42,10 @@
         <dt>Created</dt><dd>{{ detail.created_at or '—' }}</dd>
         <dt title="Wall clock from the start of the scene to the end of its last session — the dead time between episodes included">Scene time</dt>
         <dd>{{ detail.scene_seconds | duration }}</dd>
-        <dt title="Summed length of every session, mapping passes included; 'usable' drops the episodes an export would skip">Recording time</dt>
+        <dt title="Summed length of this scene's episodes; 'usable' drops the ones an export would skip. Mapping passes are not counted, so their time falls into the gap from scene time">Episode time</dt>
         <dd>
-          {{ detail.recorded_seconds | duration }} ({{ detail.usable_recorded_seconds | duration }} usable)
-          {% if detail.recorded_frac is not none %}<span class="muted">— {{ '%.0f%%' % (detail.recorded_frac * 100) }} of scene</span>{% endif %}
+          {{ detail.episode_seconds | duration }} ({{ detail.usable_episode_seconds | duration }} usable)
+          {% if detail.episode_frac is not none %}<span class="muted">— {{ '%.0f%%' % (detail.episode_frac * 100) }} of scene</span>{% endif %}
         </dd>
         <dt>Last synced</dt><dd>{{ detail.synced_at or '—' }}</dd>
       </dl>

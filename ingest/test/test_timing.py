@@ -68,6 +68,15 @@ def test_dataset_totals_dedupe_split_sessions(scene_dir):
     }
 
 
+def test_dataset_totals_report_unknown_scene_time_as_none(scene_dir, tmp_path):
+    """One member scene with no measurable span makes the whole rig total unknown, not zero."""
+    unfinished = tmp_path / 'scene_unfinished'
+    _session(unfinished, 'session_a', offset_s=30, duration_s=None)
+    totals = timing.dataset_time_totals([scene_dir, unfinished], [])
+    assert totals['scene_seconds'] is None
+    assert totals['episode_seconds'] == 0.0
+
+
 def test_dataset_totals_ignore_sessions_left_out_of_the_export(scene_dir):
     """An episode skipped by the export (unusable, no valid span) contributes no recorded time."""
     provenance = [{'scene': scene_dir.name, 'session': 'session_a', 'duration_s': 20.0}]

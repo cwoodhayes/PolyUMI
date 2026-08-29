@@ -289,24 +289,28 @@ def task_detail(db: DBSession, task_key: str) -> dict:
     }
 
 
-def _scene_time(scene: Scene, sessions: list[Session]) -> dict:
+def _scene_time(scene: Scene, episodes: list[Session]) -> dict:
     """
     Scene wall-clock span vs. time actually recording, the collection-productivity numbers.
 
-    ``scene_seconds`` spans the whole run including the dead time between episodes;
-    ``recorded_seconds`` sums every session's own length (episodes *and* mapping passes),
-    and ``usable_recorded_seconds`` drops the ones an export would skip. ``recorded_frac``
-    is the ratio the pane shows: how much of the time at the rig was camera-rolling.
+    Same three names a dataset uses (``polyumi_ingest.timing``), so the scene pane and the
+    dataset pane can be read against each other: ``scene_seconds`` spans the whole run,
+    ``episode_seconds`` sums the EPISODE sessions' own lengths, and ``usable_episode_seconds``
+    drops the ones an export would skip. A mapping pass is neither, so its time lands in the
+    gap between the first two, same as the dead time between episodes.
     """
     span = None
     if scene.started_at is not None and scene.ended_at is not None:
         span = (scene.ended_at - scene.started_at).total_seconds()
-    recorded = sum(s.duration_s or 0.0 for s in sessions)
+    recorded = sum(s.duration_s or 0.0 for s in episodes)
     return {
         'scene_seconds': span,
-        'recorded_seconds': recorded,
-        'usable_recorded_seconds': sum(s.duration_s or 0.0 for s in sessions if _is_usable(s)),
-        'recorded_frac': (recorded / span) if span else None,
+        'episode_seconds': recorded,
+        'usable_episode_seconds': sum(s.duration_s or 0.0 for s in episodes if _is_usable(s)),
+        # Deliberately unguarded against a negative span, which is worth seeing: `ended_at` is
+        # derived from each session's own `created_at`, so a fraction below zero means the Pi
+        # stepped its clock mid-scene and every timestamp in that scene is suspect.
+        'episode_frac': (recorded / span) if span else None,
     }
 
 
@@ -336,7 +340,7 @@ def scene_detail(db: DBSession, scene_id: str) -> dict:
         'archived': scene.archived,
         'created_at': scene.created_at,
         'synced_at': scene.synced_at,
-        **_scene_time(scene, sessions),
+        **_scene_time(scene, episodes),
         'n_sessions': len(sessions),
         'n_episodes': len(episodes),
         # so the pane agrees with the scene's Scenes-column badge, which is usable/total

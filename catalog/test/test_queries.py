@@ -408,6 +408,27 @@ def test_scene_detail_includes_quality_summary(tmp_path: pathlib.Path):
     assert scene['quality']['n_low_quality'] == 0
 
 
+def test_scene_detail_excludes_mapping_from_episode_time(tmp_path: pathlib.Path):
+    """A mapping pass costs scene time but is neither episode nor usable-episode time."""
+    rec = tmp_path / 'recordings'
+    scene_dir = rec / 'scene_2026-07-26_13-00-00_mnop'
+    scene_dir.mkdir(parents=True)
+    SceneManifest(scene_id='scene-4').write_to_scene_dir(scene_dir)
+    for name, stype in (('session_1', SessionType.MAPPING), ('session_2', SessionType.EPISODE)):
+        sd = _make_session(scene_dir, name, scene_id='scene-4', session_type=stype, task=None)
+        meta = SessionMetadata.from_file(sd / 'metadata.json')
+        meta.duration_s = 60.0
+        meta.to_file()
+
+    engine = get_engine(tmp_path / 'catalog.db')
+    sync_recordings(rec, engine)
+    with DBSession(engine) as db:
+        detail = queries.scene_detail(db, 'scene-4')
+
+    assert detail['episode_seconds'] == 60.0  # not 120: the mapping pass does not count
+    assert detail['usable_episode_seconds'] == 60.0
+
+
 def test_scene_detail_flags_task_conflict(tmp_path: pathlib.Path):
     """A session whose task_meta disagrees with the scene's canonical task shows up in conflicts."""
     rec = tmp_path / 'recordings'
