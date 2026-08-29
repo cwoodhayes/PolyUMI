@@ -28,9 +28,8 @@ class SceneFiles(SessionDataABC):
     scene_id: str
     sessions: list[SessionFiles] = field(default_factory=list)
     optitrack_start_time: datetime | None = None
-    #: Wall clock at which this scene began -- before the first session, so a scene's span
-    #: covers the setup and the dead time between episodes, not just the recordings. Copied
-    #: into every session's metadata.json, the only file `pingest fetch` transfers.
+    #: Wall clock at which this scene began, before the first session. Copied into every
+    #: session's metadata.json, the only file `pingest fetch` transfers.
     started_at: datetime | None = None
 
     @classmethod

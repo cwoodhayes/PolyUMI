@@ -63,10 +63,9 @@ class SessionMetadata(base.SessionDataABC):
     first_frame_metadata: dict | None = None
     sync_chirp_play_time_ns: int | None = None
     optitrack_start_time: datetime | None = None
-    #: When the enclosing scene began, copied in by SceneFiles.create_session. Carries the
-    #: scene's wall-clock start on a file the fetch actually transfers (fetch moves session
-    #: directories, never scene-level files), so the host can measure a scene's full span
-    #: including the dead time before and between episodes.
+    #: When the enclosing scene began, copied in by SceneFiles.create_session: the fetch moves
+    #: session directories and never scene-level files, so this is the scene start's only ride
+    #: to the host. Read there by ``polyumi_ingest.timing``.
     scene_started_at: datetime | None = None
     notes: str | None = None
     task: str | None = None

@@ -73,11 +73,8 @@ class DatasetManifest:
     #: embedded in the .zarr.zip's meta attrs; kept here too so it's readable without opening
     #: the buffer.
     pose_provenance: list[dict] = field(default_factory=list)
-    #: Time accounting, from ``polyumi_ingest.timing.dataset_time_totals``: the wall-clock span
-    #: of every member scene, the recorded length of the sessions that made it in, and the
-    #: seconds actually in the buffer once trimming and segmentation have had their say. The
-    #: three together say how much time at the rig became training data. None on manifests
-    #: written before these fields existed.
+    #: Time accounting from ``polyumi_ingest.timing.dataset_time_totals``, whose module
+    #: docstring defines the three. None on manifests written before these fields existed.
     scene_seconds: float | None = None
     episode_seconds: float | None = None
     exported_seconds: float | None = None

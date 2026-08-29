@@ -135,7 +135,7 @@ def create_app(engine: Engine, recordings_dir: pathlib.Path | None = None, pi_ho
     # element's title attribute, so the templates need both forms of the same string.
     templates.env.filters['short_sha'] = provenance.short_sha
     # Seconds -> 'H:MM:SS' via timedelta's own repr; scenes run for hours, so bare seconds
-    # don't read. None renders as an em dash, the same "unknown" the other fields use.
+    # don't read.
     templates.env.filters['duration'] = lambda s: str(timedelta(seconds=round(s))) if s is not None else '—'
     # A global rather than per-render context: _detail.html is rendered from a dozen call sites
     # (and from get_template().render() ones with no request), and all of them want the same

@@ -510,3 +510,24 @@ def test_sync_datasets_logs_and_skips_unparseable_manifest(tmp_path: pathlib.Pat
     assert stats.datasets_updated == 1
     with DBSession(engine) as db:
         assert db.exec(select(Dataset).where(Dataset.name == 'ok_one')).first() is not None
+
+
+def test_sync_scene_span_falls_back_to_first_session(tmp_path: pathlib.Path):
+    """A scene predating `scene_started_at` still gets a span, starting at its first session."""
+    rec = tmp_path / 'recordings'
+    scene_dir = rec / 'scene_2026-07-26_15-00-00_uvwx'
+    scene_dir.mkdir(parents=True)
+    SceneManifest(scene_id='scene-old').write_to_scene_dir(scene_dir)
+    sd = _make_session(scene_dir, 'session_1', scene_id='scene-old', session_type=SessionType.EPISODE, task=None)
+    md = SessionMetadata.from_file(sd / 'metadata.json')
+    md.duration_s = 60.0
+    md.scene_started_at = None
+    md.to_file()
+
+    engine = _engine(tmp_path)
+    sync_recordings(rec, engine)
+    with DBSession(engine) as db:
+        scene = db.get(Scene, 'scene-old')
+
+    assert scene.started_at == scene.created_at  # no scene stamp, so the first session stands in
+    assert (scene.ended_at - scene.started_at).total_seconds() == 60.0

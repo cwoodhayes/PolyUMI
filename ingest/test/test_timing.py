@@ -53,19 +53,21 @@ def test_scene_span_unknown_without_finalized_sessions(tmp_path):
     assert timing.scene_span_seconds(scene) is None
 
 
-def test_dataset_totals_dedupe_split_sessions(scene_dir):
-    """A session split into two segments is recorded once, but both segments count as exported."""
+def test_dataset_totals_count_each_session_once(scene_dir):
+    """A split session is counted once as episode time; a session left out counts not at all."""
     provenance = [
         {'scene': scene_dir.name, 'session': 'session_a', 'duration_s': 20.0},
         {'scene': scene_dir.name, 'session': 'session_a', 'duration_s': 25.0},
         {'scene': scene_dir.name, 'session': 'session_b', 'duration_s': 50.0},
     ]
-    totals = timing.dataset_time_totals([scene_dir], provenance)
-    assert totals == {
+    assert timing.dataset_time_totals([scene_dir], provenance) == {
         'scene_seconds': 390.0,
         'episode_seconds': 120.0,  # not 180: session_a counted once despite two segments
         'exported_seconds': 95.0,
     }
+
+    # Drop session_b from the export and its 60 s of recording goes with it.
+    assert timing.dataset_time_totals([scene_dir], provenance[:1])['episode_seconds'] == 60.0
 
 
 def test_dataset_totals_report_unknown_scene_time_as_none(scene_dir, tmp_path):
@@ -75,11 +77,3 @@ def test_dataset_totals_report_unknown_scene_time_as_none(scene_dir, tmp_path):
     totals = timing.dataset_time_totals([scene_dir, unfinished], [])
     assert totals['scene_seconds'] is None
     assert totals['episode_seconds'] == 0.0
-
-
-def test_dataset_totals_ignore_sessions_left_out_of_the_export(scene_dir):
-    """An episode skipped by the export (unusable, no valid span) contributes no recorded time."""
-    provenance = [{'scene': scene_dir.name, 'session': 'session_a', 'duration_s': 20.0}]
-    totals = timing.dataset_time_totals([scene_dir], provenance)
-    assert totals['episode_seconds'] == 60.0
-    assert totals['exported_seconds'] == 20.0
