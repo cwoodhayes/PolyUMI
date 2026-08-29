@@ -283,7 +283,7 @@ The gripper mount occludes a fixed strip of the finger camera's view, so this co
 - an optional `output_size` resize with `cv2.INTER_AREA`. **Default `null`** — the crop ships at native size and the choice of encoder input size stays with whoever builds the policy;
 - bounds that don't fit the frame **raise**. Silently clipping would produce a plausible-looking image that isn't the one the contract names.
 
-The crop **is** the `finger_rgb` contract: a policy trained on one crop cannot be served frames from another, so retuning it invalidates existing checkpoints. The resolved bounds go into the buffer's `meta.attrs` so a checkpoint says which crop it trained under. Nothing on the inference side calls this yet — `policy_client_node` has no finger-camera subscription and cannot gain one until the clock-domain issue in `ros2_ws/.../config/inference.yaml` is resolved — but the transform is mirrored now so that wiring is a subscription rather than a second derivation.
+The crop **is** the `finger_rgb` contract: a policy trained on one crop cannot be served frames from another, so retuning it invalidates existing checkpoints. The resolved bounds go into the buffer's `meta.attrs` so a checkpoint says which crop it trained under. Nothing on the inference side calls this yet — `policy_client_node` has no finger-camera subscription — but the transform is mirrored now so that wiring is a subscription rather than a second derivation.
 
 ### Why it's implemented twice
 
