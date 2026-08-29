@@ -194,24 +194,14 @@ In addition to the strictly necessary offsets above, we also measure & track the
 
 **Change required when: hardware design revision, or new embodiment**
 
-This checks the arm EE jaw's range of motion. Ends up being sort of unnecessary for now because my finger design doesn't interfere with the range of motion, and the Franka Hand documents its range of motion correctly. But it was good to validate this assumption.
-If bringing up a new arm, you should adapt & run this script there too to be safe.
+`gripper_min_width_m` / `gripper_max_width_m` in `ros2_ws/src/polyumi_ros2/config/inference.yaml`
+are **caliper measurements of the fingers**, currently `0.0` and `0.0812` m. The PolyUMI fingers set
+both ends — they meet at the mechanism's true zero and stop the open sweep before the drive does —
+so the numbers are the same on either gripper driver and there is nothing to probe at runtime.
 
-1. **Bring up the arm with the gripper allowed to move.** Without `execute_gripper:=true` every command is a silent no-op and the probe measures nothing.
-   ```bash
-   ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true
-   ```
-   The bridge's clamp already defaults to the Franka Hand's own maximum (0.0817 m), so the fingers stop the open sweep first if anything does. Only pass `gripper_max_width` if you have deliberately lowered it.
-
-2. **Clear the fingers and run the probe.** It drives both extremes several times and reports where the hand actually stopped.
-   ```bash
-   ros2 run polyumi_ros2 gripper_range_probe
-   ```
-   Do **not** run it while `policy_client_node` is up — they publish to the same topic.
-
-3. **Check the spread before believing the mean.** `Move` applies no force and stalls on contact, so a closed endpoint that wanders more than ~1 mm between reps is not repeatable enough to calibrate against; the probe fails and tells you to make the endpoint force-defined instead (re-run with the bridge's `use_grasp_below_m` raised and a chosen `grasp_force_n`). The probe also asks the bridge for its clamp, so it can tell you whether the open endpoint was the fingers or the software stopping them.
-
-4. **Paste the `gripper_min_width_m` / `gripper_max_width_m` lines** into `ros2_ws/src/polyumi_ros2/config/inference.yaml`.
+Measure the closed and fully-open jaw aperture directly and paste both values in. Note that 0.105 m
+is *not* this number: that is the stock metal Franka finger attachments, which also cannot close
+past 0.023 m.
 
 #### Sanity check
 

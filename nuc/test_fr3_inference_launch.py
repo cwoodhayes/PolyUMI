@@ -38,6 +38,7 @@ def _drivers_started(gripper: str, execute_gripper: str) -> set:
     context.launch_configurations['execute_gripper'] = execute_gripper
 
     started = set()
+    found = set()
     for entity in module.generate_launch_description().entities:
         condition = getattr(entity, 'condition', None)
         if condition is None:
@@ -47,8 +48,14 @@ def _drivers_started(gripper: str, execute_gripper: str) -> set:
         source = getattr(entity, 'launch_description_source', None)
         text = str(getattr(entity, 'node_executable', '')) + str(getattr(source, 'location', ''))
         for name in (HAND, FAULHABER):
-            if name in text and condition.evaluate(context):
-                started.add(name)
+            if name in text:
+                found.add(name)
+                if condition.evaluate(context):
+                    started.add(name)
+    # Without this, a rename in launch_ros (or in the launch file) makes every case report "nothing
+    # started" — which is what half the expectations below assert, so the suite would stay green
+    # while testing nothing at all.
+    assert found == {HAND, FAULHABER}, f'did not find both drivers in the LaunchDescription: {found}'
     return started
 
 

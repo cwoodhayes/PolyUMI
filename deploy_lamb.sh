@@ -22,15 +22,10 @@ echo "==> Syncing repo to ${HOST}:${REPO} ..."
 # --delete, so a file removed here is removed there — a stale serve_obs.py on lamb is the kind of
 # thing that produces a plausible-looking rollout against last week's frame convention.
 #
-# The excludes are three classes:
-#   .venv, *.pyc, __pycache__, *.egg-info  - do not survive a machine boundary; a .pyc from a
-#                                            different interpreter is worse than useless
-#   data/, recordings/, wandb/             - lamb GENERATES these (data/ holds dp_outputs, i.e.
-#                                            every checkpoint) and they dwarf the code. rsync
-#                                            protects excluded paths from --delete, so they stay.
-#   ros2_ws/{build,install,log}/           - rebuilt below
-#   external/ORB_SLAM3_PolyUMI/            - 2 GB of ingest-side C++; nothing on lamb runs it.
-#                                            The diffusion-policy fork under external/ DOES ship.
+# data/, recordings/ and wandb/ are lamb's OUTPUT — data/ holds dp_outputs, i.e. every checkpoint.
+# rsync protects excluded paths from --delete, which is the only reason they survive this.
+# external/ORB_SLAM3_PolyUMI is 2 GB of ingest-side C++ that nothing on lamb runs; the
+# diffusion-policy fork under external/ DOES ship.
 rsync -a --delete --mkpath \
     --exclude='.git/' --exclude='__pycache__/' --exclude='*.pyc' --exclude='*.egg-info/' \
     --exclude='.venv/' --exclude='recordings/' --exclude='data/' --exclude='wandb/' \

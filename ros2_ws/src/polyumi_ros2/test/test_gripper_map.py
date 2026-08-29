@@ -9,7 +9,7 @@ to flip) and the clamping behaviour.
 
 import pytest
 
-from polyumi_ros2.gripper_map import aperture_from_positions, policy_to_robot_width, robot_to_policy_width
+from polyumi_ros2.gripper_map import aperture_from_joint_state, policy_to_robot_width, robot_to_policy_width
 
 #: A hypothetical set of fingers whose tips meet before the mechanism bottoms out. The real ones
 #: measure 0.0 (see test_current_hardware_is_a_passthrough), which would make every test here pass
@@ -104,22 +104,35 @@ def test_current_hardware_is_a_passthrough():
     assert robot_to_policy_width(0.03, 0.0) == pytest.approx(0.03)
 
 
-def test_two_finger_positions_are_summed():
-    """franka_hand_node / franka_gripper: each finger carries half the aperture."""
-    assert aperture_from_positions([0.0408, 0.0408]) == pytest.approx(0.0816)
+def _state(names, positions):
+    """Build a JointState carrying these joint names and positions."""
+    from sensor_msgs.msg import JointState
+
+    msg = JointState()
+    msg.name = list(names)
+    msg.position = list(positions)
+    return msg
 
 
-def test_single_position_is_the_whole_aperture():
-    """
-    franka_gripper_control publishes one joint, fr3_gripper_width, already the full width.
-
-    Summing blindly would have read it as itself (one element), but the guards that preceded this
-    helper required two and dropped the message outright — which is what left every consumer of
-    /fr3_gripper/joint_states blind on the FAULHABER gripper.
-    """
-    assert aperture_from_positions([0.105]) == pytest.approx(0.105)
+def test_finger_joints_are_summed():
+    """franka_hand_node follows franka_gripper: each finger joint carries half the aperture."""
+    msg = _state(['fr3_finger_joint1', 'fr3_finger_joint2'], [0.0406, 0.0406])
+    assert aperture_from_joint_state(msg) == pytest.approx(0.0812)
 
 
-def test_no_positions_is_none_not_zero():
-    """A width-less message must not read as a closed gripper."""
-    assert aperture_from_positions([]) is None
+def test_width_joint_is_the_whole_aperture():
+    """franka_gripper_control publishes one joint, fr3_gripper_width, already the full width."""
+    msg = _state(['fr3_gripper_width'], [0.0812])
+    assert aperture_from_joint_state(msg) == pytest.approx(0.0812)
+
+
+def test_width_joint_is_found_by_name_not_by_position():
+    """A driver may order or pad its joints however it likes; the name is what selects the width."""
+    msg = _state(['some_other_joint', 'fr3_gripper_width'], [1.234, 0.0812])
+    assert aperture_from_joint_state(msg) == pytest.approx(0.0812)
+
+
+def test_unknown_joints_are_none_not_zero():
+    """A message naming no width joint must not read as a closed gripper."""
+    assert aperture_from_joint_state(_state([], [])) is None
+    assert aperture_from_joint_state(_state(['elbow'], [0.5])) is None

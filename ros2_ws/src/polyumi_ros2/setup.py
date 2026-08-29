@@ -57,7 +57,6 @@ setup(
             'pi_receiver_node = polyumi_ros2.pi_receiver_node:main',
             'policy_client_node = polyumi_ros2.policy_client_node:main',
             'tcp_pivot_test = polyumi_ros2.tcp_pivot_test:main',
-            'gripper_range_probe = polyumi_ros2.gripper_range_probe:main',
             'latency_probe = polyumi_ros2.latency_probe:main',
             'servo_smoke_test = polyumi_ros2.servo_smoke_test:main',
         ],

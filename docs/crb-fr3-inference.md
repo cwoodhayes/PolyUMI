@@ -61,11 +61,11 @@ ros2 launch nuc/launch/fr3_inference.launch.py \
 
 **Both execute flags default false** — launching alone never moves the robot. 
 
-`gripper:=hand|faulhaber|none` picks *which* driver, `execute_gripper` decides whether it may
-move; the two are separate so `gripper:=faulhaber` on its own is a safe way to check the
-selection resolves. `hand` is `franka_hand_node` (Franka Hand over libfranka, see "Gripper
-problems"); `faulhaber` is `franka_gripper_control` (below). Never both — they are mutually
-exclusive hardware and each claims its device on startup.
+`gripper:=hand|faulhaber|none` picks *which* driver, `execute_gripper` decides whether it may move.
+`faulhaber` is `franka_gripper_control` (below) and is the supported path; `hand` is
+`franka_hand_node` (a stock Franka Hand over libfranka, kept working for other labs but not what we
+run — see "Gripper problems"). Never both: they are mutually exclusive hardware and each claims its
+device on startup.
 
 Velocity scaling is only applicable if the arm is being controlled by moveit, which is deprecated aside from the homing functionality.
 
@@ -295,8 +295,9 @@ Most failures here are one of four things, in rough order of frequency:
 ## The FAULHABER gripper (`gripper:=faulhaber`)
 
 `external/franka_gripper_control` is Anunth Ramaswami's CANopen driver for the FAULHABER-actuated
-gripper — a 200 Hz Cyclic Synchronous Position tracker over a 105 mm stroke, i.e. a real tracker
-where the Franka Hand is a decimator (see "Gripper problems").
+gripper — a 200 Hz Cyclic Synchronous Position tracker where the Franka Hand is a decimator (see
+"Gripper problems"). Mechanically it is the same jaw: same PolyUMI fingers, same 0–0.0812 m stroke,
+new electronics.
 
 It is a submodule and needs **no fork and no patch**: it already subscribes `/polyumi/target_gripper`
 as a `JointTrajectory` carrying `fr3_gripper_width` in metres, which is exactly what
@@ -324,18 +325,10 @@ Two diagnostic topics the Hand never had, both worth a Foxglove plot during a ro
 `/faulhaber_gripper/motor_current_ma` and `/faulhaber_gripper/waypoint_tracking_error_mm` (the
 latter published only at source waypoints, not at interpolated CSP samples).
 
-Two things to re-derive before trusting a rollout on it:
-
-- **`gripper_max_width_m` in `ros2_ws/src/polyumi_ros2/config/inference.yaml` is 0.0816, the
-  Franka Hand's measured aperture.** Re-measure with `ros2 run polyumi_ros2 gripper_range_probe`.
-  This is not cosmetic: the handheld rig reaches 132.3 mm of tag separation against the Hand's
-  126.2 mm, so the top ~7% of the policy's commanded range currently saturates. A 105 mm stroke
-  should close that gap. (The probe's "is this a real stop or a software clamp" check queries
-  `/fr3_gripper/get_parameters` for `max_width_m`, which only `franka_hand_node` serves — expect
-  that one warning here, and take the hard-stop calibration as the better answer.)
-- **`latency.gripper_exec` / `latency.gripper`, both 0.0.** Re-measure with
-  `ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper_chirp`. Unlike the Hand's,
-  these should now be small and actually measurable.
+`gripper_max_width_m` needs no re-derivation — the fingers are unchanged, so 0.0812 m holds. What
+does: **`latency.gripper_exec` / `latency.gripper`, both 0.0**, which are the Hand's numbers.
+Re-measure with `ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper_chirp`; unlike the
+Hand's, these should be small and actually measurable.
 
 **A different gripper is a different TCP and a different payload.** `nuc/tcp_calib.py` feeds both
 TF and move_group's RobotModel, and running the arm with the Hand's numbers still in it gives the
@@ -388,18 +381,15 @@ Things to know before you debug it:
 - **An unhomed hand reports `max_width = 0` and `move()` returns `true` while doing nothing.** The
   node refuses to execute in that state and says so; `home_on_start:=true` fixes it.
 
-The future of this system is to replace the Franka Hand with a better hand, as other labs have
-done. `franka_hand_node` is the stopgap until then, and it has not yet been run on the arm:
+The FAULHABER gripper above is the replacement, so `franka_hand_node` is now the legacy path,
+kept working for labs running a stock hand. It has never been run on the arm; if you take it up:
 
-- [ ] **On-arm dry run.** `execute_gripper:=false` (the default) plans and logs every
-      `move(width, speed)` at the real cadence without connecting to the hand.
-- [ ] **On-arm execution.** `execute_gripper:=true`, arm plan-only. Acceptance test is
-      `ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper_chirp`.
-- [ ] **Confirm or replace `latency.gripper_exec`.** Shipped at **0.0, under test** — the node now
+- [ ] **On-arm execution.** `gripper:=hand execute_gripper:=true`, arm plan-only. Acceptance test is
+      `ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper_chirp`. There is no dry run:
+      the node claims the libfranka connection on startup, so `gripper:=none` is how you opt out.
+- [ ] **Confirm or replace `latency.gripper_exec`.** Shipped at **0.0, under test** — the node
       schedules each Move to arrive on time by itself, so a lead here would double-compensate.
       Revert to 0.380 if the hand runs late in service.
-- [ ] **`Grasp`**, if the closed endpoint has to be force-defined. See `gripper_range_probe`, which
-      fails when the fingers do not stall repeatably.
 
 Re-run the probes (`-DBUILD_HAND_PROBES=ON`) against any candidate replacement before committing to
 it — the constants above are this hand's, and nothing else in the stack will notice if they are

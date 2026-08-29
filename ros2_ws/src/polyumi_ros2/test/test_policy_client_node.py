@@ -575,34 +575,28 @@ def test_require_gripper_state_skips_the_tick_instead(make_node):
     assert node._lookup_agent_pos(image_stamp=_t(1.0)) is None
 
 
-def test_positionless_gripper_state_is_ignored(make_node):
-    """A joint state with no position at all is dropped rather than crashing the callback."""
+def test_unreadable_gripper_state_is_ignored(make_node):
+    """A joint state naming no width joint is dropped rather than crashing the callback."""
     node = make_node()
     msg = JointState()
     msg.header.stamp = _t(1.0).to_msg()
-    msg.name = ['fr3_gripper_width']
-    msg.position = []
+    msg.name = ['elbow']
+    msg.position = [0.02]
     node._gripper_cb(msg)
 
     assert node._gripper_width_at(_t(1.0)) is None
 
 
-def test_single_joint_gripper_state_is_the_whole_aperture(make_node):
-    """
-    A one-joint state message carries the whole aperture, not half of one.
-
-    The FAULHABER driver publishes one joint holding the full width; the Franka Hand publishes two
-    halves. Requiring two dropped every FAULHABER sample, so the policy ran on the fallback width
-    with nothing in the logs but a throttled warning.
-    """
+def test_gripper_state_is_buffered_against_its_header_stamp(make_node):
+    """The aperture is looked up by the stamp it was published with, not by arrival order."""
     node = make_node()
     msg = JointState()
     msg.header.stamp = _t(1.0).to_msg()
     msg.name = ['fr3_gripper_width']
-    msg.position = [0.0816]
+    msg.position = [0.0812]
     node._gripper_cb(msg)
 
-    assert node._gripper_width_at(_t(1.0)) == pytest.approx(0.0816)
+    assert node._gripper_width_at(_t(1.0)) == pytest.approx(0.0812)
 
 
 def test_tf_use_latest_takes_the_newest_gripper_sample(make_node):

@@ -128,6 +128,7 @@ def test_gripper_state_is_summed_across_both_fingers():
     msg = JointState()
     msg.header.stamp.sec = 7
     msg.header.stamp.nanosec = 500_000_000
+    msg.name = ['fr3_finger_joint1', 'fr3_finger_joint2']
     msg.position = [0.02, 0.021]
     probe._on_gripper_state(msg)
     assert [w for _, w in probe._actual] == [pytest.approx(0.041)]
@@ -150,6 +151,7 @@ def test_gripper_state_is_timed_on_arrival_not_on_the_nuc_stamp():
     # A stamp decades away from any plausible laptop clock, so using it cannot pass by accident.
     msg.header.stamp.sec = 7
     msg.header.stamp.nanosec = 500_000_000
+    msg.name = ['fr3_finger_joint1', 'fr3_finger_joint2']
     msg.position = [0.02, 0.021]
     before = probe._now()
     probe._on_gripper_state(msg)
@@ -160,24 +162,16 @@ def test_gripper_state_is_timed_on_arrival_not_on_the_nuc_stamp():
     probe.destroy_node()
 
 
-def test_positionless_gripper_state_messages_are_ignored():
-    """
-    A state message carrying no position must not enter the series as a bogus aperture.
-
-    A SINGLE position is not malformed — that is the FAULHABER driver's whole aperture, and
-    requiring two silently dropped every one of its samples. See gripper_map.aperture_from_positions.
-    """
+def test_unreadable_gripper_state_messages_are_ignored():
+    """A state message naming no width joint must not enter the series as a bogus aperture."""
     from sensor_msgs.msg import JointState
 
     probe = _probe(mode='gripper')
     msg = JointState()
-    msg.position = []
-    probe._on_gripper_state(msg)
-    assert probe._actual == []
-
+    msg.name = ['elbow']
     msg.position = [0.02]
     probe._on_gripper_state(msg)
-    assert [w for _, w in probe._actual] == [0.02]
+    assert probe._actual == []
     probe.destroy_node()
 
 

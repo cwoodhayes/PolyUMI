@@ -68,9 +68,10 @@ MAX_IMAGE_AGE_S="${MAX_IMAGE_AGE_S:-0.3}"
 # execute_arm/execute_gripper flags (both default false) in front of the arm. Set false for a
 # dry run: the preview topics still show every commanded chunk, but nothing is published.
 EXECUTE_MOTION="${EXECUTE_MOTION:-true}"
-# Which gripper driver the NUC starts: `hand` (Franka Hand over libfranka) or `faulhaber`
-# (franka_gripper_control over CANopen; needs can0 up and a completed calibration). Only rides
-# the PRE-TYPED nuc-inference line, so it still takes an Enter before anything moves.
+# Which gripper driver the NUC starts: `faulhaber` (franka_gripper_control over CANopen; needs
+# can0 up and a completed calibration) or `hand` (a stock Franka Hand over libfranka, kept working
+# but not what we run). Only rides the PRE-TYPED nuc-inference line, so it still takes an Enter
+# before anything moves.
 GRIPPER="${GRIPPER:-faulhaber}"
 
 # Every remote tmux session this script owns. Also spelled out in the pane table below; kept
@@ -92,7 +93,7 @@ if [ "$ACTION" = "--kill-local" ] || [ "$ACTION" = "--kill" ]; then
   # container and its port survive, and ros2 launch skips the shutdown that reports whether the
   # FCI was released. 8s covers the Pi's worst case: stream() stops both child streamers
   # (2s SIGTERM + 2s SIGKILL join each) before it touches the LED.
-  KILL_GRACE_S="${KILL_GRACE_S:-8}"
+  KILL_GRACE_S="${KILL_GRACE_S:-4}"
   NEEDS_GRACE=0
 
   # The Pi on BOTH paths: that pane is a plain `ssh -t` with no remote tmux to survive into, so
@@ -385,7 +386,7 @@ calibrated, find the hard stops once (SWEEPS THE FULL STROKE — clear the mecha
   ros2 service call /faulhaber_gripper/calibrate std_srvs/srv/Trigger "{}"
 It tracks nothing until that succeeds. The result persists in ~/.ros/ across launches.
 
-Running gripper:=hand? franka_hand_node logs every move(width, speed) it plans in pane 2, at
+Running gripper:=hand? franka_hand_node logs every move(width, speed) it issues in pane 2, at
 0.7-1.7 Hz. That ceiling is the hand, not a fault: docs/crb-fr3-inference.md, "Gripper problems".
 
 tmux, minimum viable:

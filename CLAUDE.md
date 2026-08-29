@@ -171,17 +171,24 @@ clock); `ssh jailfranka 'sudo chronyc makestep'` once the link is up re-steps it
 place, `tf_use_latest` is no longer needed for real runs — it was only a stationary-dry-run
 crutch for the old skew.
 
-**The gripper driver is selectable.** `fr3_inference.launch.py` takes
-`gripper:=hand|faulhaber|none`; `execute_gripper` stays the separate flag for whether it may move.
-`hand` is our `franka_hand_node` (Franka Hand over libfranka — a decimator, see the doc);
-`faulhaber` is the `external/franka_gripper_control` submodule, a third-party 200 Hz CANopen
-driver that already speaks our `/polyumi/target_gripper` contract, so it is wired in with a single
+**The gripper driver is selectable, and `faulhaber` is the supported one.**
+`fr3_inference.launch.py` takes `gripper:=faulhaber|hand|none` (default `faulhaber`);
+`execute_gripper` stays the separate flag for whether it may move. `faulhaber` is the
+`external/franka_gripper_control` submodule — a 200 Hz CANopen driver that already speaks our
+`/polyumi/target_gripper` contract, so it is wired in with a single
 `joint_state_topic:=/fr3_gripper/joint_states` launch argument and **no fork and no patch** — keep
-it that way. Its knobs are argparse CLI args, not ROS params. `fr3_session.sh` rsyncs, symlinks
-and builds it on the NUC (`GRIPPER=faulhaber ./fr3_session.sh`); `can0` and a one-time
-`/faulhaber_gripper/calibrate` are manual. `inference.yaml`'s `gripper_max_width_m` and
-`latency.gripper*` are still the Franka Hand's numbers, and `nuc/tcp_calib.py` is too — re-measure
-both before running the arm on a different gripper. See
+it that way. Its knobs are argparse CLI args, not ROS params. `hand` is `franka_hand_node` (a stock
+Franka Hand over libfranka — a decimator, see the doc), kept working for other labs but not what we
+run. `fr3_session.sh` rsyncs, symlinks and builds the submodule on the NUC; `can0` and a one-time
+`/faulhaber_gripper/calibrate` are manual.
+
+**The two grippers are mechanically identical** — same PolyUMI fingers, same 0–0.0812 m stroke
+(caliper-measured; 0.105 m is the *stock metal attachments*, which also cannot close past 0.023 m),
+so `gripper_max_width_m` and `nuc/tcp_calib.py` are shared and there is no per-gripper config
+bundle. What is NOT shared is `inference.yaml`'s `latency.gripper*`, still the Franka Hand's
+numbers — re-measure with `latency_probe --ros-args -p mode:=gripper_chirp`. Note the driver's own
+`max_width_mm` is persisted into `~/.ros/faulhaber_gripper_limits.json` at calibration time, so
+changing it needs a re-calibrate to take effect. See
 [docs/crb-fr3-inference.md](docs/crb-fr3-inference.md).
 
 **When debugging FR3 inference on the arm — read [docs/crb-fr3-inference.md](docs/crb-fr3-inference.md)
