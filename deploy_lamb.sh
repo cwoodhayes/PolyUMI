@@ -24,11 +24,14 @@ echo "==> Syncing repo to ${HOST}:${REPO} ..."
 #
 # data/, recordings/ and wandb/ are lamb's OUTPUT — data/ holds dp_outputs, i.e. every checkpoint.
 # rsync protects excluded paths from --delete, which is the only reason they survive this.
+# They are ANCHORED with a leading slash: an unanchored 'data/' matches at every depth, which
+# silently drops a fork's own package directory (external/polyumi_vista_policy/vista/data/) and
+# leaves the remote building against a tree missing files that exist here.
 # external/ORB_SLAM3_PolyUMI is 2 GB of ingest-side C++ that nothing on lamb runs; the
-# diffusion-policy fork under external/ DOES ship.
+# policy forks under external/ DO ship.
 rsync -a --delete --mkpath \
     --exclude='.git/' --exclude='__pycache__/' --exclude='*.pyc' --exclude='*.egg-info/' \
-    --exclude='.venv/' --exclude='recordings/' --exclude='data/' --exclude='wandb/' \
+    --exclude='.venv/' --exclude='/recordings/' --exclude='/data/' --exclude='/wandb/' \
     --exclude='external/ORB_SLAM3_PolyUMI/' \
     --exclude='ros2_ws/build/' --exclude='ros2_ws/install/' --exclude='ros2_ws/log/' \
     "${HERE}/" "${HOST}:${REPO}/"
