@@ -91,9 +91,9 @@ if [ "$ACTION" = "--kill-local" ] || [ "$ACTION" = "--kill" ]; then
   # these clean up on: the Pi leaves the finger LED lit (its `finally:` only runs via
   # KeyboardInterrupt), the GPU box's `docker run` CLI dies without forwarding it so the
   # container and its port survive, and ros2 launch skips the shutdown that reports whether the
-  # FCI was released. 8s covers the Pi's worst case: stream() stops both child streamers
+  # FCI was released. 6s covers the Pi's worst case: stream() stops both child streamers
   # (2s SIGTERM + 2s SIGKILL join each) before it touches the LED.
-  KILL_GRACE_S="${KILL_GRACE_S:-4}"
+  KILL_GRACE_S="${KILL_GRACE_S:-6}"
   NEEDS_GRACE=0
 
   # The Pi on BOTH paths: that pane is a plain `ssh -t` with no remote tmux to survive into, so

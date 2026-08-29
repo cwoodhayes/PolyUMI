@@ -56,6 +56,10 @@ rather than as an error.
 #: ``fr3_finger_joint1``/``2``, each holding HALF the aperture.
 WIDTH_JOINT_NAME = 'fr3_gripper_width'
 
+#: The pair ``franka_hand_node`` publishes, following franka_gripper. Each carries HALF the
+#: aperture, so BOTH must be present: one alone is not a narrower gripper, it is half a reading.
+FINGER_JOINT_NAMES = ('fr3_finger_joint1', 'fr3_finger_joint2')
+
 
 def aperture_from_joint_state(msg) -> float | None:
     """
@@ -63,18 +67,24 @@ def aperture_from_joint_state(msg) -> float | None:
 
     The two drivers spell the same physical quantity differently, and getting it wrong is a silent
     halving or doubling of a width the policy acts on — so the decision is made here once, off the
-    joint NAMES the message already carries, rather than guessed from how many entries it has.
-    Summing the two finger joints rather than doubling one keeps them honest if they ever disagree.
+    joint NAMES the message already carries, rather than guessed from how many entries it has. A
+    Hand message must carry BOTH finger joints to be read at all, since either one alone is half an
+    aperture and indistinguishable from a nearly-closed gripper.
 
     :param msg: a ``sensor_msgs/JointState`` from the gripper driver.
     :returns: jaw aperture in metres, or None if the message names no width this understands.
     """
     names = list(msg.name)
-    if WIDTH_JOINT_NAME in names:
-        index = names.index(WIDTH_JOINT_NAME)
-        return float(msg.position[index]) if index < len(msg.position) else None
-    halves = [float(p) for n, p in zip(names, msg.position) if n.startswith('fr3_finger_joint')]
-    return sum(halves) if halves else None
+
+    def position_of(joint_name):
+        index = names.index(joint_name) if joint_name in names else -1
+        return float(msg.position[index]) if 0 <= index < len(msg.position) else None
+
+    width = position_of(WIDTH_JOINT_NAME)
+    if width is not None:
+        return width
+    halves = [position_of(name) for name in FINGER_JOINT_NAMES]
+    return sum(halves) if None not in halves else None
 
 
 def policy_to_robot_width(width_m: float, min_width_m: float, max_width_m: float) -> float:

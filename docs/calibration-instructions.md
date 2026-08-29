@@ -293,28 +293,32 @@ went. **This moves the arm.**
 
 #### How to calibrate — the gripper
 
-1. **Bring up the gripper with execution on** — without `execute_gripper:=true` every command is a
-   silent no-op and the probe measures nothing.
+**Name the driver explicitly.** The two have different plants and take different probe modes, so a
+measurement taken against the wrong one is not merely stale, it is meaningless.
+
+1. **Bring up the gripper with execution on** — without `execute_gripper:=true` the driver is not
+   started at all and the probe measures nothing.
    ```bash
-   ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true
+   ros2 launch nuc/launch/fr3_inference.launch.py gripper:=faulhaber execute_gripper:=true
+   # ...or gripper:=hand, for the legacy Franka Hand path
    ```
-2. **Nothing between the fingers**, then run it. It needs no other measurement as input — the hand
-   is truncated by its own latency alone, so this run is independent of `latency.arm_exec`:
+2. **Nothing between the fingers**, then run it. It needs no other measurement as input, so this run
+   is independent of `latency.arm_exec`:
    ```bash
+   # faulhaber — a real tracker, so a chirp is the right excitation
+   ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper_chirp
+   # hand — a step response instead: 30 mm step, time-to-first-motion, 8 alternating reps.
    ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper
    ```
-   This one is a **step response**, not a chirp: it commands a 30 mm step, times how long until the
-   fingers start moving, and repeats 8 times alternating direction. See the gotcha below for why
-   cross-correlation is the wrong tool for this particular plant.
 3. This prints **two** numbers, because they are two different quantities:
-   - `latency.gripper_exec` — do **not** paste this one in. It is command → the hand actually
-     moving, a few hundred ms, most of it the hand's own firmware (a `Move` blocks 363 ms even for
-     zero travel). `franka_hand_node` already models that internally (`HandLimits.cmd_delay` in
-     `gripper_trajectory_interpolator.hpp`) to decide which setpoint each `Move` can still reach —
-     so feeding the same figure into `config/inference.yaml`'s `gripper_exec` would compensate for
-     it twice. That field is currently `0.0` and should be left that way.
    - `latency.gripper` — the **observation** side, half the `/fr3_gripper/joint_states` publish
-     interval. Goes in `config/inference.yaml`, unaffected by the above.
+     interval. Goes in `config/inference.yaml` on either driver.
+   - `latency.gripper_exec` — command → fingers actually moving. **On `faulhaber`, paste it in.** It should be about 0:
+     it is a 200 Hz CSP tracker that models nothing internally, so nothing else compensates for it.
+     **On `hand`, do NOT** — most of that figure is the hand's own firmware (a `Move` blocks 363 ms
+     even for zero travel), and `franka_hand_node` already models it (`HandLimits.cmd_delay` in
+     `gripper_trajectory_interpolator.hpp`) to decide which setpoint each `Move` can still reach, so
+     pasting it would compensate twice. Both fields ship at `0.0`.
 
 
 #### Gotchas

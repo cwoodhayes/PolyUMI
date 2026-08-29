@@ -132,6 +132,29 @@ def test_width_joint_is_found_by_name_not_by_position():
     assert aperture_from_joint_state(msg) == pytest.approx(0.0812)
 
 
+def test_one_finger_joint_alone_is_not_an_aperture():
+    """
+    A truncated Hand message must be dropped, not read as half the width.
+
+    Half an aperture is indistinguishable from a nearly-closed gripper, so returning it would feed
+    the policy a plausible wrong number rather than an obvious absence.
+    """
+    msg = _state(['fr3_finger_joint1'], [0.0406])
+    assert aperture_from_joint_state(msg) is None
+
+
+def test_finger_joints_are_read_by_name_in_any_order():
+    """Position within the message carries no meaning; only the joint name does."""
+    msg = _state(['fr3_finger_joint2', 'other', 'fr3_finger_joint1'], [0.0406, 9.9, 0.0406])
+    assert aperture_from_joint_state(msg) == pytest.approx(0.0812)
+
+
+def test_a_name_without_a_matching_position_is_none():
+    """A message naming a joint it did not publish a position for is unusable, not zero."""
+    msg = _state(['fr3_gripper_width'], [])
+    assert aperture_from_joint_state(msg) is None
+
+
 def test_unknown_joints_are_none_not_zero():
     """A message naming no width joint must not read as a closed gripper."""
     assert aperture_from_joint_state(_state([], [])) is None
