@@ -18,6 +18,9 @@ Run on the NUC, after fr3_bringup.launch.py is up:
     ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true # fingers only
     ros2 launch nuc/launch/fr3_inference.launch.py execute_arm:=true     # servo drives the arm
 
+`gripper:=faulhaber|hand|none` picks the driver (faulhaber is the supported one);
+`execute_gripper` decides whether it is started at all.
+
 The streaming Cartesian impedance controller is loaded inactive and only ACTIVATED once
 `execute_arm:=true`; otherwise it sits loaded but idle and nothing moves.
 
@@ -35,10 +38,11 @@ from launch.actions import (
 )
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
-from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch.launch_description_sources import AnyLaunchDescriptionSource, PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.substitutions import FindPackageShare
 
 SERVO_CONTROLLER = 'polyumi_cartesian_impedance_controller'
 MOVEIT_CONTROLLER = 'fr3_arm_controller'
@@ -54,12 +58,17 @@ def generate_launch_description():
     robot_ip = LaunchConfiguration('robot_ip')
     execute_arm = LaunchConfiguration('execute_arm')
     execute_gripper = LaunchConfiguration('execute_gripper')
+    gripper = LaunchConfiguration('gripper')
     max_acceleration = LaunchConfiguration('max_acceleration')
-    gripper_max_width = LaunchConfiguration('gripper_max_width')
 
     # Torque control starts the moment the controller activates, so it is gated on the same flag
     # as every other way this file can move the arm.
     activate_servo = PythonExpression(["'", execute_arm, "' == 'true'"])
+
+    # Which hardware, and whether it is allowed to move, stay two separate questions: the
+    # first-run pattern in docs/crb-fr3-inference.md is a live gripper against a plan-only arm.
+    def _selected(name: str) -> PythonExpression:
+        return PythonExpression(["'", gripper, "' == '", name, "' and '", execute_gripper, "' == 'true'"])
 
     # Hoisted out of the LaunchDescription list so the event handler below can name it: the switch
     # has to wait for this to finish, and launch offers no ordering guarantee otherwise.
@@ -103,9 +112,22 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 'execute_gripper',
                 default_value='false',
-                description='Start franka_hand_node and let it issue Moves (MOVES THE FINGERS). '
-                'False does not start the node at all — there is no hand to connect to on a '
-                'gripper-less run, and franka_hand_node treats a missing Hand as fatal.',
+                description='Start the driver named by `gripper` and let it move the fingers '
+                '(MOVES THE FINGERS). False does not start it at all: both drivers claim their '
+                'hardware on startup, so there is no dry run — use `gripper:=none` for an '
+                'arm-only session.',
+            ),
+            # The two grippers are mutually exclusive hardware, so this selects one rather than
+            # gating each.
+            DeclareLaunchArgument(
+                'gripper',
+                default_value='faulhaber',
+                choices=['hand', 'faulhaber', 'none'],
+                description='Which gripper driver to run: `faulhaber` = franka_gripper_control '
+                '(FAULHABER over CANopen, needs can0 up and a completed '
+                '/faulhaber_gripper/calibrate) — the supported one; `hand` = franka_hand_node (a '
+                'stock Franka Hand over libfranka, kept working but not what we run); `none` = '
+                'neither, for an arm-only session. Only takes effect with execute_gripper:=true.',
             ),
             DeclareLaunchArgument(
                 'max_acceleration',
@@ -113,15 +135,6 @@ def generate_launch_description():
                 description='Joint acceleration limit (rad/s^2) move_group time-parameterizes '
                 'against, for homing. Forwarded to fr3_move_group.launch.py; without it '
                 'MoveIt defaults to 1 rad/s^2 and a home sweep crawls.',
-            ),
-            DeclareLaunchArgument(
-                'gripper_max_width',
-                default_value='0.0',
-                description='Node-side aperture clamp (m). 0.0 means ask the hand for its own '
-                'max_width, which is the right answer and needs no constant here; '
-                'gripper_range_probe needs the full stroke to measure open aperture. '
-                'policy_client_node clamps to its own (measured) gripper_max_width_m '
-                'first, so this is only a backstop.',
             ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(str(NUC_DIR / 'launch' / 'fr3_move_group.launch.py')),
@@ -171,26 +184,39 @@ def generate_launch_description():
             # load_gripper:=false (its default) or the two fight over the hand. Named fr3_gripper
             # so ~/joint_states resolves to /fr3_gripper/joint_states, exactly as franka_gripper's
             # did — every existing consumer of that topic keeps working unchanged.
-            #
-            # Gated on execute_gripper, not just started with 'execute' param false: the node
-            # connects to the physical Hand unconditionally on startup, and that connection is
-            # fatal (franka::NetworkException) when no Hand is attached — a gripper-less run has
-            # no such thing as a dry-run for this node, only "don't start it".
             Node(
                 package='polyumi_fr3_controllers',
                 executable='franka_hand_node',
                 name='fr3_gripper',
                 output='screen',
-                condition=IfCondition(execute_gripper),
-                parameters=[
-                    {
-                        # value_type is not optional: a LaunchConfiguration resolves to a STRING,
-                        # and declare_parameter's bool/double defaults reject one outright.
-                        'execute': ParameterValue(execute_gripper, value_type=bool),
-                        'robot_ip': ParameterValue(robot_ip, value_type=str),
-                        'max_width_m': ParameterValue(gripper_max_width, value_type=float),
-                    }
-                ],
+                condition=IfCondition(_selected('hand')),
+                # value_type is not optional: a LaunchConfiguration resolves to a STRING, and
+                # declare_parameter's str default would otherwise be the only one that fits.
+                parameters=[{'robot_ip': ParameterValue(robot_ip, value_type=str)}],
+            ),
+            # The FAULHABER gripper, from the franka_gripper_control submodule. It already
+            # subscribes /polyumi/target_gripper as a JointTrajectory carrying fr3_gripper_width
+            # in metres — the same contract franka_hand_node serves — so the ONLY thing this
+            # override does is move its state stream onto the topic the six existing consumers
+            # read. Everything else is left at its defaults; retune via its own launch args (see
+            # its README), never `--ros-args -p`: its knobs are argparse, not ROS parameters.
+            #
+            # It holds position until /faulhaber_gripper/calibrate has found both hard stops, so a
+            # fresh NUC needs that service call before any width is tracked.
+            IncludeLaunchDescription(
+                AnyLaunchDescriptionSource(
+                    PathJoinSubstitution(
+                        [
+                            FindPackageShare('franka_gripper_control'),
+                            'launch',
+                            'faulhaber_gripper.launch.xml',
+                        ]
+                    )
+                ),
+                launch_arguments={
+                    'joint_state_topic': '/fr3_gripper/joint_states',
+                }.items(),
+                condition=IfCondition(_selected('faulhaber')),
             ),
         ]
     )

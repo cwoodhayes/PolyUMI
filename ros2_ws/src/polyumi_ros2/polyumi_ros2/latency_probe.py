@@ -97,6 +97,7 @@ from sensor_msgs.msg import Image, JointState
 from tf2_ros import Buffer, TransformListener
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
+from polyumi_ros2.gripper_map import aperture_from_joint_state
 from polyumi_ros2.latency_util import get_latency
 from polyumi_ros2.target_chunk import TargetChunkPublisher
 
@@ -116,7 +117,7 @@ CHIRP_BAND_HZ = {'arm': (0.05, 0.4), 'gripper_chirp': (0.1, 0.7)}
 #: every window.
 COMMAND_HZ = {'arm': 10.0, 'gripper_chirp': 10.0}
 
-#: Joint name on /polyumi/target_gripper, matching policy_client_node and gripper_range_probe.
+#: Joint name on /polyumi/target_gripper, matching policy_client_node.
 GRIPPER_JOINT_NAME = 'fr3_gripper_width'
 
 #: franka_hand_node's shipped defaults, mirrored here to size the chirp excitation — it runs on
@@ -550,11 +551,12 @@ class LatencyProbe(Node):
         The stamps are kept separately, since the publish INTERVAL is a property of the NUC-side
         publisher and measuring it off arrivals would fold in transport jitter.
         """
-        if len(msg.position) < 2:
+        aperture = aperture_from_joint_state(msg)
+        if aperture is None:
             return
         stamp_s = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         with self._lock:
-            self._actual.append((self._now(), float(msg.position[0] + msg.position[1])))
+            self._actual.append((self._now(), aperture))
             self._state_stamps.append(stamp_s)
 
     def _now(self) -> float:

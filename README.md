@@ -30,6 +30,8 @@ It combines the [Universal Manipulation Interface (UMI)](https://umi-gripper.git
 catalog/          # Catalog UI: Web UI for organizing datasets collected on the gripper
 docs/             # Documentation for this repo
 external/         # Git submodules
+  franka_gripper_control/   # FAULHABER gripper driver (CANopen CSP); runs on the NUC, speaks our
+                            #   /polyumi/target_gripper contract unmodified
   franka_ros2/              # ROS2 control stack for Franka Emika Panda robot arm
   ORB_SLAM3_PolyUMI/        # PolyUMI's ORB_SLAM3 fork (monocular visual-inertial SLAM for the GoPro Hero 12)
   polyumi_diffusion_policy  # control policy implementations, dockerized & wrapped in an API server

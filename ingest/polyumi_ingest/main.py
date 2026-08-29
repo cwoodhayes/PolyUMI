@@ -634,9 +634,6 @@ def calibrate_gripper(
     print('  gripper_fingers:')
     print(f'    closed_mm: {stats.closed_width_m * 1000:.2f}')
     print(f'    open_mm: {stats.max_m * 1000:.2f}')
-    print()
-    print('Then measure the FR3 side (gripper_min_width_m / gripper_max_width_m):')
-    print('  ros2 run polyumi_ros2 gripper_range_probe')
 
 
 @app.command(name='archive-scene')

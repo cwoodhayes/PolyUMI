@@ -51,7 +51,7 @@ unset _polyumi_self
 # subnet entirely. Each such host keeps its values in config/env.<hostname>.sh (see
 # config/env.lamb.sh); the defaults below are this laptop's. Exported vars still win over both,
 # so a one-off override works without editing anything.
-_polyumi_host_env="${POLYUMI_ROOT}/config/env.$(hostname).sh"
+_polyumi_host_env="${POLYUMI_ROOT}/config/env.$(hostname -s).sh"
 if [ -f "$_polyumi_host_env" ]; then
   echo "[setup_franka_env] host config: $_polyumi_host_env"
   . "$_polyumi_host_env"
@@ -59,7 +59,7 @@ fi
 unset _polyumi_host_env
 
 : "${FR3_IFACE:=enp0s31f6}"
-: "${FR3_LAPTOP_IP:=10.0.0.1/24}"
+: "${FR3_SELF_IP:=10.0.0.1/24}"
 : "${FR3_NM_PROFILE:=fr3-link}"
 
 # --- franka_description, for Foxglove's URDF panel ---
@@ -85,12 +85,9 @@ fi
 # the caller's shell rc having already done it — true on a laptop set up for ROS dev, not
 # guaranteed elsewhere (e.g. a GPU box whose rc sources the distro but never this repo's build).
 #
-# `cd` into each setup.bash's own directory before sourcing it, then back: unlike the
-# franka_description case above (data-only, so a plain AMENT_PREFIX_PATH prepend is enough),
-# `ros2` itself needs the real setup.bash chain run — and that chain resolves a companion file by
-# relative path, which under zsh falls back to $PWD instead of the script's own location,
-# breaking with "no such file or directory: $PWD/setup.sh" (CLAUDE.md) unless $PWD already IS
-# that directory. Verified both ways under zsh -ic.
+# `cd` into each setup.bash's own directory before sourcing it, then back: the setup chain
+# resolves a companion file by relative path, which under zsh falls back to $PWD. See CLAUDE.md,
+# "Running colcon build / ros2 from a non-interactive (or zsh) shell".
 : "${ROS_DISTRO_DIR:=/opt/ros/kilted}"
 _polyumi_pwd="$PWD"
 if ! command -v ros2 >/dev/null 2>&1; then
@@ -131,14 +128,14 @@ export CYCLONEDDS_URI="file://${CYCLONEDDS_CONFIG_FILE}"
 # still does normal DHCP for other uses and the static IP is only active while
 # this profile is up. To revert: `nmcli connection down $FR3_NM_PROFILE`.
 if ! command -v nmcli >/dev/null 2>&1; then
-  echo "[setup_franka_env] WARNING: nmcli not found; bring up ${FR3_LAPTOP_IP} on ${FR3_IFACE} yourself"
+  echo "[setup_franka_env] WARNING: nmcli not found; bring up ${FR3_SELF_IP} on ${FR3_IFACE} yourself"
 elif nmcli -t -f NAME connection show --active 2>/dev/null | grep -qx "$FR3_NM_PROFILE"; then
   echo "[setup_franka_env] NM profile '$FR3_NM_PROFILE' already active"
 else
   if ! nmcli -t -f NAME connection show 2>/dev/null | grep -qx "$FR3_NM_PROFILE"; then
-    echo "[setup_franka_env] creating NM profile '$FR3_NM_PROFILE' (${FR3_LAPTOP_IP} on ${FR3_IFACE}, autoconnect off)"
+    echo "[setup_franka_env] creating NM profile '$FR3_NM_PROFILE' (${FR3_SELF_IP} on ${FR3_IFACE}, autoconnect off)"
     nmcli connection add type ethernet ifname "$FR3_IFACE" con-name "$FR3_NM_PROFILE" \
-      ipv4.method manual ipv4.addresses "$FR3_LAPTOP_IP" connection.autoconnect no
+      ipv4.method manual ipv4.addresses "$FR3_SELF_IP" connection.autoconnect no
   fi
   echo "[setup_franka_env] bringing up NM profile '$FR3_NM_PROFILE'"
   nmcli connection up "$FR3_NM_PROFILE"

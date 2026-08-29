@@ -194,24 +194,14 @@ In addition to the strictly necessary offsets above, we also measure & track the
 
 **Change required when: hardware design revision, or new embodiment**
 
-This checks the arm EE jaw's range of motion. Ends up being sort of unnecessary for now because my finger design doesn't interfere with the range of motion, and the Franka Hand documents its range of motion correctly. But it was good to validate this assumption.
-If bringing up a new arm, you should adapt & run this script there too to be safe.
+`gripper_min_width_m` / `gripper_max_width_m` in `ros2_ws/src/polyumi_ros2/config/inference.yaml`
+are **caliper measurements of the fingers**, currently `0.0` and `0.0812` m. The PolyUMI fingers set
+both ends — they meet at the mechanism's true zero and stop the open sweep before the drive does —
+so the numbers are the same on either gripper driver and there is nothing to probe at runtime.
 
-1. **Bring up the arm with the gripper allowed to move.** Without `execute_gripper:=true` every command is a silent no-op and the probe measures nothing.
-   ```bash
-   ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true
-   ```
-   The bridge's clamp already defaults to the Franka Hand's own maximum (0.0817 m), so the fingers stop the open sweep first if anything does. Only pass `gripper_max_width` if you have deliberately lowered it.
-
-2. **Clear the fingers and run the probe.** It drives both extremes several times and reports where the hand actually stopped.
-   ```bash
-   ros2 run polyumi_ros2 gripper_range_probe
-   ```
-   Do **not** run it while `policy_client_node` is up — they publish to the same topic.
-
-3. **Check the spread before believing the mean.** `Move` applies no force and stalls on contact, so a closed endpoint that wanders more than ~1 mm between reps is not repeatable enough to calibrate against; the probe fails and tells you to make the endpoint force-defined instead (re-run with the bridge's `use_grasp_below_m` raised and a chosen `grasp_force_n`). The probe also asks the bridge for its clamp, so it can tell you whether the open endpoint was the fingers or the software stopping them.
-
-4. **Paste the `gripper_min_width_m` / `gripper_max_width_m` lines** into `ros2_ws/src/polyumi_ros2/config/inference.yaml`.
+Measure the closed and fully-open jaw aperture directly and paste both values in. Note that 0.105 m
+is *not* this number: that is the stock metal Franka finger attachments, which also cannot close
+past 0.023 m.
 
 #### Sanity check
 
@@ -303,28 +293,32 @@ went. **This moves the arm.**
 
 #### How to calibrate — the gripper
 
-1. **Bring up the gripper with execution on** — without `execute_gripper:=true` every command is a
-   silent no-op and the probe measures nothing.
+**Name the driver explicitly.** The two have different plants and take different probe modes, so a
+measurement taken against the wrong one is not merely stale, it is meaningless.
+
+1. **Bring up the gripper with execution on** — without `execute_gripper:=true` the driver is not
+   started at all and the probe measures nothing.
    ```bash
-   ros2 launch nuc/launch/fr3_inference.launch.py execute_gripper:=true
+   ros2 launch nuc/launch/fr3_inference.launch.py gripper:=faulhaber execute_gripper:=true
+   # ...or gripper:=hand, for the legacy Franka Hand path
    ```
-2. **Nothing between the fingers**, then run it. It needs no other measurement as input — the hand
-   is truncated by its own latency alone, so this run is independent of `latency.arm_exec`:
+2. **Nothing between the fingers**, then run it. It needs no other measurement as input, so this run
+   is independent of `latency.arm_exec`:
    ```bash
+   # faulhaber — a real tracker, so a chirp is the right excitation
+   ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper_chirp
+   # hand — a step response instead: 30 mm step, time-to-first-motion, 8 alternating reps.
    ros2 run polyumi_ros2 latency_probe --ros-args -p mode:=gripper
    ```
-   This one is a **step response**, not a chirp: it commands a 30 mm step, times how long until the
-   fingers start moving, and repeats 8 times alternating direction. See the gotcha below for why
-   cross-correlation is the wrong tool for this particular plant.
 3. This prints **two** numbers, because they are two different quantities:
-   - `latency.gripper_exec` — do **not** paste this one in. It is command → the hand actually
-     moving, a few hundred ms, most of it the hand's own firmware (a `Move` blocks 363 ms even for
-     zero travel). `franka_hand_node` already models that internally (`HandLimits.cmd_delay` in
-     `gripper_trajectory_interpolator.hpp`) to decide which setpoint each `Move` can still reach —
-     so feeding the same figure into `config/inference.yaml`'s `gripper_exec` would compensate for
-     it twice. That field is currently `0.0` and should be left that way.
    - `latency.gripper` — the **observation** side, half the `/fr3_gripper/joint_states` publish
-     interval. Goes in `config/inference.yaml`, unaffected by the above.
+     interval. Goes in `config/inference.yaml` on either driver.
+   - `latency.gripper_exec` — command → fingers actually moving. **On `faulhaber`, paste it in.** It should be about 0:
+     it is a 200 Hz CSP tracker that models nothing internally, so nothing else compensates for it.
+     **On `hand`, do NOT** — most of that figure is the hand's own firmware (a `Move` blocks 363 ms
+     even for zero travel), and `franka_hand_node` already models it (`HandLimits.cmd_delay` in
+     `gripper_trajectory_interpolator.hpp`) to decide which setpoint each `Move` can still reach, so
+     pasting it would compensate twice. Both fields ship at `0.0`.
 
 
 #### Gotchas

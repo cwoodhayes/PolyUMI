@@ -37,10 +37,8 @@ collides early at either end**; the hand's own limits are the binding ones. A re
 met before the mechanism bottomed out would make it non-zero, which is why the low clamp is
 ``min_width_m`` rather than a hardcoded 0.
 
-Derive the numbers with::
-
-    pingest calibrate-gripper --scene <scene>   # the closed width, from an open/close recording
-    ros2 run polyumi_ros2 gripper_range_probe   # both apertures, from the hand itself
+Derive the closed width with ``pingest calibrate-gripper --scene <scene>``, from an open/close
+recording. The two apertures are caliper measurements on the fingers themselves (0.0 and 0.0812 m).
 
 The closed width does not appear in this file at all — the DP exporter has already subtracted it
 by the time a width reaches the policy. It only mattered to inference for checkpoints exported
@@ -48,10 +46,45 @@ before 2026-08-09, which spoke raw tag separation and needed ``closed_width - cl
 here; support for those was dropped rather than carried.
 
 **This aligns the zero point, not the stroke**, and the two mechanisms genuinely differ: the
-handheld reaches 132.3 mm of tag separation where the FR3 manages 126.2 mm, so the top ~7% of the
+handheld reaches 132.3 mm of tag separation where the FR3 manages 125.8 mm, so the top ~7% of the
 policy's commanded range clamps at ``max_width_m``. That surfaces as the policy's intent saturating
 rather than as an error.
 """
+
+#: The single joint ``franka_gripper_control`` (the FAULHABER driver) publishes, already carrying
+#: the whole aperture. ``franka_hand_node`` follows franka_gripper instead and publishes
+#: ``fr3_finger_joint1``/``2``, each holding HALF the aperture.
+WIDTH_JOINT_NAME = 'fr3_gripper_width'
+
+#: The pair ``franka_hand_node`` publishes, following franka_gripper. Each carries HALF the
+#: aperture, so BOTH must be present: one alone is not a narrower gripper, it is half a reading.
+FINGER_JOINT_NAMES = ('fr3_finger_joint1', 'fr3_finger_joint2')
+
+
+def aperture_from_joint_state(msg) -> float | None:
+    """
+    Read a jaw aperture out of a ``/fr3_gripper/joint_states`` message.
+
+    The two drivers spell the same physical quantity differently, and getting it wrong is a silent
+    halving or doubling of a width the policy acts on — so the decision is made here once, off the
+    joint NAMES the message already carries, rather than guessed from how many entries it has. A
+    Hand message must carry BOTH finger joints to be read at all, since either one alone is half an
+    aperture and indistinguishable from a nearly-closed gripper.
+
+    :param msg: a ``sensor_msgs/JointState`` from the gripper driver.
+    :returns: jaw aperture in metres, or None if the message names no width this understands.
+    """
+    names = list(msg.name)
+
+    def position_of(joint_name):
+        index = names.index(joint_name) if joint_name in names else -1
+        return float(msg.position[index]) if 0 <= index < len(msg.position) else None
+
+    width = position_of(WIDTH_JOINT_NAME)
+    if width is not None:
+        return width
+    halves = [position_of(name) for name in FINGER_JOINT_NAMES]
+    return sum(halves) if None not in halves else None
 
 
 def policy_to_robot_width(width_m: float, min_width_m: float, max_width_m: float) -> float:
