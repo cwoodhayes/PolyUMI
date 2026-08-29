@@ -1,4 +1,4 @@
-# Training the visuomotor diffusion policy
+# Training a policy
 
 This is the step **after** ingest and preprocessing. The full pipeline is:
 
@@ -7,15 +7,20 @@ pingest fetch → process-all → pp (preprocessing steps 1–5) → export → 
 ```
 
 Training runs a fork of [UMI](https://github.com/real-stanford/universal_manipulation_interface)
-(`external/polyumi_diffusion_policy`) inside a **Docker** image, so it needs no host conda
-(which fights the ROS install) and is portable to the GPU workstation. The same image serves
-both training and inference — the serving environment must match the training one because
-checkpoints are dill-pickled and unpickle against the exact dependency tree.
+inside a **Docker** image, so it needs no host conda (which fights the ROS install) and is portable
+to the GPU workstation. The same image serves both training and inference — the serving environment
+must match the training one because checkpoints are dill-pickled and unpickle against the exact
+dependency tree.
 
-This doc covers the **visuomotor** policy — vision plus proprioception, which is what
-`export --type dp` (the default) produces. For adding the finger contact mic as an observation,
-the data contract and the ManiWAV recipe are in
-[maniwav-audio-policy.md](maniwav-audio-policy.md); the policy itself is not implemented yet.
+There are **two forks** under `external/`, selected with `POLICY` (below): the visuomotor diffusion
+policy (`dp`, the default) and Rickmer's Vista multimodal zoo (`vista`). Most of this doc is
+written for `dp` — the flags, mounts and rootless gotchas are identical for both — with the
+Vista-specific parts in "Choosing a policy" and "Vista".
+
+The visuomotor policy takes vision plus proprioception, which is what `export --type dp` (the
+default) produces. Vista adds the finger camera and the contact mic, from
+`export --type polyumi`; the data contract and the ManiWAV recipe behind the audio channel are in
+[maniwav-audio-policy.md](maniwav-audio-policy.md).
 
 ## Prerequisites
 
@@ -52,12 +57,36 @@ flags and the dataset/output mounts. Any extra arguments pass straight through t
 **Hydra overrides** (`training.num_epochs=...`, `logging.mode=offline`, `task.dataset_path=...`,
 etc). Outputs (checkpoints, hydra logs) land in `data/dp_outputs/` by default (`OUTPUT_DIR`).
 
-`DP_CONFIG` is forwarded into the container as an env var, meant to select which workspace config
-Hydra runs for a policy other than the visuomotor default (an env var rather than a Hydra
-override because Hydra cannot set `--config-name` that way) — but it is currently an **inert
-hook**: the fork's `docker/train.sh` does not yet read it into `--config-name`, so today's
-visuomotor default always runs regardless of the value. See
-[maniwav-audio-policy.md](maniwav-audio-policy.md) §5.
+`CONFIG_NAME` selects which Hydra workspace config runs, for a fork that offers more than one (an
+env var rather than a Hydra override, because Hydra cannot set `--config-name` that way). Each
+policy's default is in its `config/policy.*.env`; set `CONFIG_NAME` in the calling shell to
+override it for one run. It replaces the old `DP_CONFIG`, which was never wired to anything.
+
+## Choosing a policy
+
+`POLICY` picks which fork gets built and run. It defaults to `dp`, so every command above is
+unchanged.
+
+| `POLICY` | Fork | Image | Entrypoint | Dataset |
+|---|---|---|---|---|
+| `dp` *(default)* | `external/polyumi_diffusion_policy` | `polyumi-dp` | `docker/train.sh` | `export --type dp` |
+| `vista` | `external/polyumi_vista_policy` | `polyumi-vista` | `docker/train_day0suite.sh` | `export --type polyumi` |
+
+The wiring lives in **`config/policy.<name>.env`** in this repo — one file per fork, holding its
+directory under `external/`, its image tag, its container entrypoint, where `DATASET` mounts, and
+its default `CONFIG_NAME`. These are facts about how PolyUMI *drives* a fork, so they belong here
+rather than in the submodule: a fork cannot know its own path in the parent, and the values have to
+be readable before there is anything checked out to read. Same pattern as `config/env.<hostname>.sh`.
+
+Hyperparameters are **not** here. They stay in each fork's own Hydra tree
+(`vista/config/`, `diffusion_policy/config/`); `config/policy.*.env` only names which workspace yaml
+to run. Adding a third fork is a submodule plus one new `config/policy.<name>.env`.
+
+Building without starting a run — useful for the first, slow build of a new fork:
+
+```bash
+POLICY=vista ./build_policy_image.sh
+```
 
 `WANDB_ENTITY`/`WANDB_PROJECT` are forwarded to the container only if set in the calling shell
 (the config resolves them via `${oc.env:WANDB_ENTITY,null}` / `${oc.env:WANDB_PROJECT,polyumi}`),
@@ -72,12 +101,14 @@ so leaving them unset falls back to your wandb login's default entity and the `p
 
 | Stage | Context | What | Cost |
 |---|---|---|---|
-| `polyumi-dp-base` | `external/polyumi_diffusion_policy` | conda env, torch, diffusion_policy | ~23 min cold, then cached |
-| `polyumi-dp` | `inference_server` | `polyumi_inference` layered on top | seconds |
+| `<image>-base` | the selected fork | conda env, torch, the policy code | ~23 min cold, then cached |
+| `<image>` | `inference_server` | `polyumi_inference` + `pytest` layered on top | seconds |
 
-Two stages because the fork's Dockerfile builds with the *fork directory* as its context and so
+Two stages because a fork's Dockerfile builds with the *fork directory* as its context and so
 cannot see `inference_server/`, which both ends of the inference protocol import. Layer caching
 makes this cheaper than one build would be: editing the shared library rebuilds only stage two.
+The stage-one solve is **not** shared between forks — each has its own conda env — so the first
+build of a new policy pays the ~23 minutes again.
 
 To build by hand:
 
@@ -199,6 +230,53 @@ call it makes to the dummy server today, so nothing changes on the ROS side but 
 > pose with a warning. `policy_client_node` is wired to it (image→224, URL, `/reset` at episode
 > start) and unit-tested; what remains is the on-arm dry run — see
 > [franka-inference-bringup.md](franka-inference-bringup.md#the-on-arm-sequence).
+
+## Vista
+
+`POLICY=vista` runs Rickmer's multimodal zoo — vision (`camera0_rgb`) + finger camera
+(`finger_rgb`) + contact mic (`mic_0`) + proprioception, with an encoder / fusion / head /
+objective cross-product. Architecture, registries and the porting map are in the fork's
+[`docs/VISTA_AGENT_GUIDE.md`](../external/polyumi_vista_policy/docs/VISTA_AGENT_GUIDE.md).
+
+The submodule is **private** (`RiicK3d/polyumi_vista_policy`), so `git submodule update --init
+external/polyumi_vista_policy` needs collaborator access. lamb gets it by rsync from
+`deploy_lamb.sh`, not by cloning, so no credentials are needed there.
+
+The entrypoint is `scripts/train_day0suite.sh`, a suite runner over eight models: four full
+multimodal (`vista`, `touch_in_the_wild`, `see_hear_feel`, `sparsh_x`), two vision-only
+(`vista_v`, `sparsh_x_v`), two vision+tactile (`vista_vt`, `touch_in_the_wild_vt`). A bare
+invocation trains **all eight back to back**, so narrow it with `--model`:
+
+```bash
+POLICY=vista DATASET=/abs/path/to/day0suite.zarr.zip \
+    ./train_policy.sh --model vista_vt training.max_epochs=2 logging.mode=offline
+```
+
+Note `training.max_epochs`, not the visuomotor config's `training.num_epochs`. `DRY_RUN=1` prints
+the `train_vista.py` command lines each model would run and exits.
+
+### Running the fork's tests
+
+The image can run its own test suite — `pytest` is layered in by
+`docker/polyumi_inference.Dockerfile`:
+
+```bash
+docker run --rm --user 0:0 \
+    -e HOME=/tmp -e HF_HOME=/hf_cache -e MPLCONFIGDIR=/tmp/mpl \
+    -v "${HOME}/.cache/huggingface:/hf_cache:rw" \
+    polyumi-vista \
+    python -m pytest test/test_sensor_ablation.py test/test_vista_shapes.py -q
+```
+
+CPU-only, no GPU flag needed. The HF-cache mount is for the AST audio encoder, which the `va` and
+`vta` ablation groups pull from the hub on first run.
+
+> **`vista/data/` is missing from the fork**, so nothing that touches the dataset runs yet — the
+> repo's `.gitignore` has an unanchored `data` pattern, which git applies at every depth, and the
+> package was silently never committed. That is why the command above names those two test files:
+> `test/test_vista_dataset.py` fails at import, and training fails on
+> `vista/config/task/day0suite.yaml`'s `_target_: vista.data.vista_dataset.VistaDataset`. Fix is
+> upstream — anchor the pattern (`/data`) and commit the package.
 
 ## What is out of scope here
 

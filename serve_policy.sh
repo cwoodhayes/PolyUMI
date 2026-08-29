@@ -15,6 +15,11 @@
 #   CKPT=/abs/path/to/epoch=0070-....ckpt ./serve_policy.sh
 #   CKPT=... PORT=8001 ./serve_policy.sh
 #   CKPT=... CUDA_VISIBLE_DEVICES=1 ./serve_policy.sh    # pin to the second GPU
+#   POLICY=vista CKPT=... ./serve_policy.sh              # serve a checkpoint from another fork
+#
+# POLICY selects the fork the same way train_policy.sh does (config/policy.<name>.env). It must
+# match the fork the checkpoint was trained with -- checkpoints are dill-pickled against their
+# image's dep tree and will not unpickle against another's.
 #
 # serve_policy.py loads the policy on plain 'cuda', i.e. whatever CUDA_VISIBLE_DEVICES makes
 # device 0. Not defaulted here: which card is quiet changes hour to hour, so check `nvidia-smi`.
@@ -22,7 +27,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-IMAGE="${IMAGE:-polyumi-dp}"
+POLICY="${POLICY:-dp}"
 CKPT="${CKPT:?set CKPT=/abs/path/to/<name>.ckpt (a trained checkpoint from train_policy.sh)}"
 PORT="${PORT:-8002}"
 
@@ -53,9 +58,11 @@ mkdir -p "${HF_CACHE_DIR}"
 
 # shellcheck source=build_policy_image.sh
 source "${REPO_ROOT}/build_policy_image.sh"
-build_policy_image "${REPO_ROOT}" "${IMAGE}"
+# Sets IMAGE, POLICY_DIR and SERVE_CMD from config/policy.${POLICY}.env.
+policy_select "${REPO_ROOT}" "${POLICY}"
+build_policy_image "${REPO_ROOT}" "${IMAGE}" "${POLICY_DIR}"
 
-echo ">> serving (checkpoint: ${CKPT}) on http://0.0.0.0:${PORT}"
+echo ">> serving ${POLICY} (checkpoint: ${CKPT}) on http://0.0.0.0:${PORT}"
 # The checkpoint file is mounted directly (its filename contains '=', which is fine for a bind
 # mount — only ':' would confuse -v); CKPT_PATH points at the clean in-container path. HOME and
 # cache dirs point at /tmp so anything needing a writable home works regardless of the container
@@ -74,4 +81,4 @@ exec docker run --rm -i ${TTY_FLAG} \
     -v "${CKPT}:/data/model.ckpt:ro" \
     -v "${HF_CACHE_DIR}:/hf_cache:rw" \
     "${IMAGE}" \
-    bash docker/serve.sh
+    ${SERVE_CMD}

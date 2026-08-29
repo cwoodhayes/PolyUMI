@@ -42,6 +42,13 @@ ssh "${HOST}" "
     test -f ${REPO}/inference_server/polyumi_inference/wire.py
     test -f ${REPO}/docker/polyumi_inference.Dockerfile
     echo '    fork + polyumi_inference present'
+    # Guarded: the Vista fork is optional here, but a half-synced one is worth catching now rather
+    # than as a stage-1 build failure 20 minutes in.
+    if [ -d ${REPO}/external/polyumi_vista_policy ]; then
+        test -f ${REPO}/external/polyumi_vista_policy/Dockerfile
+        test -f ${REPO}/external/polyumi_vista_policy/scripts/train_day0suite.sh
+        echo '    vista fork present'
+    fi
 "
 
 # colcon COPIES sources into install/, so an edited node keeps running the old code until you
