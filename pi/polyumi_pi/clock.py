@@ -13,10 +13,6 @@ Deliberately free of sounddevice imports, so it runs — and is tested — off t
 # Above this, a measured buffering lag is not a lag but a bad clock reading.
 MAX_PLAUSIBLE_LAG_S = 1.0
 
-# EMA weight for new lag samples. Low: the lag is the capture buffer's occupancy, which is
-# near-constant, so most of the per-callback variation is frame quantisation.
-LAG_EMA_ALPHA = 0.1
-
 
 class AudioStreamClock:
     """
@@ -35,11 +31,13 @@ class AudioStreamClock:
     re-reads the clock ~0.4 ms later and folds the callback's own startup cost into every
     timestamp.
 
-    A reading outside the plausible band reuses the tracked lag, so timestamps stay continuous
-    across the gap; before any usable reading the lag is modelled as one block. Measured on the
-    WM8960 HAT, 2026-08-29, 44.1 kHz / 20 ms blocks: 20.0027 ms, stdev 0.011 ms. The one-block
-    model is not a degraded fallback there, it is the same answer to within the two-frame
-    quantisation of the ALSA delay.
+    Each usable reading is applied as measured: it is the age of *this* callback's first sample,
+    so a callback that ran late has genuinely been holding a fuller buffer and must be stamped
+    with the larger lag. A reading outside the plausible band reuses the last good lag, so
+    timestamps stay continuous across the gap; before any usable reading the lag is modelled as
+    one block. Measured on the WM8960 HAT, 2026-08-29, 44.1 kHz / 20 ms blocks: 20.0027 ms, stdev
+    0.011 ms. The one-block model is not a degraded fallback there, it is the same answer to
+    within the two-frame quantisation of the ALSA delay.
 
     The lag is the capture buffer's occupancy, not the codec's own conversion delay — that
     remains for ``latency.piezo_mic`` to cover.
@@ -80,10 +78,7 @@ class AudioStreamClock:
         """
         lag_s = current_time_s - adc_time_s
         if 0.0 < lag_s <= MAX_PLAUSIBLE_LAG_S:
-            if self._lag_s is None:
-                self._lag_s = lag_s
-            else:
-                self._lag_s += LAG_EMA_ALPHA * (lag_s - self._lag_s)
+            self._lag_s = lag_s
         else:
             self.n_rejected += 1
         return epoch_ns - round(self.lag_s * 1e9)
