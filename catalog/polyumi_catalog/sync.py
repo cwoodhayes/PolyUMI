@@ -30,6 +30,7 @@ import pathlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from polyumi_ingest import timing
 from polyumi_pi.files.metadata import SessionMetadata
 from sqlmodel import Session as DBSession
 from sqlmodel import select
@@ -174,8 +175,11 @@ def _sync_scene(db: DBSession, scene_dir: pathlib.Path, now: datetime, force: bo
         task_id = task.id
         if created:
             stats.tasks_created += 1
-    created_ats = [m.created_at for _, m in metas if m.created_at is not None]
+    created_ats = [m.created_at for _, m in metas]
     scene_created = min(created_ats) if created_ats else None
+    # One span rule for the whole project, so the scene pane and a dataset's manifest cannot
+    # disagree about how long a scene ran.
+    scene_started, scene_ended = timing.span_from_metas([m for _, m in metas])
 
     # retire a stale row left behind if this scene's resolved identity has changed since
     # the last sync (e.g. metadata previously failed to parse everywhere, so scene_id fell
@@ -190,6 +194,8 @@ def _sync_scene(db: DBSession, scene_dir: pathlib.Path, now: datetime, force: bo
     scene.notes = manifest.notes if manifest else scene.notes
     scene.archived = _is_archived(scene_dir)
     scene.created_at = scene_created
+    scene.started_at = scene_started
+    scene.ended_at = scene_ended
     scene.synced_at = now
     db.add(scene)
 
@@ -291,6 +297,9 @@ def _sync_dataset_manifest(
     dataset.n_episodes = manifest.n_episodes
     dataset.polyumi_version = manifest.polyumi_version
     dataset.exporter_type = manifest.exporter_type
+    dataset.scene_seconds = manifest.scene_seconds
+    dataset.episode_seconds = manifest.episode_seconds
+    dataset.exported_seconds = manifest.exported_seconds
     db.add(dataset)
     db.flush()  # assign dataset.id if new
 

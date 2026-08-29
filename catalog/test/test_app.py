@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import pathlib
+import re
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
 import zarr
 from fastapi.testclient import TestClient
@@ -347,6 +349,39 @@ def test_select_scene_includes_assign_task_dropdown(tmp_path: pathlib.Path):
     resp = _client(tmp_path).get('/select/scene/scene-1')
     assert 'name="task_id"' in resp.text
     assert '>fold_towel<' in resp.text
+
+
+def test_scene_pane_renders_durations_and_unknowns(tmp_path: pathlib.Path):
+    """The `duration` filter is wired up and covers both its branches. Numbers: test_queries."""
+    rec = tmp_path / 'recordings'
+    started = datetime(2026, 7, 26, 10, 0, 0, tzinfo=timezone.utc)
+    # scene-1 has a measurable span; scene-2's session never finalized, so it has none.
+    for scene_id, name, duration in (
+        ('scene-1', 'scene_2026-07-26_10-00-00_abcd', 60),
+        ('scene-2', 'scene_2026-07-26_11-00-00_efgh', None),
+    ):
+        scene_dir = rec / name
+        scene_dir.mkdir(parents=True)
+        SceneManifest(scene_id=scene_id).write_to_scene_dir(scene_dir)
+        for i, offset in enumerate((30, 630)):  # ten minutes apart
+            sd = scene_dir / f'session_{i}'
+            sd.mkdir()
+            SessionMetadata(
+                path=sd / 'metadata.json',
+                scene_id=scene_id,
+                session_type=SessionType.EPISODE,
+                created_at=started + timedelta(seconds=offset),
+                duration_s=duration,
+                scene_started_at=started,
+            ).to_file()
+
+    engine = get_engine(tmp_path / 'catalog.db')
+    sync_recordings(rec, engine)
+    client = TestClient(create_app(engine, recordings_dir=rec))
+
+    # Anchored to the row itself: a bare '—' would also match the other nullable fields.
+    assert re.search(r'Scene time</dt>\s*<dd>0:11:30</dd>', client.get('/select/scene/scene-1').text)
+    assert re.search(r'Scene time</dt>\s*<dd>—</dd>', client.get('/select/scene/scene-2').text)
 
 
 def test_post_create_task_redirects_and_persists(tmp_path: pathlib.Path):

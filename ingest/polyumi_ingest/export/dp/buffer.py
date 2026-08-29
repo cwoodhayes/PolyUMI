@@ -451,6 +451,9 @@ def _export_episode(
             'segment': seg_i,
             'frame_range': [int(gidx[0]), int(gidx[-1])],
             'frame_stride': stride,
+            # Span of the exported steps, i.e. how much real time this episode contributes to
+            # the dataset. First-to-last, so it is one frame short of the time the steps cover.
+            'duration_s': float(span_ts[-1] - span_ts[0]),
         }
         # Absent entirely when nothing extra was exported, so the default --type dp's sidecar
         # and meta attrs stay byte-identical to a plain visuomotor buffer.

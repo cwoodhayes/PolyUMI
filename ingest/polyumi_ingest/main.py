@@ -18,6 +18,7 @@ from polyumi_pi.files.session import SessionFiles
 from rich.logging import RichHandler
 from rich.prompt import Confirm
 
+from polyumi_ingest import timing
 from polyumi_ingest.export.dp import MIN_SEGMENT_STEPS
 from polyumi_ingest.gopro_fetch import DEFAULT_THRESHOLD_MS, find_gopro_mount, find_gopro_video
 from polyumi_ingest.pi_fetch import DEFAULT_HOST, PiFetch
@@ -794,6 +795,13 @@ def _run_export(
     _log_pose_source_summary(provenance)
     sidecar_path = _write_provenance_sidecar(output_path, provenance)
     log.info(f'Exported {n} episode(s) from {len(scene_paths)} scene(s) → {output_path} (provenance: {sidecar_path})')
+    totals = timing.dataset_time_totals(scene_paths, provenance)
+    at_rig = totals['scene_seconds']
+    log.info(
+        f'  time: {"unknown" if at_rig is None else f"{at_rig / 60:.1f} min"} at the rig, '
+        f'{totals["episode_seconds"] / 60:.1f} min recorded, '
+        f'{totals["exported_seconds"] / 60:.1f} min in the dataset'
+    )
 
 
 class ExportType(str, Enum):

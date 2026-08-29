@@ -289,6 +289,31 @@ def task_detail(db: DBSession, task_key: str) -> dict:
     }
 
 
+def _scene_time(scene: Scene, episodes: list[Session]) -> dict:
+    """
+    Scene wall-clock span vs. time actually recording, the collection-productivity numbers.
+
+    Same three names a dataset uses (``polyumi_ingest.timing``), so the scene pane and the
+    dataset pane can be read against each other: ``scene_seconds`` spans the whole run,
+    ``episode_seconds`` sums the EPISODE sessions' own lengths, and ``usable_episode_seconds``
+    drops the ones an export would skip. A mapping pass is neither, so its time lands in the
+    gap between the first two, same as the dead time between episodes.
+    """
+    span = None
+    if scene.started_at is not None and scene.ended_at is not None:
+        span = (scene.ended_at - scene.started_at).total_seconds()
+    recorded = sum(s.duration_s or 0.0 for s in episodes)
+    return {
+        'scene_seconds': span,
+        'episode_seconds': recorded,
+        'usable_episode_seconds': sum(s.duration_s or 0.0 for s in episodes if _is_usable(s)),
+        # Deliberately unguarded against a negative span, which is worth seeing: `ended_at` is
+        # derived from each session's own `created_at`, so a fraction below zero means the Pi
+        # stepped its clock mid-scene and every timestamp in that scene is suspect.
+        'episode_frac': (recorded / span) if span else None,
+    }
+
+
 def scene_detail(db: DBSession, scene_id: str) -> dict:
     """Return the detail-panel view model for a Scenes-column selection."""
     scene = db.get(Scene, scene_id)
@@ -315,6 +340,7 @@ def scene_detail(db: DBSession, scene_id: str) -> dict:
         'archived': scene.archived,
         'created_at': scene.created_at,
         'synced_at': scene.synced_at,
+        **_scene_time(scene, episodes),
         'n_sessions': len(sessions),
         'n_episodes': len(episodes),
         # so the pane agrees with the scene's Scenes-column badge, which is usable/total
@@ -390,6 +416,9 @@ def dataset_detail(db: DBSession, dataset_id: int) -> dict:
         'polyumi_version': d.polyumi_version,
         'exporter_type': d.exporter_type,
         'created_at': d.created_at,
+        'scene_seconds': d.scene_seconds,
+        'episode_seconds': d.episode_seconds,
+        'exported_seconds': d.exported_seconds,
         'members': [
             {'scene_id': m.scene_id, 'name': scene_names.get(m.scene_id, m.scene_id), 'episodes': m.episodes}
             for m in members

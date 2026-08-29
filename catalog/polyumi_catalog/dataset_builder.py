@@ -20,6 +20,8 @@ import subprocess
 from sqlmodel import Session as DBSession
 from sqlmodel import select
 
+from polyumi_ingest import timing
+
 from polyumi_catalog.manifests import DatasetManifest, DatasetMemberSpec
 from polyumi_catalog.models import Dataset, DatasetMember, Scene, Task
 
@@ -104,10 +106,15 @@ def build_dataset(
     output_path = output_dir / f'{name}.zarr.zip'
     manifest_path = output_dir / f'{name}.dataset.json'
 
+    scene_paths = [pathlib.Path(s.dir) for s in scenes]
     try:
-        n_episodes, pose_provenance = export_fn([pathlib.Path(s.dir) for s in scenes], output_path)
+        n_episodes, pose_provenance = export_fn(scene_paths, output_path)
     except (FileNotFoundError, ValueError, RuntimeError) as err:
         raise DatasetBuildError(str(err)) from err
+
+    # From disk, not the DB rows: the same helper `pingest export` logs from, so a dataset
+    # built here and one built from the CLI report the same seconds.
+    totals = timing.dataset_time_totals(scene_paths, pose_provenance)
 
     manifest = DatasetManifest(
         name=name,
@@ -118,6 +125,7 @@ def build_dataset(
         members=[DatasetMemberSpec(scene_id=s.scene_id, scene_dir=s.dir, episodes='all') for s in scenes],
         pose_provenance=pose_provenance,
         exporter_type=exporter_type,
+        **totals,
     )
     manifest.to_file(manifest_path)
 
@@ -129,6 +137,7 @@ def build_dataset(
         n_episodes=n_episodes,
         polyumi_version=manifest.polyumi_version,
         exporter_type=exporter_type,
+        **totals,
     )
     db.add(dataset)
     db.flush()  # assign dataset.id
