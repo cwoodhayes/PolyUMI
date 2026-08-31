@@ -3,13 +3,13 @@
     "3D!oah9y3": {
       "cameraState": {
         "perspective": true,
-        "distance": 8.802533373032816,
-        "phi": 88.94111917862352,
-        "thetaOffset": 169.1858414070775,
+        "distance": 1.9888051397416786,
+        "phi": 81.65289020427466,
+        "thetaOffset": 24.627524077710902,
         "targetOffset": [
-          1.3493915315382277,
-          -7.259365787179679,
-          -4.1030786173700024e-19
+          -0.04084533603184034,
+          0.06620880051285748,
+          0.29419321130628545
         ],
         "target": [
           0,
@@ -29,7 +29,10 @@
       "followMode": "follow-pose",
       "followTf": "slam",
       "scene": {
-        "meshUpAxis": "z_up"
+        "meshUpAxis": "z_up",
+        "transforms": {
+          "labelSize": 0.0466
+        }
       },
       "transforms": {
         "frame:slam": {
@@ -54,11 +57,14 @@
           "axisScale": 0.3
         },
         "/slam/pose": {
-          "visible": true
+          "visible": false
         },
         "/optitrack/pose_raw": {
           "visible": false,
           "axisScale": 0.1
+        },
+        "/eef/pose_slam": {
+          "visible": true
         }
       },
       "layers": {
@@ -190,6 +196,52 @@
         }
       }
     },
+    "Image!11fq2wz": {
+      "cameraState": {
+        "distance": 20,
+        "perspective": true,
+        "phi": 60,
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "thetaOffset": 60,
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followMode": "follow-pose",
+      "scene": {},
+      "transforms": {},
+      "topics": {},
+      "layers": {},
+      "publish": {
+        "type": "point",
+        "poseTopic": "/move_base_simple/goal",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "synchronize": false,
+      "imageMode": {
+        "imageTopic": "/finger/logmel"
+      },
+      "foxglovePanelTitle": "piezo audio: log-mel view (model input)"
+    },
     "Plot!3ahq65t": {
       "xAxisLabel": "",
       "foxglovePanelTitle": "Linear Accel",
@@ -264,29 +316,22 @@
       ]
     },
     "Audio!3nxj4f9": {
-      "volume": 0.89,
+      "volume": 0.15,
       "slidingViewWidth": 10,
       "topic": "/gopro/audio",
-      "muted": true
+      "muted": false
     },
     "Audio!2w9y83j": {
-      "volume": 0.98,
+      "volume": 0.93,
       "slidingViewWidth": 10,
       "topic": "/finger/piezo",
       "muted": false
     },
     "Audio!1v0aezy": {
-      "volume": 0,
+      "volume": 0.95,
       "slidingViewWidth": 10,
       "topic": "/finger/air",
       "muted": true
-    },
-    "RosOut!3jpmf8l": {
-      "minLogLevel": 1,
-      "preload": true,
-      "searchTerms": [],
-      "nameFilter": {},
-      "fontSize": 12
     }
   },
   "globalVariables": {},
@@ -299,16 +344,17 @@
   },
   "layout": {
     "first": {
-      "first": {
-        "first": {
-          "first": "3D!oah9y3",
-          "second": "Image!3zkla5f",
-          "direction": "row"
-        },
+      "first": "3D!oah9y3",
+      "second": {
+        "first": "Image!3zkla5f",
         "second": "Image!24wk5v",
-        "direction": "row",
-        "splitPercentage": 71.28001014564859
+        "direction": "row"
       },
+      "direction": "row",
+      "splitPercentage": 31.73134074891738
+    },
+    "second": {
+      "first": "Image!11fq2wz",
       "second": {
         "first": {
           "first": "Plot!3ahq65t",
@@ -334,11 +380,10 @@
         "direction": "column",
         "splitPercentage": 33.79404020668456
       },
-      "direction": "column",
-      "splitPercentage": 42.63565891472868
+      "direction": "row",
+      "splitPercentage": 23.98743313237667
     },
-    "second": "RosOut!3jpmf8l",
     "direction": "column",
-    "splitPercentage": 89.56515507139913
+    "splitPercentage": 47.98947113219963
   }
 }
