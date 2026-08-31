@@ -2,7 +2,13 @@
 
 import numpy as np
 import pytest
-from polyumi_ingest.preproc.logmel import hz_to_mel, log_mel_spectrogram, mel_filterbank, mel_to_hz
+from polyumi_ingest.preproc.logmel import (
+    display_range,
+    hz_to_mel,
+    log_mel_spectrogram,
+    mel_filterbank,
+    mel_to_hz,
+)
 
 SR = 16_000
 N_FFT = 400
@@ -112,3 +118,24 @@ def test_first_frame_covers_the_whole_window_not_half_zero_padding() -> None:
     spec_loud = log_mel_spectrogram(audio_loud_tail, SR, **_PARAMS)
 
     assert not np.allclose(spec_silent[0], spec_loud[0])
+
+
+def test_display_range_ignores_the_silence_floor() -> None:
+    """
+    A mostly-silent episode must not scale to its own floor, or events vanish into the top.
+
+    The 1st percentile of a 95%-silent array is still the floor, but the 99.5th tracks the loud
+    part, so the range spans the events rather than collapsing onto them.
+    """
+    quiet = np.full(2000, np.log(1e-6), dtype=np.float32)
+    quiet[-100:] = 2.0
+    vmin, vmax = display_range(quiet)
+    assert vmin == pytest.approx(np.log(1e-6), abs=1e-3)
+    assert vmax == pytest.approx(2.0, abs=1e-3)
+
+
+def test_display_range_never_returns_a_zero_width_span() -> None:
+    """Callers divide by vmax - vmin; a constant array must not make that a divide by zero."""
+    vmin, vmax = display_range(np.zeros(100, dtype=np.float32))
+    assert vmax > vmin
+    assert display_range(np.zeros((0, N_MELS), dtype=np.float32)) == (0.0, 1.0)

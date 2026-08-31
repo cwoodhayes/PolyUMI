@@ -6,6 +6,7 @@ import logging
 import pathlib
 from concurrent.futures import ThreadPoolExecutor
 
+import cv2
 import numpy as np
 import zarr
 from mcap.writer import Writer
@@ -14,6 +15,7 @@ from scipy.spatial.transform import RigidTransform, Rotation
 
 from polyumi_ingest.config import load_gripper_calib
 from polyumi_ingest.export.helpers import encode_frames_to_jpeg
+from polyumi_ingest.preproc.logmel import display_range
 from polyumi_ingest.pzarr.scene_files import SceneFiles, resolve_gopro_mp4
 from polyumi_ingest.transforms import gripper_calib_transforms, transform_optitrack_pose
 from polyumi_ingest.video_helpers import GoproMp4Frames, open_gopro_frames
@@ -300,6 +302,7 @@ def _register_channels(
     has_eef_pose_slam: bool,
     has_aruco: bool,
     has_chirp_marker: bool,
+    has_logmel: bool,
 ) -> dict[str, int]:
     """Register all schemas and channels; return {topic: channel_id}."""
     img_sid = writer.register_schema('foxglove.CompressedImage', 'jsonschema', _SCHEMA_COMPRESSED_IMAGE)
@@ -345,6 +348,8 @@ def _register_channels(
         channels['/gripper/width'] = ch('/gripper/width', width_sid)
     if has_chirp_marker:
         channels['/session/events'] = ch('/session/events', log_sid)
+    if has_logmel:
+        channels['/finger/logmel'] = ch('/finger/logmel', img_sid)
     return channels
 
 
@@ -388,6 +393,77 @@ def _write_video(
                     }
                 ).encode()
                 writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
+
+
+#: Rolling window and publish rate for the /finger/logmel diagnostic channel. The window is wide
+#: enough to show a contact event's onset and decay around the playhead; the rate is coarse enough
+#: that a minute-long episode costs tens of MB rather than one image per 10 ms hop. Fixed rather
+#: than configurable — this is a look-at-it channel, not a product.
+_LOGMEL_WINDOW_S = 2.0
+_LOGMEL_PUBLISH_HZ = 20.0
+
+#: Nearest-neighbour upscale, so single hops and mel bins stay visible as blocks in Foxglove
+#: rather than being smoothed into each other.
+_LOGMEL_ZOOM_X = 2
+_LOGMEL_ZOOM_Y = 4
+
+
+def _write_logmel(
+    writer: Writer,
+    channel_id: int,
+    logmel: np.ndarray,
+    ts: np.ndarray,
+    quality: int,
+) -> None:
+    """
+    Write the diagnostic log-mel as a rolling-window CompressedImage, one per publish tick.
+
+    ``logmel`` is ``(n_hops, n_mels)`` with bin 0 lowest, as step 6 wrote it; each message is the
+    window centred on that tick, transposed so time runs left-to-right and flipped so low
+    frequencies sit at the bottom. A white column marks the playhead at the window centre —
+    without it there is no telling which part of the picture is "now".
+    """
+    if len(logmel) == 0:
+        return
+    vmin, vmax = display_range(logmel)
+    hop_s = float(np.median(np.diff(ts))) if len(ts) > 1 else _LOGMEL_WINDOW_S
+    half = max(1, int(round(_LOGMEL_WINDOW_S / hop_s / 2)))
+    stride = max(1, int(round(1.0 / (_LOGMEL_PUBLISH_HZ * hop_s))))
+
+    # Colourmap the whole episode once against a single range, so brightness is comparable
+    # across windows rather than re-normalising per frame.
+    scaled = np.clip((logmel - vmin) / (vmax - vmin), 0.0, 1.0)
+    coloured = cv2.applyColorMap((scaled * 255).astype(np.uint8), cv2.COLORMAP_MAGMA)  # (n_hops, n_mels, 3) BGR
+
+    for i in range(0, len(logmel), stride):
+        lo, hi = i - half, i + half
+        window = coloured[max(lo, 0) : min(hi, len(coloured))]
+        # Pad past either end rather than clipping, so the playhead stays at the centre column
+        # for the first and last second of the episode too.
+        pad_before, pad_after = max(0, -lo), max(0, hi - len(coloured))
+        if pad_before or pad_after:
+            window = np.pad(window, ((pad_before, pad_after), (0, 0), (0, 0)))
+        img = np.ascontiguousarray(window.transpose(1, 0, 2)[::-1])
+        img = cv2.resize(
+            img,
+            (img.shape[1] * _LOGMEL_ZOOM_X, img.shape[0] * _LOGMEL_ZOOM_Y),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        img[:, img.shape[1] // 2] = 255
+        ok, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        if not ok:
+            raise RuntimeError('cv2.imencode failed for log-mel window')
+
+        t_s = float(ts[i])
+        msg = json.dumps(
+            {
+                'timestamp': _foxglove_time(t_s),
+                'frame_id': 'finger_logmel',
+                'data': _b64(buf.tobytes()),
+                'format': 'jpeg',
+            }
+        ).encode()
+        writer.add_message(channel_id=channel_id, log_time=_ts_ns(t_s), data=msg, publish_time=_ts_ns(t_s))
 
 
 def _write_audio(
@@ -781,6 +857,11 @@ def export_episode_to_mcap(
     has_chirp_marker = (
         'annotations/time_sync' in ep_grp and 'finger_chirp_onset_s' in ep_grp['annotations/time_sync'].attrs  # type: ignore[index]
     )
+    # Step 6's diagnostic spectrogram. Empty for an episode shorter than one FFT frame, which
+    # is a real case — no channel rather than an empty one.
+    has_logmel = (
+        'annotations/contact_audio/logmel' in ep_grp and ep_grp['annotations/contact_audio/logmel'].shape[0] > 0  # type: ignore[index,union-attr]
+    )
 
     # gopro_to_finger_offset_s = gopro_time - finger_time, so subtract it
     # from gopro timestamps to bring them into the finger (Pi) time domain.
@@ -811,6 +892,7 @@ def export_episode_to_mcap(
                 has_eef_pose_slam=has_eef_pose_slam,
                 has_aruco=has_aruco,
                 has_chirp_marker=has_chirp_marker,
+                has_logmel=has_logmel,
             )
 
             # Use the earliest timestamp across all streams as the TF anchor so that
@@ -924,6 +1006,16 @@ def export_episode_to_mcap(
                 ep_grp['timestamps/finger_piezo'][:],  # type: ignore[index]
                 chunk_size=audio_chunk_size,
             )
+
+            if has_logmel:
+                log.info('  finger piezo log-mel...')
+                _write_logmel(
+                    writer,
+                    ch['/finger/logmel'],
+                    np.asarray(ep_grp['annotations/contact_audio/logmel'][:]),  # type: ignore[index]
+                    np.asarray(ep_grp['annotations/contact_audio/logmel_timestamps'][:]),  # type: ignore[index]
+                    quality=jpeg_quality,
+                )
 
             log.info('  finger air audio...')
             _write_audio(
