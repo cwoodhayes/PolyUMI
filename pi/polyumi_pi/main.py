@@ -70,24 +70,33 @@ def _recv_child_stats(
     name: str,
     timeout_s: float = 1.0,
 ) -> dict:
-    """Receive one final stats payload from a child process."""
+    """
+    Merge every stats payload a child process sent, later keys winning.
+
+    Children send the fields they learn early (the first-frame metadata, the audio start
+    time) as soon as they have them and the full tally at shutdown, because a child that
+    overruns the terminate grace in :func:`_stop_child_process` gets killed before it can
+    report anything. Draining rather than reading one payload is what keeps the early
+    fields — the ones ingest cannot rebuild from the files on disk — through that kill.
+    """
     if conn is None:
         return {}
 
+    stats: dict = {}
     try:
-        if not conn.poll(timeout_s):
+        while conn.poll(timeout_s if not stats else 0):
+            payload = conn.recv()
+            if not isinstance(payload, dict):
+                log.warning(f'Unexpected {name} stats payload type: {type(payload)}')
+                continue
+            stats.update(payload)
+        if not stats:
             log.warning(f'No {name} stats received before timeout.')
-            return {}
-        payload = conn.recv()
-        if not isinstance(payload, dict):
-            log.warning(f'Unexpected {name} stats payload type: {type(payload)}')
-            return {}
-        return payload
     except (EOFError, OSError) as err:
         log.warning(f'Failed to receive {name} stats: {err}')
-        return {}
     finally:
         conn.close()
+    return stats
 
 
 async def _record_session_async(
