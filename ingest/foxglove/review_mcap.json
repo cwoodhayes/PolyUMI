@@ -2,19 +2,18 @@
   "configById": {
     "3D!oah9y3": {
       "cameraState": {
+        "distance": 2.44173097473536,
         "perspective": true,
-        "distance": 1.9888051397416786,
-        "phi": 81.65289020427466,
-        "thetaOffset": 24.627524077710902,
-        "targetOffset": [
-          -0.04084533603184034,
-          0.06620880051285748,
-          0.29419321130628545
-        ],
+        "phi": 100.9974489360878,
         "target": [
           0,
           0,
           0
+        ],
+        "targetOffset": [
+          -0.04084533603184034,
+          0.06620880051285748,
+          0.29419321130628545
         ],
         "targetOrientation": [
           0,
@@ -22,6 +21,7 @@
           0,
           1
         ],
+        "thetaOffset": -43.60190235104815,
         "fovy": 45,
         "near": 0.5,
         "far": 5000
@@ -196,6 +196,25 @@
         }
       }
     },
+    "Plot!3ahq65t": {
+      "xAxisLabel": "",
+      "foxglovePanelTitle": "SLAM availability",
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/eef/pose_slam.pose.position.x",
+          "enabled": true,
+          "color": "#4e98e2",
+          "id": "c8bed577-f471-4d0e-9a00-4aa981d24033",
+          "label": "SLAM pose"
+        }
+      ],
+      "yAxisLabel": "available?",
+      "minYValue": -10000,
+      "maxYValue": 10000,
+      "showYAxisGridLines": false,
+      "showYAxisLabels": false
+    },
     "Image!11fq2wz": {
       "cameraState": {
         "distance": 20,
@@ -241,37 +260,6 @@
         "imageTopic": "/finger/logmel"
       },
       "foxglovePanelTitle": "piezo audio: log-mel view (model input)"
-    },
-    "Plot!3ahq65t": {
-      "xAxisLabel": "",
-      "foxglovePanelTitle": "Linear Accel",
-      "paths": [
-        {
-          "timestampMethod": "receiveTime",
-          "value": "/gopro/accel.linear_acceleration.x",
-          "enabled": true,
-          "color": "#4e98e2",
-          "id": "06c76180-5e97-4141-9891-a39f0b7c4457",
-          "label": "a_x"
-        },
-        {
-          "timestampMethod": "receiveTime",
-          "value": "/gopro/accel.linear_acceleration.y",
-          "enabled": true,
-          "color": "#f5774d",
-          "id": "00912f57-58af-4d8c-837b-234209c744a4",
-          "label": "a_y"
-        },
-        {
-          "timestampMethod": "receiveTime",
-          "value": "/gopro/accel.linear_acceleration.z",
-          "enabled": true,
-          "color": "#2cff00",
-          "id": "68fd08fe-7862-40dd-a2b9-e0731a3f6f75",
-          "label": "a_z"
-        }
-      ],
-      "yAxisLabel": "m/s^2"
     },
     "Plot!35segx7": {
       "foxglovePanelTitle": "Gyro",
@@ -319,7 +307,7 @@
       "volume": 0.15,
       "slidingViewWidth": 10,
       "topic": "/gopro/audio",
-      "muted": false
+      "muted": true
     },
     "Audio!2w9y83j": {
       "volume": 0.93,
@@ -354,24 +342,24 @@
       "splitPercentage": 31.73134074891738
     },
     "second": {
-      "first": "Image!11fq2wz",
+      "first": {
+        "first": "Plot!3ahq65t",
+        "second": "Image!11fq2wz",
+        "direction": "column",
+        "splitPercentage": 33.88160085236731
+      },
       "second": {
         "first": {
-          "first": "Plot!3ahq65t",
-          "second": {
-            "first": "Plot!35segx7",
-            "second": "Plot!3z3pxs",
-            "direction": "row"
-          },
-          "direction": "row",
-          "splitPercentage": 33.166770768269835
+          "first": "Plot!35segx7",
+          "second": "Plot!3z3pxs",
+          "direction": "row"
         },
         "second": {
           "first": {
             "first": "Audio!3nxj4f9",
             "second": "Audio!2w9y83j",
             "direction": "column",
-            "splitPercentage": 49.15541131221808
+            "splitPercentage": 49.41170542289896
           },
           "second": "Audio!1v0aezy",
           "direction": "column",
