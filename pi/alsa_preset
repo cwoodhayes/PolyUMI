@@ -448,7 +448,7 @@ state.wm8960soundcard {
 	control.37 {
 		iface MIXER
 		name 'Left Output Mixer Boost Bypass Volume'
-		value 0
+		value 7
 		comment {
 			access 'read write'
 			type INTEGER
@@ -476,7 +476,7 @@ state.wm8960soundcard {
 	control.39 {
 		iface MIXER
 		name 'Right Output Mixer Boost Bypass Volume'
-		value 5
+		value 7
 		comment {
 			access 'read write'
 			type INTEGER
@@ -630,7 +630,7 @@ state.wm8960soundcard {
 	control.53 {
 		iface MIXER
 		name 'Left Output Mixer Boost Bypass Switch'
-		value false
+		value true
 		comment {
 			access 'read write'
 			type BOOLEAN
@@ -660,7 +660,7 @@ state.wm8960soundcard {
 	control.56 {
 		iface MIXER
 		name 'Right Output Mixer Boost Bypass Switch'
-		value false
+		value true
 		comment {
 			access 'read write'
 			type BOOLEAN
