@@ -5,18 +5,25 @@ The metrics themselves live in each episode's ``annotations/slam`` attrs, writte
 ``OrbSlam3Step`` (preprocessing step 2). This module turns those numbers into a
 usable/unusable verdict using thresholds from ``config/quality_thresholds.yaml``.
 
-Two deliberate properties:
-
 * **Derived, never stored.** No verdict is written into the pzarr, so editing the
   threshold file reclassifies every scene at once with no reprocessing. The pzarr
   holds measurements; this module holds policy.
-* **One rule, two consumers.** The catalog UI and DP export both call
-  ``auto_unusable_reasons``, so what the UI marks unusable is exactly what export
-  skips.
+
+**This is a prediction, not the export's gate.** It used to be both — export called
+``auto_unusable_reasons`` and skipped whatever it condemned. It no longer does. The
+exporter cuts a session into segments at its dropouts and pose jumps
+(``export.dp.buffer.plan_episode_segments``), so an episode with holes is no longer an
+episode worth deleting, and the only thing decided here is whether the episode is too
+short to yield any segment at all. That check needs the pose array, which this module
+must not read: the catalog calls it on every page render and is attrs-only by design.
+
+What survives of "one rule, two consumers" is a one-way implication, asserted in
+``test_dp_export.py``: whatever this module calls unusable, the export really does
+produce nothing from. The reverse does not hold.
 
 An episode listed explicitly in ``scene.json``'s ``unusable_episodes`` is unusable
-regardless of these thresholds — that set is a human decision and this module only
-adds to it.
+regardless of these thresholds — that set is a human decision, and since the automatic
+veto was retired it is the only thing that discards a whole session at export.
 """
 
 from __future__ import annotations
@@ -35,10 +42,11 @@ from polyumi_ingest.config import QUALITY_THRESHOLDS_YAML
 class QualityThresholds:
     """Thresholds controlling automatic unusable-flagging. See config/quality_thresholds.yaml."""
 
-    max_lost_frames: int = 10
-    min_tracked_frames: int = 60
+    min_tracked_frames: int = 90
     optitrack_always_usable: bool = True
     low_tracking_ratio: float = 0.90
+    #: Not a usability verdict: the distance at which the exporter *cuts* a trajectory in two.
+    #: Lives here because it is policy read at export time, like everything else in this file.
     max_pose_jump_m: float = 0.08
 
 
@@ -107,10 +115,18 @@ def auto_unusable_reasons(
     ``_fed_frame_counts`` and the config file. Feeding the whole-grid ``n_frames_lost``
     to ``max_lost_frames`` would reject every episode processed at a stride above 1.
 
-    ``max_pose_jump_m`` sits in the same mapping but is measured by step 5, on the hand-frame
-    trajectory rather than reported by the localizer. It catches what the frame counts
-    structurally cannot: an episode that tracked every frame it was fed and still teleported
-    between two of them.
+    This is a **necessary condition, not a sufficient one**, and only a prediction: an episode
+    with fewer tracked frames than the export's length floor cannot contain a run at least that
+    long, so it is safe to say it will contribute nothing. The converse does not follow —
+    plenty of episodes clear this bar and still export nothing once their tracked frames turn
+    out to be scattered in runs that are each too short. Only the exporter knows that, because
+    only the exporter reads the pose array; see ``export.dp.buffer.plan_episode_segments``.
+
+    Holes and teleports are deliberately *not* judged here any more. Both are things
+    segmentation cuts around — the exporter splits a session at a dropout and at an
+    over-threshold pose jump — so condemning the whole session for them discarded the good runs
+    either side. Measured over 148 sessions, that veto was the difference between 21 and 99
+    exported segments.
     """
     th = thresholds if thresholds is not None else load_quality_thresholds()
     if not slam_attrs:
@@ -118,26 +134,14 @@ def auto_unusable_reasons(
     if has_optitrack and th.optitrack_always_usable:
         return []
 
-    reasons: list[str] = []
-    # Ahead of the frame counts, and deliberately not behind their `counts is None` bail: a
-    # store too old to have post-chirp counts can still have a measured jump, and a metre-long
-    # teleport is worth reporting on its own.
-    jump = slam_attrs.get('max_pose_jump_m')
-    if isinstance(jump, (int, float)) and not math.isnan(jump) and jump > th.max_pose_jump_m:
-        reasons.append(
-            f'{jump * 100:.0f} cm pose jump between adjacent frames (threshold {th.max_pose_jump_m * 100:.0f} cm)'
-        )
-
     counts = _fed_frame_counts(slam_attrs)
     if counts is None:
-        return reasons
-    n_tracked, n_lost, window = counts
+        return []
+    n_tracked, _, window = counts
 
-    if n_lost > th.max_lost_frames:
-        reasons.append(f'{n_lost} frames lost {window} (threshold {th.max_lost_frames})')
     if n_tracked < th.min_tracked_frames:
-        reasons.append(f'only {n_tracked} frames tracked {window} (threshold {th.min_tracked_frames})')
-    return reasons
+        return [f'only {n_tracked} frames tracked {window} (threshold {th.min_tracked_frames})']
+    return []
 
 
 def is_low_quality(slam_attrs: Mapping[str, Any] | None, thresholds: QualityThresholds | None = None) -> bool:

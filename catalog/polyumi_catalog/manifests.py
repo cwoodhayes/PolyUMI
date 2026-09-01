@@ -68,10 +68,13 @@ class DatasetManifest:
     exporter_type: str = 'dp'
     export_params: dict = field(default_factory=dict)
     members: list[DatasetMemberSpec] = field(default_factory=list)
-    #: Per-episode pose-source provenance from the export (scene, session, episode, source,
-    #: world_frame, n_steps, n_interp_filled) — see export.dp.buffer's module docstring. Also
-    #: embedded in the .zarr.zip's meta attrs; kept here too so it's readable without opening
-    #: the buffer.
+    #: One record per exported *segment* — a session is cut into several where its trajectory
+    #: drops out or teleports, so this is longer than the session count. Carries scene, session,
+    #: episode, segment, source, world_frame, n_steps, frame_range, frame_stride, duration_s and
+    #: cut_start/cut_end (why the segment begins and ends where it does); see export.dp.buffer's
+    #: module docstring. Also embedded in the .zarr.zip's meta attrs; kept here too so it's
+    #: readable without opening the buffer. Read fields with .get() — manifests predating a
+    #: field simply lack it.
     pose_provenance: list[dict] = field(default_factory=list)
     #: Time accounting from ``polyumi_ingest.timing.dataset_time_totals``, whose module
     #: docstring defines the three. None on manifests written before these fields existed.

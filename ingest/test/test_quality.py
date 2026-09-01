@@ -12,7 +12,6 @@ from polyumi_ingest.quality import (
 )
 
 _TH = QualityThresholds(
-    max_lost_frames=10,
     min_tracked_frames=60,
     optitrack_always_usable=True,
     low_tracking_ratio=0.90,
@@ -41,54 +40,65 @@ def test_healthy_episode_is_usable() -> None:
     assert auto_unusable_reasons(_attrs(n_fed=220, n_lost=0), thresholds=_TH) == []
 
 
-def test_whole_grid_losses_are_not_what_gets_gated() -> None:
+def test_lost_frames_no_longer_condemn_an_episode() -> None:
     """
-    The 219 whole-grid 'lost' frames of a flawless stride-2 episode must not condemn it.
+    Holes are segmentation's job, not a verdict's.
 
-    This is the failure mode the fed-grid counting exists to prevent: `n_frames_lost` counts
-    every frame the localizer was never fed, so gating on it would reject the entire corpus.
+    The exporter splits a session at each dropout and keeps the runs either side, so
+    condemning the whole thing for having holes threw away the good parts. This episode lost
+    half its frames and is still not excluded here — whether it yields anything is decided by
+    the segment floor, which only the exporter can evaluate.
     """
-    attrs = _attrs(n_fed=220, n_lost=0)
-    assert attrs['n_frames_lost'] > _TH.max_lost_frames  # the trap
+    assert auto_unusable_reasons(_attrs(n_fed=220, n_lost=110), thresholds=_TH) == []
+
+
+def test_a_pose_jump_no_longer_condemns_an_episode() -> None:
+    """
+    A teleport cuts the trajectory at export; it does not delete the demo.
+
+    Real case from red_trapezoid_mug_v3: 205 frames fed, none lost, tracking_ratio 1.000, and
+    a 1.14 m teleport between two adjacent frames. That is now two episodes, not zero.
+    """
+    attrs = _attrs(n_fed=205, n_lost=0)
+    attrs['max_pose_jump_m'] = 1.142
     assert auto_unusable_reasons(attrs, thresholds=_TH) == []
 
 
-def test_too_many_lost_frames_flags_unusable() -> None:
-    """Past the absolute lost-frame count the episode is dropped, UMI-style."""
-    reasons = auto_unusable_reasons(_attrs(n_fed=220, n_lost=11), thresholds=_TH)
-    assert len(reasons) == 1
-    assert '11 frames lost' in reasons[0]
-    assert 'after the chirp' in reasons[0]
-
-
-def test_lost_frames_exactly_at_threshold_is_usable() -> None:
-    """The bound is inclusive — exactly 10 lost passes, so the boundary isn't off by one."""
-    assert auto_unusable_reasons(_attrs(n_fed=220, n_lost=10), thresholds=_TH) == []
-
-
 def test_too_few_tracked_frames_flags_unusable() -> None:
-    """A very short episode has few lost frames simply by being short; the floor catches it."""
+    """The one surviving check: too short to contain a segment of the export's floor length."""
     reasons = auto_unusable_reasons(_attrs(n_fed=50, n_lost=0), thresholds=_TH)
     assert len(reasons) == 1
     assert 'only 50 frames tracked' in reasons[0]
+    assert 'after the chirp' in reasons[0]
 
 
-def test_both_failures_report_both_reasons() -> None:
-    """The count and the floor are independent checks; both can fire at once."""
-    assert len(auto_unusable_reasons(_attrs(n_fed=40, n_lost=20), thresholds=_TH)) == 2
+def test_tracked_frames_exactly_at_threshold_is_usable() -> None:
+    """The bound is inclusive, so the boundary isn't off by one."""
+    assert auto_unusable_reasons(_attrs(n_fed=60, n_lost=0), thresholds=_TH) == []
+
+
+def test_whole_grid_losses_are_not_what_gets_counted() -> None:
+    """
+    A flawless stride-2 episode has half its whole-grid frames 'lost' by construction.
+
+    The tracked count must come off the fed grid, or the floor would reject the whole corpus.
+    """
+    attrs = _attrs(n_fed=220, n_lost=0)
+    assert attrs['n_frames_lost'] > _TH.min_tracked_frames  # the trap
+    assert auto_unusable_reasons(attrs, thresholds=_TH) == []
 
 
 def test_optitrack_exempts_an_otherwise_unusable_episode() -> None:
     """An episode with OptiTrack poses doesn't depend on SLAM, so SLAM checks don't apply."""
-    attrs = _attrs(n_fed=100, n_lost=90)
+    attrs = _attrs(n_fed=50, n_lost=0)
     assert auto_unusable_reasons(attrs, has_optitrack=True, thresholds=_TH) == []
     assert auto_unusable_reasons(attrs, has_optitrack=False, thresholds=_TH) != []
 
 
 def test_optitrack_exemption_can_be_disabled_by_config() -> None:
     """With optitrack_always_usable off, OptiTrack episodes are judged like any other."""
-    th = QualityThresholds(optitrack_always_usable=False, max_lost_frames=10)
-    assert auto_unusable_reasons(_attrs(n_fed=100, n_lost=90), has_optitrack=True, thresholds=th) != []
+    th = QualityThresholds(optitrack_always_usable=False, min_tracked_frames=60)
+    assert auto_unusable_reasons(_attrs(n_fed=50, n_lost=0), has_optitrack=True, thresholds=th) != []
 
 
 def test_missing_metrics_are_treated_as_nothing_to_judge() -> None:
@@ -106,75 +116,23 @@ def test_pre_v4_store_falls_back_to_whole_episode_counts() -> None:
     The reason string has to say so: the same episode is judged more harshly this way, since
     the idle pre-chirp prefix (where the localizer is still relocalizing) counts against it.
     """
-    legacy = {'n_frames_fed': 220, 'tracking_ratio': 0.9}  # 22 lost over the whole episode
+    legacy = {'n_frames_fed': 50, 'tracking_ratio': 0.9}  # 45 tracked over the whole episode
     reasons = auto_unusable_reasons(legacy, thresholds=_TH)
     assert len(reasons) == 1
-    assert '22 frames lost' in reasons[0]
+    assert 'only 45 frames tracked' in reasons[0]
     assert 'pre-v4' in reasons[0]
 
 
 def test_pre_v4_fallback_recovers_exact_counts() -> None:
-    """Deriving the lost count from a float ratio must round-trip to the exact integer."""
-    assert auto_unusable_reasons({'n_frames_fed': 220, 'tracking_ratio': 1.0}, thresholds=_TH) == []
-    # 210/220 tracked = 10 lost, exactly at the inclusive bound.
-    assert auto_unusable_reasons({'n_frames_fed': 220, 'tracking_ratio': 210 / 220}, thresholds=_TH) == []
-    assert auto_unusable_reasons({'n_frames_fed': 220, 'tracking_ratio': 209 / 220}, thresholds=_TH) != []
-
-
-def test_a_pose_jump_condemns_an_otherwise_perfect_episode() -> None:
-    """
-    The blind spot the jump check exists for.
-
-    Real case from red_trapezoid_mug_v3: an episode that was fed 205 frames, lost none of
-    them, reported tracking_ratio 1.000 — and teleported 1.14 m between two adjacent frames.
-    Every frame-count threshold calls this healthy, because no frame was lost.
-    """
-    attrs = _attrs(n_fed=205, n_lost=0)
-    assert auto_unusable_reasons(attrs, thresholds=_TH) == []
-
-    attrs['max_pose_jump_m'] = 1.142
-    reasons = auto_unusable_reasons(attrs, thresholds=_TH)
-    assert len(reasons) == 1
-    assert '114 cm pose jump' in reasons[0]
-
-
-def test_normal_hand_motion_is_not_a_jump() -> None:
-    """The clean corpus peaks at 6.2 cm; the threshold must sit above that, not in it."""
-    attrs = _attrs(n_fed=205, n_lost=0)
-    attrs['max_pose_jump_m'] = 0.062
-    assert auto_unusable_reasons(attrs, thresholds=_TH) == []
-    # Inclusive bound, matching max_lost_frames.
-    attrs['max_pose_jump_m'] = 0.08
-    assert auto_unusable_reasons(attrs, thresholds=_TH) == []
-
-
-def test_pose_jump_is_judged_even_without_usable_frame_counts() -> None:
-    """
-    A store too old to derive fed-frame counts from still gets its jump judged.
-
-    The check sits ahead of the counts precisely so it doesn't inherit their bail-out — a
-    metre-long teleport is worth reporting on its own.
-    """
-    reasons = auto_unusable_reasons({'n_frames_total': 400, 'max_pose_jump_m': 3.06}, thresholds=_TH)
-    assert len(reasons) == 1
-    assert '306 cm pose jump' in reasons[0]
-
-
-def test_optitrack_episodes_skip_the_jump_check_too() -> None:
-    """The metric is measured on the SLAM trajectory, which such episodes don't export."""
-    attrs = _attrs(n_fed=205, n_lost=0)
-    attrs['max_pose_jump_m'] = 3.06
-    assert auto_unusable_reasons(attrs, has_optitrack=True, thresholds=_TH) == []
-
-
-def test_missing_jump_metric_condemns_nothing() -> None:
-    """Episodes preprocessed before step 5 wrote the metric stay judged on frame counts alone."""
-    assert auto_unusable_reasons(_attrs(n_fed=205, n_lost=0), thresholds=_TH) == []
+    """Deriving the tracked count from a float ratio must round-trip to the exact integer."""
+    # 60/100 tracked = exactly at the inclusive bound.
+    assert auto_unusable_reasons({'n_frames_fed': 100, 'tracking_ratio': 60 / 100}, thresholds=_TH) == []
+    assert auto_unusable_reasons({'n_frames_fed': 100, 'tracking_ratio': 59 / 100}, thresholds=_TH) != []
 
 
 def test_is_low_quality_is_looser_than_unusable() -> None:
     """The advisory badge fires on coverage without excluding the episode."""
-    attrs = _attrs(n_fed=220, n_lost=8)  # 96.4% tracked... but set the ratio into the badge band
+    attrs = _attrs(n_fed=220, n_lost=8)
     attrs['tracking_ratio'] = 0.85
     assert is_low_quality(attrs, thresholds=_TH) is True
     assert auto_unusable_reasons(attrs, thresholds=_TH) == []
@@ -184,8 +142,8 @@ def test_load_quality_thresholds_reads_the_shipped_config() -> None:
     """The shipped YAML parses and carries the documented defaults."""
     load_quality_thresholds.cache_clear()
     th = load_quality_thresholds()
-    assert th.max_lost_frames == 10
-    assert th.min_tracked_frames == 60
+    assert th.min_tracked_frames == 90
+    assert th.max_pose_jump_m == 0.08
     assert th.optitrack_always_usable is True
 
 
@@ -199,13 +157,20 @@ def test_load_quality_thresholds_falls_back_when_config_missing(monkeypatch) -> 
         load_quality_thresholds.cache_clear()
 
 
-def test_load_quality_thresholds_ignores_unknown_keys(tmp_path, monkeypatch) -> None:
-    """An unrecognised key in the YAML is skipped, not passed into the dataclass ctor."""
+def test_a_retired_key_in_a_local_config_is_inert(tmp_path, monkeypatch) -> None:
+    """
+    An unrecognised key is skipped, not passed into the dataclass ctor.
+
+    This is what lets `max_lost_frames` be retired without breaking an operator's edited copy
+    of the file: the key simply stops doing anything.
+    """
     cfg = tmp_path / 'q.yaml'
-    cfg.write_text('max_lost_frames: 5\nsomething_new: 12\n')
+    cfg.write_text('max_lost_frames: 5\nsomething_new: 12\nmin_tracked_frames: 42\n')
     monkeypatch.setattr('polyumi_ingest.quality.QUALITY_THRESHOLDS_YAML', cfg)
     load_quality_thresholds.cache_clear()
     try:
-        assert load_quality_thresholds().max_lost_frames == 5
+        th = load_quality_thresholds()
+        assert th.min_tracked_frames == 42
+        assert not hasattr(th, 'max_lost_frames')
     finally:
         load_quality_thresholds.cache_clear()

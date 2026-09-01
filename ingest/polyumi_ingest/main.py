@@ -10,6 +10,7 @@ import logging
 import os
 import pathlib
 import shutil
+from collections import Counter
 from collections.abc import Callable
 from enum import Enum
 
@@ -809,6 +810,110 @@ class ExportType(str, Enum):
 
     dp = 'dp'
     polyumi = 'polyumi'
+
+
+@app.command(name='segments')
+def preview_segments(
+    scene_paths: list[pathlib.Path] = typer.Argument(..., help='Scene directories to inspect.'),
+    exporter_type: ExportType = typer.Option(
+        ExportType.dp,
+        '--type',
+        help='Which export to preview. polyumi attaches the contact-mic and finger-camera '
+        'modalities, which narrow the valid span further and so can cut more segments.',
+    ),
+    min_segment_steps: int = typer.Option(
+        MIN_SEGMENT_STEPS, '--min-segment-steps', help='Length floor to preview, in fed steps.'
+    ),
+    enforce_preprocessing: bool = typer.Option(True, '--enforce-preprocessing/--no-enforce-preprocessing'),
+    as_json: bool = typer.Option(False, '--json', help='Emit the per-segment records as JSON instead.'),
+):
+    """
+    Show what an export would cut these scenes into, without decoding a single frame.
+
+    Answers "how much usable data do I actually have, and where does it go" in seconds rather
+    than the minutes a real export costs. It runs the exporter's own planning code
+    (plan_episode_segments) over the exporter's own episode selection, so the preview cannot
+    disagree with what `pingest export` would write.
+
+    Each segment reports why it starts and ends: episode_start/episode_end, chirp (the idle
+    prefix before the sync chirp), pose_gap (SLAM lost tracking), pose_jump (a relocalization
+    teleport past max_pose_jump_m), gripper_gap, or a modality name.
+    """
+    from polyumi_ingest.config import load_closed_width_m, load_open_width_m
+    from polyumi_ingest.export.dp.buffer import iter_exportable_episodes, plan_episode_segments
+    from polyumi_ingest.export.dp.polyumi import POLYUMI_MODALITIES
+
+    # The planner logs a line or two per episode through RichHandler, which writes to stdout —
+    # harmless for the table, but it would corrupt --json into something no parser can read.
+    if as_json:
+        logging.getLogger().setLevel(logging.ERROR)
+
+    # Instantiated per run, exactly as export_scenes_to_polyumi does: a modality stashes
+    # per-episode state on self, so the preview needs its own instances, not the classes.
+    modalities = [cls() for cls in POLYUMI_MODALITIES] if exporter_type == ExportType.polyumi else []
+    closed_width_m, open_width_m = load_closed_width_m(), load_open_width_m()
+
+    records: list[dict] = []
+    causes: Counter[str] = Counter()
+    n_dropped = 0
+    dropped_s = 0.0
+    try:
+        for scene_path in scene_paths:
+            for scene_label, ep_key, session_dir, ep, pose_source in iter_exportable_episodes(
+                scene_path, enforce_preprocessing=enforce_preprocessing, modalities=modalities
+            ):
+                plan = plan_episode_segments(
+                    ep,
+                    f'{scene_label}/{ep_key}',
+                    pose_source,
+                    closed_width_m=closed_width_m,
+                    open_width_m=open_width_m,
+                    min_segment_steps=min_segment_steps,
+                    modalities=modalities,
+                )
+                n_dropped += len(plan.dropped)
+                dropped_s += sum(plan.duration_s(run) for run in plan.dropped)
+                for seg_i, (segment, (cut_start, cut_end)) in enumerate(zip(plan.segments, plan.cuts)):
+                    causes[cut_start] += 1
+                    causes[cut_end] += 1
+                    gidx = plan.steps[segment[0] : segment[1] + 1]
+                    records.append(
+                        {
+                            'scene': scene_label,
+                            'session': session_dir,
+                            'episode': ep_key,
+                            'segment': seg_i,
+                            'source': pose_source,
+                            'n_steps': len(gidx),
+                            'frame_range': [int(gidx[0]), int(gidx[-1])],
+                            'frame_stride': plan.stride,
+                            'duration_s': plan.duration_s(segment),
+                            'cut_start': cut_start,
+                            'cut_end': cut_end,
+                        }
+                    )
+    except (FileNotFoundError, ValueError, RuntimeError) as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+
+    if as_json:
+        typer.echo(json.dumps(records, indent=2))
+        return
+
+    by_session: dict[tuple[str, str], list[dict]] = {}
+    for r in records:
+        by_session.setdefault((r['scene'], r['episode']), []).append(r)
+    for (scene_label, ep_key), segs in by_session.items():
+        spans = ', '.join(f'{s["duration_s"]:.1f}s [{s["cut_start"]}->{s["cut_end"]}]' for s in segs)
+        typer.echo(f'  {scene_label}/{ep_key}: {len(segs)} segment(s)  {spans}')
+
+    total_s = sum(r['duration_s'] for r in records)
+    typer.echo(
+        f'\n{len(records)} segment(s) over {len(by_session)} session(s), {total_s / 60:.1f} min usable '
+        f'(floor {min_segment_steps} steps; {n_dropped} run(s) / {dropped_s / 60:.1f} min below it)'
+    )
+    if causes:
+        typer.echo('cut causes: ' + ', '.join(f'{k}={v}' for k, v in causes.most_common()))
 
 
 @app.command(name='export')

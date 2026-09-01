@@ -1,51 +1,28 @@
-# Thresholds for automatically flagging an episode as unusable.
+# Thresholds for judging and cutting episodes at export time.
 #
-# These are POLICY, not data. Verdicts are derived at read time from the metrics
-# already stored in each episode's `annotations/slam` attrs, so editing this file
-# reclassifies every scene immediately — nothing is written into the pzarr and no
-# reprocessing is needed. Consumed by the catalog UI (episode_quality.py) and by
-# DP export (export/dp/buffer.py), which share one rule so the UI can't disagree
-# with what actually gets exported.
+# These are POLICY, not data. Nothing here is written into the pzarr, so editing this
+# file changes what the next export produces and what the catalog shows immediately —
+# no reprocessing. Consumed by the catalog UI (episode_quality.py) and by DP export
+# (export/dp/buffer.py).
 #
-# An episode explicitly listed in a scene's scene.json `unusable_episodes` is
-# unusable regardless of what's here; these thresholds only add to that set.
+# Unknown keys are ignored rather than rejected (quality.py filters to the dataclass
+# fields), so a local copy carrying a retired key still loads — it just does nothing.
+# `max_lost_frames` is one such retired key; see below.
 #
-# The two counts below deliberately mirror upstream UMI's
-# scripts_slam_pipeline/06_generate_dataset_plan.py, which drops a demo outright
-# rather than exporting around a patchy trajectory. Since pzarr v4 we no longer
-# interpolate over tracking gaps, so an episode that keeps losing the map has
-# nothing standing in for the frames it lost — dropping it is the honest outcome.
+# An episode explicitly listed in a scene's scene.json `unusable_episodes` is unusable
+# regardless of what's here. Since the automatic whole-episode veto was retired, that
+# human set is the only thing that discards an entire session at export.
 
-# Maximum number of lost frames before the whole episode is unusable. An absolute
-# count, not a fraction: UMI's judgement is that a demo which loses tracking at all
-# is suspect, however long it happens to be.
+# --- Segment cut thresholds (export/dp/buffer.py: plan_episode_segments) ---
+
+# Largest tolerated position step (metres) between two adjacent tracked frames. A step
+# above this CUTS the trajectory in two; it does not condemn the episode.
 #
-# Counted on the frames SLAM was actually *fed*, never on the full GoPro grid. Under
-# `localization_frame_stride: 2` the localizer never sees odd frames, so the
-# whole-grid `n_frames_lost` is ~half the episode even for a flawless run and this
-# threshold would reject the entire corpus.
-max_lost_frames: 10
-
-# Minimum number of tracked frames for the episode to be worth keeping at all.
-# Guards the degenerate case the count above cannot see: an episode that tracked
-# almost nothing has few lost frames simply because it is short.
-min_tracked_frames: 60
-
-# Both counts are measured over the post-chirp window — the end of the sync chirp to
-# the end of the episode — because that is the span the exporter actually ships. The
-# idle prefix before the chirp is where the localizer is still relocalizing, and
-# condemning an episode for gaps in footage that never reaches the dataset costs real
-# demos: measured across 246 episodes, 61% survive when judged over the whole
-# recording against 65% over the exported window.
-#
-# Stores written before pzarr v4 have no post-chirp counts; quality.py falls back to
-# the whole-episode fed-frame count for those and says so in the reason string.
-
-# Largest tolerated position step (metres) between two adjacent tracked frames, written by
-# step 5 into `annotations/slam` as `max_pose_jump_m`. Catches what the frame counts
-# structurally cannot: an episode can be fed every frame, lose none, report tracking_ratio
-# 1.000, and still teleport a metre when the localizer relocalizes against the wrong part of
-# the map.
+# A relocalization teleport makes the trajectory wrong at one *transition*, not at either
+# frame — both poses are internally consistent, they just aren't consistent with each
+# other. The world frame cancels out of the relative trajectory the policy trains on, so
+# once the two sides are separate episodes the displacement between them costs nothing.
+# Both frames either side of the cut are kept.
 #
 # 0.08 sits in a real gap in the data: 93 of 97 episodes across three clean scenes peak at
 # 6.2 cm or below (p50 3.4, p95 5.9), and the next value up is 10.6 cm. It is a ceiling on
@@ -54,13 +31,47 @@ min_tracked_frames: 60
 # Measured on the hand frame, not the camera's: that is what the policy consumes, and the
 # lever arm amplifies orientation glitches the camera position never sees — p_hand =
 # p_cam + R_cam·t with |t| = 0.2685 m, so an orientation flip alone moves the hand up to 54 cm.
+# Step 5 records the per-episode maximum as `max_pose_jump_m`; the exporter recomputes the
+# per-step distances, since only it needs to know *where* the jumps are.
 max_pose_jump_m: 0.08
 
+# --- Catalog prediction (quality.py: auto_unusable_reasons) ---
+
+# Minimum number of tracked frames for the episode to be able to yield anything at all.
+#
+# This is a NECESSARY condition, not a sufficient one: an episode with fewer tracked frames
+# than the exporter's length floor cannot contain a run that long, so the catalog can safely
+# predict it will contribute nothing. The converse does not follow — an episode can clear
+# this bar and still export nothing, if its tracked frames are scattered across runs that are
+# each too short. Only the exporter can tell, because only the exporter reads the pose array.
+#
+# Must stay <= MIN_SEGMENT_STEPS in export/dp/buffer.py (currently 90), or the catalog starts
+# condemning episodes that do in fact export. There is a test for exactly that.
+min_tracked_frames: 90
+
+# Counted over the post-chirp window — the end of the sync chirp to the end of the episode —
+# because that is the span the exporter actually ships. The idle prefix before the chirp is
+# where the localizer is still relocalizing, and judging an episode on footage that never
+# reaches the dataset costs real demos.
+#
+# Counted on the frames SLAM was actually *fed*, never on the full GoPro grid. Under
+# `localization_frame_stride: 2` the localizer never sees odd frames, so a whole-grid count
+# is ~half the episode even for a flawless run.
+#
+# Stores written before pzarr v4 have no post-chirp counts; quality.py falls back to the
+# whole-episode fed-frame count for those and says so in the reason string.
+
 # Episodes with OptiTrack poses available (eef.attrs['available_sources']) skip
-# the checks above entirely — their pose source doesn't depend on SLAM.
+# the check above entirely — their pose source doesn't depend on SLAM.
 optitrack_always_usable: true
 
 # Advisory only: drives the "low" badge in the catalog UI. Does NOT make an
 # episode unusable. Kept separate so the warning threshold and the exclusion
 # threshold can move independently.
 low_tracking_ratio: 0.90
+
+# RETIRED: max_lost_frames. It condemned an episode for having holes, which is precisely
+# what segmentation cuts around — the exporter splits a session at each dropout and keeps
+# the runs either side. Over 148 sessions it fired 119 times and was the single largest
+# cause of data loss in the corpus (21 exported segments with it, 99 without). Leaving the
+# key in a local copy of this file is harmless; it is no longer read.
