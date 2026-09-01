@@ -140,8 +140,8 @@ state.wm8960soundcard {
 	control.11 {
 		iface MIXER
 		name 'Headphone Playback Volume'
-		value.0 95
-		value.1 95
+		value.0 122
+		value.1 0
 		comment {
 			access 'read write'
 			type INTEGER
@@ -149,8 +149,8 @@ state.wm8960soundcard {
 			range '0 - 127'
 			dbmin -9999999
 			dbmax 600
-			dbvalue.0 -2600
-			dbvalue.1 -2600
+			dbvalue.0 100
+			dbvalue.1 -9999999
 		}
 	}
 	control.12 {
@@ -660,7 +660,7 @@ state.wm8960soundcard {
 	control.56 {
 		iface MIXER
 		name 'Right Output Mixer Boost Bypass Switch'
-		value true
+		value false
 		comment {
 			access 'read write'
 			type BOOLEAN
