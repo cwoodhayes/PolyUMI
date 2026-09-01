@@ -10,3 +10,6 @@
 [submodule "external/franka_gripper_control"]
 	path = external/franka_gripper_control
 	url = https://github.com/anunthramaswami2030/franka_gripper_control.git
+[submodule "external/polyumi_vista_policy"]
+	path = external/polyumi_vista_policy
+	url = https://github.com/RiicK3d/polyumi_vista_policy.git

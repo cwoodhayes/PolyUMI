@@ -218,18 +218,38 @@ pingest export <scene> -o <name>.zarr.zip --type polyumi        # + data/mic_0 (
                                                                 #   and data/finger_rgb (finger camera, cropped)
 ```
 
-### Training the diffusion policy (GPU workstation, Docker)
-Training runs the UMI fork (`external/polyumi_diffusion_policy`) in a Docker image built from
-its conda env via micromamba — **not** bare conda (which fights ROS) and **not** the uv
-workspace. One image serves both training and inference. Run it with `./train_policy.sh`
-(builds the fork image + mounts dataset/output with rootless-safe flags). Full walkthrough,
-including rootless-Docker gotchas, is in
+### Training a policy (GPU workstation, Docker)
+Training runs a UMI fork in a Docker image built from its conda env via micromamba — **not** bare
+conda (which fights ROS) and **not** the uv workspace. One image serves both training and
+inference. Run it with `./train_policy.sh` (builds the fork image + mounts dataset/output with
+rootless-safe flags). Full walkthrough, including rootless-Docker gotchas, is in
 [docs/training-instructions.md](docs/training-instructions.md). This is the step after `pingest
 export`.
 
+**There are two forks, selected with `POLICY`** — `dp` (default,
+`external/polyumi_diffusion_policy`, visuomotor) and `vista`
+(`external/polyumi_vista_policy`, Rickmer's multimodal zoo: + finger camera + contact mic).
+The wiring is one file per fork in **`config/policy.<name>.env`** — fork directory, image tag,
+container entrypoint, dataset mount point, default `CONFIG_NAME` — resolved by `policy_select` in
+`build_policy_image.sh`, which `train_policy.sh` and `serve_policy.sh` both source. Those values
+live in this repo, not the submodule: a fork cannot know its own path in the parent, and they must
+be readable before anything is checked out to read. **Hyperparameters stay in each fork's own Hydra
+tree** — `config/policy.*.env` only names which workspace yaml to run. Adding a third fork is a
+submodule plus one new env file; do not add a branch to the scripts.
+
+`CONFIG_NAME` is the live version of the old, never-wired `DP_CONFIG`: both forks'
+`docker/train.sh` read it into `--config-name`. Vista's suite runner
+(`scripts/train_day0suite.sh`) passes its own, so `policy.vista.env` deliberately sets no
+`CONFIG_NAME` rather than setting one nothing reads.
+
+`vista/data/` is **absent from the Vista fork** — its `.gitignore` has an unanchored `data`
+pattern, so the package was never committed. Vista training and `test/test_vista_dataset.py`
+cannot run until that is fixed upstream; the rest of its test suite can.
+
 **Serving a trained checkpoint** (the real inference server) uses the same image via
 `CKPT=/abs/path/to/<name>.ckpt ./serve_policy.sh` at the repo root (the inference counterpart of
-`train_policy.sh`). It runs `serve_policy.py` in-container and direct-imports the policy — there is
+`train_policy.sh`; it takes the same `POLICY`, which must match the fork the checkpoint was
+trained with). It runs `serve_policy.py` in-container and direct-imports the policy — there is
 **no** subprocess/`conda run`. Do **not** run the fork's `external/polyumi_diffusion_policy/docker/serve.sh`
 on the host; it is the in-container entrypoint and fails with `exec: uvicorn: not found`. The wire
 contract matches `dummy_server` (`POST /predict_cartesian/` + `POST /reset` for the episode-start
