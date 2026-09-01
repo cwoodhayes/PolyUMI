@@ -231,22 +231,17 @@ the size ManiWAV's was, over the same 2 s of wall time. Note their horizon of 12
 
 ## 5. Selecting your policy at train time
 
-`train_policy.sh` forwards a `DP_CONFIG` environment variable into the container:
+`train_policy.sh` forwards a `CONFIG_NAME` environment variable into the container, which the
+fork's `docker/train.sh` reads into `--config-name`:
 
 ```bash
-DP_CONFIG=train_diffusion_unet_timm_polyumi_audio_workspace \
+CONFIG_NAME=train_diffusion_unet_timm_polyumi_audio_workspace \
 DATASET=/abs/path/to/audio.zarr.zip ./train_policy.sh
 ```
 
-For this to do anything, the fork's `docker/train.sh` must read it:
-
-```bash
---config-name="${DP_CONFIG:-train_diffusion_unet_timm_polyumi_workspace}"
-```
-
-Unset, it keeps today's visuomotor default, so the hook is inert until you wire that half. It is
-an env var rather than a Hydra override because Hydra cannot override `--config-name` through a
-passthrough override.
+Unset, it keeps the default in `config/policy.dp.env`. It is an env var rather than a Hydra
+override because Hydra cannot override `--config-name` through a passthrough override. See
+[training-instructions.md](training-instructions.md) § "Choosing a policy".
 
 ---
 

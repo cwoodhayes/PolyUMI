@@ -15,11 +15,12 @@
 #   CKPT=/abs/path/to/epoch=0070-....ckpt ./serve_policy.sh
 #   CKPT=... PORT=8001 ./serve_policy.sh
 #   CKPT=... CUDA_VISIBLE_DEVICES=1 ./serve_policy.sh    # pin to the second GPU
-#   POLICY=vista CKPT=... ./serve_policy.sh              # serve a checkpoint from another fork
+#   POLICY=<fork> CKPT=... ./serve_policy.sh             # serve a checkpoint from another fork
 #
 # POLICY selects the fork the same way train_policy.sh does (config/policy.<name>.env). It must
 # match the fork the checkpoint was trained with -- checkpoints are dill-pickled against their
-# image's dep tree and will not unpickle against another's.
+# image's dep tree and will not unpickle against another's. Only forks whose env file sets a
+# SERVE_CMD can be served; POLICY=vista currently cannot (see config/policy.vista.env).
 #
 # serve_policy.py loads the policy on plain 'cuda', i.e. whatever CUDA_VISIBLE_DEVICES makes
 # device 0. Not defaulted here: which card is quiet changes hour to hour, so check `nvidia-smi`.
@@ -56,10 +57,20 @@ fi
 
 mkdir -p "${HF_CACHE_DIR}"
 
+# shellcheck source=config/policy_select.sh
+source "${REPO_ROOT}/config/policy_select.sh"
 # shellcheck source=build_policy_image.sh
 source "${REPO_ROOT}/build_policy_image.sh"
 # Sets IMAGE, POLICY_DIR and SERVE_CMD from config/policy.${POLICY}.env.
 policy_select "${REPO_ROOT}" "${POLICY}"
+
+# Refuse here rather than build a 20-minute image and then fail inside the container: a fork with
+# no SERVE_CMD has no backend that speaks polyumi_inference's wire format for its modalities.
+if [ -z "${SERVE_CMD}" ]; then
+    echo "error: POLICY '${POLICY}' has no inference server (config/policy.${POLICY}.env sets no SERVE_CMD)" >&2
+    exit 1
+fi
+
 build_policy_image "${REPO_ROOT}" "${IMAGE}" "${POLICY_DIR}"
 
 echo ">> serving ${POLICY} (checkpoint: ${CKPT}) on http://0.0.0.0:${PORT}"

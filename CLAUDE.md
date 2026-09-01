@@ -230,21 +230,22 @@ export`.
 `external/polyumi_diffusion_policy`, visuomotor) and `vista`
 (`external/polyumi_vista_policy`, Rickmer's multimodal zoo: + finger camera + contact mic).
 The wiring is one file per fork in **`config/policy.<name>.env`** — fork directory, image tag,
-container entrypoint, dataset mount point, default `CONFIG_NAME` — resolved by `policy_select` in
-`build_policy_image.sh`, which `train_policy.sh` and `serve_policy.sh` both source. Those values
-live in this repo, not the submodule: a fork cannot know its own path in the parent, and they must
-be readable before anything is checked out to read. **Hyperparameters stay in each fork's own Hydra
-tree** — `config/policy.*.env` only names which workspace yaml to run. Adding a third fork is a
-submodule plus one new env file; do not add a branch to the scripts.
+container entrypoint, optional `CONFIG_NAME` — resolved by `policy_select` in
+`config/policy_select.sh`, which `train_policy.sh`, `serve_policy.sh` and `build_policy_image.sh`
+all source. See [docs/training-instructions.md](docs/training-instructions.md) § "Choosing a
+policy" for the contract and why those values live in this repo rather than in the submodule.
+**Hyperparameters stay in each fork's own Hydra tree** — `config/policy.*.env` only names which
+workspace yaml to run. Adding a third fork is a submodule plus one new env file; do not add a
+branch to the scripts.
 
-`CONFIG_NAME` is the live version of the old, never-wired `DP_CONFIG`: both forks'
-`docker/train.sh` read it into `--config-name`. Vista's suite runner
-(`scripts/train_day0suite.sh`) passes its own, so `policy.vista.env` deliberately sets no
-`CONFIG_NAME` rather than setting one nothing reads.
+`$DATASET` mounts at **`/data/dataset.zarr.zip`** for every fork — each entrypoint defaults to
+that path, so no dataset override is forwarded in. A new fork is expected to match it.
 
-`vista/data/` is **absent from the Vista fork** — its `.gitignore` has an unanchored `data`
-pattern, so the package was never committed. Vista training and `test/test_vista_dataset.py`
-cannot run until that is fixed upstream; the rest of its test suite can.
+**`POLICY=vista` trains but does not serve.** `policy.vista.env` sets no `SERVE_CMD`, and
+`serve_policy.sh` refuses rather than building an image that fails at the first request: the
+fork's `serve_policy.py` is still the visuomotor `UmiPolicyBackend`, which reads `camera0_rgb`
+and `agent_pos` only, while a Vista checkpoint also wants `finger_rgb` and `mic_0`. Serving Vista
+needs a backend that puts those modalities on `polyumi_inference`'s wire.
 
 **Serving a trained checkpoint** (the real inference server) uses the same image via
 `CKPT=/abs/path/to/<name>.ckpt ./serve_policy.sh` at the repo root (the inference counterpart of

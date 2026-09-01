@@ -60,23 +60,36 @@ etc). Outputs (checkpoints, hydra logs) land in `data/dp_outputs/` by default (`
 `CONFIG_NAME` selects which Hydra workspace config runs, for a fork that offers more than one (an
 env var rather than a Hydra override, because Hydra cannot set `--config-name` that way). Each
 policy's default is in its `config/policy.*.env`; set `CONFIG_NAME` in the calling shell to
-override it for one run. It replaces the old `DP_CONFIG`, which was never wired to anything.
+override it for one run.
 
 ## Choosing a policy
 
 `POLICY` picks which fork gets built and run. It defaults to `dp`, so every command above is
 unchanged.
 
-| `POLICY` | Fork | Image | Entrypoint | Dataset |
-|---|---|---|---|---|
-| `dp` *(default)* | `external/polyumi_diffusion_policy` | `polyumi-dp` | `docker/train.sh` | `export --type dp` |
-| `vista` | `external/polyumi_vista_policy` | `polyumi-vista` | `docker/train_day0suite.sh` | `export --type polyumi` |
+| `POLICY` | Fork | Image | Entrypoint | Dataset | Serves? |
+|---|---|---|---|---|---|
+| `dp` *(default)* | `external/polyumi_diffusion_policy` | `polyumi-dp` | `docker/train.sh` | `export --type dp` | yes |
+| `vista` | `external/polyumi_vista_policy` | `polyumi-vista` | `docker/train_day0suite.sh` | `export --type polyumi` | no — see [Vista](#vista) |
 
-The wiring lives in **`config/policy.<name>.env`** in this repo — one file per fork, holding its
-directory under `external/`, its image tag, its container entrypoint, where `DATASET` mounts, and
-its default `CONFIG_NAME`. These are facts about how PolyUMI *drives* a fork, so they belong here
-rather than in the submodule: a fork cannot know its own path in the parent, and the values have to
-be readable before there is anything checked out to read. Same pattern as `config/env.<hostname>.sh`.
+The wiring lives in **`config/policy.<name>.env`** in this repo — one file per fork, read by
+`config/policy_select.sh`, which `train_policy.sh`, `serve_policy.sh` and `build_policy_image.sh`
+all source. These are facts about how PolyUMI *drives* a fork, so they belong here rather than in
+the submodule: a fork cannot know its own path in the parent, and the values have to be readable
+before there is anything checked out to read. Same pattern as `config/env.<hostname>.sh`.
+
+| Variable | | Meaning |
+|---|---|---|
+| `POLICY_DIR` | required | the fork's path under `external/` |
+| `IMAGE` | required | the tag stage two builds; stage one is `<IMAGE>-base` |
+| `TRAIN_CMD` | required | in-container train entrypoint, run with `$@` appended |
+| `SERVE_CMD` | optional | in-container serve entrypoint. Absent means the fork has no backend that speaks `polyumi_inference`'s wire format, and `serve_policy.sh` refuses it |
+| `CONFIG_NAME` | optional | default Hydra workspace config, forwarded as an env var |
+
+`IMAGE` and `CONFIG_NAME` set in the calling shell win over the file's, for a one-off tag or
+workspace config. `$DATASET` always mounts at **`/data/dataset.zarr.zip`**, which every fork's
+entrypoint defaults to — that is the contract a new fork has to meet, rather than a per-fork
+setting, so nothing needs forwarding in.
 
 Hyperparameters are **not** here. They stay in each fork's own Hydra tree
 (`vista/config/`, `diffusion_policy/config/`); `config/policy.*.env` only names which workspace yaml
@@ -252,31 +265,31 @@ POLICY=vista DATASET=/abs/path/to/day0suite.zarr.zip \
     ./train_policy.sh --model vista_vt training.max_epochs=2 logging.mode=offline
 ```
 
-Note `training.max_epochs`, not the visuomotor config's `training.num_epochs`. `DRY_RUN=1` prints
-the `train_vista.py` command lines each model would run and exits.
+Note `training.max_epochs`, not the visuomotor config's `training.num_epochs`. Add `--dry-run` to
+print the `train_vista.py` command lines each model would run and exit without training.
+
+### Vista does not serve yet
+
+`config/policy.vista.env` sets no `SERVE_CMD`, so `serve_policy.sh` refuses `POLICY=vista` instead
+of building an image that would fail at the first request. The fork's `serve_policy.py` is still
+the visuomotor `UmiPolicyBackend`: it reads `camera0_rgb` and `agent_pos` off the wire, while a
+Vista checkpoint also wants `finger_rgb` and `mic_0`. Serving Vista means a backend that puts
+those modalities into the `Observation` frame — a `polyumi_inference` change as much as a fork one.
 
 ### Running the fork's tests
 
-The image can run its own test suite — `pytest` is layered in by
-`docker/polyumi_inference.Dockerfile`:
+The image can run its own test suite (`pytest` is installed by the fork's Dockerfile):
 
 ```bash
 docker run --rm --user 0:0 \
     -e HOME=/tmp -e HF_HOME=/hf_cache -e MPLCONFIGDIR=/tmp/mpl \
     -v "${HOME}/.cache/huggingface:/hf_cache:rw" \
     polyumi-vista \
-    python -m pytest test/test_sensor_ablation.py test/test_vista_shapes.py -q
+    python -m pytest test/ -q
 ```
 
 CPU-only, no GPU flag needed. The HF-cache mount is for the AST audio encoder, which the `va` and
 `vta` ablation groups pull from the hub on first run.
-
-> **`vista/data/` is missing from the fork**, so nothing that touches the dataset runs yet — the
-> repo's `.gitignore` has an unanchored `data` pattern, which git applies at every depth, and the
-> package was silently never committed. That is why the command above names those two test files:
-> `test/test_vista_dataset.py` fails at import, and training fails on
-> `vista/config/task/day0suite.yaml`'s `_target_: vista.data.vista_dataset.VistaDataset`. Fix is
-> upstream — anchor the pattern (`/data`) and commit the package.
 
 ## What is out of scope here
 

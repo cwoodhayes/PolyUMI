@@ -29,9 +29,3 @@ COPY --chown=$MAMBA_USER:$MAMBA_USER . /opt/polyumi_inference
 # relying on MAMBA_DOCKERFILE_ACTIVATE: that is a build-time ARG and does not survive into a
 # derived build.
 RUN micromamba run -n umi pip install --no-cache-dir --no-deps /opt/polyumi_inference
-
-# pytest, so an image can run its own fork's test suite. It belongs in each fork's
-# conda_environment.yaml and is here instead because neither fork lists it; drop this layer once
-# they do. --no-deps would break it (pytest genuinely needs pluggy/iniconfig), but it pulls only
-# pure-python leaves and touches nothing a checkpoint is pickled against.
-RUN micromamba run -n umi pip install --no-cache-dir pytest
