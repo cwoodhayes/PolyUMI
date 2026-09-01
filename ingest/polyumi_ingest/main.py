@@ -564,6 +564,62 @@ def preprocessing_pipeline(
         raise typer.Exit(1)
 
 
+@app.command(name='copy-map')
+def copy_map(
+    source: pathlib.Path = typer.Argument(..., help='Scene whose atlas to reuse (dir or scene.zarr).'),
+    target: pathlib.Path = typer.Argument(..., help='Scene that should adopt it (dir or scene.zarr).'),
+    force: bool = typer.Option(
+        False,
+        '--force',
+        help="Overwrite the target's existing atlas.",
+    ),
+):
+    """
+    Reuse one scene's ORB-SLAM3 atlas — its whole mapping pass — in another scene.
+
+    Copies the source's ``<scene>.atlas.osa`` to the target's conventional atlas path and
+    clears the target's step-2 marks, so ``pingest pp 2 --scene <target>`` relocalizes every
+    episode against the borrowed map instead of building one from the target's own mapping
+    walk. Both scenes then land in a single SLAM frame, which is the point: it is what makes
+    episodes recorded in separate scenes comparable, and it rescues a scene whose own mapping
+    walk came out poorly.
+
+    The target's own MAPPING session keeps whatever poses its own map build gave it — phase 2
+    never localizes the mapping session. Those poses stay in the abandoned frame, which is
+    harmless because DP export skips MAPPING sessions outright.
+    """
+    import zarr
+
+    from polyumi_ingest.preproc import clear_step_marks
+    from polyumi_ingest.preproc.slam_step import ATLAS_SOURCE_ATTR
+    from polyumi_ingest.pzarr.scene_files import SceneFiles
+
+    src = SceneFiles(path=SceneFiles.resolve_zarr_path(source).parent)
+    dst = SceneFiles(path=SceneFiles.resolve_zarr_path(target).parent)
+
+    if src.path == dst.path:
+        log.error('Source and target are the same scene.')
+        raise typer.Exit(1)
+    if not src.orb_slam3_atlas.exists():
+        log.error(f'No atlas at {src.orb_slam3_atlas} — run `pingest pp 2` on {src.path.name} first.')
+        raise typer.Exit(1)
+    if not dst.zarr_path.exists():
+        log.error(f'No scene.zarr found at {dst.path}')
+        raise typer.Exit(1)
+    if dst.orb_slam3_atlas.exists() and not force:
+        log.error(f'{dst.orb_slam3_atlas} already exists. Use --force to replace it.')
+        raise typer.Exit(1)
+
+    shutil.copy2(src.orb_slam3_atlas, dst.orb_slam3_atlas)
+    root = zarr.open_group(str(dst.zarr_path), mode='a')
+    root.attrs[ATLAS_SOURCE_ATTR] = src.path.name
+    # Step 2 only: re-running it invalidates the steps after it on its own.
+    clear_step_marks(root, [2])
+
+    log.info(f'Copied atlas from {src.path.name} ({_human_size(dst.orb_slam3_atlas.stat().st_size)}).')
+    log.info(f'Now run: pingest pp 2 --scene {dst.path}')
+
+
 @app.command(name='calibrate-gripper')
 def calibrate_gripper(
     scene: pathlib.Path = typer.Option(
