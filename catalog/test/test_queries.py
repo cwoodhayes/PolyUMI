@@ -204,8 +204,9 @@ def test_task_detail_usable_count_follows_the_thresholds_not_a_stored_verdict(tm
 
     iquality.load_quality_thresholds.cache_clear()
     try:
+        # 100 fed - 5 lost = 95 tracked, so a floor of 96 excludes exactly this episode.
         with mock.patch.object(
-            iquality, 'load_quality_thresholds', return_value=iquality.QualityThresholds(max_lost_frames=1)
+            iquality, 'load_quality_thresholds', return_value=iquality.QualityThresholds(min_tracked_frames=96)
         ):
             with DBSession(engine) as db:
                 # same cached numbers, stricter threshold -> scene-1's episode is now excluded

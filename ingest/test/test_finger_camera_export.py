@@ -15,10 +15,10 @@ import numpy as np
 import pytest
 import zarr
 from polyumi_ingest.config import load_finger_camera_config
-from polyumi_ingest.export.dp import export_scene_to_dp, export_scenes_to_polyumi
-
+from export_floor import export_scene_to_dp, export_scenes_to_polyumi
 from test_dp_export import EXPECTED_KEYS, _build_scene, _open_zip
 from test_polyumi_export import FINGER_FPS, FINGER_OFFSET_S, _add_contact_audio, _add_finger_camera
+
 
 CFG = load_finger_camera_config()
 CROP = CFG['crop']
@@ -178,7 +178,7 @@ def test_trimming_keeps_every_surviving_step_within_tolerance(tmp_path: pathlib.
 
 def test_an_episode_with_no_usable_coverage_is_dropped(tmp_path: pathlib.Path) -> None:
     """
-    Trimming past MIN_SEGMENT_STEPS leaves nothing to export, and that has to be a clean skip.
+    Trimming past the length floor leaves nothing to export, and that has to be a clean skip.
 
     The existing segmentation already handles this for pose dropouts; the finger camera reuses
     it rather than inventing a second way for an episode to be unusable.
@@ -188,7 +188,8 @@ def test_an_episode_with_no_usable_coverage_is_dropped(tmp_path: pathlib.Path) -
     _add_finger_camera(scene, truncate_s=0.8)
 
     with pytest.raises(RuntimeError, match='no EPISODE sessions to export'):
-        export_scenes_to_polyumi([scene], tmp_path / 'buf.zarr.zip')
+        # Floor pinned above what the truncated finger stream can cover, so the trim empties it.
+        export_scenes_to_polyumi([scene], tmp_path / 'buf.zarr.zip', min_segment_steps=24)
 
 
 def test_a_gap_inside_tolerance_trims_nothing(tmp_path: pathlib.Path) -> None:

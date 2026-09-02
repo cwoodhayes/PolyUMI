@@ -6,6 +6,8 @@ import rpi_hardware_pwm
 
 log = logging.getLogger('pi_led_manager')
 
+DEFAULT_BRIGHTNESS = 0.5
+
 
 class LEDManager:
     """Manages the LED strip that lights the sensor surface."""
@@ -22,14 +24,16 @@ class LEDManager:
         self.pwm: rpi_hardware_pwm.HardwarePWM = rpi_hardware_pwm.HardwarePWM(self.PWM_CHANNEL, hz=1000, chip=0)
         self.pwm.start(0)
 
-    def set_brightness(self, brightness: float) -> None:
+    def set_brightness(self, brightness: float | None = None) -> None:
         """
         Set the brightness of the LED strip.
 
         Args:
-            brightness: Brightness in [0.0, 1.0].
+            brightness: Brightness in [0.0, 1.0]. Defaults to DEFAULT_BRIGHTNESS when None.
 
         """
+        if brightness is None:
+            brightness = DEFAULT_BRIGHTNESS
         duty_cycle = int(brightness * 100)
         self.pwm.change_duty_cycle(duty_cycle)
         log.info(f'Set LED brightness to {brightness:.2f} (duty cycle: {duty_cycle}%)')

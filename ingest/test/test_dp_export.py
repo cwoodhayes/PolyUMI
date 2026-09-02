@@ -19,9 +19,12 @@ import zarr
 from scipy.spatial.transform import Rotation
 
 from polyumi_catalog import episode_quality
-from polyumi_ingest.export.dp import buffer, export_scene_to_dp, export_scenes_to_dp
+from polyumi_ingest.export.dp import buffer
+from polyumi_ingest.export.dp import export_scene_to_dp as _export_scene_to_dp
 from polyumi_ingest.manifests import SceneManifest
 from polyumi_ingest.preproc import available_preprocessing_steps
+
+from export_floor import export_scene_to_dp, export_scenes_to_dp
 
 RES = 224
 RATE = 59.94
@@ -267,68 +270,151 @@ def _slam_counts(n_fed: int, n_lost: int) -> dict:
     }
 
 
-def test_skips_episode_failing_the_quality_thresholds(tmp_path: pathlib.Path) -> None:
+def _add_pose_jump(scene: pathlib.Path, at: int, metres: float, source: str = 'slam') -> None:
     """
-    An episode whose stored SLAM metrics fail config/quality_thresholds.yaml is skipped.
+    Displace every pose from row ``at`` onward, making one over-threshold step at ``at``.
 
-    Enough lost frames to trip UMI's absolute count. Nothing interpolates over them any more,
-    so the alternative to dropping the demo is exporting around holes in its trajectory.
+    Shifting the whole tail rather than a single row models what a relocalization actually does
+    — the trajectory continues, consistently, in a different place — and leaves exactly one
+    oversized inter-frame step, at the seam.
     """
-    scene = _build_scene(tmp_path, with_slam=True)
-    _make_slam_only(scene, **_slam_counts(n_fed=120, n_lost=25))
-    with pytest.raises(RuntimeError, match='no EPISODE sessions'):
-        export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
-
-
-def test_skips_episode_with_too_few_tracked_frames(tmp_path: pathlib.Path) -> None:
-    """An episode too short to be worth training on is excluded even with no losses."""
-    scene = _build_scene(tmp_path, with_slam=True)
-    _make_slam_only(scene, **_slam_counts(n_fed=40, n_lost=0))
-    with pytest.raises(RuntimeError, match='no EPISODE sessions'):
-        export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
-
-
-def test_exports_episode_that_passes_the_quality_thresholds(tmp_path: pathlib.Path) -> None:
-    """The converse: healthy SLAM metrics must not be excluded by the new checks."""
-    scene = _build_scene(tmp_path, with_slam=True)
-    _make_slam_only(scene, **_slam_counts(n_fed=120, n_lost=2))
-    n_eps, _ = export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
-    assert n_eps == 1
-
-
-def test_optitrack_episode_is_exempt_from_slam_quality_thresholds(tmp_path: pathlib.Path) -> None:
-    """
-    An episode with OptiTrack available exports even with terrible SLAM metrics.
-
-    Its poses don't come from SLAM, so the SLAM-derived verdict must not exclude it.
-    """
-    scene = _build_scene(tmp_path, with_slam=True)  # keeps pose_optitrack + available_sources
     root = zarr.open_group(str(scene), mode='a')
-    root['episode_0']['annotations'].require_group('slam').attrs.update(_slam_counts(n_fed=120, n_lost=119))
+    pose = root['episode_0']['eef'][f'pose_{source}']
+    data = pose[:]
+    data[at:, 0] += metres
+    pose[:] = data
+
+
+def test_a_session_with_lost_frames_still_exports(tmp_path: pathlib.Path) -> None:
+    """
+    Whole-episode SLAM metrics never discard a session; only segmentation decides what survives.
+
+    25 lost of 120 fed frames is a patchy demo, not a worthless one — segmentation cuts around
+    the holes and keeps the runs either side, so nothing here may reject it up front.
+    """
+    scene = _build_scene(tmp_path, with_slam=True)
+    _make_slam_only(scene, **_slam_counts(n_fed=120, n_lost=25))
+
     n_eps, _ = export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
+
     assert n_eps == 1
 
 
-def test_export_and_catalog_agree_on_which_episodes_are_unusable(tmp_path: pathlib.Path) -> None:
+def test_a_pose_jump_splits_a_session_and_costs_no_frames(tmp_path: pathlib.Path) -> None:
     """
-    The exporter's skip decision and the catalog's badge come from the same function.
+    A teleport is a bad *transition*, so it cuts the demo in two and keeps both poses bracketing it.
 
-    Regression guard against the two drifting apart: if the UI says an episode is
-    excluded, export must actually skip it, and vice versa. Both paths read the same
-    stored attrs and call ``quality.auto_unusable_reasons``.
+    The frame-range half fails if the break is ever implemented by marking a step invalid —
+    that would silently drop a good frame and put the boundary one step off. Both halves
+    together must still account for every valid step.
     """
-    from polyumi_ingest.export.dp.buffer import _auto_unusable_reasons_for_episode
+    n = 120
+    scene = _build_scene(tmp_path, n=n, with_slam=True)
+    _make_slam_only(scene, max_pose_jump_m=3.0, **_slam_counts(n_fed=n, n_lost=0))
+    _add_pose_jump(scene, at=60, metres=1.0)
+    out = tmp_path / 'buf.zarr.zip'
 
-    scene = _build_scene(tmp_path, with_slam=True)
-    _make_slam_only(scene, **_slam_counts(n_fed=120, n_lost=25))
-    ep = zarr.open_group(str(scene / 'episode_0'), mode='r')
+    n_eps, provenance = export_scene_to_dp(scene, out, min_segment_steps=24)
 
-    export_reasons = _auto_unusable_reasons_for_episode(ep)
+    assert n_eps == 2
+    assert provenance[0]['cut_end'] == 'pose_jump'
+    assert provenance[1]['cut_start'] == 'pose_jump'
+    ends = list(_open_zip(out)['meta/episode_ends'][:])
+    assert ends == [60, n]  # no step lost at the seam
+    assert provenance[0]['frame_range'] == [0, 59]
+    assert provenance[1]['frame_range'] == [60, n - 1]
+
+
+def test_a_pose_step_under_the_threshold_does_not_split(tmp_path: pathlib.Path) -> None:
+    """The converse: ordinary fast motion is not a teleport."""
+    n = 120
+    scene = _build_scene(tmp_path, n=n, with_slam=True)
+    _make_slam_only(scene, **_slam_counts(n_fed=n, n_lost=0))
+    _add_pose_jump(scene, at=60, metres=0.01)  # 1 cm, well under the 8 cm threshold
+
+    n_eps, _ = export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip', min_segment_steps=24)
+
+    assert n_eps == 1
+
+
+def test_a_jump_beside_a_tracking_gap_cuts_once_not_twice(tmp_path: pathlib.Path) -> None:
+    """
+    A pose pair spanning a NaN run produces a NaN distance, so the gap alone does the cutting.
+
+    Without that, the frames either side of a dropout would look like a teleport to the jump
+    check and split an already-split run again, emitting a spurious empty-ish episode.
+    """
+    n = 120
+    scene = _build_scene(tmp_path, n=n, nan_rows=slice(60, 66), with_slam=True)
+    _make_slam_only(scene, **_slam_counts(n_fed=n, n_lost=6))
+    # The trajectory resumes 1 m away — across the gap, which must NOT register as a jump.
+    _add_pose_jump(scene, at=66, metres=1.0)
+
+    n_eps, provenance = export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip', min_segment_steps=24)
+
+    assert n_eps == 2
+    assert [p['cut_end'] for p in provenance] == ['pose_gap', 'episode_end']
+
+
+def test_catalog_unusable_implies_the_export_yields_nothing(tmp_path: pathlib.Path) -> None:
+    """
+    The surviving half of "one rule, two consumers", now that export has no veto of its own.
+
+    ``quality.auto_unusable_reasons`` can no longer be *the* export rule — the real rule needs
+    the pose array, and the catalog is attrs-only by design. What must still hold is the
+    direction that matters to a user reading the UI: if the catalog predicts an episode
+    contributes nothing, the export must actually produce nothing from it.
+    """
+    scene = _build_scene(tmp_path, n=40, with_slam=True)
+    _make_slam_only(scene, **_slam_counts(n_fed=40, n_lost=0))
+
     catalog_quality = episode_quality.scene_quality_by_session_dir(tmp_path)['session_0']
+    assert catalog_quality['auto_unusable'] is True  # too few tracked frames to yield a segment
 
-    assert export_reasons  # export would skip it
-    assert catalog_quality['auto_unusable'] is True  # ...and the UI says so
-    assert catalog_quality['auto_unusable_reasons'] == export_reasons  # for the same reason
+    # The production floor, not this module's small one — the prediction is only meaningful
+    # against the floor an actual export uses.
+    with pytest.raises(RuntimeError, match='no EPISODE sessions'):
+        _export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
+
+
+def test_a_bad_chirp_detection_does_not_make_an_exportable_episode_unusable(tmp_path: pathlib.Path) -> None:
+    """
+    The catalog must follow the exporter into its bad-chirp fallback, or the implication breaks.
+
+    A chirp end that leaves fewer steps than the floor is treated by the exporter as a wrong
+    detection, so it ships the episode *untrimmed*. Judging such an episode on its post-chirp
+    counts would badge it unusable while the export produces a full episode from it.
+    """
+    n = 200
+    post_chirp = 20
+    scene = _build_scene(tmp_path, n=n, with_slam=True, gopro_chirp_end_s=(n - post_chirp) / RATE)
+    counts = _slam_counts(n_fed=n, n_lost=0)
+    counts['n_frames_fed_post_chirp'] = post_chirp
+    _make_slam_only(scene, **counts)
+
+    n_eps, provenance = _export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
+
+    assert n_eps == 1
+    assert provenance[0]['n_steps'] == n  # untrimmed: the marker was distrusted
+    assert episode_quality.scene_quality_by_session_dir(tmp_path)['session_0']['auto_unusable'] is False
+
+
+def test_the_shortest_exportable_episode_is_not_called_unusable(tmp_path: pathlib.Path) -> None:
+    """
+    The boundary the prediction above rests on, exercised rather than asserted on constants.
+
+    An episode of exactly ``MIN_SEGMENT_STEPS`` tracked frames is the shortest thing that
+    exports at all. The catalog must not condemn it — which holds only while
+    ``min_tracked_frames <= MIN_SEGMENT_STEPS``. Raise the catalog's number above the export's
+    and this fails, because the catalog would be excluding an episode that does export.
+    """
+    n = buffer.MIN_SEGMENT_STEPS
+    scene = _build_scene(tmp_path, n=n, with_slam=True)
+    _make_slam_only(scene, **_slam_counts(n_fed=n, n_lost=0))
+
+    assert episode_quality.scene_quality_by_session_dir(tmp_path)['session_0']['auto_unusable'] is False
+    n_eps, _ = _export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
+    assert n_eps == 1
 
 
 def test_missing_eef_pose_raises(tmp_path: pathlib.Path) -> None:
@@ -350,7 +436,8 @@ def test_nan_span_is_dropped_keeping_longest_run(tmp_path: pathlib.Path) -> None
     """
     scene = _build_scene(tmp_path, n=120, nan_rows=slice(80, 100))
     out = tmp_path / 'buf.zarr.zip'
-    export_scene_to_dp(scene, out)
+    # Floor pinned above the 20-step tail so only the long run survives — the point of the test.
+    export_scene_to_dp(scene, out, min_segment_steps=24)
 
     t = int(_open_zip(out)['meta/episode_ends'][-1])
     assert t == 80  # longest gap-free run is rows [0, 80); frames taken as-is, none resampled
@@ -673,11 +760,11 @@ def test_pose_gap_splits_one_session_into_two_episodes(tmp_path: pathlib.Path) -
 def test_segment_shorter_than_the_floor_is_dropped(tmp_path: pathlib.Path) -> None:
     """A run too short to sample a horizon from is discarded, not emitted as an episode."""
     n = 120
-    # 10 valid steps, then a hole, then the rest: the first run is under the 24-step floor.
+    # 10 valid steps, then a hole, then the rest: the first run is under the floor set below.
     scene = _build_scene(tmp_path, n=n, nan_rows=slice(10, 20))
     out = tmp_path / 'buf.zarr.zip'
 
-    n_eps, provenance = export_scene_to_dp(scene, out)
+    n_eps, provenance = export_scene_to_dp(scene, out, min_segment_steps=24)
 
     assert n_eps == 1
     assert provenance[0]['frame_range'] == [20, n - 1]

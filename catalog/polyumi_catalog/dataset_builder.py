@@ -21,6 +21,7 @@ from sqlmodel import Session as DBSession
 from sqlmodel import select
 
 from polyumi_ingest import timing
+from polyumi_ingest.export.dp import MIN_SEGMENT_STEPS
 
 from polyumi_catalog.manifests import DatasetManifest, DatasetMemberSpec
 from polyumi_catalog.models import Dataset, DatasetMember, Scene, Task
@@ -125,6 +126,10 @@ def build_dataset(
         members=[DatasetMemberSpec(scene_id=s.scene_id, scene_dir=s.dir, episodes='all') for s in scenes],
         pose_provenance=pose_provenance,
         exporter_type=exporter_type,
+        # This build path deliberately exposes no knobs, so the values it used are whatever the
+        # exporter's defaults were on the day — record them, or a change to a default silently
+        # rewrites what every catalog-built dataset means with nothing on disk to show it.
+        export_params={'min_segment_steps': MIN_SEGMENT_STEPS},
         **totals,
     )
     manifest.to_file(manifest_path)

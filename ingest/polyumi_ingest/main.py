@@ -10,6 +10,7 @@ import logging
 import os
 import pathlib
 import shutil
+from collections import Counter
 from collections.abc import Callable
 from enum import Enum
 
@@ -563,6 +564,62 @@ def preprocessing_pipeline(
         raise typer.Exit(1)
 
 
+@app.command(name='copy-map')
+def copy_map(
+    source: pathlib.Path = typer.Argument(..., help='Scene whose atlas to reuse (dir or scene.zarr).'),
+    target: pathlib.Path = typer.Argument(..., help='Scene that should adopt it (dir or scene.zarr).'),
+    force: bool = typer.Option(
+        False,
+        '--force',
+        help="Overwrite the target's existing atlas.",
+    ),
+):
+    """
+    Reuse one scene's ORB-SLAM3 atlas — its whole mapping pass — in another scene.
+
+    Copies the source's ``<scene>.atlas.osa`` to the target's conventional atlas path and
+    clears the target's step-2 marks, so ``pingest pp 2 --scene <target>`` relocalizes every
+    episode against the borrowed map instead of building one from the target's own mapping
+    walk. Both scenes then land in a single SLAM frame, which is the point: it is what makes
+    episodes recorded in separate scenes comparable, and it rescues a scene whose own mapping
+    walk came out poorly.
+
+    The target's own MAPPING session keeps whatever poses its own map build gave it — phase 2
+    never localizes the mapping session. Those poses stay in the abandoned frame, which is
+    harmless because DP export skips MAPPING sessions outright.
+    """
+    import zarr
+
+    from polyumi_ingest.preproc import clear_step_marks
+    from polyumi_ingest.preproc.slam_step import ATLAS_SOURCE_ATTR
+    from polyumi_ingest.pzarr.scene_files import SceneFiles
+
+    src = SceneFiles(path=SceneFiles.resolve_zarr_path(source).parent)
+    dst = SceneFiles(path=SceneFiles.resolve_zarr_path(target).parent)
+
+    if src.path == dst.path:
+        log.error('Source and target are the same scene.')
+        raise typer.Exit(1)
+    if not src.orb_slam3_atlas.exists():
+        log.error(f'No atlas at {src.orb_slam3_atlas} — run `pingest pp 2` on {src.path.name} first.')
+        raise typer.Exit(1)
+    if not dst.zarr_path.exists():
+        log.error(f'No scene.zarr found at {dst.path}')
+        raise typer.Exit(1)
+    if dst.orb_slam3_atlas.exists() and not force:
+        log.error(f'{dst.orb_slam3_atlas} already exists. Use --force to replace it.')
+        raise typer.Exit(1)
+
+    shutil.copy2(src.orb_slam3_atlas, dst.orb_slam3_atlas)
+    root = zarr.open_group(str(dst.zarr_path), mode='a')
+    root.attrs[ATLAS_SOURCE_ATTR] = src.path.name
+    # Step 2 only: re-running it invalidates the steps after it on its own.
+    clear_step_marks(root, [2])
+
+    log.info(f'Copied atlas from {src.path.name} ({_human_size(dst.orb_slam3_atlas.stat().st_size)}).')
+    log.info(f'Now run: pingest pp 2 --scene {dst.path}')
+
+
 @app.command(name='calibrate-gripper')
 def calibrate_gripper(
     scene: pathlib.Path = typer.Option(
@@ -811,6 +868,88 @@ class ExportType(str, Enum):
     polyumi = 'polyumi'
 
 
+def _dry_run_export(
+    scene_paths: list[pathlib.Path],
+    modalities: list,
+    enforce_preprocessing: bool,
+    min_segment_steps: int,
+    as_json: bool,
+) -> None:
+    """
+    Report what an export would cut these scenes into, without decoding a single frame.
+
+    Answers "how much usable data do I actually have, and where does it go" in seconds rather
+    than the minutes a real export costs. It runs the exporter's own episode selection and its
+    own planner, and prints ``EpisodePlan.segment_record`` verbatim, so the preview cannot
+    disagree with what a real run would write.
+    """
+    from polyumi_ingest.config import load_closed_width_m, load_open_width_m
+    from polyumi_ingest.export.dp.buffer import iter_exportable_episodes, plan_episode_segments
+
+    # The planner logs a line or two per episode through RichHandler, which writes to stdout —
+    # harmless for the table, but it would corrupt --json into something no parser can read.
+    if as_json:
+        logging.getLogger().setLevel(logging.ERROR)
+
+    closed_width_m, open_width_m = load_closed_width_m(), load_open_width_m()
+
+    records: list[dict] = []
+    causes: Counter[str] = Counter()
+    n_dropped = 0
+    dropped_s = 0.0
+    try:
+        for scene_path in scene_paths:
+            for scene_label, ep_key, session_dir, ep, pose_source in iter_exportable_episodes(
+                scene_path, enforce_preprocessing=enforce_preprocessing, modalities=modalities
+            ):
+                plan, _, _ = plan_episode_segments(
+                    ep,
+                    f'{scene_label}/{ep_key}',
+                    pose_source,
+                    closed_width_m=closed_width_m,
+                    open_width_m=open_width_m,
+                    min_segment_steps=min_segment_steps,
+                    modalities=modalities,
+                )
+                n_dropped += len(plan.dropped)
+                dropped_s += sum(plan.duration_s(run) for run in plan.dropped)
+                for seg_i in range(len(plan.segments)):
+                    record = plan.segment_record(seg_i)
+                    causes[record['cut_start']] += 1
+                    causes[record['cut_end']] += 1
+                    records.append(
+                        {
+                            'scene': scene_label,
+                            'session': session_dir,
+                            'episode': ep_key,
+                            'source': pose_source,
+                            **record,
+                        }
+                    )
+    except (FileNotFoundError, ValueError, RuntimeError) as e:
+        log.error(str(e))
+        raise typer.Exit(1)
+
+    if as_json:
+        typer.echo(json.dumps(records, indent=2))
+        return
+
+    by_session: dict[tuple[str, str], list[dict]] = {}
+    for r in records:
+        by_session.setdefault((r['scene'], r['episode']), []).append(r)
+    for (scene_label, ep_key), segs in by_session.items():
+        spans = ', '.join(f'{s["duration_s"]:.1f}s [{s["cut_start"]}->{s["cut_end"]}]' for s in segs)
+        typer.echo(f'  {scene_label}/{ep_key}: {len(segs)} segment(s)  {spans}')
+
+    total_s = sum(r['duration_s'] for r in records)
+    typer.echo(
+        f'\n{len(records)} segment(s) over {len(by_session)} session(s), {total_s / 60:.1f} min usable '
+        f'(floor {min_segment_steps} steps; {n_dropped} run(s) / {dropped_s / 60:.1f} min below it)'
+    )
+    if causes:
+        typer.echo('cut causes: ' + ', '.join(f'{k}={v}' for k, v in causes.most_common()))
+
+
 @app.command(name='export')
 def export_scenes(
     scene_paths: list[pathlib.Path] = typer.Argument(
@@ -819,10 +958,10 @@ def export_scenes(
         'One or more; multiple scenes are concatenated in the order given.',
     ),
     output_path: pathlib.Path = typer.Option(
-        ...,
+        None,
         '--output',
         '-o',
-        help='Output ReplayBuffer path (a .zarr.zip file).',
+        help='Output ReplayBuffer path (a .zarr.zip file). Required unless --dry-run.',
     ),
     exporter_type: ExportType = typer.Option(
         ExportType.dp,
@@ -847,6 +986,16 @@ def export_scenes(
         'source drops out is split into the runs either side; runs shorter than this are '
         'discarded rather than emitted as episodes too short to sample a horizon from.',
     ),
+    dry_run: bool = typer.Option(
+        False,
+        '--dry-run',
+        help="Report what would be exported — one line per session, with each segment's span "
+        'and why it was cut there — and write nothing. Decodes no frames, so it costs seconds '
+        'rather than the minutes a real export does.',
+    ),
+    as_json: bool = typer.Option(
+        False, '--json', help='With --dry-run, emit the per-segment records as JSON instead of a table.'
+    ),
 ):
     """
     Export pzarr scenes to a ReplayBuffer (.zarr.zip).
@@ -864,9 +1013,27 @@ def export_scenes(
     raw rather than a spectrogram, since the log-mel belongs in the training container where
     it can be computed after waveform-domain augmentation) and `data/finger_rgb` (the finger
     camera, cropped to the region the gripper mount doesn't occlude, left at that resolution).
+
+    `--dry-run` reports the plan and writes nothing, in seconds rather than minutes: each
+    segment's span plus why it starts and ends where it does — episode_start/episode_end,
+    chirp (the idle prefix before the sync chirp), pose_gap (SLAM lost tracking), pose_jump (a
+    relocalization teleport past max_pose_jump_m), gripper_gap, or a modality name. Sweep the
+    length floor with --min-segment-steps, and note --type polyumi cuts more, since its extra
+    modalities narrow the valid span.
     """
     from polyumi_ingest.export.dp import export_scenes_to_dp, export_scenes_to_polyumi
+    from polyumi_ingest.export.dp.polyumi import POLYUMI_MODALITIES
 
+    if dry_run:
+        # Instantiated per run, exactly as export_scenes_to_polyumi does: a modality stashes
+        # per-episode state on self, so this needs its own instances, not the classes.
+        modalities = [cls() for cls in POLYUMI_MODALITIES] if exporter_type == ExportType.polyumi else []
+        _dry_run_export(scene_paths, modalities, enforce_preprocessing, min_segment_steps, as_json)
+        return
+
+    if output_path is None:
+        log.error('--output/-o is required (omit it only with --dry-run).')
+        raise typer.Exit(1)
     export_fn = export_scenes_to_polyumi if exporter_type == ExportType.polyumi else export_scenes_to_dp
     _run_export(export_fn, scene_paths, output_path, enforce_preprocessing, min_segment_steps)
 
