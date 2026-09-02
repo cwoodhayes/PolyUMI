@@ -1,24 +1,24 @@
 """
-How a chunk of target EEF poses is put on the wire — as a command, and as a picture of one.
+PolyUMI's wiring for the streaming impedance controller's chunk format.
 
-``multidof_trajectory`` is the COMMAND format. The streaming Cartesian impedance controller takes a
-``MultiDOFJointTrajectory``, where every waypoint has an absolute instant (``header.stamp +
-time_from_start``) that its interpolator splices on. Every producer — the policy client and the
-three on-arm probes — builds it through ``TargetChunkPublisher``, which is also what keeps
-``topic_name`` and ``get_subscription_count()`` available for "nobody is listening" errors.
+The format itself — how a chunk of target EEF poses is put on the wire — lives in
+``franka_streaming_impedance_client.target_chunk``, which is a standalone open-source package
+shared with other users of the controller. What is PolyUMI-specific, and so stays here, is
+*which* topic this deployment publishes on and *what* has to be running to receive it.
 
-``pose_array`` is the PREVIEW format, and moves nothing. ``policy_client_node`` publishes every
-commanded chunk as an untimed ``PoseArray`` on a separate topic so the motion can be watched in
-Foxglove whether or not execution is enabled. It lives here so both views of a chunk are built
-from one place, but nothing on the NUC subscribes to it.
+Import ``TargetChunkPublisher`` from here rather than from the generic package: the subclass
+below is the one that knows this deployment's topic. ``pose_array`` is re-exported unchanged —
+it is the PREVIEW format ``policy_client_node`` publishes so a chunk can be watched in Foxglove
+whether or not execution is enabled.
 """
 
-from geometry_msgs.msg import Pose, PoseArray, Transform
-from rclpy.duration import Duration
-from trajectory_msgs.msg import MultiDOFJointTrajectory, MultiDOFJointTrajectoryPoint
+from franka_streaming_impedance_client.target_chunk import TargetChunkPublisher as _ChunkPublisher
+from franka_streaming_impedance_client.target_chunk import pose_array
+
+__all__ = ['CONSUMER_HINT', 'TARGET_POSES_TOPIC', 'TargetChunkPublisher', 'pose_array']
 
 #: Where the streaming controller listens. Producers may override per-node, but this is the one
-#: topic the running stack is wired for.
+#: topic the running stack is wired for. Set as `target_topic` in nuc/config/polyumi_controllers.yaml.
 TARGET_POSES_TOPIC = '/polyumi/target_poses_traj'
 
 #: What must be running for a chunk to reach the arm, for "nobody is listening" errors. The
@@ -29,101 +29,21 @@ CONSUMER_HINT = (
 )
 
 
-def pose_array(poses: list[Pose], *, frame_id: str, stamp) -> PoseArray:
+class TargetChunkPublisher(_ChunkPublisher):
     """
-    Build a PoseArray of `poses` in `frame_id`.
+    The generic chunk publisher, defaulted to the topic this deployment is wired for.
 
-    `stamp` carries no per-waypoint meaning — the consumer re-times the chunk from arrival.
-    """
-    msg = PoseArray()
-    msg.header.stamp = stamp
-    msg.header.frame_id = frame_id
-    msg.poses = list(poses)
-    return msg
-
-
-def multidof_trajectory(
-    poses: list[Pose],
-    *,
-    frame_id: str,
-    joint_name: str,
-    stamp,
-    dt: float,
-    first_index: int = 0,
-) -> MultiDOFJointTrajectory:
-    """
-    Build a MultiDOFJointTrajectory placing waypoint k at ``stamp + (first_index + k) * dt``.
-
-    `first_index` is the index of ``poses[0]`` in the UNSLICED chunk, because chunks are usually
-    published with their leading waypoints dropped as stale. Numbering the survivors from zero
-    would slide the whole timeline earlier, and the consumer reads these as absolute instants — a
-    uniform shift that looks like tracking lag rather than a bug.
-    """
-    msg = MultiDOFJointTrajectory()
-    msg.header.stamp = stamp
-    msg.header.frame_id = frame_id
-    msg.joint_names = [joint_name]
-    for i, pose in enumerate(poses):
-        transform = Transform()
-        transform.translation.x = pose.position.x
-        transform.translation.y = pose.position.y
-        transform.translation.z = pose.position.z
-        transform.rotation = pose.orientation
-        point = MultiDOFJointTrajectoryPoint()
-        point.transforms = [transform]
-        point.time_from_start = Duration(seconds=(first_index + i) * dt).to_msg()
-        msg.points.append(point)
-    return msg
-
-
-class TargetChunkPublisher:
-    """
-    Publishes pose chunks as a timed MultiDOFJointTrajectory for the streaming controller.
-
-    Wraps a plain publisher rather than replacing it, so callers keep ``topic_name`` and
-    ``get_subscription_count()`` — publishing where nothing subscribes is otherwise silent, since
-    nothing moves and there is no error anywhere.
+    The generic class requires `topic`, because its own node-relative default would resolve
+    against the publishing node and address nothing. PolyUMI has one answer for every producer,
+    so it is supplied here instead of at each of the four call sites.
     """
 
-    def __init__(
-        self,
-        node,
-        *,
-        frame_id: str,
-        joint_name: str,
-        topic: str | None = None,
-        qos: int = 10,
-    ):
-        """Create the underlying publisher, defaulting to :data:`TARGET_POSES_TOPIC`."""
-        self._frame_id = frame_id
-        self._joint_name = joint_name
-        self._node = node
-        self._pub = node.create_publisher(MultiDOFJointTrajectory, topic or TARGET_POSES_TOPIC, qos)
-
-    @property
-    def topic_name(self) -> str:
-        """Resolved topic name, for log messages."""
-        return self._pub.topic_name
-
-    def get_subscription_count(self) -> int:
-        """How many subscribers the topic has — i.e. whether the controller is listening."""
-        return self._pub.get_subscription_count()
-
-    def publish(self, poses: list[Pose], *, dt: float = 0.0, first_index: int = 0, stamp=None) -> None:
-        """
-        Publish `poses` as a MultiDOFJointTrajectory.
-
-        `stamp` defaults to now; pass an earlier instant to command ahead of time, which is how
-        action latency is compensated. See multidof_trajectory for what first_index indexes into.
-        """
-        stamp = stamp if stamp is not None else self._node.get_clock().now().to_msg()
-        self._pub.publish(
-            multidof_trajectory(
-                poses,
-                frame_id=self._frame_id,
-                joint_name=self._joint_name,
-                stamp=stamp,
-                dt=dt,
-                first_index=first_index,
-            )
+    def __init__(self, node, *, frame_id: str, joint_name: str, topic: str | None = None, qos: int = 10):
+        """Create the publisher, defaulting to :data:`TARGET_POSES_TOPIC`."""
+        super().__init__(
+            node,
+            frame_id=frame_id,
+            joint_name=joint_name,
+            topic=topic or TARGET_POSES_TOPIC,
+            qos=qos,
         )

@@ -82,7 +82,7 @@ def generate_launch_description():
             # Required, and not redundant with --param-file: Humble's spawner sets the `type`
             # param only from -t. See the note in fr3_bringup.launch.py.
             '-t',
-            'polyumi_fr3_controllers/CartesianImpedanceController',
+            'franka_streaming_impedance_controller/CartesianImpedanceController',
             '--param-file',
             str(NUC_DIR / 'config' / 'polyumi_controllers.yaml'),
             # Inactive in both modes. Activating means claiming the effort interfaces
@@ -185,14 +185,23 @@ def generate_launch_description():
             # so ~/joint_states resolves to /fr3_gripper/joint_states, exactly as franka_gripper's
             # did — every existing consumer of that topic keeps working unchanged.
             Node(
-                package='polyumi_fr3_controllers',
+                package='franka_streaming_impedance_controller',
                 executable='franka_hand_node',
                 name='fr3_gripper',
                 output='screen',
                 condition=IfCondition(_selected('hand')),
                 # value_type is not optional: a LaunchConfiguration resolves to a STRING, and
                 # declare_parameter's str default would otherwise be the only one that fits.
-                parameters=[{'robot_ip': ParameterValue(robot_ip, value_type=str)}],
+                #
+                # target_topic is explicit because the node's own default is node-relative
+                # (~/target_widths, i.e. under the name below); the FAULHABER driver subscribes
+                # /polyumi/target_gripper, and the two drivers must be interchangeable.
+                parameters=[
+                    {
+                        'robot_ip': ParameterValue(robot_ip, value_type=str),
+                        'target_topic': '/polyumi/target_gripper',
+                    }
+                ],
             ),
             # The FAULHABER gripper, from the franka_gripper_control submodule. It already
             # subscribes /polyumi/target_gripper as a JointTrajectory carrying fr3_gripper_width

@@ -41,6 +41,11 @@
        own channel and its own cadence. Consumed by franka_hand_node on the NUC — the franka_msgs
        gripper actions are called from the NUC, not here. -->
   <depend>trajectory_msgs</depend>
+  <!-- The chunk wire format itself, shared with the streaming impedance controller's other users.
+       polyumi_ros2/target_chunk.py re-exports it and adds this deployment's topic name. Built from
+       the symlink at ros2_ws/src/franka_streaming_impedance_client; declared here so colcon puts it
+       on the environment for `colcon test`, not just for a sourced install. -->
+  <depend>franka_streaming_impedance_client</depend>
   <!-- On the inference path: camera_preproc's resize/crop and policy_client_node's use of it, plus
        the QR encode/decode in latency_probe's camera mode. Undeclared until 2026-08-11 — it worked
        only because python3-opencv happens to be installed system-wide, so the `rosdep install`

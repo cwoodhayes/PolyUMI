@@ -15,7 +15,7 @@ import pytest
 import rclpy
 from rclpy.parameter import Parameter
 
-from polyumi_ros2.target_chunk import CONSUMER_HINT
+from polyumi_ros2.target_chunk import CONSUMER_HINT, TARGET_POSES_TOPIC
 from polyumi_ros2.tcp_pivot_test import (
     TcpPivotTest,
     axis_quat,
@@ -222,7 +222,7 @@ def test_close_gripper_tolerates_fingers_stalling_just_short():
 class _Pub:
     """A publisher stub whose subscription count appears after `after` polls."""
 
-    topic_name = '/polyumi/target_poses_traj'
+    topic_name = TARGET_POSES_TOPIC
 
     def __init__(self, after: int):
         self._after = after

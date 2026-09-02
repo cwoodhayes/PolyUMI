@@ -178,6 +178,35 @@ verbatim as ROS headers, so the Pi has to agree with whichever machine runs the 
 and the verification are step 6 of [docs/pi-provisioning.md](docs/pi-provisioning.md), and
 `./deploy.sh` warns on every deploy when the Pi has no synchronised source.
 
+**The impedance controller is its own open-source repo now**, consumed as the submodule
+`external/franka_streaming_impedance_controller`
+([github](https://github.com/cwoodhayes/franka_streaming_impedance_controller), MIT). It holds
+two packages:
+
+- `franka_streaming_impedance_controller` (ament_cmake) — the core math library, the
+  `CartesianImpedanceController` pluginlib plugin, and `franka_hand_node`. Built **on the NUC**;
+  `fr3_session.sh` rsyncs it and symlinks it into `~/franka_ws/src`.
+- `franka_streaming_impedance_client` (ament_python) — the producer side: builds the
+  absolutely-timed `MultiDOFJointTrajectory` chunks the controller splices on. Symlinked into
+  `ros2_ws/src/` so colcon builds it on the laptop/lamb.
+
+**Fix bugs in that submodule upstream, not here** — PolyUMI is one of its consumers, not its
+owner, and a local edit is lost on the next submodule update. Changing it is a PR there plus a
+pointer bump here.
+
+Everything deployment-specific stays in PolyUMI: gains and collision thresholds in
+`nuc/config/polyumi_controllers.yaml`, the TCP geometry in `nuc/tcp_calib.py`, the payload, the
+launch files, and the topic names. `ros2_ws/src/polyumi_ros2/polyumi_ros2/target_chunk.py` is a
+thin shim over the generic client: it adds the two PolyUMI constants (`TARGET_POSES_TOPIC`,
+`CONSUMER_HINT`) and a `TargetChunkPublisher` subclass defaulting `topic` to the first — import it,
+not the generic module, from PolyUMI code. The generic class deliberately requires `topic` (its own
+default is node-relative and would address nothing), so the deployment's answer is supplied once
+here rather than at every producer.
+**Before adding anything to the submodule, ask whether it would make sense to a lab that has
+never heard of PolyUMI**; if not, it belongs on this side of the line. The controller's parameter
+defaults are deliberately neutral (`tcp_frame: fr3_hand_tcp`, node-relative topics), so PolyUMI's
+launch and yaml must pass its own values explicitly — they do.
+
 **The gripper driver is selectable, and `faulhaber` is the supported one.**
 `fr3_inference.launch.py` takes `gripper:=faulhaber|hand|none` (default `faulhaber`);
 `execute_gripper` stays the separate flag for whether it may move. `faulhaber` is the

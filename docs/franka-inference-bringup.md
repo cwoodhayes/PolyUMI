@@ -10,7 +10,7 @@ these instead:
 | How to run the stack, and what breaks | [crb-fr3-inference.md](crb-fr3-inference.md) |
 | Pose/gripper/image data conventions | [data-format.md](data-format.md) |
 | Measuring the constants | [calibration-instructions.md](calibration-instructions.md) |
-| The on-arm executor, and why torque control | `nuc/polyumi_fr3_controllers/include/.../cartesian_impedance_controller.hpp` |
+| The on-arm executor, and why torque control | `external/franka_streaming_impedance_controller/franka_streaming_impedance_controller/include/.../cartesian_impedance_controller.hpp` |
 | Gains, clips, collision thresholds | [polyumi_controllers.yaml](../nuc/config/polyumi_controllers.yaml) |
 | Serving a checkpoint | `external/polyumi_diffusion_policy/serve_policy.py` |
 

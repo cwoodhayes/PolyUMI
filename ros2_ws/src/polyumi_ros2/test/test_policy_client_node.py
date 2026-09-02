@@ -23,6 +23,7 @@ from sensor_msgs.msg import Image, JointState
 
 from polyumi_inference import ActionChunk, Observation, TransportError
 from polyumi_ros2.policy_client_node import PolicyClientNode
+from polyumi_ros2.target_chunk import TARGET_POSES_TOPIC
 
 #: Stand-in for the tests that drive _post_and_act directly. Its contents never reach a server --
 #: those tests mock the client -- but it has to be the type the method now takes.
@@ -862,8 +863,22 @@ def test_gripper_preview_publishes_full_chunk(make_node):
 # Where the arm chunk is aimed, and how it is anchored in time
 # ----------------------------------------------------------------------
 #
-# The message layout itself is covered by test_target_chunk.py. What this node contributes is the
-# two arguments it derives: the anchor instant, and the pre-slice index.
+# The message layout itself is covered upstream, in franka_streaming_impedance_client's own tests.
+# What this node contributes is where the chunk is aimed, and the two arguments it derives: the
+# anchor instant, and the pre-slice index.
+
+
+def test_arm_chunk_goes_to_the_topic_the_controller_subscribes(make_node):
+    """
+    The controller listens on one topic, and polyumi_ros2.target_chunk is where it is named.
+
+    The generic publisher upstream requires the topic and defaults it node-relative, so a chunk
+    built without this deployment's default would advertise under the node's own name and reach
+    nothing — silently, since nothing moves and no error is raised anywhere.
+    """
+    node = make_node(execute_motion=True, publish_preview=False)
+
+    assert node._target_pub.topic_name == TARGET_POSES_TOPIC
 
 
 def test_arm_chunk_is_anchored_at_t_obs_minus_arm_exec(make_node):
