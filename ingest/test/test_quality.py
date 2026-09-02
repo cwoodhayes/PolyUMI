@@ -65,15 +65,36 @@ def test_a_pose_jump_is_not_a_usability_verdict() -> None:
 
 def test_too_few_tracked_frames_flags_unusable() -> None:
     """The one surviving check: too short to contain a segment of the export's floor length."""
-    reasons = auto_unusable_reasons(_attrs(n_fed=50, n_lost=0), thresholds=_TH)
+    reasons = auto_unusable_reasons(_attrs(n_fed=100, n_lost=45), thresholds=_TH)
     assert len(reasons) == 1
-    assert 'only 50 frames tracked' in reasons[0]
+    assert 'only 55 frames tracked' in reasons[0]
     assert 'after the chirp' in reasons[0]
 
 
 def test_tracked_frames_exactly_at_threshold_is_usable() -> None:
     """The bound is inclusive, so the boundary isn't off by one."""
-    assert auto_unusable_reasons(_attrs(n_fed=60, n_lost=0), thresholds=_TH) == []
+    assert auto_unusable_reasons(_attrs(n_fed=100, n_lost=40), thresholds=_TH) == []
+
+
+def test_a_distrusted_chirp_end_is_judged_on_the_whole_episode() -> None:
+    """
+    Mirror of the exporter: a post-chirp window under its floor means a bad detection.
+
+    The exporter ships such an episode untrimmed, so judging its 20-frame post-chirp window
+    would condemn an episode that exports in full. The reason string has to say which window
+    it used, and must not blame an old store — this one is current.
+    """
+    attrs = _attrs(n_fed=200, n_lost=0)
+    attrs['n_frames_fed_post_chirp'] = 20
+    attrs['n_frames_fed_lost_post_chirp'] = 0
+
+    assert auto_unusable_reasons(attrs, thresholds=_TH) == []
+
+    attrs['tracking_ratio'] = 0.1  # 20 tracked over the whole episode: short either way
+    reasons = auto_unusable_reasons(attrs, thresholds=_TH)
+    assert len(reasons) == 1
+    assert 'chirp end distrusted' in reasons[0]
+    assert 'pre-v4' not in reasons[0]
 
 
 def test_whole_grid_losses_are_not_what_gets_counted() -> None:

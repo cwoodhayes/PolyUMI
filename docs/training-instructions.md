@@ -239,8 +239,13 @@ objective cross-product. Architecture, registries and the porting map are in the
 [`docs/VISTA_AGENT_GUIDE.md`](../external/polyumi_vista_policy/docs/VISTA_AGENT_GUIDE.md).
 
 The submodule is **private** (`RiicK3d/polyumi_vista_policy`), so `git submodule update --init
-external/polyumi_vista_policy` needs collaborator access. lamb gets it by rsync from
-`deploy_lamb.sh`, not by cloning, so no credentials are needed there.
+external/polyumi_vista_policy` needs collaborator access.
+
+**lamb's copy is hand-managed, and `deploy_lamb.sh` deliberately does not sync it** — it is in
+that script's exclude list, and the deploy only checks that it is present. The checkpoints under
+`data/dp_outputs/` were trained against a working copy that is not any commit of the fork, so
+overwriting it by rsync makes them unloadable. Update lamb's copy by hand when you mean to, and
+expect a fresh lamb to need it put there by hand once.
 
 The entrypoint is `scripts/train_day0suite.sh`, a suite runner over eight models: four full
 multimodal (`vista`, `touch_in_the_wild`, `see_hear_feel`, `sparsh_x`), two vision-only

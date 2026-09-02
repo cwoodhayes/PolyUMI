@@ -73,23 +73,42 @@ def _fed_frame_counts(slam_attrs: Mapping[str, Any]) -> tuple[int, int, str] | N
     and label the window so the reason string can say which one it used — a v3 verdict is
     stricter than a v4 one on the same episode, since it counts the idle pre-chirp prefix
     where the localizer is still relocalizing.
+
+    A post-chirp window shorter than the export's own floor is the one case where the exporter
+    *distrusts* the marker and ships the whole episode untrimmed
+    (``plan_episode_segments``), so this falls back to the whole-episode counts there too.
+    Without that, an episode with a bad chirp detection would be badged unusable and then
+    export perfectly well — the one direction this module promises cannot happen.
     """
-    n_fed = slam_attrs.get('n_frames_fed_post_chirp')
-    n_lost = slam_attrs.get('n_frames_fed_lost_post_chirp')
-    label = 'after the chirp'
-    if not isinstance(n_fed, (int, float)) or not isinstance(n_lost, (int, float)):
+    # Deferred: export.dp.buffer imports this module, so a module-level import would be a
+    # cycle. The floor is the exporter's own constant rather than a threshold of ours,
+    # because it is the exporter's rule being mirrored.
+    from polyumi_ingest.export.dp.buffer import MIN_SEGMENT_STEPS
+
+    def whole_episode(label: str) -> tuple[int, int, str] | None:
         n_fed = slam_attrs.get('n_frames_fed')
         ratio = slam_attrs.get('tracking_ratio')
         if not isinstance(n_fed, (int, float)) or not isinstance(ratio, (int, float)) or math.isnan(ratio):
             return None
+        n_fed = int(n_fed)
+        if n_fed <= 0:
+            return None
         # Pre-v4 stores recorded the ratio but not the tracked count; both are exact
         # integers underneath, so rounding the product recovers the count losslessly.
         n_lost = round(float(n_fed) * (1.0 - float(ratio)))
-        label = 'whole episode, pre-v4 store'
+        return n_fed - n_lost, n_lost, label
+
+    n_fed = slam_attrs.get('n_frames_fed_post_chirp')
+    n_lost = slam_attrs.get('n_frames_fed_lost_post_chirp')
+    if not isinstance(n_fed, (int, float)) or not isinstance(n_lost, (int, float)):
+        return whole_episode('whole episode, pre-v4 store')
     n_fed, n_lost = int(n_fed), int(n_lost)
-    if n_fed <= 0:
-        return None
-    return n_fed - n_lost, n_lost, label
+    if n_fed < MIN_SEGMENT_STEPS:
+        # Distinct from the pre-v4 case above, and labelled separately: the store is fine, the
+        # marker is not. This is the exporter's own rule, so the reason string says which
+        # window was judged rather than implying an old store.
+        return whole_episode('whole episode, chirp end distrusted')
+    return n_fed - n_lost, n_lost, 'after the chirp'
 
 
 def auto_unusable_reasons(

@@ -19,7 +19,6 @@ import zarr
 from scipy.spatial.transform import Rotation
 
 from polyumi_catalog import episode_quality
-from polyumi_ingest import quality
 from polyumi_ingest.export.dp import buffer
 from polyumi_ingest.export.dp import export_scene_to_dp as _export_scene_to_dp
 from polyumi_ingest.manifests import SceneManifest
@@ -376,6 +375,28 @@ def test_catalog_unusable_implies_the_export_yields_nothing(tmp_path: pathlib.Pa
     # against the floor an actual export uses.
     with pytest.raises(RuntimeError, match='no EPISODE sessions'):
         _export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
+
+
+def test_a_bad_chirp_detection_does_not_make_an_exportable_episode_unusable(tmp_path: pathlib.Path) -> None:
+    """
+    The catalog must follow the exporter into its bad-chirp fallback, or the implication breaks.
+
+    A chirp end that leaves fewer steps than the floor is treated by the exporter as a wrong
+    detection, so it ships the episode *untrimmed*. Judging such an episode on its post-chirp
+    counts would badge it unusable while the export produces a full episode from it.
+    """
+    n = 200
+    post_chirp = 20
+    scene = _build_scene(tmp_path, n=n, with_slam=True, gopro_chirp_end_s=(n - post_chirp) / RATE)
+    counts = _slam_counts(n_fed=n, n_lost=0)
+    counts['n_frames_fed_post_chirp'] = post_chirp
+    _make_slam_only(scene, **counts)
+
+    n_eps, provenance = _export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
+
+    assert n_eps == 1
+    assert provenance[0]['n_steps'] == n  # untrimmed: the marker was distrusted
+    assert episode_quality.scene_quality_by_session_dir(tmp_path)['session_0']['auto_unusable'] is False
 
 
 def test_the_shortest_exportable_episode_is_not_called_unusable(tmp_path: pathlib.Path) -> None:

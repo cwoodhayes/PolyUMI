@@ -57,6 +57,12 @@ policy_select() {
     if [ -n "${config_override}" ]; then
         CONFIG_NAME="${config_override}"
     fi
+    # Exported because train_policy.sh forwards it with a value-less `docker run -e CONFIG_NAME`,
+    # which reads the docker client's ENVIRONMENT -- a plain shell variable set by the `source`
+    # above would never reach the container, so the env file's default would silently do nothing
+    # and only a caller's override would land. `export` on a name the env file never set marks it
+    # without giving it a value, so vista still passes nothing rather than an empty string.
+    export CONFIG_NAME
 
     # An uninitialised submodule is an existing but EMPTY directory, so check for what stage 1
     # actually needs rather than for the directory.

@@ -104,3 +104,39 @@ def test_borrowed_atlas_survives_a_forced_rerun(tmp_path: pathlib.Path) -> None:
     assert built == []
     assert localized == ['/episode_1']
     assert (tmp_path / 'scene_dst' / 'scene_dst.atlas.osa').read_bytes() == b'ATLAS'
+
+
+def test_deleting_a_borrowed_atlas_returns_the_scene_to_its_own_map(tmp_path: pathlib.Path) -> None:
+    """
+    The documented escape hatch — delete the file by hand — must also drop the borrow marker.
+
+    Otherwise the marker outlives the atlas it described: the rebuild happens, but every later
+    `--force` sees a scene still flagged as borrowing and refuses to rebuild the *local* map,
+    while the log keeps calling it copied.
+    """
+    _make_scene(tmp_path / 'scene_src', with_atlas=True, steps_done=[2])
+    dst_zarr = _make_scene(tmp_path / 'scene_dst', with_atlas=False, steps_done=[2])
+    assert runner.invoke(app, ['copy-map', str(tmp_path / 'scene_src'), str(tmp_path / 'scene_dst')]).exit_code == 0
+
+    (tmp_path / 'scene_dst' / 'scene_dst.atlas.osa').unlink()  # the escape hatch
+
+    settings = _calibrated_settings(tmp_path)
+    step = OrbSlam3Step(settings_yaml=settings)
+    built = []
+
+    def _fake_localize(ep_grp, episode_index, atlas_path, log_dir, scene_zarr):
+        from polyumi_ingest.preproc.slam_step import _write_slam_results
+
+        n = ep_grp['timestamps/gopro'].shape[0]
+        poses = np.zeros((n, 7), dtype=np.float64)
+        poses[:, 6] = 1.0
+        _write_slam_results(ep_grp, poses, settings, atlas_path)
+
+    with (
+        mock.patch.object(step, '_build_map', side_effect=lambda *a: built.append(a)),
+        mock.patch.object(step, '_localize_episode', side_effect=_fake_localize),
+    ):
+        step.run_step(dst_zarr, force=True)
+
+    assert len(built) == 1  # it did map from this scene
+    assert ATLAS_SOURCE_ATTR not in zarr.open_group(str(dst_zarr), mode='r').attrs

@@ -798,6 +798,15 @@ class OrbSlam3Step(PreprocessingStep):
             log.info(f'Atlas already exists at {self.atlas_path}{origin}, skipping map building.')
             return
 
+        # Past the guard above there is no atlas to reuse, so a borrow marker left over from a
+        # deleted one is stale: the map about to be built is this scene's own. Clearing it is
+        # what makes the "delete the file by hand" escape hatch actually work — otherwise every
+        # later --force would refuse to rebuild the local map, and the log would keep calling it
+        # copied.
+        if borrowed:
+            log.info(f'Borrowed atlas from {borrowed} is gone; building this scene its own map.')
+            del scene.root.attrs[ATLAS_SOURCE_ATTR]
+
         log.info(f'Phase 1: building map from {mapping.key}...')
         t0 = time.monotonic()
         self._build_map(mapping.group, self.atlas_path, self.log_dir, scene.zarr_path)
