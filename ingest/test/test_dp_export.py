@@ -22,28 +22,10 @@ from polyumi_catalog import episode_quality
 from polyumi_ingest import quality
 from polyumi_ingest.export.dp import buffer
 from polyumi_ingest.export.dp import export_scene_to_dp as _export_scene_to_dp
-from polyumi_ingest.export.dp import export_scenes_to_dp as _export_scenes_to_dp
-
 from polyumi_ingest.manifests import SceneManifest
 from polyumi_ingest.preproc import available_preprocessing_steps
 
-#: These fixtures are deliberately tiny (30-120 steps) because they test export *mechanics*,
-#: not the length floor. Pinning a small floor here keeps them from breaking every time the
-#: production MIN_SEGMENT_STEPS moves; the tests that are about the floor pass their own.
-TEST_MIN_SEGMENT_STEPS = 8
-
-
-def export_scene_to_dp(*args, **kwargs):
-    """``export_scene_to_dp`` with a floor small enough for this module's fixtures."""
-    kwargs.setdefault('min_segment_steps', TEST_MIN_SEGMENT_STEPS)
-    return _export_scene_to_dp(*args, **kwargs)
-
-
-def export_scenes_to_dp(*args, **kwargs):
-    """``export_scenes_to_dp`` with a floor small enough for this module's fixtures."""
-    kwargs.setdefault('min_segment_steps', TEST_MIN_SEGMENT_STEPS)
-    return _export_scenes_to_dp(*args, **kwargs)
-
+from export_floor import export_scene_to_dp, export_scenes_to_dp
 
 RES = 224
 RATE = 59.94
@@ -304,14 +286,12 @@ def _add_pose_jump(scene: pathlib.Path, at: int, metres: float, source: str = 's
     pose[:] = data
 
 
-def test_metrics_that_used_to_veto_an_episode_no_longer_delete_it(tmp_path: pathlib.Path) -> None:
+def test_a_session_with_lost_frames_still_exports(tmp_path: pathlib.Path) -> None:
     """
-    Bad whole-episode SLAM metrics no longer discard the session before segmentation runs.
+    Whole-episode SLAM metrics never discard a session; only segmentation decides what survives.
 
-    25 lost of 120 fed frames tripped the old ``max_lost_frames`` veto, which ran *ahead* of
-    the segmenter and threw the demo away wholesale — redundantly, since segmentation already
-    cuts around exactly those holes. Measured over four scenes, dropping the veto is the
-    difference between 21 and 99 exported segments.
+    25 lost of 120 fed frames is a patchy demo, not a worthless one — segmentation cuts around
+    the holes and keeps the runs either side, so nothing here may reject it up front.
     """
     scene = _build_scene(tmp_path, with_slam=True)
     _make_slam_only(scene, **_slam_counts(n_fed=120, n_lost=25))
@@ -321,25 +301,11 @@ def test_metrics_that_used_to_veto_an_episode_no_longer_delete_it(tmp_path: path
     assert n_eps == 1
 
 
-def test_a_pose_jump_that_used_to_veto_an_episode_now_only_cuts_it(tmp_path: pathlib.Path) -> None:
-    """A teleport is a bad *transition*, so it splits the demo instead of condemning it."""
-    n = 120
-    scene = _build_scene(tmp_path, n=n, with_slam=True)
-    _make_slam_only(scene, max_pose_jump_m=3.0, **_slam_counts(n_fed=n, n_lost=0))
-    _add_pose_jump(scene, at=60, metres=1.0)
-
-    n_eps, provenance = export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip', min_segment_steps=24)
-
-    assert n_eps == 2
-    assert provenance[0]['cut_end'] == 'pose_jump'
-    assert provenance[1]['cut_start'] == 'pose_jump'
-
-
-def test_a_pose_jump_cut_keeps_both_frames_either_side(tmp_path: pathlib.Path) -> None:
+def test_a_pose_jump_splits_a_session_and_costs_no_frames(tmp_path: pathlib.Path) -> None:
     """
-    The cut costs no data: a jump invalidates the transition, not the two poses bracketing it.
+    A teleport is a bad *transition*, so it cuts the demo in two and keeps both poses bracketing it.
 
-    This is the test that fails if the break is ever implemented by marking a step invalid —
+    The frame-range half fails if the break is ever implemented by marking a step invalid —
     that would silently drop a good frame and put the boundary one step off. Both halves
     together must still account for every valid step.
     """
@@ -349,8 +315,11 @@ def test_a_pose_jump_cut_keeps_both_frames_either_side(tmp_path: pathlib.Path) -
     _add_pose_jump(scene, at=60, metres=1.0)
     out = tmp_path / 'buf.zarr.zip'
 
-    _, provenance = export_scene_to_dp(scene, out, min_segment_steps=24)
+    n_eps, provenance = export_scene_to_dp(scene, out, min_segment_steps=24)
 
+    assert n_eps == 2
+    assert provenance[0]['cut_end'] == 'pose_jump'
+    assert provenance[1]['cut_start'] == 'pose_jump'
     ends = list(_open_zip(out)['meta/episode_ends'][:])
     assert ends == [60, n]  # no step lost at the seam
     assert provenance[0]['frame_range'] == [0, 59]
@@ -388,15 +357,6 @@ def test_a_jump_beside_a_tracking_gap_cuts_once_not_twice(tmp_path: pathlib.Path
     assert [p['cut_end'] for p in provenance] == ['pose_gap', 'episode_end']
 
 
-def test_an_episode_too_short_to_export_is_dropped_by_the_floor(tmp_path: pathlib.Path) -> None:
-    """Short episodes are excluded by the length floor now, not by a whole-episode verdict."""
-    scene = _build_scene(tmp_path, n=40, with_slam=True)
-    _make_slam_only(scene, **_slam_counts(n_fed=40, n_lost=0))
-
-    with pytest.raises(RuntimeError, match='no EPISODE sessions'):
-        export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip', min_segment_steps=90)
-
-
 def test_catalog_unusable_implies_the_export_yields_nothing(tmp_path: pathlib.Path) -> None:
     """
     The surviving half of "one rule, two consumers", now that export has no veto of its own.
@@ -418,15 +378,22 @@ def test_catalog_unusable_implies_the_export_yields_nothing(tmp_path: pathlib.Pa
         _export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
 
 
-def test_the_catalogs_length_prediction_cannot_outrun_the_export_floor() -> None:
+def test_the_shortest_exportable_episode_is_not_called_unusable(tmp_path: pathlib.Path) -> None:
     """
-    ``min_tracked_frames <= MIN_SEGMENT_STEPS`` is what makes the prediction above sound.
+    The boundary the prediction above rests on, exercised rather than asserted on constants.
 
-    An episode with fewer tracked frames than the floor cannot contain a run at least that
-    long, so the catalog is safe to call it unusable. Raise the catalog's number above the
-    export's and that stops being true — it would start condemning episodes that do export.
+    An episode of exactly ``MIN_SEGMENT_STEPS`` tracked frames is the shortest thing that
+    exports at all. The catalog must not condemn it — which holds only while
+    ``min_tracked_frames <= MIN_SEGMENT_STEPS``. Raise the catalog's number above the export's
+    and this fails, because the catalog would be excluding an episode that does export.
     """
-    assert quality.load_quality_thresholds().min_tracked_frames <= buffer.MIN_SEGMENT_STEPS
+    n = buffer.MIN_SEGMENT_STEPS
+    scene = _build_scene(tmp_path, n=n, with_slam=True)
+    _make_slam_only(scene, **_slam_counts(n_fed=n, n_lost=0))
+
+    assert episode_quality.scene_quality_by_session_dir(tmp_path)['session_0']['auto_unusable'] is False
+    n_eps, _ = _export_scene_to_dp(scene, tmp_path / 'buf.zarr.zip')
+    assert n_eps == 1
 
 
 def test_missing_eef_pose_raises(tmp_path: pathlib.Path) -> None:

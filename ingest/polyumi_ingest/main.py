@@ -868,45 +868,29 @@ class ExportType(str, Enum):
     polyumi = 'polyumi'
 
 
-@app.command(name='segments')
-def preview_segments(
-    scene_paths: list[pathlib.Path] = typer.Argument(..., help='Scene directories to inspect.'),
-    exporter_type: ExportType = typer.Option(
-        ExportType.dp,
-        '--type',
-        help='Which export to preview. polyumi attaches the contact-mic and finger-camera '
-        'modalities, which narrow the valid span further and so can cut more segments.',
-    ),
-    min_segment_steps: int = typer.Option(
-        MIN_SEGMENT_STEPS, '--min-segment-steps', help='Length floor to preview, in fed steps.'
-    ),
-    enforce_preprocessing: bool = typer.Option(True, '--enforce-preprocessing/--no-enforce-preprocessing'),
-    as_json: bool = typer.Option(False, '--json', help='Emit the per-segment records as JSON instead.'),
-):
+def _dry_run_export(
+    scene_paths: list[pathlib.Path],
+    modalities: list,
+    enforce_preprocessing: bool,
+    min_segment_steps: int,
+    as_json: bool,
+) -> None:
     """
-    Show what an export would cut these scenes into, without decoding a single frame.
+    Report what an export would cut these scenes into, without decoding a single frame.
 
     Answers "how much usable data do I actually have, and where does it go" in seconds rather
-    than the minutes a real export costs. It runs the exporter's own planning code
-    (plan_episode_segments) over the exporter's own episode selection, so the preview cannot
-    disagree with what `pingest export` would write.
-
-    Each segment reports why it starts and ends: episode_start/episode_end, chirp (the idle
-    prefix before the sync chirp), pose_gap (SLAM lost tracking), pose_jump (a relocalization
-    teleport past max_pose_jump_m), gripper_gap, or a modality name.
+    than the minutes a real export costs. It runs the exporter's own episode selection and its
+    own planner, and prints ``EpisodePlan.segment_record`` verbatim, so the preview cannot
+    disagree with what a real run would write.
     """
     from polyumi_ingest.config import load_closed_width_m, load_open_width_m
     from polyumi_ingest.export.dp.buffer import iter_exportable_episodes, plan_episode_segments
-    from polyumi_ingest.export.dp.polyumi import POLYUMI_MODALITIES
 
     # The planner logs a line or two per episode through RichHandler, which writes to stdout —
     # harmless for the table, but it would corrupt --json into something no parser can read.
     if as_json:
         logging.getLogger().setLevel(logging.ERROR)
 
-    # Instantiated per run, exactly as export_scenes_to_polyumi does: a modality stashes
-    # per-episode state on self, so the preview needs its own instances, not the classes.
-    modalities = [cls() for cls in POLYUMI_MODALITIES] if exporter_type == ExportType.polyumi else []
     closed_width_m, open_width_m = load_closed_width_m(), load_open_width_m()
 
     records: list[dict] = []
@@ -918,7 +902,7 @@ def preview_segments(
             for scene_label, ep_key, session_dir, ep, pose_source in iter_exportable_episodes(
                 scene_path, enforce_preprocessing=enforce_preprocessing, modalities=modalities
             ):
-                plan = plan_episode_segments(
+                plan, _, _ = plan_episode_segments(
                     ep,
                     f'{scene_label}/{ep_key}',
                     pose_source,
@@ -929,23 +913,17 @@ def preview_segments(
                 )
                 n_dropped += len(plan.dropped)
                 dropped_s += sum(plan.duration_s(run) for run in plan.dropped)
-                for seg_i, (segment, (cut_start, cut_end)) in enumerate(zip(plan.segments, plan.cuts)):
-                    causes[cut_start] += 1
-                    causes[cut_end] += 1
-                    gidx = plan.steps[segment[0] : segment[1] + 1]
+                for seg_i in range(len(plan.segments)):
+                    record = plan.segment_record(seg_i)
+                    causes[record['cut_start']] += 1
+                    causes[record['cut_end']] += 1
                     records.append(
                         {
                             'scene': scene_label,
                             'session': session_dir,
                             'episode': ep_key,
-                            'segment': seg_i,
                             'source': pose_source,
-                            'n_steps': len(gidx),
-                            'frame_range': [int(gidx[0]), int(gidx[-1])],
-                            'frame_stride': plan.stride,
-                            'duration_s': plan.duration_s(segment),
-                            'cut_start': cut_start,
-                            'cut_end': cut_end,
+                            **record,
                         }
                     )
     except (FileNotFoundError, ValueError, RuntimeError) as e:
@@ -980,10 +958,10 @@ def export_scenes(
         'One or more; multiple scenes are concatenated in the order given.',
     ),
     output_path: pathlib.Path = typer.Option(
-        ...,
+        None,
         '--output',
         '-o',
-        help='Output ReplayBuffer path (a .zarr.zip file).',
+        help='Output ReplayBuffer path (a .zarr.zip file). Required unless --dry-run.',
     ),
     exporter_type: ExportType = typer.Option(
         ExportType.dp,
@@ -1008,6 +986,16 @@ def export_scenes(
         'source drops out is split into the runs either side; runs shorter than this are '
         'discarded rather than emitted as episodes too short to sample a horizon from.',
     ),
+    dry_run: bool = typer.Option(
+        False,
+        '--dry-run',
+        help="Report what would be exported — one line per session, with each segment's span "
+        'and why it was cut there — and write nothing. Decodes no frames, so it costs seconds '
+        'rather than the minutes a real export does.',
+    ),
+    as_json: bool = typer.Option(
+        False, '--json', help='With --dry-run, emit the per-segment records as JSON instead of a table.'
+    ),
 ):
     """
     Export pzarr scenes to a ReplayBuffer (.zarr.zip).
@@ -1025,9 +1013,27 @@ def export_scenes(
     raw rather than a spectrogram, since the log-mel belongs in the training container where
     it can be computed after waveform-domain augmentation) and `data/finger_rgb` (the finger
     camera, cropped to the region the gripper mount doesn't occlude, left at that resolution).
+
+    `--dry-run` reports the plan and writes nothing, in seconds rather than minutes: each
+    segment's span plus why it starts and ends where it does — episode_start/episode_end,
+    chirp (the idle prefix before the sync chirp), pose_gap (SLAM lost tracking), pose_jump (a
+    relocalization teleport past max_pose_jump_m), gripper_gap, or a modality name. Sweep the
+    length floor with --min-segment-steps, and note --type polyumi cuts more, since its extra
+    modalities narrow the valid span.
     """
     from polyumi_ingest.export.dp import export_scenes_to_dp, export_scenes_to_polyumi
+    from polyumi_ingest.export.dp.polyumi import POLYUMI_MODALITIES
 
+    if dry_run:
+        # Instantiated per run, exactly as export_scenes_to_polyumi does: a modality stashes
+        # per-episode state on self, so this needs its own instances, not the classes.
+        modalities = [cls() for cls in POLYUMI_MODALITIES] if exporter_type == ExportType.polyumi else []
+        _dry_run_export(scene_paths, modalities, enforce_preprocessing, min_segment_steps, as_json)
+        return
+
+    if output_path is None:
+        log.error('--output/-o is required (omit it only with --dry-run).')
+        raise typer.Exit(1)
     export_fn = export_scenes_to_polyumi if exporter_type == ExportType.polyumi else export_scenes_to_dp
     _run_export(export_fn, scene_paths, output_path, enforce_preprocessing, min_segment_steps)
 

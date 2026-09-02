@@ -6,28 +6,10 @@ import numpy as np
 import pytest
 import zarr
 from polyumi_ingest.config import load_contact_audio_config
-from polyumi_ingest.export.dp import export_scene_to_dp as _export_scene_to_dp
-from polyumi_ingest.export.dp import export_scenes_to_polyumi as _export_scenes_to_polyumi
-
 from polyumi_ingest.preproc import available_preprocessing_steps
 
+from export_floor import export_scene_to_dp, export_scenes_to_polyumi
 from test_dp_export import ALL_STEPS, EXPECTED_KEYS, _build_scene, _open_zip
-
-#: Fixtures here are ~60 steps and test the audio contract, not the length floor. See the same
-#: note in test_dp_export.py.
-TEST_MIN_SEGMENT_STEPS = 8
-
-
-def export_scene_to_dp(*args, **kwargs):
-    """``export_scene_to_dp`` with a floor small enough for this module's fixtures."""
-    kwargs.setdefault('min_segment_steps', TEST_MIN_SEGMENT_STEPS)
-    return _export_scene_to_dp(*args, **kwargs)
-
-
-def export_scenes_to_polyumi(*args, **kwargs):
-    """``export_scenes_to_polyumi`` with a floor small enough for this module's fixtures."""
-    kwargs.setdefault('min_segment_steps', TEST_MIN_SEGMENT_STEPS)
-    return _export_scenes_to_polyumi(*args, **kwargs)
 
 
 BLOCKS = load_contact_audio_config()['blocks']

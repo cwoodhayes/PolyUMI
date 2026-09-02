@@ -66,10 +66,9 @@ sampler cannot see; splitting keeps every episode honest. This follows the upstr
 **Cutting, not condemning.** There is no automatic whole-episode veto here: a session with holes
 or a teleport is segmented around them rather than discarded, and the only thing that drops a
 whole session is the human ``unusable_episodes`` set in ``scene.json``.
-``polyumi_ingest.quality`` still predicts, for the catalog, which episodes are too short to
-yield anything, but the export no longer consults it — see that module's docstring for the
-one-way relationship that survives. ``pingest segments`` previews the whole plan without
-decoding a frame.
+``polyumi_ingest.quality`` predicts, for the catalog alone, which episodes are too short to
+yield anything — see that module's docstring for the one-way relationship between the two.
+``pingest export --dry-run`` previews the whole plan without decoding a frame.
 
 Images use **Blosc**, not JpegXl, on purpose. The training container pins Python 3.9 with
 ``imagecodecs==2023.9.18``, whose JpegXl codec cannot parse the config that our Python-3.13
@@ -157,8 +156,8 @@ _GAP_WARN_FACTOR = 5.0
 #:
 #: Steps, not seconds, because that is the unit the sampler's own constraint is in. The cost is
 #: that the wall-clock meaning tracks ``localization_frame_stride`` — 3.0 s at stride 2, 1.5 s
-#: at stride 1 — so the resolved seconds are logged and stored per export rather than left
-#: implicit. A buffer may not mix strides, so within one dataset this always has one meaning.
+#: at stride 1 — so ``EpisodePlan.min_seconds`` resolves it per episode for the logs. A buffer
+#: may not mix strides, so within one dataset this always has one meaning.
 MIN_SEGMENT_STEPS = 90
 
 
@@ -186,10 +185,9 @@ def _split_runs(valid: np.ndarray, break_after: np.ndarray | None = None) -> lis
     """
     Split a validity mask into contiguous runs, as inclusive ``[start, end]`` index pairs.
 
-    One episode per run, rather than the single longest run we used to keep: a demo whose pose
-    source drops out in the middle is two usable demonstrations either side of the hole, not one
-    truncated one. This mirrors upstream UMI's ``get_bool_segments`` in
-    the upstream UMI repo's ``scripts_slam_pipeline/06_generate_dataset_plan.py``.
+    One episode per run: a demo whose pose source drops out in the middle is two usable
+    demonstrations either side of the hole, not one truncated one. This mirrors upstream UMI's
+    ``get_bool_segments`` in its ``scripts_slam_pipeline/06_generate_dataset_plan.py``.
 
     Splitting rather than bridging is the whole point: UMI's fixed-rate sampler assumes uniform
     Δt *within* an episode, which a gap would silently violate.
@@ -249,27 +247,6 @@ def _append(data_grp: zarr.Group, arrays: dict[str, np.ndarray]) -> None:
             a[old:] = value
 
 
-def _auto_unusable_reasons_for_episode(ep: zarr.Group) -> list[str]:
-    """
-    Threshold-derived reasons to exclude ``ep``; empty list means keep it.
-
-    Thin adapter over ``polyumi_ingest.quality.auto_unusable_reasons`` that pulls the
-    two inputs off the episode group: the ``annotations/slam`` metrics, and whether
-    OptiTrack is among step 5's ``available_sources`` (in which case the episode's
-    poses don't come from SLAM and the SLAM-derived checks don't apply).
-
-    Missing groups mean "nothing to judge" — an episode whose preprocessing hasn't run
-    isn't excluded here; ``resolve_pose_source`` raises on that separately.
-    """
-    if 'annotations' not in ep or 'slam' not in grp(ep, 'annotations'):
-        return []
-    slam_attrs = dict(grp(grp(ep, 'annotations'), 'slam').attrs)
-    has_optitrack = False
-    if 'eef' in ep:
-        has_optitrack = 'optitrack' in list(grp(ep, 'eef').attrs.get('available_sources', []))
-    return quality.auto_unusable_reasons(slam_attrs, has_optitrack=has_optitrack)
-
-
 def resolve_pose_source(ep: zarr.Group, episode_key: str, override: str | None) -> str:
     """
     Resolve which pose source ``episode_key`` should export from.
@@ -308,28 +285,25 @@ class EpisodePlan:
     ``segments`` and ``dropped`` are inclusive ``[start, end]`` index pairs into ``steps``,
     which itself holds GoPro-grid frame indices (the fed grid, after the chirp trim). ``cuts``
     is one ``(cut_start, cut_end)`` reason pair per kept segment, aligned with ``segments``.
+    ``step_ts`` is the timestamp of each of those steps, so timings need no second array.
 
-    The source arrays ride along because the planner had to read them anyway; the export path
-    reuses them rather than re-reading, and the dry-run simply ignores them. Nothing here
-    touches ``gopro.mp4``, which is what makes ``pingest segments`` cheap.
+    This is the plan alone. The pose and gripper arrays it was computed from are returned
+    beside it by :func:`plan_episode_segments`, for the export path that goes on to write them;
+    a dry run takes the plan and drops the rest. Nothing here touches ``gopro.mp4``, which is
+    what makes the preview cheap.
     """
 
     steps: np.ndarray
+    step_ts: np.ndarray
     segments: list[tuple[int, int]]
     cuts: list[tuple[str, str]]
     dropped: list[tuple[int, int]]
     stride: int
     min_steps: int
-    n_fed: int
-    chirp_trimmed: int
-    gopro_ts: np.ndarray
-    pose: np.ndarray
-    gripper: np.ndarray
 
     def duration_s(self, segment: tuple[int, int]) -> float:
         """Wall-clock span of one segment, first step to last."""
-        gidx = self.steps[segment[0] : segment[1] + 1]
-        return float(self.gopro_ts[gidx[-1]] - self.gopro_ts[gidx[0]])
+        return float(self.step_ts[segment[1]] - self.step_ts[segment[0]])
 
     @property
     def min_seconds(self) -> float:
@@ -339,9 +313,34 @@ class EpisodePlan:
         ``min_steps`` is stride-relative, so the same flag means 3.0 s at stride 2 and 1.5 s at
         stride 1. Surfaced so an export states what its floor actually enforced.
         """
-        if len(self.gopro_ts) < 2:
+        if len(self.step_ts) < 2:
             return 0.0
-        return float(self.min_steps * self.stride * np.median(np.diff(self.gopro_ts)))
+        return float(self.min_steps * np.median(np.diff(self.step_ts)))
+
+    def segment_record(self, seg_i: int) -> dict:
+        """
+        Build the provenance record for one kept segment: what it covers, and why it ends there.
+
+        The single source of these fields. A real export merges the pose source and its
+        modalities on top; ``--dry-run`` prints them as they are. Two builders would drift, and
+        a preview that disagreed with the export would cost someone a training run.
+        """
+        s0, s1 = self.segments[seg_i]
+        gidx = self.steps[s0 : s1 + 1]
+        return {
+            'segment': seg_i,
+            'n_steps': len(gidx),
+            'frame_range': [int(gidx[0]), int(gidx[-1])],
+            'frame_stride': self.stride,
+            # Why this segment begins and ends where it does — 'episode_start'/'episode_end',
+            # 'chirp', 'pose_gap', 'gripper_gap', or a modality name. Readers must .get()
+            # these: buffers exported before cut attribution existed carry neither.
+            'cut_start': self.cuts[seg_i][0],
+            'cut_end': self.cuts[seg_i][1],
+            # Span of the exported steps, i.e. how much real time this episode contributes to
+            # the dataset. First-to-last, so it is one frame short of the time the steps cover.
+            'duration_s': self.duration_s((s0, s1)),
+        }
 
 
 def _cut_reason(i: int, masks: Sequence[tuple[str, np.ndarray]]) -> str:
@@ -361,12 +360,16 @@ def plan_episode_segments(
     min_segment_steps: int = MIN_SEGMENT_STEPS,
     modalities: Sequence[ExportModality] = (),
     thresholds: quality.QualityThresholds | None = None,
-) -> EpisodePlan:
+) -> tuple[EpisodePlan, np.ndarray, np.ndarray]:
     """
     Decide how one session splits into exportable segments, decoding no frames.
 
-    Shared by the real export and by ``pingest segments``, so the preview cannot disagree with
-    what an export actually writes.
+    Returns ``(plan, pose, gripper)`` — the plan, plus the two GoPro-grid arrays it was cut
+    from, so the export path that writes them need not read them a second time. ``--dry-run``
+    keeps the plan and drops the arrays.
+
+    Shared by the real export and by ``pingest export --dry-run``, so the preview cannot
+    disagree with what an export actually writes.
 
     ``thresholds`` supplies the pose-jump cut distance (default: ``quality_thresholds.yaml``),
     which stays policy read at export time rather than anything baked into the pzarr.
@@ -421,7 +424,6 @@ def plan_episode_segments(
     # make every other row NaN. Δt is uniform at stride/rate, which is what UMI's sampler needs.
     stride = _episode_frame_stride(ep)
     steps = np.arange(0, n, stride)
-    n_fed = len(steps)
 
     # Before any segment is cut, so a modality missing its inputs fails the export by name
     # rather than emitting a buffer that is quietly short one observation.
@@ -517,19 +519,16 @@ def plan_episode_segments(
             end_why = 'pose_jump' if break_after[e] else _cut_reason(e + 1, masks)
         cuts.append((start_why, end_why))
 
-    return EpisodePlan(
+    plan = EpisodePlan(
         steps=steps,
+        step_ts=gopro_ts[steps],
         segments=kept,
         cuts=cuts,
         dropped=dropped,
         stride=stride,
         min_steps=min_segment_steps,
-        n_fed=n_fed,
-        chirp_trimmed=chirp_trimmed,
-        gopro_ts=gopro_ts,
-        pose=pose,
-        gripper=gripper,
     )
+    return plan, pose, gripper
 
 
 def _export_episode(
@@ -549,7 +548,7 @@ def _export_episode(
     Returns ``[(T, provenance), ...]`` — possibly empty if nothing survived, one entry per
     segment appended to ``data_grp``.
     """
-    plan = plan_episode_segments(
+    plan, pose, gripper = plan_episode_segments(
         ep,
         episode_key,
         pose_source,
@@ -559,8 +558,7 @@ def _export_episode(
         modalities=modalities,
     )
     pose_attrs = arr(ep, f'eef/pose_{pose_source}').attrs
-    steps, gopro_ts, pose, gripper = plan.steps, plan.gopro_ts, plan.pose, plan.gripper
-    stride, segments = plan.stride, plan.segments
+    steps, segments = plan.steps, plan.segments
     if not segments:
         log.warning(
             f'  {episode_key}: no valid run of >={min_segment_steps} steps '
@@ -580,7 +578,7 @@ def _export_episode(
         # No resampling: the stored Δt *is* the dataset's, and UMI sets the observation rate
         # from it via obs_down_sample_steps. A gap much larger than the median means a dropped
         # frame, which would be stored as one ordinary step and silently bend the time base.
-        span_ts = gopro_ts[gidx]
+        span_ts = plan.step_ts[s0 : s1 + 1]
         rate = _measure_rate(span_ts)
         max_gap = float(np.max(np.diff(span_ts)))
         if max_gap > _GAP_WARN_FACTOR / rate:
@@ -623,18 +621,7 @@ def _export_episode(
         ep_provenance = {
             'source': pose_source,
             'world_frame': pose_attrs.get('world_frame'),
-            'n_steps': t,
-            'segment': seg_i,
-            'frame_range': [int(gidx[0]), int(gidx[-1])],
-            'frame_stride': stride,
-            # Why this segment begins and ends where it does — 'episode_start'/'episode_end',
-            # 'chirp', 'pose_gap', 'gripper_gap', or a modality name. Readers must .get() these:
-            # buffers exported before cut attribution existed carry neither.
-            'cut_start': plan.cuts[seg_i][0],
-            'cut_end': plan.cuts[seg_i][1],
-            # Span of the exported steps, i.e. how much real time this episode contributes to
-            # the dataset. First-to-last, so it is one frame short of the time the steps cover.
-            'duration_s': float(span_ts[-1] - span_ts[0]),
+            **plan.segment_record(seg_i),
         }
         # Absent entirely when nothing extra was exported, so the default --type dp's sidecar
         # and meta attrs stay byte-identical to a plain visuomotor buffer.
@@ -694,7 +681,7 @@ def iter_exportable_episodes(
     Yield ``(scene_label, ep_key, session_dir, ep_group, pose_source)`` per exportable session.
 
     The MAPPING skip, the ``scene.json`` unusable set, and the pose-source resolution, in one
-    place so the real export and ``pingest segments`` select exactly the same sessions — a
+    place so the real export and ``--dry-run`` select exactly the same sessions — a
     preview that disagreed with the export about *which* episodes count would be worse than no
     preview at all.
     """
