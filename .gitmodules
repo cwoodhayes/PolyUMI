@@ -13,3 +13,6 @@
 [submodule "external/polyumi_vista_policy"]
 	path = external/polyumi_vista_policy
 	url = https://github.com/RiicK3d/polyumi_vista_policy.git
+[submodule "external/franka_streaming_impedance_controller"]
+	path = external/franka_streaming_impedance_controller
+	url = https://github.com/cwoodhayes/franka_streaming_impedance_controller.git

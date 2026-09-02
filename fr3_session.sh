@@ -45,7 +45,7 @@ SHELL_SETTLE_S="${SHELL_SETTLE_S:-5}"
 NUC_SSH_HOST="${NUC_SSH_HOST:-jailfranka}"
 NUC_REPO="${NUC_REPO:-~/Documents/PolyUMI}"
 # The NUC's franka_ros2 workspace. ~/franka_ws/src/franka_streaming_impedance_controller is a
-# symlink into $NUC_REPO/nuc (refreshed on every deploy below), so a build there picks up
+# symlink into $NUC_REPO/external (refreshed on every deploy below), so a build there picks up
 # whatever the rsync landed.
 NUC_FRANKA_WS="${NUC_FRANKA_WS:-~/franka_ws}"
 
@@ -185,13 +185,28 @@ fi
 if [ "${SKIP_DEPLOY:-0}" = 1 ]; then
   echo "SKIP_DEPLOY=1 — leaving the remote source trees as they are."
 else
-  echo "==> Syncing nuc/ + franka_gripper_control to $NUC_SSH_HOST:$NUC_REPO ..."
-  # -R (--relative) so each source keeps its path under $NUC_REPO — external/franka_gripper_control
-  # must land at external/franka_gripper_control, not at the repo root. --delete stays scoped to
-  # the transferred directories; the implied external/ is created, never scanned, so the other
-  # submodules (which the NUC does not have and does not need) are safe.
+  # The two submodules the NUC builds. Both are transferred with --delete, so an UNINITIALISED
+  # one (an empty directory, after a fresh clone or a `git submodule deinit`) would delete the
+  # NUC's working copy and leave it building nothing — while the already-installed artifacts keep
+  # running, so the arm still moves and nothing looks wrong until the next source change silently
+  # fails to take. Check before transferring rather than after.
+  NUC_SUBMODULES=(external/franka_gripper_control external/franka_streaming_impedance_controller)
+  for sub in "${NUC_SUBMODULES[@]}"; do
+    if [ -z "$(ls -A "$sub" 2>/dev/null)" ]; then
+      echo "ERROR: $sub is empty — the submodule is not checked out." >&2
+      echo "       Syncing it would DELETE the NUC's copy. Run:" >&2
+      echo "         git submodule update --init $sub" >&2
+      exit 1
+    fi
+  done
+
+  echo "==> Syncing nuc/ + the NUC's submodules to $NUC_SSH_HOST:$NUC_REPO ..."
+  # -R (--relative) so each source keeps its path under $NUC_REPO — external/<name> must land at
+  # external/<name>, not at the repo root. --delete stays scoped to the transferred directories;
+  # the implied external/ is created, never scanned, so the other submodules (which the NUC does
+  # not have and does not need) are safe.
   if rsync -aR --delete --mkpath --exclude='__pycache__/' --exclude='*.pyc' --exclude='.git/' \
-      nuc external/franka_gripper_control "${NUC_SSH_HOST}:${NUC_REPO}/"; then
+      nuc "${NUC_SUBMODULES[@]}" "${NUC_SSH_HOST}:${NUC_REPO}/"; then
     # fr3_home_service runs straight from the synced tree, but the controller is C++ and
     # franka_gripper_control is an installed ament_python package: rsync only updates the sources
     # that ~/franka_ws/src symlinks at, so without this the NUC keeps running the previously built
@@ -201,7 +216,7 @@ else
     if ssh -o ConnectTimeout=10 "$NUC_SSH_HOST" \
         "ln -sfn $NUC_REPO/external/franka_gripper_control \
              $NUC_FRANKA_WS/src/franka_gripper_control \
-         && ln -sfn $NUC_REPO/nuc/franka_streaming_impedance_controller/franka_streaming_impedance_controller \
+         && ln -sfn $NUC_REPO/external/franka_streaming_impedance_controller/franka_streaming_impedance_controller \
              $NUC_FRANKA_WS/src/franka_streaming_impedance_controller \
          && source /opt/ros/humble/setup.bash \
          && source $NUC_FRANKA_WS/install/setup.bash \
