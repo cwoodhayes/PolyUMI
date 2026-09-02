@@ -14,19 +14,31 @@ log = logging.getLogger('pi_sync_chirp')
 _CARD = 'wm8960soundcard'
 _HP_VOL = 'Headphone Playback Volume'
 
+#: Where to restore the headphones when the pre-chirp read failed and there is no measured
+#: value to put back. Left ear at +1 dB (122 on the control's 0-127 scale), right muted —
+#: monitoring convention, and the same pair `pi/alsa_preset` stores. Needed because a failed
+#: read must not leave the mute in place: the chirp would be the last thing ever heard.
+_HP_DEFAULT = '122,0'
 
-def _hp_volume(value: str | None = None) -> str:
-    """Read the headphone volume, or set it when `value` is given. Returns '' if amixer fails."""
-    if value == '':
-        return ''
-    action = 'cget' if value is None else 'cset'
-    args = ['amixer', '-c', _CARD, action, f'name={_HP_VOL}'] + ([value] if value else [])
+
+def _hp_volume_get() -> str:
+    """Read the headphone volume as amixer's ``'L,R'`` string; ``''`` if amixer fails."""
+    args = ['amixer', '-c', _CARD, 'cget', f'name={_HP_VOL}']
     try:
         out = subprocess.run(args, capture_output=True, text=True, check=True).stdout
         return out.split(': values=')[1].split('\n', 1)[0]
     except (OSError, subprocess.CalledProcessError, IndexError) as exc:
-        log.warning(f'Could not {action} {_HP_VOL} ({exc}); chirp will play through the headphones.')
+        log.warning(f'Could not read {_HP_VOL} ({exc}); will restore it to {_HP_DEFAULT} after the chirp.')
         return ''
+
+
+def _hp_volume_set(value: str) -> None:
+    """Set the headphone volume from an amixer ``'L,R'`` string; a failure is logged, not raised."""
+    args = ['amixer', '-c', _CARD, 'cset', f'name={_HP_VOL}', value]
+    try:
+        subprocess.run(args, capture_output=True, text=True, check=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        log.warning(f'Could not set {_HP_VOL} to {value} ({exc}).')
 
 
 DURATION_S = 0.5
@@ -85,11 +97,13 @@ def play(sample_rate: int, device: int | str | None = None) -> int:
 
     mono = generate(sample_rate)
     stereo = np.column_stack([mono, mono])
-    prev_hp = _hp_volume()
-    _hp_volume('0')
+    # Resolved before the mute, so a failed read still restores to something audible rather
+    # than leaving the headphones dead for the rest of the session.
+    restore_to = _hp_volume_get() or _HP_DEFAULT
+    _hp_volume_set('0')
     try:
         ts = time.time_ns()
         sd.play(stereo, samplerate=sample_rate, device=device, blocking=True)
     finally:
-        _hp_volume(prev_hp)
+        _hp_volume_set(restore_to)
     return ts

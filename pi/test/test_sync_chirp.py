@@ -1,6 +1,7 @@
 """Tests for the headphone muting around sync chirp playback."""
 
 import subprocess
+import sys
 
 from polyumi_pi import sync_chirp
 
@@ -21,10 +22,10 @@ def test_hp_volume_reads_and_writes(monkeypatch):
 
     monkeypatch.setattr(subprocess, 'run', fake_run)
 
-    assert sync_chirp._hp_volume() == '95,95'
+    assert sync_chirp._hp_volume_get() == '95,95'
     assert 'cget' in calls[0]
 
-    sync_chirp._hp_volume('0')
+    sync_chirp._hp_volume_set('0')
     assert 'cset' in calls[1]
     assert calls[1][-1] == '0'
 
@@ -33,5 +34,28 @@ def test_hp_volume_survives_missing_amixer(monkeypatch):
     """A missing amixer must degrade to a warning, never break chirp playback."""
     monkeypatch.setattr(subprocess, 'run', lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError('amixer')))
 
-    assert sync_chirp._hp_volume() == ''
-    assert sync_chirp._hp_volume('') == ''  # restoring after a failed read is a no-op
+    assert sync_chirp._hp_volume_get() == ''
+    sync_chirp._hp_volume_set('0')  # and a failed write raises nothing either
+
+
+def test_an_unreadable_volume_is_restored_to_the_default(monkeypatch):
+    """
+    A chirp must never be the last thing heard.
+
+    If the pre-chirp read fails but the mute lands, restoring the empty read would leave the
+    headphones dead for the rest of the session — so the known default goes back instead.
+    """
+    monkeypatch.setattr(sync_chirp, '_hp_volume_get', lambda: '')
+    written = []
+    monkeypatch.setattr(sync_chirp, '_hp_volume_set', written.append)
+
+    class _FakeSd:
+        @staticmethod
+        def play(*args, **kwargs):
+            pass
+
+    monkeypatch.setitem(sys.modules, 'sounddevice', _FakeSd)
+
+    sync_chirp.play(16000)
+
+    assert written == ['0', sync_chirp._HP_DEFAULT]
