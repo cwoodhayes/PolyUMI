@@ -39,7 +39,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from tf2_ros import Buffer, TransformListener
 
-from polyumi_ros2.target_chunk import CONSUMER_HINT, TARGET_POSES_TOPIC, TargetChunkPublisher
+from polyumi_ros2.target_chunk import CONSUMER_HINT, TargetChunkPublisher
 
 #: How long to wait for the first TF sample before giving up.
 TF_TIMEOUT_S = 10.0
@@ -85,7 +85,7 @@ class ServoSmokeTest(Node):
 
         self._base = self.get_parameter('base_frame').get_parameter_value().string_value
         self._eef = self.get_parameter('eef_frame').get_parameter_value().string_value
-        topic = self.get_parameter('target_topic').get_parameter_value().string_value or TARGET_POSES_TOPIC
+        topic = self.get_parameter('target_topic').get_parameter_value().string_value or None
         self._radius = self.get_parameter('radius_m').get_parameter_value().double_value
         self._period = self.get_parameter('period_s').get_parameter_value().double_value
         self._duration = self.get_parameter('duration_s').get_parameter_value().double_value

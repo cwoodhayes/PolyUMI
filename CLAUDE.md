@@ -197,8 +197,11 @@ pointer bump here.
 Everything deployment-specific stays in PolyUMI: gains and collision thresholds in
 `nuc/config/polyumi_controllers.yaml`, the TCP geometry in `nuc/tcp_calib.py`, the payload, the
 launch files, and the topic names. `ros2_ws/src/polyumi_ros2/polyumi_ros2/target_chunk.py` is a
-thin shim that re-exports the generic client and adds the two PolyUMI constants
-(`TARGET_POSES_TOPIC`, `CONSUMER_HINT`) — import it, not the generic module, from PolyUMI code.
+thin shim over the generic client: it adds the two PolyUMI constants (`TARGET_POSES_TOPIC`,
+`CONSUMER_HINT`) and a `TargetChunkPublisher` subclass defaulting `topic` to the first — import it,
+not the generic module, from PolyUMI code. The generic class deliberately requires `topic` (its own
+default is node-relative and would address nothing), so the deployment's answer is supplied once
+here rather than at every producer.
 **Before adding anything to the submodule, ask whether it would make sense to a lab that has
 never heard of PolyUMI**; if not, it belongs on this side of the line. The controller's parameter
 defaults are deliberately neutral (`tcp_frame: fr3_hand_tcp`, node-relative topics), so PolyUMI's

@@ -185,14 +185,11 @@ fi
 if [ "${SKIP_DEPLOY:-0}" = 1 ]; then
   echo "SKIP_DEPLOY=1 — leaving the remote source trees as they are."
 else
-  # The two submodules the NUC builds. Both are transferred with --delete, so an UNINITIALISED
-  # one (an empty directory, after a fresh clone or a `git submodule deinit`) would delete the
-  # NUC's working copy and leave it building nothing — while the already-installed artifacts keep
-  # running, so the arm still moves and nothing looks wrong until the next source change silently
-  # fails to take. Check before transferring rather than after.
+  # The two submodules the NUC builds. Both are transferred with --delete, so an unchecked-out
+  # one would wipe the NUC's copy instead of updating it. Check before transferring, not after.
   NUC_SUBMODULES=(external/franka_gripper_control external/franka_streaming_impedance_controller)
   for sub in "${NUC_SUBMODULES[@]}"; do
-    if [ -z "$(ls -A "$sub" 2>/dev/null)" ]; then
+    if [ -z "$(ls -A "$REPO_DIR/$sub" 2>/dev/null)" ]; then
       echo "ERROR: $sub is empty — the submodule is not checked out." >&2
       echo "       Syncing it would DELETE the NUC's copy. Run:" >&2
       echo "         git submodule update --init $sub" >&2
@@ -205,8 +202,8 @@ else
   # external/<name>, not at the repo root. --delete stays scoped to the transferred directories;
   # the implied external/ is created, never scanned, so the other submodules (which the NUC does
   # not have and does not need) are safe.
-  if rsync -aR --delete --mkpath --exclude='__pycache__/' --exclude='*.pyc' --exclude='.git/' \
-      nuc "${NUC_SUBMODULES[@]}" "${NUC_SSH_HOST}:${NUC_REPO}/"; then
+  if (cd "$REPO_DIR" && rsync -aR --delete --mkpath --exclude='__pycache__/' --exclude='*.pyc' \
+      --exclude='.git/' nuc "${NUC_SUBMODULES[@]}" "${NUC_SSH_HOST}:${NUC_REPO}/"); then
     # fr3_home_service runs straight from the synced tree, but the controller is C++ and
     # franka_gripper_control is an installed ament_python package: rsync only updates the sources
     # that ~/franka_ws/src symlinks at, so without this the NUC keeps running the previously built
@@ -269,12 +266,10 @@ logged() {
   # which is how the shutdown sequence — the part that says whether bringup released the FCI —
   # ends up in the file. The find is scoped by -maxdepth 1 and a name glob to files we write.
   #
-  # Every step is &&-chained, including back into whatever the caller prefixed (a `cd`, a
-  # `source setup_franka_env.sh`). That prefix is a PRECONDITION, not a courtesy: a launch that
-  # runs anyway with an unsourced environment dies inside every node at once — four RCLErrors
-  # deep in rmw, naming nothing that points back at the setup line that failed. Log rotation is
-  # the one step allowed to fail, since a full disk should not stop a run, so its exit status is
-  # swallowed explicitly rather than by breaking the chain for everything after it.
+  # Every step is &&-chained, back into whatever the caller prefixed (a `cd`, a `source`): that
+  # prefix is a precondition, and a launch that runs without it fails deep in rmw, naming nothing.
+  # Log rotation is the one step allowed to fail — a full disk should not stop a run — so its
+  # exit status is swallowed rather than breaking the chain.
   printf 'mkdir -p %s && { find %s -maxdepth 1 -name "%s_*.log" -mtime +%s -delete 2>/dev/null || true; } && %s 2>&1 | { trap "" INT; tee -a %s/%s_$(date +%%F).log; }' \
     "$REMOTE_LOG_DIR" "$REMOTE_LOG_DIR" "$1" "$REMOTE_LOG_KEEP_DAYS" "$2" "$REMOTE_LOG_DIR" "$1"
 }
@@ -319,11 +314,9 @@ add_pane policy-server "$ROS_SSH_HOST" polyumi split \
 # carries its own DDS env instead of inheriting whatever the shell happened to have. An
 # interactive rc exporting its own ROS_DOMAIN_ID silently beats tmux's inherited environment, and
 # the only symptom is policy_client_node never seeing fr3_link0.
-#
-# Its output is NOT silenced. The two lines it prints — which host config it picked, and the
-# resolved CYCLONEDDS_URI — are the only visible evidence of which DDS config this pane ended up
-# on, and the failure they catch (a config path that does not exist on this host) otherwise
-# surfaces as every node aborting inside rmw with nothing naming the file.
+# Its two lines of output are left visible: they are the only evidence of which DDS config this
+# pane got, and a config path missing on this host otherwise surfaces as every node aborting
+# inside rmw with nothing naming the file.
 add_pane ros-client "$ROS_SSH_HOST" polyumi-ros window "" \
   "cd $ROS_REPO && source setup_franka_env.sh && $(logged policy_client "ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=$INFERENCE_URL execute_motion:=$EXECUTE_MOTION max_image_age_s:=$MAX_IMAGE_AGE_S pi_host:=$PI_HOST video_device:=$ROS_VIDEO_DEVICE")"
 
