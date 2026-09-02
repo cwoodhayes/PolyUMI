@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import pathlib
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from polyumi_pi.files.base import SessionDataABC
@@ -28,6 +28,9 @@ class SceneFiles(SessionDataABC):
     scene_id: str
     sessions: list[SessionFiles] = field(default_factory=list)
     optitrack_start_time: datetime | None = None
+    #: Wall clock at which this scene began, before the first session. Copied into every
+    #: session's metadata.json, the only file `pingest fetch` transfers.
+    started_at: datetime | None = None
 
     @classmethod
     def create(
@@ -36,9 +39,11 @@ class SceneFiles(SessionDataABC):
     ) -> SceneFiles:
         """Create a new scene directory under base_dir and update the latest symlink."""
         scene_id = str(uuid4())
-        folder_name = datetime.now().astimezone().strftime(r'scene_%Y-%m-%d_%H-%M-%S') + f'_{scene_id[:4]}'
+        # One `now` for both, so the stamp and the directory name cannot disagree.
+        now = datetime.now().astimezone()
+        folder_name = now.strftime(r'scene_%Y-%m-%d_%H-%M-%S') + f'_{scene_id[:4]}'
         path = base_dir / folder_name
-        return cls(path=path, scene_id=scene_id)
+        return cls(path=path, scene_id=scene_id, started_at=now.astimezone(timezone.utc))
 
     def create_session(self) -> SessionFiles:
         """Create a new session directory inside this scene."""
@@ -58,6 +63,7 @@ class SceneFiles(SessionDataABC):
         )
         if self.optitrack_start_time is not None:
             session.metadata.optitrack_start_time = self.optitrack_start_time
+        session.metadata.scene_started_at = self.started_at
         return session
 
     @classmethod
@@ -80,4 +86,7 @@ class SceneFiles(SessionDataABC):
                     log.exception(err)
                     pass
 
-        return cls(path=path, scene_id=scene_id, sessions=sessions)
+        # Recovered from the sessions rather than a scene-level file: that is the only place
+        # it was ever written (see create_session).
+        starts = [s.metadata.scene_started_at for s in sessions if s.metadata.scene_started_at is not None]
+        return cls(path=path, scene_id=scene_id, sessions=sessions, started_at=min(starts) if starts else None)

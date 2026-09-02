@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import zarr
@@ -203,8 +204,9 @@ def test_task_detail_usable_count_follows_the_thresholds_not_a_stored_verdict(tm
 
     iquality.load_quality_thresholds.cache_clear()
     try:
+        # 100 fed - 5 lost = 95 tracked, so a floor of 96 excludes exactly this episode.
         with mock.patch.object(
-            iquality, 'load_quality_thresholds', return_value=iquality.QualityThresholds(max_lost_frames=1)
+            iquality, 'load_quality_thresholds', return_value=iquality.QualityThresholds(min_tracked_frames=96)
         ):
             with DBSession(engine) as db:
                 # same cached numbers, stricter threshold -> scene-1's episode is now excluded
@@ -406,6 +408,56 @@ def test_scene_detail_includes_quality_summary(tmp_path: pathlib.Path):
     assert scene['quality']['n_episodes_with_slam'] == 1
     assert scene['quality']['avg_tracking_ratio'] == 0.9
     assert scene['quality']['n_low_quality'] == 0
+
+
+def test_scene_detail_separates_scene_span_from_episode_time(tmp_path: pathlib.Path):
+    """The productivity numbers: the whole run at the rig, and the part of it that recorded."""
+    rec = tmp_path / 'recordings'
+    scene_dir = rec / 'scene_2026-07-26_14-00-00_qrst'
+    scene_dir.mkdir(parents=True)
+    SceneManifest(scene_id='scene-5').write_to_scene_dir(scene_dir)
+    started = datetime(2026, 7, 26, 14, 0, 0, tzinfo=timezone.utc)
+    for i, offset in enumerate((30, 630)):  # ten minutes apart, one minute of recording each
+        sd = scene_dir / f'session_{i}'
+        sd.mkdir()
+        SessionMetadata(
+            path=sd / 'metadata.json',
+            scene_id='scene-5',
+            session_type=SessionType.EPISODE,
+            created_at=started + timedelta(seconds=offset),
+            duration_s=60,
+            scene_started_at=started,
+        ).to_file()
+
+    engine = get_engine(tmp_path / 'catalog.db')
+    sync_recordings(rec, engine)
+    with DBSession(engine) as db:
+        detail = queries.scene_detail(db, 'scene-5')
+
+    assert detail['scene_seconds'] == 690.0  # scene start -> end of the second session
+    assert detail['episode_seconds'] == 120.0  # two one-minute episodes; the rest is dead time
+    assert detail['episode_frac'] == 120.0 / 690.0
+
+
+def test_scene_detail_excludes_mapping_from_episode_time(tmp_path: pathlib.Path):
+    """A mapping pass costs scene time but is neither episode nor usable-episode time."""
+    rec = tmp_path / 'recordings'
+    scene_dir = rec / 'scene_2026-07-26_13-00-00_mnop'
+    scene_dir.mkdir(parents=True)
+    SceneManifest(scene_id='scene-4').write_to_scene_dir(scene_dir)
+    for name, stype in (('session_1', SessionType.MAPPING), ('session_2', SessionType.EPISODE)):
+        sd = _make_session(scene_dir, name, scene_id='scene-4', session_type=stype, task=None)
+        meta = SessionMetadata.from_file(sd / 'metadata.json')
+        meta.duration_s = 60.0
+        meta.to_file()
+
+    engine = get_engine(tmp_path / 'catalog.db')
+    sync_recordings(rec, engine)
+    with DBSession(engine) as db:
+        detail = queries.scene_detail(db, 'scene-4')
+
+    assert detail['episode_seconds'] == 60.0  # not 120: the mapping pass does not count
+    assert detail['usable_episode_seconds'] == 60.0
 
 
 def test_scene_detail_flags_task_conflict(tmp_path: pathlib.Path):

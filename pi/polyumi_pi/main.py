@@ -30,7 +30,7 @@ from polyumi_pi.files.scene import SceneFiles
 from polyumi_pi.files.session import DEFAULT_RECORDINGS_DIR, SessionFiles
 from polyumi_pi.gopro.gopro_config import GoProConfig, load_gopro_config, save_gopro_config
 from polyumi_pi.gopro.gopro_wrapper import GoProNotReadyError, GoProWrapper
-from polyumi_pi.led_manager import LEDManager
+from polyumi_pi.led_manager import DEFAULT_BRIGHTNESS, LEDManager
 from polyumi_pi.optitrack import await_optitrack_esync
 from polyumi_pi.raspi_driver import IndicatorState, RaspiDriver
 
@@ -70,24 +70,33 @@ def _recv_child_stats(
     name: str,
     timeout_s: float = 1.0,
 ) -> dict:
-    """Receive one final stats payload from a child process."""
+    """
+    Merge every stats payload a child process sent, later keys winning.
+
+    Children send the fields they learn early (the first-frame metadata, the audio start
+    time) as soon as they have them and the full tally at shutdown, because a child that
+    overruns the terminate grace in :func:`_stop_child_process` gets killed before it can
+    report anything. Draining rather than reading one payload is what keeps the early
+    fields — the ones ingest cannot rebuild from the files on disk — through that kill.
+    """
     if conn is None:
         return {}
 
+    stats: dict = {}
     try:
-        if not conn.poll(timeout_s):
+        while conn.poll(timeout_s if not stats else 0):
+            payload = conn.recv()
+            if not isinstance(payload, dict):
+                log.warning(f'Unexpected {name} stats payload type: {type(payload)}')
+                continue
+            stats.update(payload)
+        if not stats:
             log.warning(f'No {name} stats received before timeout.')
-            return {}
-        payload = conn.recv()
-        if not isinstance(payload, dict):
-            log.warning(f'Unexpected {name} stats payload type: {type(payload)}')
-            return {}
-        return payload
     except (EOFError, OSError) as err:
         log.warning(f'Failed to receive {name} stats: {err}')
-        return {}
     finally:
         conn.close()
+    return stats
 
 
 async def _record_session_async(
@@ -114,8 +123,8 @@ async def _record_session_async(
     audio_parent_conn: Connection | None = None
 
     try:
-        session.metadata.led_brightness = 1.0
-        led.set_brightness(1.0)
+        session.metadata.led_brightness = DEFAULT_BRIGHTNESS
+        led.set_brightness()
 
         # Set by the camera process once its first frame is captured, so the audio
         # process can delay the sync chirp until then — the chirp doubles as an
@@ -324,7 +333,7 @@ def stream_video(
     led = LEDManager()
 
     try:
-        led.set_brightness(1.0)
+        led.set_brightness()
         streamer.start()
     finally:
         context.term()
@@ -362,6 +371,9 @@ def stream(
     sample_rate: int = typer.Option(16000, help='Audio sample rate (Hz).'),
     chunk_ms: int = typer.Option(20, help='Audio chunk size (ms).'),
     channels: int = typer.Option(1, help='Number of audio channels.'),
+    led_brightness: float = typer.Option(
+        DEFAULT_BRIGHTNESS, min=0.0, max=1.0, help='LED strip PWM duty cycle, in [0.0, 1.0].'
+    ),
 ):
     """
     Stream both video and audio data over ZMQ.
@@ -374,7 +386,7 @@ def stream(
     audio_process: multiprocessing.Process | None = None
 
     try:
-        led.set_brightness(1.0)
+        led.set_brightness(led_brightness)
         log.info('Starting camera streamer...')
         cam_process = multiprocessing.Process(
             target=_run_video_streamer,

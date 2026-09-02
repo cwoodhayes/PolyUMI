@@ -132,6 +132,11 @@ class CameraStreamer:
                     if first_frame_metadata is None:
                         first_frame_metadata = dict(metadata)
                         log.info(f'First-frame metadata: {first_frame_metadata}')
+                        # Report it now, not with the shutdown tally: ingest anchors every
+                        # finger timestamp to FrameWallClock, and a shutdown that overruns
+                        # the parent's terminate grace loses it along with the recording.
+                        if self.stats_conn is not None:
+                            self.stats_conn.send({'first_frame_metadata': first_frame_metadata})
                         if self.first_frame_event is not None:
                             self.first_frame_event.set()
                     log.debug(metadata)

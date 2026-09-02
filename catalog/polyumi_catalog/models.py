@@ -42,6 +42,10 @@ class Scene(SQLModel, table=True):
     notes: str | None = None
     archived: bool = False
     created_at: datetime | None = None
+    #: The scene's wall-clock span, cached from ``polyumi_ingest.timing.span_from_metas``,
+    #: which is where how each end is derived is written down.
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
     synced_at: datetime | None = None
 
 
@@ -104,6 +108,10 @@ class Dataset(SQLModel, table=True):
     #: modalities). Mirrors
     #: ``DatasetManifest.exporter_type``, which is the source of truth on re-sync.
     exporter_type: str = 'dp'
+    #: Time accounting, mirroring ``DatasetManifest``; see ``polyumi_ingest.timing``.
+    scene_seconds: float | None = None
+    episode_seconds: float | None = None
+    exported_seconds: float | None = None
     created_at: datetime = Field(default_factory=_utcnow)
 
 

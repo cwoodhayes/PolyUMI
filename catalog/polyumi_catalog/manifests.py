@@ -68,11 +68,19 @@ class DatasetManifest:
     exporter_type: str = 'dp'
     export_params: dict = field(default_factory=dict)
     members: list[DatasetMemberSpec] = field(default_factory=list)
-    #: Per-episode pose-source provenance from the export (scene, session, episode, source,
-    #: world_frame, n_steps, n_interp_filled) — see export.dp.buffer's module docstring. Also
-    #: embedded in the .zarr.zip's meta attrs; kept here too so it's readable without opening
-    #: the buffer.
+    #: One record per exported *segment* — a session is cut into several where its trajectory
+    #: drops out or teleports, so this is longer than the session count. Carries scene, session,
+    #: episode, segment, source, world_frame, n_steps, frame_range, frame_stride, duration_s and
+    #: cut_start/cut_end (why the segment begins and ends where it does); see export.dp.buffer's
+    #: module docstring. Also embedded in the .zarr.zip's meta attrs; kept here too so it's
+    #: readable without opening the buffer. Read fields with .get() — manifests predating a
+    #: field simply lack it.
     pose_provenance: list[dict] = field(default_factory=list)
+    #: Time accounting from ``polyumi_ingest.timing.dataset_time_totals``, whose module
+    #: docstring defines the three. None on manifests written before these fields existed.
+    scene_seconds: float | None = None
+    episode_seconds: float | None = None
+    exported_seconds: float | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     file_version: int = 1
 
@@ -93,6 +101,9 @@ class DatasetManifest:
             export_params=data.get('export_params', {}),
             members=[DatasetMemberSpec.from_dict(m) for m in data.get('members', [])],
             pose_provenance=data.get('pose_provenance', []),
+            scene_seconds=data.get('scene_seconds'),
+            episode_seconds=data.get('episode_seconds'),
+            exported_seconds=data.get('exported_seconds'),
             created_at=datetime.fromisoformat(data['created_at']),
             file_version=version,
         )
@@ -110,6 +121,9 @@ class DatasetManifest:
             'pose_provenance': self.pose_provenance,
             'output': self.output,
             'n_episodes': self.n_episodes,
+            'scene_seconds': self.scene_seconds,
+            'episode_seconds': self.episode_seconds,
+            'exported_seconds': self.exported_seconds,
             'file_version': self.file_version,
         }
 

@@ -189,6 +189,12 @@ class AudioStreamer:
                 n_audio_chunks += 1
                 if audio_start_time_ns is None:
                     audio_start_time_ns = ts
+                    # Same reason as the camera's first-frame metadata: ingest needs this
+                    # anchor and cannot recover it from audio.wav, so don't hold it until
+                    # shutdown, which may be a kill. Safe to send from this thread — the
+                    # final send happens after pub_thread is joined.
+                    if self.stats_conn is not None:
+                        self.stats_conn.send({'audio_start_time_ns': audio_start_time_ns})
 
         device_index = self.find_device_index(self.DEVICE_NAME)
         log.info(f'Using device index {device_index}: {sd.query_devices(device_index)["name"]}')

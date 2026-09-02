@@ -2,19 +2,18 @@
   "configById": {
     "3D!oah9y3": {
       "cameraState": {
+        "distance": 2.44173097473536,
         "perspective": true,
-        "distance": 8.802533373032816,
-        "phi": 88.94111917862352,
-        "thetaOffset": 169.1858414070775,
-        "targetOffset": [
-          1.3493915315382277,
-          -7.259365787179679,
-          -4.1030786173700024e-19
-        ],
+        "phi": 100.9974489360878,
         "target": [
           0,
           0,
           0
+        ],
+        "targetOffset": [
+          -0.04084533603184034,
+          0.06620880051285748,
+          0.29419321130628545
         ],
         "targetOrientation": [
           0,
@@ -22,6 +21,7 @@
           0,
           1
         ],
+        "thetaOffset": -43.60190235104815,
         "fovy": 45,
         "near": 0.5,
         "far": 5000
@@ -29,7 +29,10 @@
       "followMode": "follow-pose",
       "followTf": "slam",
       "scene": {
-        "meshUpAxis": "z_up"
+        "meshUpAxis": "z_up",
+        "transforms": {
+          "labelSize": 0.0466
+        }
       },
       "transforms": {
         "frame:slam": {
@@ -54,11 +57,14 @@
           "axisScale": 0.3
         },
         "/slam/pose": {
-          "visible": true
+          "visible": false
         },
         "/optitrack/pose_raw": {
           "visible": false,
           "axisScale": 0.1
+        },
+        "/eef/pose_slam": {
+          "visible": true
         }
       },
       "layers": {
@@ -192,34 +198,68 @@
     },
     "Plot!3ahq65t": {
       "xAxisLabel": "",
-      "foxglovePanelTitle": "Linear Accel",
+      "foxglovePanelTitle": "SLAM availability",
       "paths": [
         {
           "timestampMethod": "receiveTime",
-          "value": "/gopro/accel.linear_acceleration.x",
+          "value": "/eef/pose_slam.pose.position.x",
           "enabled": true,
           "color": "#4e98e2",
-          "id": "06c76180-5e97-4141-9891-a39f0b7c4457",
-          "label": "a_x"
-        },
-        {
-          "timestampMethod": "receiveTime",
-          "value": "/gopro/accel.linear_acceleration.y",
-          "enabled": true,
-          "color": "#f5774d",
-          "id": "00912f57-58af-4d8c-837b-234209c744a4",
-          "label": "a_y"
-        },
-        {
-          "timestampMethod": "receiveTime",
-          "value": "/gopro/accel.linear_acceleration.z",
-          "enabled": true,
-          "color": "#2cff00",
-          "id": "68fd08fe-7862-40dd-a2b9-e0731a3f6f75",
-          "label": "a_z"
+          "id": "c8bed577-f471-4d0e-9a00-4aa981d24033",
+          "label": "SLAM pose"
         }
       ],
-      "yAxisLabel": "m/s^2"
+      "yAxisLabel": "available?",
+      "minYValue": -10000,
+      "maxYValue": 10000,
+      "showYAxisGridLines": false,
+      "showYAxisLabels": false
+    },
+    "Image!11fq2wz": {
+      "cameraState": {
+        "distance": 20,
+        "perspective": true,
+        "phi": 60,
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "thetaOffset": 60,
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followMode": "follow-pose",
+      "scene": {},
+      "transforms": {},
+      "topics": {},
+      "layers": {},
+      "publish": {
+        "type": "point",
+        "poseTopic": "/move_base_simple/goal",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "synchronize": false,
+      "imageMode": {
+        "imageTopic": "/finger/logmel"
+      },
+      "foxglovePanelTitle": "piezo audio: log-mel view (model input)"
     },
     "Plot!35segx7": {
       "foxglovePanelTitle": "Gyro",
@@ -264,29 +304,22 @@
       ]
     },
     "Audio!3nxj4f9": {
-      "volume": 0.89,
+      "volume": 0.15,
       "slidingViewWidth": 10,
       "topic": "/gopro/audio",
       "muted": true
     },
     "Audio!2w9y83j": {
-      "volume": 0.98,
+      "volume": 0.93,
       "slidingViewWidth": 10,
       "topic": "/finger/piezo",
       "muted": false
     },
     "Audio!1v0aezy": {
-      "volume": 0,
+      "volume": 0.95,
       "slidingViewWidth": 10,
       "topic": "/finger/air",
       "muted": true
-    },
-    "RosOut!3jpmf8l": {
-      "minLogLevel": 1,
-      "preload": true,
-      "searchTerms": [],
-      "nameFilter": {},
-      "fontSize": 12
     }
   },
   "globalVariables": {},
@@ -299,33 +332,34 @@
   },
   "layout": {
     "first": {
-      "first": {
-        "first": {
-          "first": "3D!oah9y3",
-          "second": "Image!3zkla5f",
-          "direction": "row"
-        },
+      "first": "3D!oah9y3",
+      "second": {
+        "first": "Image!3zkla5f",
         "second": "Image!24wk5v",
-        "direction": "row",
-        "splitPercentage": 71.28001014564859
+        "direction": "row"
+      },
+      "direction": "row",
+      "splitPercentage": 31.73134074891738
+    },
+    "second": {
+      "first": {
+        "first": "Plot!3ahq65t",
+        "second": "Image!11fq2wz",
+        "direction": "column",
+        "splitPercentage": 33.88160085236731
       },
       "second": {
         "first": {
-          "first": "Plot!3ahq65t",
-          "second": {
-            "first": "Plot!35segx7",
-            "second": "Plot!3z3pxs",
-            "direction": "row"
-          },
-          "direction": "row",
-          "splitPercentage": 33.166770768269835
+          "first": "Plot!35segx7",
+          "second": "Plot!3z3pxs",
+          "direction": "row"
         },
         "second": {
           "first": {
             "first": "Audio!3nxj4f9",
             "second": "Audio!2w9y83j",
             "direction": "column",
-            "splitPercentage": 49.15541131221808
+            "splitPercentage": 49.41170542289896
           },
           "second": "Audio!1v0aezy",
           "direction": "column",
@@ -334,11 +368,10 @@
         "direction": "column",
         "splitPercentage": 33.79404020668456
       },
-      "direction": "column",
-      "splitPercentage": 42.63565891472868
+      "direction": "row",
+      "splitPercentage": 23.98743313237667
     },
-    "second": "RosOut!3jpmf8l",
     "direction": "column",
-    "splitPercentage": 89.56515507139913
+    "splitPercentage": 47.98947113219963
   }
 }

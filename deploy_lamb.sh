@@ -24,12 +24,32 @@ echo "==> Syncing repo to ${HOST}:${REPO} ..."
 #
 # data/, recordings/ and wandb/ are lamb's OUTPUT — data/ holds dp_outputs, i.e. every checkpoint.
 # rsync protects excluded paths from --delete, which is the only reason they survive this.
-# external/ORB_SLAM3_PolyUMI is 2 GB of ingest-side C++ that nothing on lamb runs; the
-# diffusion-policy fork under external/ DOES ship.
+# They are ANCHORED with a leading slash: an unanchored 'data/' matches at every depth, which
+# silently drops a fork's own package directory (external/polyumi_vista_policy/vista/data/) and
+# leaves the remote building against a tree missing files that exist here.
+# external/ORB_SLAM3_PolyUMI is 2 GB of ingest-side C++ that nothing on lamb runs.
+# external/polyumi_vista_policy is hand-managed ON lamb: the checkpoints under data/dp_outputs/
+# were trained against a working copy that is not any commit of the fork, and overwriting it makes
+# them unloadable. The dp fork under external/ DOES ship.
+
+# An uninitialised submodule is an EMPTY directory here, and --delete would erase the remote's
+# copy of it — silently, since rsync reports nothing for a directory it merely empties. Refuse
+# rather than ship the deletion; `git submodule update --init <path>` is the fix.
+for d in "${HERE}"/external/*/; do
+    case "${d}" in
+        */ORB_SLAM3_PolyUMI/ | */polyumi_vista_policy/) continue ;;
+    esac
+    if [ -z "$(ls -A "${d}")" ]; then
+        echo "error: ${d} is empty (uninitialised submodule); --delete would wipe it on ${HOST}." >&2
+        echo "       run: git submodule update --init ${d#"${HERE}"/}" >&2
+        exit 1
+    fi
+done
+
 rsync -a --delete --mkpath \
     --exclude='.git/' --exclude='__pycache__/' --exclude='*.pyc' --exclude='*.egg-info/' \
-    --exclude='.venv/' --exclude='recordings/' --exclude='data/' --exclude='wandb/' \
-    --exclude='external/ORB_SLAM3_PolyUMI/' \
+    --exclude='.venv/' --exclude='/recordings/' --exclude='/data/' --exclude='/wandb/' \
+    --exclude='external/ORB_SLAM3_PolyUMI/' --exclude='external/polyumi_vista_policy/' \
     --exclude='ros2_ws/build/' --exclude='ros2_ws/install/' --exclude='ros2_ws/log/' \
     "${HERE}/" "${HOST}:${REPO}/"
 
@@ -42,6 +62,13 @@ ssh "${HOST}" "
     test -f ${REPO}/inference_server/polyumi_inference/wire.py
     test -f ${REPO}/docker/polyumi_inference.Dockerfile
     echo '    fork + polyumi_inference present'
+    # Not synced (see the exclude above) — this only confirms lamb's hand-managed copy is intact,
+    # which is worth catching now rather than as a stage-1 build failure 20 minutes in.
+    if [ -d ${REPO}/external/polyumi_vista_policy ]; then
+        test -f ${REPO}/external/polyumi_vista_policy/Dockerfile
+        test -f ${REPO}/external/polyumi_vista_policy/scripts/train_day0suite.sh
+        echo '    vista fork present'
+    fi
 "
 
 # colcon COPIES sources into install/, so an edited node keeps running the old code until you

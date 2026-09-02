@@ -34,6 +34,10 @@ _BLOSC = Blosc(cname='zstd', clevel=5, shuffle=Blosc.SHUFFLE)
 # Marker string used in the settings YAML to flag values that need calibration.
 _PLACEHOLDER_MARKER = 'CALIBRATE_ME'
 
+#: Scene-root attr naming the scene a borrowed atlas was copied from (``pingest copy-map``).
+#: Its presence is what makes the map survive ``--force`` below.
+ATLAS_SOURCE_ATTR = 'slam_atlas_source_scene'
+
 # Repo-root-relative default install path for the ORB-SLAM3 fork — the git
 # submodule at external/ORB_SLAM3_PolyUMI.  Set ORB_SLAM3_DIR in the env to
 # override (useful if you're working out-of-tree).
@@ -782,12 +786,26 @@ class OrbSlam3Step(PreprocessingStep):
                 f'localization will run. Add episode sessions to localize.'
             )
 
-        if self.atlas_path.exists() and scene.force:
+        # An atlas borrowed from another scene survives --force: rebuilding it here would put
+        # this scene back in its own SLAM frame, which is the one thing `pingest copy-map`
+        # exists to prevent. Delete the file by hand to map from this scene again.
+        borrowed = scene.root.attrs.get(ATLAS_SOURCE_ATTR)
+        if self.atlas_path.exists() and scene.force and not borrowed:
             log.info(f'--force: removing existing atlas at {self.atlas_path}')
             self.atlas_path.unlink()
         if self.atlas_path.exists():
-            log.info(f'Atlas already exists at {self.atlas_path}, skipping map building.')
+            origin = f' (copied from {borrowed})' if borrowed else ''
+            log.info(f'Atlas already exists at {self.atlas_path}{origin}, skipping map building.')
             return
+
+        # Past the guard above there is no atlas to reuse, so a borrow marker left over from a
+        # deleted one is stale: the map about to be built is this scene's own. Clearing it is
+        # what makes the "delete the file by hand" escape hatch actually work — otherwise every
+        # later --force would refuse to rebuild the local map, and the log would keep calling it
+        # copied.
+        if borrowed:
+            log.info(f'Borrowed atlas from {borrowed} is gone; building this scene its own map.')
+            del scene.root.attrs[ATLAS_SOURCE_ATTR]
 
         log.info(f'Phase 1: building map from {mapping.key}...')
         t0 = time.monotonic()

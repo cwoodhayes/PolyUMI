@@ -156,9 +156,9 @@ uv tool install --editable ingest
 # Show all ingest commands:
 pingest --help
 # Fetch only the latest session from the Pi:
-pingest fetch --host <pi_ssh_hostname> --latest
+uv run pingest fetch --host <pi_ssh_hostname> --latest
 # Fetch all new sessions:
-pingest fetch --host <pi_ssh_hostname>
+uv run pingest fetch --host <pi_ssh_hostname>
 # Plug in the GoPro's SD card before running the fetch commands above to automatically fetch the GoPro's footage for each session
 # OR download gopro footage from the SD later for all sessions you've fetched:
 pingest fetch-gopro --host <pi_ssh_hostname>
