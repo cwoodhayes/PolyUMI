@@ -6,12 +6,12 @@
 # (export/dp/buffer.py).
 #
 # Unknown keys are ignored rather than rejected (quality.py filters to the dataclass
-# fields), so a local copy carrying a retired key still loads — it just does nothing.
-# `max_lost_frames` is one such retired key; see below.
+# fields), so a local copy carrying a key this file no longer defines still loads — the
+# key simply does nothing.
 #
 # An episode explicitly listed in a scene's scene.json `unusable_episodes` is unusable
-# regardless of what's here. Since the automatic whole-episode veto was retired, that
-# human set is the only thing that discards an entire session at export.
+# regardless of what's here. That human set is the only thing that discards an entire
+# session at export; everything below either cuts a session or badges it.
 
 # --- Segment cut thresholds (export/dp/buffer.py: plan_episode_segments) ---
 
@@ -69,9 +69,3 @@ optitrack_always_usable: true
 # episode unusable. Kept separate so the warning threshold and the exclusion
 # threshold can move independently.
 low_tracking_ratio: 0.90
-
-# RETIRED: max_lost_frames. It condemned an episode for having holes, which is precisely
-# what segmentation cuts around — the exporter splits a session at each dropout and keeps
-# the runs either side. Over 148 sessions it fired 119 times and was the single largest
-# cause of data loss in the corpus (21 exported segments with it, 99 without). Leaving the
-# key in a local copy of this file is harmless; it is no longer read.

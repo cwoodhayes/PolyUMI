@@ -75,7 +75,10 @@
       # waypoint that is shifts by arm_exec/action_dt steps, so overstating it skips ahead in the
       # policy's trajectory rather than commanding early.
       #
-      # Calibrated 2026-08-19 in servo mode; close to UMI's robot_action_latency of 0.1.
+      # Tuned on hardware, not measured: 0.04 is what the gear and pick-and-place runs
+      # succeeded at. The servo-mode calibration measured 0.0910 (2026-08-19), and UMI
+      # hardcodes robot_action_latency: 0.1 — both are the reference points this was tuned
+      # down from, so re-derive from 0.0910 if the controller stiffness changes.
       arm_exec: 0.04
 
       # The gripper's counterpart to arm_exec: how far ahead of intent to command the hand.

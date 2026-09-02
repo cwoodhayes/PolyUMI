@@ -40,24 +40,23 @@ def test_healthy_episode_is_usable() -> None:
     assert auto_unusable_reasons(_attrs(n_fed=220, n_lost=0), thresholds=_TH) == []
 
 
-def test_lost_frames_no_longer_condemn_an_episode() -> None:
+def test_an_episode_full_of_holes_is_still_usable() -> None:
     """
     Holes are segmentation's job, not a verdict's.
 
-    The exporter splits a session at each dropout and keeps the runs either side, so
-    condemning the whole thing for having holes threw away the good parts. This episode lost
-    half its frames and is still not excluded here — whether it yields anything is decided by
+    This episode lost half its frames and is not excluded: the exporter splits a session at
+    each dropout and keeps the runs either side, so whether it yields anything is decided by
     the segment floor, which only the exporter can evaluate.
     """
     assert auto_unusable_reasons(_attrs(n_fed=220, n_lost=110), thresholds=_TH) == []
 
 
-def test_a_pose_jump_no_longer_condemns_an_episode() -> None:
+def test_a_pose_jump_is_not_a_usability_verdict() -> None:
     """
-    A teleport cuts the trajectory at export; it does not delete the demo.
+    A teleport cuts the trajectory at export rather than condemning the demo.
 
     Real case from red_trapezoid_mug_v3: 205 frames fed, none lost, tracking_ratio 1.000, and
-    a 1.14 m teleport between two adjacent frames. That is now two episodes, not zero.
+    a 1.14 m teleport between two adjacent frames — which is two episodes, not zero.
     """
     attrs = _attrs(n_fed=205, n_lost=0)
     attrs['max_pose_jump_m'] = 1.142
@@ -81,10 +80,12 @@ def test_whole_grid_losses_are_not_what_gets_counted() -> None:
     """
     A flawless stride-2 episode has half its whole-grid frames 'lost' by construction.
 
-    The tracked count must come off the fed grid, or the floor would reject the whole corpus.
+    Both counts must come off the *fed* grid. Subtracting the whole-grid `n_frames_lost` from
+    the fed `n_frames_fed` mixes the two and reports zero tracked frames for a perfect
+    episode — the trap asserted below, which would reject the entire corpus.
     """
     attrs = _attrs(n_fed=220, n_lost=0)
-    assert attrs['n_frames_lost'] > _TH.min_tracked_frames  # the trap
+    assert attrs['n_frames_fed'] - attrs['n_frames_lost'] < _TH.min_tracked_frames  # the trap
     assert auto_unusable_reasons(attrs, thresholds=_TH) == []
 
 

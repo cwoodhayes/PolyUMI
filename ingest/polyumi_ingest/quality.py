@@ -9,21 +9,17 @@ usable/unusable verdict using thresholds from ``config/quality_thresholds.yaml``
   threshold file reclassifies every scene at once with no reprocessing. The pzarr
   holds measurements; this module holds policy.
 
-**This is a prediction, not the export's gate.** It used to be both — export called
-``auto_unusable_reasons`` and skipped whatever it condemned. It no longer does. The
-exporter cuts a session into segments at its dropouts and pose jumps
-(``export.dp.buffer.plan_episode_segments``), so an episode with holes is no longer an
-episode worth deleting, and the only thing decided here is whether the episode is too
-short to yield any segment at all. That check needs the pose array, which this module
-must not read: the catalog calls it on every page render and is attrs-only by design.
+**This is a prediction, not the export's gate.** The exporter cuts a session into segments at
+its dropouts and pose jumps (``export.dp.buffer.plan_episode_segments``), so holes do not
+condemn an episode; the only thing decided here is whether an episode is too short to yield
+any segment at all. The real rule needs the pose array, which this module must not read: the
+catalog calls it on every page render and is attrs-only by design.
 
-What survives of "one rule, two consumers" is a one-way implication, asserted in
-``test_dp_export.py``: whatever this module calls unusable, the export really does
-produce nothing from. The reverse does not hold.
+The two are related in one direction only, asserted in ``test_dp_export.py``: whatever this
+module calls unusable, the export really does produce nothing from. The reverse does not hold.
 
-An episode listed explicitly in ``scene.json``'s ``unusable_episodes`` is unusable
-regardless of these thresholds — that set is a human decision, and since the automatic
-veto was retired it is the only thing that discards a whole session at export.
+An episode listed explicitly in ``scene.json``'s ``unusable_episodes`` is unusable regardless
+of these thresholds — that human set is the only thing that discards a whole session at export.
 """
 
 from __future__ import annotations
@@ -111,9 +107,9 @@ def auto_unusable_reasons(
     ``has_optitrack`` short-circuits every check when the thresholds allow it: such
     an episode's pose source doesn't depend on SLAM at all.
 
-    The frame-count checks count frames SLAM was *fed*, not every GoPro frame — see
-    ``_fed_frame_counts`` and the config file. Feeding the whole-grid ``n_frames_lost``
-    to ``max_lost_frames`` would reject every episode processed at a stride above 1.
+    The tracked count is of frames SLAM was *fed*, not every GoPro frame — see
+    ``_fed_frame_counts`` and the config file. At a stride above 1 the localizer never sees the
+    other frames, so a whole-grid count would reject the entire corpus.
 
     This is a **necessary condition, not a sufficient one**, and only a prediction: an episode
     with fewer tracked frames than the export's length floor cannot contain a run at least that
@@ -122,11 +118,8 @@ def auto_unusable_reasons(
     out to be scattered in runs that are each too short. Only the exporter knows that, because
     only the exporter reads the pose array; see ``export.dp.buffer.plan_episode_segments``.
 
-    Holes and teleports are deliberately *not* judged here any more. Both are things
-    segmentation cuts around — the exporter splits a session at a dropout and at an
-    over-threshold pose jump — so condemning the whole session for them discarded the good runs
-    either side. Measured over 148 sessions, that veto was the difference between 21 and 99
-    exported segments.
+    Holes and teleports are deliberately not judged here: both are things segmentation cuts
+    around, so condemning a whole session for them would discard the good runs either side.
     """
     th = thresholds if thresholds is not None else load_quality_thresholds()
     if not slam_attrs:

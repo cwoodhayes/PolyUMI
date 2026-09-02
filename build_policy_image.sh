@@ -28,6 +28,10 @@
 # checked out to read. Same pattern as config/env.<hostname>.sh.
 #
 # Hyperparameters stay in each fork's own Hydra tree; CONFIG_NAME only selects which workspace yaml.
+#
+# Returns non-zero rather than calling exit, since this file is meant to be sourced: an exit here
+# would kill an interactive shell that sourced it. Callers run under `set -e`, so an unchecked
+# call still aborts the script.
 policy_select() {
     local repo_root="$1"
     local policy="$2"
@@ -40,7 +44,7 @@ policy_select() {
             f="${f##*/policy.}"
             echo "    ${f%.env}" >&2
         done
-        exit 1
+        return 1
     fi
 
     # A value already set in the calling shell wins over the file's, so a one-off tag or workspace
@@ -59,7 +63,7 @@ policy_select() {
     # shellcheck disable=SC2153  # POLICY_DIR comes from the sourced env file above
     if [ ! -f "${repo_root}/${POLICY_DIR}/Dockerfile" ]; then
         echo "error: no ${POLICY_DIR}/Dockerfile -- run 'git submodule update --init ${POLICY_DIR}'" >&2
-        exit 1
+        return 1
     fi
 }
 
