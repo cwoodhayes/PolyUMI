@@ -253,7 +253,14 @@ logged() {
   # teardown into a closed pipe. Ignoring INT there lets tee read until stdout closes on its own,
   # which is how the shutdown sequence — the part that says whether bringup released the FCI —
   # ends up in the file. The find is scoped by -maxdepth 1 and a name glob to files we write.
-  printf 'mkdir -p %s && find %s -maxdepth 1 -name "%s_*.log" -mtime +%s -delete 2>/dev/null; %s 2>&1 | { trap "" INT; tee -a %s/%s_$(date +%%F).log; }' \
+  #
+  # Every step is &&-chained, including back into whatever the caller prefixed (a `cd`, a
+  # `source setup_franka_env.sh`). That prefix is a PRECONDITION, not a courtesy: a launch that
+  # runs anyway with an unsourced environment dies inside every node at once — four RCLErrors
+  # deep in rmw, naming nothing that points back at the setup line that failed. Log rotation is
+  # the one step allowed to fail, since a full disk should not stop a run, so its exit status is
+  # swallowed explicitly rather than by breaking the chain for everything after it.
+  printf 'mkdir -p %s && { find %s -maxdepth 1 -name "%s_*.log" -mtime +%s -delete 2>/dev/null || true; } && %s 2>&1 | { trap "" INT; tee -a %s/%s_$(date +%%F).log; }' \
     "$REMOTE_LOG_DIR" "$REMOTE_LOG_DIR" "$1" "$REMOTE_LOG_KEEP_DAYS" "$2" "$REMOTE_LOG_DIR" "$1"
 }
 
@@ -297,8 +304,13 @@ add_pane policy-server "$ROS_SSH_HOST" polyumi split \
 # carries its own DDS env instead of inheriting whatever the shell happened to have. An
 # interactive rc exporting its own ROS_DOMAIN_ID silently beats tmux's inherited environment, and
 # the only symptom is policy_client_node never seeing fr3_link0.
+#
+# Its output is NOT silenced. The two lines it prints — which host config it picked, and the
+# resolved CYCLONEDDS_URI — are the only visible evidence of which DDS config this pane ended up
+# on, and the failure they catch (a config path that does not exist on this host) otherwise
+# surfaces as every node aborting inside rmw with nothing naming the file.
 add_pane ros-client "$ROS_SSH_HOST" polyumi-ros window "" \
-  "cd $ROS_REPO && source setup_franka_env.sh >/dev/null && $(logged policy_client "ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=$INFERENCE_URL execute_motion:=$EXECUTE_MOTION max_image_age_s:=$MAX_IMAGE_AGE_S pi_host:=$PI_HOST video_device:=$ROS_VIDEO_DEVICE")"
+  "cd $ROS_REPO && source setup_franka_env.sh && $(logged policy_client "ros2 launch polyumi_ros2 inference_demo.launch.xml inference_server_url:=$INFERENCE_URL execute_motion:=$EXECUTE_MOTION max_image_age_s:=$MAX_IMAGE_AGE_S pi_host:=$PI_HOST video_device:=$ROS_VIDEO_DEVICE")"
 
 # ---------------------------------------------------------------------------
 # Probe, open, type
