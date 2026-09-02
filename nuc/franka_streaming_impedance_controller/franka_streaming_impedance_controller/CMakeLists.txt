@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(polyumi_fr3_controllers)
+project(franka_streaming_impedance_controller)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -45,33 +45,33 @@ set(DEPENDENCIES
 # The maths (interpolator + control law) is a separate library from the ros2_control wrapper so the
 # tests can link it without pulling in a hardware interface. That split is the whole reason the law
 # is unit-testable at all.
-add_library(polyumi_fr3_control_core SHARED
+add_library(franka_streaming_impedance_core SHARED
   src/pose_trajectory_interpolator.cpp
   src/cartesian_impedance_law.cpp
   src/gripper_trajectory_interpolator.cpp
 )
-target_include_directories(polyumi_fr3_control_core PUBLIC
+target_include_directories(franka_streaming_impedance_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(polyumi_fr3_control_core PUBLIC Eigen3::Eigen)
+target_link_libraries(franka_streaming_impedance_core PUBLIC Eigen3::Eigen)
 
-add_library(polyumi_fr3_controllers SHARED
+add_library(franka_streaming_impedance_controller SHARED
   src/cartesian_impedance_controller.cpp
 )
-target_include_directories(polyumi_fr3_controllers PUBLIC
+target_include_directories(franka_streaming_impedance_controller PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(polyumi_fr3_controllers PUBLIC polyumi_fr3_control_core)
-ament_target_dependencies(polyumi_fr3_controllers PUBLIC ${DEPENDENCIES})
+target_link_libraries(franka_streaming_impedance_controller PUBLIC franka_streaming_impedance_core)
+ament_target_dependencies(franka_streaming_impedance_controller PUBLIC ${DEPENDENCIES})
 
-pluginlib_export_plugin_description_file(controller_interface polyumi_fr3_controllers.xml)
+pluginlib_export_plugin_description_file(controller_interface franka_streaming_impedance_controller.xml)
 
 # The production hand driver: owns the libfranka gripper connection outright, so franka_gripper
 # must NOT be running (load_gripper:=false). See the file header for why the action server is gone.
 add_executable(franka_hand_node src/franka_hand_node.cpp)
-target_link_libraries(franka_hand_node polyumi_fr3_control_core Franka::Franka)
+target_link_libraries(franka_hand_node franka_streaming_impedance_core Franka::Franka)
 ament_target_dependencies(franka_hand_node rclcpp sensor_msgs trajectory_msgs)
 
 # Firmware bringup probes: one-off characterisations of what a Move costs with no ROS, no action
@@ -79,7 +79,7 @@ ament_target_dependencies(franka_hand_node rclcpp sensor_msgs trajectory_msgs)
 # else shares their threads. Nothing in service loads them and they have already produced their
 # answer (HandLimits), so they are off by default; turn them on to characterise a different hand.
 #
-#   colcon build --packages-select polyumi_fr3_controllers --cmake-args -DBUILD_HAND_PROBES=ON
+#   colcon build --packages-select franka_streaming_impedance_controller --cmake-args -DBUILD_HAND_PROBES=ON
 option(BUILD_HAND_PROBES "Build the franka_hand_testing characterisation probes" OFF)
 
 install(DIRECTORY include/ DESTINATION include)
@@ -103,8 +103,8 @@ if(BUILD_HAND_PROBES)
 endif()
 
 install(
-  TARGETS polyumi_fr3_control_core polyumi_fr3_controllers
-  EXPORT export_polyumi_fr3_controllers
+  TARGETS franka_streaming_impedance_core franka_streaming_impedance_controller
+  EXPORT export_franka_streaming_impedance_controller
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
@@ -114,17 +114,17 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
 
   ament_add_gtest(test_pose_trajectory_interpolator test/test_pose_trajectory_interpolator.cpp)
-  target_link_libraries(test_pose_trajectory_interpolator polyumi_fr3_control_core)
+  target_link_libraries(test_pose_trajectory_interpolator franka_streaming_impedance_core)
 
   ament_add_gtest(test_cartesian_impedance_law test/test_cartesian_impedance_law.cpp)
-  target_link_libraries(test_cartesian_impedance_law polyumi_fr3_control_core)
+  target_link_libraries(test_cartesian_impedance_law franka_streaming_impedance_core)
 
   ament_add_gtest(test_gripper_trajectory_interpolator
     test/test_gripper_trajectory_interpolator.cpp)
-  target_link_libraries(test_gripper_trajectory_interpolator polyumi_fr3_control_core)
+  target_link_libraries(test_gripper_trajectory_interpolator franka_streaming_impedance_core)
 endif()
 
 ament_export_include_directories(include)
-ament_export_libraries(polyumi_fr3_control_core polyumi_fr3_controllers)
+ament_export_libraries(franka_streaming_impedance_core franka_streaming_impedance_controller)
 ament_export_dependencies(${DEPENDENCIES})
 ament_package()

@@ -1,12 +1,12 @@
-// Copyright (c) 2026 PolyUMI. MIT.
+// Copyright (c) 2026 the franka_streaming_impedance_controller authors. MIT.
 
-#include <polyumi_fr3_controllers/pose_trajectory_interpolator.hpp>
+#include <franka_streaming_impedance_controller/pose_trajectory_interpolator.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
-namespace polyumi_fr3_controllers {
+namespace franka_streaming_impedance {
 
 std::pair<double, double> poseDistance(const Pose& a, const Pose& b) {
   return {(b.position - a.position).norm(), a.orientation.angularDistance(b.orientation)};
@@ -122,4 +122,4 @@ PoseTrajectoryInterpolator PoseTrajectoryInterpolator::scheduleWaypoint(const Po
   return PoseTrajectoryInterpolator(std::move(times), std::move(poses));
 }
 
-}  // namespace polyumi_fr3_controllers
+}  // namespace franka_streaming_impedance

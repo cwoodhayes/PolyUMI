@@ -1,0 +1,10 @@
+<library path="franka_streaming_impedance_controller">
+  <class name="franka_streaming_impedance_controller/CartesianImpedanceController"
+         type="franka_streaming_impedance::CartesianImpedanceController"
+         base_class_type="controller_interface::ControllerInterface">
+    <description>
+      Cartesian impedance control about a configurable TCP frame, with the equilibrium pose
+      generated at 1 kHz from absolutely-timed MultiDOFJointTrajectory chunks.
+    </description>
+  </class>
+</library>

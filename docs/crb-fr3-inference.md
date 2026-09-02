@@ -196,7 +196,8 @@ The laptop publishes an entire inference **action chunk** (`n_action_steps` wayp
 
 A dead command path is loud rather than silent: nothing subscribes, the arm holds still, and the
 client warns every second naming the topic it expected. The full contract is the module docstring
-of `ros2_ws/src/polyumi_ros2/polyumi_ros2/target_chunk.py`.
+of `nuc/franka_streaming_impedance_controller/franka_streaming_impedance_client/franka_streaming_impedance_client/target_chunk.py`;
+which topic *this* deployment uses is `ros2_ws/src/polyumi_ros2/polyumi_ros2/target_chunk.py`.
 
 `fr3_home_service` runs alongside it, serving only `/polyumi/home` — joint-space homing
 through move_group. It and the streaming controller claim the same `<joint>/effort` interfaces, so
@@ -347,7 +348,7 @@ safe without it; `execute_arm:=true` is not. See
 This is the `gripper:=hand` path — the Franka Hand, which is terrible, and which the FAULHABER
 gripper above exists to replace. I've done a bunch of analysis on it, tl;dr it has ~210ms observable command delay, only updates its state at 5Hz, and its move() commands cannot be pre-empted once issued.
 
-The scripts I used for this analysis are in `nuc/polyumi_fr3_controllers/src/franka_hand_testing`, gated off the default build behind `-DBUILD_HAND_PROBES=ON`. The constants below were fitted to their output in a Jupyter notebook that is not in the repo; the values as shipped live in `HandLimits` (`gripper_trajectory_interpolator.hpp`), pinned by the anchor tests in `test_gripper_trajectory_interpolator.cpp`. Re-run the probes against any other hand before trusting them.
+The scripts I used for this analysis are in `nuc/franka_streaming_impedance_controller/franka_streaming_impedance_controller/src/franka_hand_testing`, gated off the default build behind `-DBUILD_HAND_PROBES=ON`. The constants below were fitted to their output in a Jupyter notebook that is not in the repo; the values as shipped live in `HandLimits` (`gripper_trajectory_interpolator.hpp`), pinned by the anchor tests in `test_gripper_trajectory_interpolator.cpp`. Re-run the probes against any other hand before trusting them.
 
 `franka_hand_node` works around all of this with a custom interpolator built on that model:
 

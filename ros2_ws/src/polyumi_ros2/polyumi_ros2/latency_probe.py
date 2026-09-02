@@ -99,7 +99,7 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from polyumi_ros2.gripper_map import aperture_from_joint_state
 from polyumi_ros2.latency_util import get_latency
-from polyumi_ros2.target_chunk import TargetChunkPublisher
+from polyumi_ros2.target_chunk import TARGET_POSES_TOPIC, TargetChunkPublisher
 
 MODES = ('camera', 'arm', 'gripper', 'gripper_chirp')
 
@@ -364,7 +364,7 @@ class LatencyProbe(Node):
                 errors.append(f'amplitude_m must be > 0, got {self._amplitude}')
             if self._lead <= 0:
                 errors.append(f'lead_s must be > 0, got {self._lead} — every waypoint would be dropped as stale')
-            topic = self.get_parameter('target_topic').get_parameter_value().string_value or None
+            topic = self.get_parameter('target_topic').get_parameter_value().string_value or TARGET_POSES_TOPIC
             self._pub = TargetChunkPublisher(self, frame_id=self._base_frame, joint_name=self._eef_frame, topic=topic)
             self._tf_buffer = Buffer()
             self._tf_listener = TransformListener(self._tf_buffer, self)

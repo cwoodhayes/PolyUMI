@@ -178,6 +178,26 @@ verbatim as ROS headers, so the Pi has to agree with whichever machine runs the 
 and the verification are step 6 of [docs/pi-provisioning.md](docs/pi-provisioning.md), and
 `./deploy.sh` warns on every deploy when the Pi has no synchronised source.
 
+**The impedance controller is being extracted into its own open-source repo.** It lives at
+`nuc/franka_streaming_impedance_controller/`, which is staged as the *future repo root* — it holds
+two packages, and nothing in it may depend on PolyUMI:
+
+- `franka_streaming_impedance_controller` (ament_cmake) — the core math library, the
+  `CartesianImpedanceController` pluginlib plugin, and `franka_hand_node`.
+- `franka_streaming_impedance_client` (ament_python) — the producer side: builds the
+  absolutely-timed `MultiDOFJointTrajectory` chunks the controller splices on. Symlinked into
+  `ros2_ws/src/` so colcon builds it on the laptop/lamb.
+
+Everything deployment-specific stays in PolyUMI: gains and collision thresholds in
+`nuc/config/polyumi_controllers.yaml`, the TCP geometry in `nuc/tcp_calib.py`, the payload, the
+launch files, and the topic names. `ros2_ws/src/polyumi_ros2/polyumi_ros2/target_chunk.py` is a
+thin shim that re-exports the generic client and adds the two PolyUMI constants
+(`TARGET_POSES_TOPIC`, `CONSUMER_HINT`) — import it, not the generic module, from PolyUMI code.
+**When touching that directory, ask whether the change would make sense to a lab that has never
+heard of PolyUMI**; if not, it belongs on the PolyUMI side of the line. The controller's parameter
+defaults are deliberately neutral (`tcp_frame: fr3_hand_tcp`, node-relative topics), so PolyUMI's
+launch and yaml must pass its own values explicitly — they do.
+
 **The gripper driver is selectable, and `faulhaber` is the supported one.**
 `fr3_inference.launch.py` takes `gripper:=faulhaber|hand|none` (default `faulhaber`);
 `execute_gripper` stays the separate flag for whether it may move. `faulhaber` is the

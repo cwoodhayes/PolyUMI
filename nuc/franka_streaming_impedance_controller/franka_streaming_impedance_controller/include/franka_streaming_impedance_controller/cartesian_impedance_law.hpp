@@ -1,4 +1,4 @@
-// Copyright (c) 2026 PolyUMI. MIT.
+// Copyright (c) 2026 the franka_streaming_impedance_controller authors. MIT.
 //
 // The Cartesian impedance control law, ported from
 // https://github.com/rail-berkeley/serl_franka_controllers (MIT) — itself derived from
@@ -14,11 +14,11 @@
 
 #pragma once
 
-#include <polyumi_fr3_controllers/pose_trajectory_interpolator.hpp>
+#include <franka_streaming_impedance_controller/pose_trajectory_interpolator.hpp>
 
 #include <Eigen/Dense>
 
-namespace polyumi_fr3_controllers {
+namespace franka_streaming_impedance {
 
 using Vector7d = Eigen::Matrix<double, 7, 1>;
 using Vector6d = Eigen::Matrix<double, 6, 1>;
@@ -46,7 +46,7 @@ Vector6d poseError(const Pose& current, const Pose& desired);
  * Clamp each axis of the error independently, which is what bounds commanded force.
  *
  * Force is `stiffness * error`, so a bounded error is a bounded force however far the equilibrium
- * point has run away. Why the shipped numbers are what they are: nuc/config/polyumi_controllers.yaml.
+ * point has run away. Why the shipped numbers are what they are: the example controllers.yaml.
  */
 Vector6d clipPoseError(const Vector6d& error, const ErrorClip& clip);
 
@@ -99,13 +99,13 @@ Vector7d saturateTorqueRate(const Vector7d& tau_desired,
  * offset`, and the angular rows are unchanged. Only the translation matters, because a zero
  * Jacobian already expresses both velocities in the base frame.
  *
- * Needed because franka reports its Jacobian at `fr3_hand_tcp` while the contact happens at
- * `polyumi_tcp`, ~15 cm away — a spring anchored at the wrong point turns an orientation error
- * into a large fingertip translation.
+ * Needed because franka reports its Jacobian at `<arm_id>_hand_tcp` while the contact happens at
+ * `tcp_frame`, which for a custom tool is some distance away — a spring anchored at the wrong
+ * point turns an orientation error into a large translation at the actual contact point.
  */
 Jacobian shiftJacobian(const Jacobian& jacobian, const Eigen::Vector3d& offset);
 
 /// Damped pseudo-inverse (SVD, lambda=0.2), as SERL's pseudo_inversion.h computes it.
 Eigen::MatrixXd dampedPseudoInverse(const Eigen::MatrixXd& m, double lambda = 0.2);
 
-}  // namespace polyumi_fr3_controllers
+}  // namespace franka_streaming_impedance

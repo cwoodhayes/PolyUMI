@@ -1,4 +1,4 @@
-// Copyright (c) 2026 PolyUMI. MIT.
+// Copyright (c) 2026 the franka_streaming_impedance_controller authors. MIT.
 //
 // What does a Franka Hand Move actually cost, with nothing in the way?
 //
@@ -24,7 +24,7 @@
 // Run on the NUC, with franka_gripper NOT running -- only one process may hold the hand's
 // connection (bring up with load_gripper:=false):
 //
-//     ros2 run polyumi_fr3_controllers gripper_timing_probe 192.168.51.20
+//     ros2 run franka_streaming_impedance_controller gripper_timing_probe 192.168.51.20
 //
 // MOVES THE FINGERS. Nothing between them.
 

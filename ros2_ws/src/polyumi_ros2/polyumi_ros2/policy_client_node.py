@@ -58,7 +58,12 @@ from polyumi_inference import Observation, TransportError, WireFormatError
 from polyumi_inference.client import PolicyClient
 
 from polyumi_ros2.gripper_map import aperture_from_joint_state, policy_to_robot_width, robot_to_policy_width
-from polyumi_ros2.target_chunk import CONSUMER_HINT, TargetChunkPublisher, pose_array
+from polyumi_ros2.target_chunk import (
+    CONSUMER_HINT,
+    TARGET_POSES_TOPIC,
+    TargetChunkPublisher,
+    pose_array,
+)
 
 # Name used for the single "joint" in the gripper trajectory chunk. Deliberately NOT a real joint
 # name (the FR3's fingers are fr3_finger_joint1/2, each reporting half the aperture): the value we
@@ -319,6 +324,7 @@ class PolicyClientNode(Node):
                 self,
                 frame_id=self._base_frame,
                 joint_name=self._eef_frame,
+                topic=TARGET_POSES_TOPIC,
             )
             self._gripper_pub = self.create_publisher(JointTrajectory, '/polyumi/target_gripper', 10)
 

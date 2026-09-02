@@ -1,8 +1,8 @@
 """
 Tests for the chunk wire format and the publisher that builds it.
 
-Four producers build these messages — the policy client and the three on-arm probes — so the
-format rules are tested once here rather than through each of them.
+Every producer builds these messages through the same helpers, so the format rules are tested
+once here rather than through each of them.
 """
 
 import pytest
@@ -12,7 +12,7 @@ from geometry_msgs.msg import Pose
 from rclpy.node import Node
 from trajectory_msgs.msg import MultiDOFJointTrajectory
 
-from polyumi_ros2.target_chunk import TARGET_POSES_TOPIC, TargetChunkPublisher, multidof_trajectory
+from franka_streaming_impedance_client.target_chunk import TargetChunkPublisher, multidof_trajectory
 
 
 @pytest.fixture(scope='module', autouse=True)
@@ -47,11 +47,11 @@ def _stamp(seconds: float):
     return Time(sec=int(seconds), nanosec=int((seconds % 1) * 1e9))
 
 
-def test_publisher_defaults_to_the_controller_topic_and_type(node):
-    """The publisher resolves the default topic and builds the right message type."""
-    pub = TargetChunkPublisher(node, frame_id='fr3_link0', joint_name='polyumi_tcp')
+def test_publisher_uses_the_given_topic_and_message_type(node):
+    """The publisher addresses the topic it was given and builds the right message type."""
+    pub = TargetChunkPublisher(node, frame_id='fr3_link0', joint_name='fr3_hand_tcp', topic='/impedance/target_poses')
 
-    assert pub.topic_name == TARGET_POSES_TOPIC
+    assert pub.topic_name == '/impedance/target_poses'
     assert pub._pub.msg_type is MultiDOFJointTrajectory
 
 
@@ -65,7 +65,7 @@ def test_multidof_times_use_the_preslice_index():
     like tracking lag rather than a bug, which is why it is pinned.
     """
     msg = multidof_trajectory(
-        _poses(5), frame_id='fr3_link0', joint_name='polyumi_tcp', stamp=_stamp(5.0), dt=0.1, first_index=3
+        _poses(5), frame_id='fr3_link0', joint_name='fr3_hand_tcp', stamp=_stamp(5.0), dt=0.1, first_index=3
     )
 
     offsets = [p.time_from_start.sec + p.time_from_start.nanosec * 1e-9 for p in msg.points]
@@ -75,7 +75,7 @@ def test_multidof_times_use_the_preslice_index():
 
 def test_multidof_carries_the_frames_the_controller_matches_on():
     """The controller rejects chunks whose frame_id is not its base frame, so both must be set."""
-    msg = multidof_trajectory(_poses(1), frame_id='fr3_link0', joint_name='polyumi_tcp', stamp=_stamp(5.0), dt=0.1)
+    msg = multidof_trajectory(_poses(1), frame_id='fr3_link0', joint_name='fr3_hand_tcp', stamp=_stamp(5.0), dt=0.1)
 
     assert msg.header.frame_id == 'fr3_link0'
-    assert msg.joint_names == ['polyumi_tcp']
+    assert msg.joint_names == ['fr3_hand_tcp']

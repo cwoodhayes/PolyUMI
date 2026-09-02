@@ -1,24 +1,24 @@
-// Copyright (c) 2026 PolyUMI. MIT.
+// Copyright (c) 2026 the franka_streaming_impedance_controller authors. MIT.
 //
 // The model constants under test were fitted in a Jupyter notebook from runs of the
 // franka_hand_testing probes; the notebook is not in the repo, so the measured rows the anchor
 // tests replay are inlined below. Editing a constant therefore fails here rather than quietly
 // changing what the fingers do.
 
-#include <polyumi_fr3_controllers/gripper_trajectory_interpolator.hpp>
+#include <franka_streaming_impedance_controller/gripper_trajectory_interpolator.hpp>
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <stdexcept>
 
-using polyumi_fr3_controllers::blockedDuration;
-using polyumi_fr3_controllers::HandLimits;
-using polyumi_fr3_controllers::maxDistance;
-using polyumi_fr3_controllers::moveDuration;
-using polyumi_fr3_controllers::selectMove;
-using polyumi_fr3_controllers::speedForDuration;
-using polyumi_fr3_controllers::WidthTrajectory;
+using franka_streaming_impedance::blockedDuration;
+using franka_streaming_impedance::HandLimits;
+using franka_streaming_impedance::maxDistance;
+using franka_streaming_impedance::moveDuration;
+using franka_streaming_impedance::selectMove;
+using franka_streaming_impedance::speedForDuration;
+using franka_streaming_impedance::WidthTrajectory;
 
 namespace {
 

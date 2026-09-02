@@ -1,16 +1,16 @@
-// Copyright (c) 2026 PolyUMI. MIT.
+// Copyright (c) 2026 the franka_streaming_impedance_controller authors. MIT.
 //
 // The law runs at 1 kHz on a 3 kg arm with no firmware net underneath it, so its properties are
 // pinned here rather than discovered in the room. Everything below uses a hand-built Jacobian and
 // needs no hardware.
 
-#include <polyumi_fr3_controllers/cartesian_impedance_law.hpp>
+#include <franka_streaming_impedance_controller/cartesian_impedance_law.hpp>
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 
-using namespace polyumi_fr3_controllers;  // NOLINT(build/namespaces)
+using namespace franka_streaming_impedance;  // NOLINT(build/namespaces)
 
 namespace {
 
@@ -184,7 +184,7 @@ TEST(CartesianImpedanceLaw, ShiftedJacobianTurnsRotationIntoFingertipTranslation
   Jacobian j = Jacobian::Zero();
   j(5, 0) = 1.0;  // joint 0 produces angular velocity about base z at the EE
 
-  const Eigen::Vector3d offset(0.0, 0.0, -0.1535);  // EE -> polyumi_tcp, roughly
+  const Eigen::Vector3d offset(0.0, 0.0, -0.1535);  // EE -> a fingertip TCP, roughly
   const Jacobian shifted = shiftJacobian(j, offset);
 
   // w x offset, with w = +z and offset along -z, is zero — collinear.

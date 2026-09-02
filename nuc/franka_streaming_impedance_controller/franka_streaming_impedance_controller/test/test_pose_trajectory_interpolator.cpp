@@ -1,20 +1,20 @@
-// Copyright (c) 2026 PolyUMI. MIT.
+// Copyright (c) 2026 the franka_streaming_impedance_controller authors. MIT.
 //
 // Every expected value here was produced by RUNNING UMI's own implementation
 // (../universal_manipulation_interface/umi/common/pose_trajectory_interpolator.py) on the same
 // inputs and pasting what it printed. That is the point: a port checked against itself only
 // proves it is self-consistent. See the plan's verification section for the generator snippet.
 
-#include <polyumi_fr3_controllers/pose_trajectory_interpolator.hpp>
+#include <franka_streaming_impedance_controller/pose_trajectory_interpolator.hpp>
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <limits>
 
-using polyumi_fr3_controllers::Pose;
-using polyumi_fr3_controllers::PoseTrajectoryInterpolator;
-using polyumi_fr3_controllers::poseDistance;
+using franka_streaming_impedance::Pose;
+using franka_streaming_impedance::PoseTrajectoryInterpolator;
+using franka_streaming_impedance::poseDistance;
 
 namespace {
 

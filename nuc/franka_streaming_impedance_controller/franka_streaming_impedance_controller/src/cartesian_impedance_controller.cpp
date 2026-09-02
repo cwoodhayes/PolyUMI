@@ -1,6 +1,6 @@
-// Copyright (c) 2026 PolyUMI. MIT.
+// Copyright (c) 2026 the franka_streaming_impedance_controller authors. MIT.
 
-#include <polyumi_fr3_controllers/cartesian_impedance_controller.hpp>
+#include <franka_streaming_impedance_controller/cartesian_impedance_controller.hpp>
 
 #include <controller_interface/helpers.hpp>
 #include <hardware_interface/types/hardware_interface_type_values.hpp>
@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-namespace polyumi_fr3_controllers {
+namespace franka_streaming_impedance {
 
 namespace {
 
@@ -133,11 +133,14 @@ void CartesianImpedanceController::declareParameters() {
   // defaults. The defaults exist so the controller still runs with no param file at all.
   auto_declare<std::string>("arm_id", "fr3");
   auto_declare<std::string>("base_frame", "fr3_link0");
-  auto_declare<std::string>("tcp_frame", "polyumi_tcp");
-  auto_declare<std::string>("target_topic", "/polyumi/target_poses_traj");
+  // Any TF frame rigidly attached to the flange. The default is franka's own tool frame, i.e. no
+  // offset from what the robot already reports; a custom tool overrides this with its own frame.
+  auto_declare<std::string>("tcp_frame", "fr3_hand_tcp");
+  auto_declare<std::string>("target_topic", "~/target_poses");
 
-  // SERL's shipped defaults, mirrored from nuc/config/polyumi_controllers.yaml, which is where the
-  // reasoning for each number lives. These exist so the controller still runs with no param file.
+  // SERL's shipped defaults. The reasoning for each number is in the example controllers.yaml,
+  // which is also where a deployment overrides them. These exist so the controller still runs
+  // with no param file.
   auto_declare<double>("translational_stiffness", 2000.0);
   auto_declare<double>("translational_damping", 89.0);
   auto_declare<double>("rotational_stiffness", 150.0);
@@ -287,8 +290,8 @@ CallbackReturn CartesianImpedanceController::on_configure(
   // a session where this silently did not apply looks exactly like one where the gains are wrong.
   if (!applyCollisionBehavior()) {
     RCLCPP_FATAL(node->get_logger(),
-                 "Refusing to configure without known collision thresholds. See "
-                 "nuc/config/polyumi_controllers.yaml, collision.*");
+                 "Refusing to configure without known collision thresholds. See the "
+                 "controller's param file, collision.*");
     return CallbackReturn::ERROR;
   }
 
@@ -321,9 +324,9 @@ CallbackReturn CartesianImpedanceController::on_activate(
     return CallbackReturn::ERROR;
   }
 
-  // polyumi_tcp relative to franka's O_T_EE frame. Both are fixed frames, so one lookup holds for
-  // the controller's lifetime, and taking it from TF means nuc/tcp_calib.py remains the only place
-  // the geometry is written down.
+  // tcp_frame relative to franka's O_T_EE frame. Both are fixed frames, so one lookup holds for
+  // the controller's lifetime, and taking it from TF means whatever publishes that transform
+  // remains the only place the tool geometry is written down.
   const std::string ee_frame = arm_id_ + "_hand_tcp";
   try {
     const auto tf = tf_buffer_->lookupTransform(ee_frame, tcp_frame_, tf2::TimePointZero,
@@ -403,7 +406,7 @@ void CartesianImpedanceController::onTrajectory(
                          msg->header.frame_id.c_str(), base_frame_.c_str());
     return;
   }
-  // joint_names names the commanded frame, e.g. polyumi_tcp; a chunk addressed to anything else
+  // joint_names names the commanded frame, i.e. tcp_frame; a chunk addressed to anything else
   // (a typo, or a producer built for a different message convention) must not be interpreted as
   // one anyway just because it landed on this topic.
   if (msg->joint_names.size() != 1 || msg->joint_names.front() != tcp_frame_) {
@@ -487,7 +490,7 @@ void CartesianImpedanceController::readState(Pose& pose,
   const std::array<double, 16> ee_pose = robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
   const Pose ee = poseFromColumnMajor(ee_pose);
 
-  // Move both the pose and the Jacobian onto polyumi_tcp. The offset must be rotated into the base
+  // Move both the pose and the Jacobian onto tcp_frame. The offset must be rotated into the base
   // frame first: ee_to_tcp_ is expressed in the EE frame, the Jacobian is not.
   const Eigen::Vector3d offset_base = ee.orientation * ee_to_tcp_;
   pose.position = ee.position + offset_base;
@@ -538,9 +541,9 @@ controller_interface::return_type CartesianImpedanceController::update(
   return controller_interface::return_type::OK;
 }
 
-}  // namespace polyumi_fr3_controllers
+}  // namespace franka_streaming_impedance
 
 #include "pluginlib/class_list_macros.hpp"
 // NOLINTNEXTLINE
-PLUGINLIB_EXPORT_CLASS(polyumi_fr3_controllers::CartesianImpedanceController,
+PLUGINLIB_EXPORT_CLASS(franka_streaming_impedance::CartesianImpedanceController,
                        controller_interface::ControllerInterface)

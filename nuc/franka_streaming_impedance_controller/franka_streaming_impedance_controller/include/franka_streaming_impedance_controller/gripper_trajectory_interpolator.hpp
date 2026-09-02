@@ -1,4 +1,4 @@
-// Copyright (c) 2026 PolyUMI. MIT.
+// Copyright (c) 2026 the franka_streaming_impedance_controller authors. MIT.
 //
 // The Franka Hand's answer to PoseTrajectoryInterpolator, and a very different problem.
 //
@@ -14,7 +14,7 @@
 #include <optional>
 #include <vector>
 
-namespace polyumi_fr3_controllers {
+namespace franka_streaming_impedance {
 
 /**
  * Measured response of the Franka Hand to a Move.
@@ -144,4 +144,4 @@ std::optional<MoveCommand> selectMove(const WidthTrajectory& horizon,
                                       double min_speed,
                                       const HandLimits& limits = {});
 
-}  // namespace polyumi_fr3_controllers
+}  // namespace franka_streaming_impedance

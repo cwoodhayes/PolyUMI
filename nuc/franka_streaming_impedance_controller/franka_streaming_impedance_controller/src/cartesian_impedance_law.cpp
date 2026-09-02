@@ -1,14 +1,14 @@
-// Copyright (c) 2026 PolyUMI. MIT.
+// Copyright (c) 2026 the franka_streaming_impedance_controller authors. MIT.
 // Ported from serl_franka_controllers (MIT), rail-berkeley.
 
-#include <polyumi_fr3_controllers/cartesian_impedance_law.hpp>
+#include <franka_streaming_impedance_controller/cartesian_impedance_law.hpp>
 
 #include <Eigen/SVD>
 
 #include <algorithm>
 #include <cmath>
 
-namespace polyumi_fr3_controllers {
+namespace franka_streaming_impedance {
 
 Vector6d poseError(const Pose& current, const Pose& desired) {
   Vector6d error;
@@ -107,4 +107,4 @@ Eigen::MatrixXd dampedPseudoInverse(const Eigen::MatrixXd& m, double lambda) {
   return svd.matrixV() * s.transpose() * svd.matrixU().transpose();
 }
 
-}  // namespace polyumi_fr3_controllers
+}  // namespace franka_streaming_impedance

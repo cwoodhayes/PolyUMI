@@ -1,9 +1,9 @@
-// Copyright (c) 2026 PolyUMI. MIT.
+// Copyright (c) 2026 the franka_streaming_impedance_controller authors. MIT.
 
 #pragma once
 
-#include <polyumi_fr3_controllers/cartesian_impedance_law.hpp>
-#include <polyumi_fr3_controllers/pose_trajectory_interpolator.hpp>
+#include <franka_streaming_impedance_controller/cartesian_impedance_law.hpp>
+#include <franka_streaming_impedance_controller/pose_trajectory_interpolator.hpp>
 
 #include <controller_interface/controller_interface.hpp>
 #include <franka_msgs/srv/set_full_collision_behavior.hpp>
@@ -22,18 +22,18 @@
 
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 
-namespace polyumi_fr3_controllers {
+namespace franka_streaming_impedance {
 
 /**
  * Streaming Cartesian impedance controller for the FR3, driven by absolutely-timed pose chunks.
  *
- * This is PolyUMI's on-arm executor: the only thing that drives the arm from a policy chunk. It
+ * The executor for a chunked reference — a policy's action chunks, a planner's sampled path. It
  * splices consecutive chunks on their own absolute waypoint times, so the arm neither starts from
- * rest nor stops at a chunk boundary, and the policy's `dt` timeline survives to the joint level.
+ * rest nor stops at a chunk boundary, and the producer's `dt` timeline survives to the joint level.
  *
  * Architecture, following UMI:
  *
- *   MultiDOFJointTrajectory (10 Hz, absolute times)   [non-realtime subscription]
+ *   MultiDOFJointTrajectory (absolute times)          [non-realtime subscription]
  *     -> PoseTrajectoryInterpolator::scheduleWaypoint  splices without stopping
  *       -> update() at 1 kHz evaluates it              [realtime; the eval allocates nothing]
  *         -> Cartesian impedance law -> 7 joint torques
@@ -44,9 +44,10 @@ namespace polyumi_fr3_controllers {
  * The control law is SERL's (see cartesian_impedance_law.hpp), which is polymetis's — what UMI
  * actually deploys — plus an error clip and a nullspace term.
  *
- * The control point is `polyumi_tcp`, NOT franka's `O_T_EE` (which is `fr3_hand_tcp`, verified on
- * hardware). Both the measured pose and the Jacobian are moved onto it at activation using a TF
- * lookup, so `nuc/tcp_calib.py` stays the single definition of that frame.
+ * The control point is the `tcp_frame` parameter, which need NOT be franka's `O_T_EE` (that is
+ * `<arm_id>_hand_tcp`, verified on hardware). Both the measured pose and the Jacobian are moved
+ * onto it at activation using a TF lookup, so whatever publishes that transform stays the single
+ * definition of the tool geometry.
  *
  * Torque, and not `franka_hardware`'s native `cartesian_pose` interface, which looks like the
  * direct analogue of UMI's `update_desired_ee_pose`: under it libfranka hardcodes
@@ -111,8 +112,9 @@ class CartesianImpedanceController : public controller_interface::ControllerInte
   // realtime loop by pointer. update() only ever reads and evaluates.
   realtime_tools::RealtimeBuffer<std::shared_ptr<const PoseTrajectoryInterpolator>> interpolator_;
   /// Gates onTrajectory. The subscription lives from on_configure, so without this a chunk
-  /// arriving while the arm is on loan to move_group (a /polyumi/home) splices against a
-  /// now_seconds_ that update() stopped advancing, growing the trajectory for the whole home.
+  /// arriving while the arm is on loan to another controller (say a move_group-driven home)
+  /// splices against a now_seconds_ that update() stopped advancing, growing the trajectory for
+  /// the whole excursion.
   std::atomic<bool> active_{false};
   /// Written by update(), read by the subscription callback so its splice knows "now".
   std::atomic<double> now_seconds_{0.0};
@@ -121,9 +123,9 @@ class CartesianImpedanceController : public controller_interface::ControllerInte
 
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
-  /// Base-frame translation from franka's O_T_EE origin to polyumi_tcp. Resolved at activation.
+  /// Base-frame translation from franka's O_T_EE origin to tcp_frame. Resolved at activation.
   Eigen::Vector3d ee_to_tcp_{Eigen::Vector3d::Zero()};
-  /// Rotation from the O_T_EE frame to polyumi_tcp. Fixed; also resolved at activation.
+  /// Rotation from the O_T_EE frame to tcp_frame. Fixed; also resolved at activation.
   Eigen::Quaterniond ee_to_tcp_rotation_{Eigen::Quaterniond::Identity()};
 
   std::string arm_id_;
@@ -143,4 +145,4 @@ class CartesianImpedanceController : public controller_interface::ControllerInte
   Vector7d tau_previous_{Vector7d::Zero()};
 };
 
-}  // namespace polyumi_fr3_controllers
+}  // namespace franka_streaming_impedance

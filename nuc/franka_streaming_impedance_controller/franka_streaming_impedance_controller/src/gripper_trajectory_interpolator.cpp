@@ -1,13 +1,13 @@
-// Copyright (c) 2026 PolyUMI. MIT.
+// Copyright (c) 2026 the franka_streaming_impedance_controller authors. MIT.
 
-#include <polyumi_fr3_controllers/gripper_trajectory_interpolator.hpp>
+#include <franka_streaming_impedance_controller/gripper_trajectory_interpolator.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
 
-namespace polyumi_fr3_controllers {
+namespace franka_streaming_impedance {
 
 namespace {
 
@@ -209,4 +209,4 @@ std::optional<MoveCommand> selectMove(const WidthTrajectory& horizon,
   return MoveCommand{w, limits.v_max, arrival, false};
 }
 
-}  // namespace polyumi_fr3_controllers
+}  // namespace franka_streaming_impedance

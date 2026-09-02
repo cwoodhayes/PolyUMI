@@ -54,7 +54,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from polyumi_ros2.gripper_map import aperture_from_joint_state
-from polyumi_ros2.target_chunk import CONSUMER_HINT, TargetChunkPublisher
+from polyumi_ros2.target_chunk import CONSUMER_HINT, TARGET_POSES_TOPIC, TargetChunkPublisher
 from tf2_ros import Buffer, TransformListener
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
@@ -171,7 +171,7 @@ class TcpPivotTest(Node):
 
         self._base = self.get_parameter('base_frame').get_parameter_value().string_value
         self._eef = self.get_parameter('eef_frame').get_parameter_value().string_value
-        topic = self.get_parameter('target_topic').get_parameter_value().string_value or None
+        topic = self.get_parameter('target_topic').get_parameter_value().string_value or TARGET_POSES_TOPIC
         self._waypoint_dt = self.get_parameter('waypoint_dt_s').get_parameter_value().double_value
         self._angle_deg = self.get_parameter('angle_deg').get_parameter_value().double_value
         self._step_deg = self.get_parameter('step_deg').get_parameter_value().double_value

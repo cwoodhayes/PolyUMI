@@ -48,7 +48,7 @@ def main():
     ap.add_argument('--shape', choices=['square', 'ramp', 'fast'], default='square')
     ap.add_argument('--n', type=int, default=24, help='points per chunk (inference.yaml n_action_steps)')
     ap.add_argument('--dt', type=float, default=0.1, help='setpoint spacing (1/control_hz)')
-    ap.add_argument('--topic', default='/polyumi/target_gripper')
+    ap.add_argument('--topic', default='~/target_widths')
     args = ap.parse_args()
 
     rclpy.init()

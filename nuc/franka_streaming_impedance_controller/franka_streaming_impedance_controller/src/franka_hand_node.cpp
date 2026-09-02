@@ -1,8 +1,7 @@
-// Copyright (c) 2026 PolyUMI. MIT.
+// Copyright (c) 2026 the franka_streaming_impedance_controller authors. MIT.
 //
-// Drives the Franka Hand from the gripper half of the inference action chunk, holding it as a
-// horizon of absolutely-timed widths and planning one Move at a time against a measured model of
-// what a Move costs.
+// Drives the Franka Hand from a stream of absolutely-timed target widths, holding them as a
+// horizon and planning one Move at a time against a measured model of what a Move costs.
 //
 // WHY LIBFRANKA DIRECTLY, NOT franka_gripper. A Move cannot be pre-empted: stop() queues *behind*
 // it and costs the remainder of the stroke plus ~100 ms, and a superseding Move stops the fingers
@@ -14,16 +13,14 @@
 //
 // WHAT IT COSTS. blockedDuration(0) = 363 ms, so the command ceiling is 2.75 Hz and realistically
 // 0.7-1.7 Hz. Against a 10 Hz setpoint stream this node is a DECIMATOR, servicing roughly every
-// 4th-15th setpoint. That is the hardware, not a bug. See docs/crb-fr3-inference.md for what the
-// hand cannot do.
+// 4th-15th setpoint. That is the hardware, not a bug; the README says what the hand cannot do.
 //
-// It also republishes /fr3_gripper/joint_states: with load_gripper:=false nothing else does, and
-// six consumers need it (policy_client_node's agent_pos[7] among them). That stream costs the
-// libfranka connection, which only one process may hold, so this node must not run unless the
-// hand is actually attached and wanted -- which is why the launch file starts it only for
-// `gripper:=hand execute_gripper:=true`, and `gripper:=none` is how an arm-only session opts out.
+// It also republishes ~/joint_states, because franka_bringup with load_gripper:=false leaves
+// nothing else publishing the finger state. That stream costs the libfranka connection, which
+// only one process may hold, so this node must not run unless the hand is attached and wanted,
+// and franka_gripper must NOT be running alongside it.
 
-#include <polyumi_fr3_controllers/gripper_trajectory_interpolator.hpp>
+#include <franka_streaming_impedance_controller/gripper_trajectory_interpolator.hpp>
 
 #include <franka/exception.h>
 #include <franka/gripper.h>
@@ -47,11 +44,11 @@
 
 namespace {
 
-using polyumi_fr3_controllers::blockedDuration;
-using polyumi_fr3_controllers::HandLimits;
-using polyumi_fr3_controllers::MoveCommand;
-using polyumi_fr3_controllers::selectMove;
-using polyumi_fr3_controllers::WidthTrajectory;
+using franka_streaming_impedance::blockedDuration;
+using franka_streaming_impedance::HandLimits;
+using franka_streaming_impedance::MoveCommand;
+using franka_streaming_impedance::selectMove;
+using franka_streaming_impedance::WidthTrajectory;
 
 /// How long the mover waits for a chunk when it has nothing to do. Short against the hand's own
 /// 363 ms floor, so it costs nothing; it exists only so a stopped stream does not spin.
@@ -70,7 +67,7 @@ class FrankaHandNode : public rclcpp::Node {
  public:
   FrankaHandNode() : rclcpp::Node("fr3_gripper") {
     const auto robot_ip = declare_parameter("robot_ip", std::string("192.168.51.20"));
-    const auto target_topic = declare_parameter("target_topic", std::string("/polyumi/target_gripper"));
+    const auto target_topic = declare_parameter("target_topic", std::string("~/target_widths"));
     const auto state_topic = declare_parameter("state_topic", std::string("~/joint_states"));
     // 0.0 means "ask the hand", which is the right answer. Anything else is a backstop clamp.
     max_width_ = declare_parameter("max_width_m", 0.0);

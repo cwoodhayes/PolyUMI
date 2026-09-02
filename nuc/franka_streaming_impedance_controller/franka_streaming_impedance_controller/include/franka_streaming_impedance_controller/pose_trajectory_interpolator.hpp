@@ -1,4 +1,4 @@
-// Copyright (c) 2026 PolyUMI. MIT.
+// Copyright (c) 2026 the franka_streaming_impedance_controller authors. MIT.
 //
 // C++/Eigen port of UMI's umi/common/pose_trajectory_interpolator.py, which is what turns a
 // sparse action chunk into the continuous reference a 1 kHz servo needs.
@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-namespace polyumi_fr3_controllers {
+namespace franka_streaming_impedance {
 
 /// A pose on the trajectory: position plus orientation, both in the trajectory's own frame.
 struct Pose {
@@ -76,4 +76,4 @@ class PoseTrajectoryInterpolator {
   std::vector<Pose> poses_;
 };
 
-}  // namespace polyumi_fr3_controllers
+}  // namespace franka_streaming_impedance

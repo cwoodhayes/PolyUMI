@@ -44,8 +44,9 @@ SHELL_SETTLE_S="${SHELL_SETTLE_S:-5}"
 # Repo paths are left unexpanded so the REMOTE shell resolves the tilde against its own $HOME.
 NUC_SSH_HOST="${NUC_SSH_HOST:-jailfranka}"
 NUC_REPO="${NUC_REPO:-~/Documents/PolyUMI}"
-# The NUC's franka_ros2 workspace. ~/franka_ws/src/polyumi_fr3_controllers is a symlink into
-# $NUC_REPO/nuc, so a build there picks up whatever the rsync landed.
+# The NUC's franka_ros2 workspace. ~/franka_ws/src/franka_streaming_impedance_controller is a
+# symlink into $NUC_REPO/nuc (refreshed on every deploy below), so a build there picks up
+# whatever the rsync landed.
 NUC_FRANKA_WS="${NUC_FRANKA_WS:-~/franka_ws}"
 
 # lamb runs both the ROS client and the policy server. One host, one checkout, one sync.
@@ -191,19 +192,21 @@ else
   # submodules (which the NUC does not have and does not need) are safe.
   if rsync -aR --delete --mkpath --exclude='__pycache__/' --exclude='*.pyc' --exclude='.git/' \
       nuc external/franka_gripper_control "${NUC_SSH_HOST}:${NUC_REPO}/"; then
-    # fr3_home_service runs straight from the synced tree, but polyumi_fr3_controllers is C++ and
+    # fr3_home_service runs straight from the synced tree, but the controller is C++ and
     # franka_gripper_control is an installed ament_python package: rsync only updates the sources
     # that ~/franka_ws/src symlinks at, so without this the NUC keeps running the previously built
     # artifacts — a torque controller, the Franka Hand driver, and the FAULHABER driver.
     # Sourcing is explicit because `ssh host 'cmd'` gets no ~/.bashrc.
-    echo "==> Rebuilding polyumi_fr3_controllers + franka_gripper_control on $NUC_SSH_HOST ..."
+    echo "==> Rebuilding franka_streaming_impedance_controller + franka_gripper_control on $NUC_SSH_HOST ..."
     if ssh -o ConnectTimeout=10 "$NUC_SSH_HOST" \
         "ln -sfn $NUC_REPO/external/franka_gripper_control \
              $NUC_FRANKA_WS/src/franka_gripper_control \
+         && ln -sfn $NUC_REPO/nuc/franka_streaming_impedance_controller/franka_streaming_impedance_controller \
+             $NUC_FRANKA_WS/src/franka_streaming_impedance_controller \
          && source /opt/ros/humble/setup.bash \
          && source $NUC_FRANKA_WS/install/setup.bash \
          && cd $NUC_FRANKA_WS \
-         && colcon build --packages-select polyumi_fr3_controllers franka_gripper_control \
+         && colcon build --packages-select franka_streaming_impedance_controller franka_gripper_control \
               --cmake-args -DCMAKE_BUILD_TYPE=Release"; then
       echo "    done. NOTE: the impedance controller is a pluginlib .so that controller_manager"
       echo "    keeps mapped, so it runs the OLD build until fr3_bringup restarts; the gripper"
