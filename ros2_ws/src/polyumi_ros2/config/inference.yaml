@@ -76,7 +76,7 @@
       # policy's trajectory rather than commanding early.
       #
       # Calibrated 2026-08-19 in servo mode; close to UMI's robot_action_latency of 0.1.
-      arm_exec: 0.0910
+      arm_exec: 0.04
 
       # The gripper's counterpart to arm_exec: how far ahead of intent to command the hand.
       # franka_hand_node already plans each Move to ARRIVE at its waypoint's stated instant
