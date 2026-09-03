@@ -31,7 +31,7 @@
     #
     # Starting point, not a measured value: tune it against measured jerk with the A/B procedure in
     # ingest/integration/plot_measured_motion.py, the same way the interpolant was.
-    temporal_ensemble_tau_s: 0.0
+    temporal_ensemble_tau_s: 0.3
 
     # --- Per-component latencies, in seconds. ---
     # Measured with `ros2 run polyumi_ros2 latency_probe`, one mode per value. Procedures and what
