@@ -18,6 +18,21 @@
     # are ignored.
     n_action_steps: 16
 
+    # Temporal ensembling: recency decay constant, in seconds, for blending each new action chunk
+    # with the recent chunks that overlap it (polyumi_ros2/temporal_ensemble.py). 0 disables it.
+    #
+    # The policy re-predicts its whole horizon every steps_per_inference ticks and the successive
+    # predictions do not agree, so executing each new chunk at face value steps the commanded
+    # target by however much the model changed its mind. Blending trades reactivity for smoothness:
+    # larger values average in staler predictions, so the arm is slower to respond to genuinely new
+    # information — which for contact-critical work is the wrong thing to be slow at. Hence a value
+    # on the order of ONE stride (steps_per_inference * 1/control_hz = 0.3s here), which smooths the
+    # handoff between consecutive chunks without averaging over a meaningfully stale window.
+    #
+    # Starting point, not a measured value: tune it against measured jerk with the A/B procedure in
+    # ingest/integration/plot_measured_motion.py, the same way the interpolant was.
+    temporal_ensemble_tau_s: 0.3
+
     # --- Per-component latencies, in seconds. ---
     # Measured with `ros2 run polyumi_ros2 latency_probe`, one mode per value. Procedures and what
     # each number does and does not cover: docs/calibration-instructions.md, "Latencies".
