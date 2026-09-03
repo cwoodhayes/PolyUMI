@@ -59,7 +59,6 @@ from polyumi_inference.client import PolicyClient
 
 from polyumi_ros2.gripper_map import aperture_from_joint_state, policy_to_robot_width, robot_to_policy_width
 from polyumi_ros2.target_chunk import CONSUMER_HINT, TargetChunkPublisher, pose_array
-from polyumi_ros2.temporal_ensemble import TemporalEnsembler
 
 # Name used for the single "joint" in the gripper trajectory chunk. Deliberately NOT a real joint
 # name (the FR3's fingers are fr3_finger_joint1/2, each reporting half the aperture): the value we
@@ -170,12 +169,6 @@ class PolicyClientNode(Node):
         # means the arm runs out of fresh waypoints before the next chunk lands. The launch
         # default lives in config/inference.yaml (loaded via <param from>); this is the fallback.
         self.declare_parameter('steps_per_inference', 6)
-        # Temporal ensembling: blend each new chunk with the recent chunks that overlap it, decayed
-        # by this time constant in seconds, instead of executing the newest one at face value. See
-        # temporal_ensemble.py for the method and what it does and does not fix. 0 disables it, and
-        # is the fallback here so anything running without config/inference.yaml — where the tuned
-        # value lives — behaves exactly as it did before this existed.
-        self.declare_parameter('temporal_ensemble_tau_s', 0.0)
         # Per-component system latencies (seconds), loaded from config/inference.yaml via the
         # inference launch file; that file documents each value's provenance. Measure them with
         # `ros2 run polyumi_ros2 latency_probe` (one mode per value) — procedures in
@@ -272,12 +265,6 @@ class PolicyClientNode(Node):
         # horizon runs at the observation/control rate (standard for UMI/diffusion policy);
         # if a model is ever trained at a different action rate this needs its own parameter.
         self._action_dt = 1.0 / control_hz
-        # Blends overlapping chunks before anything downstream sees them, on the incoming chunk's
-        # own time grid — so the stale-drop, first_index and the anchor stamp below are untouched.
-        self._ensembler = TemporalEnsembler(
-            tau_s=self.get_parameter('temporal_ensemble_tau_s').get_parameter_value().double_value,
-            action_dt=self._action_dt,
-        )
 
         # History buffers — each entry: (image_uint8 [H,W,C], agent_pos [8])
         self._obs_buffer: deque = deque(maxlen=self._n_obs_steps)
@@ -417,16 +404,9 @@ class PolicyClientNode(Node):
         preview = 'on (/polyumi/target_poses_preview)' if self._publish_preview else 'off'
         self.get_logger().info(f'policy_client_node started — server: {self._url} — mode: {mode} — preview: {preview}')
         stride_interval = self._steps_per_inference * self._action_dt
-        tau_s = self.get_parameter('temporal_ensemble_tau_s').get_parameter_value().double_value
-        # Worth saying out loud either way: with it on, the commanded chunk is not what the model
-        # returned, and every plot of target_poses_* is of the blend rather than the raw prediction.
-        ensemble = (
-            f'temporal ensembling tau={tau_s * 1e3:.0f}ms' if self._ensembler.enabled else 'temporal ensembling off'
-        )
         self.get_logger().info(
             f'receding-horizon stride — inference every {self._steps_per_inference} ticks '
-            f'({stride_interval * 1e3:.0f}ms @ {control_hz:g}Hz), chunk n_action_steps={self._n_action_steps}, '
-            f'{ensemble}'
+            f'({stride_interval * 1e3:.0f}ms @ {control_hz:g}Hz), chunk n_action_steps={self._n_action_steps}'
         )
         latency_str = ' '.join(f'{name}={seconds}s' for name, seconds in self._latency.items())
         tf_mode = 'LATEST (clock-skew workaround; not time-aligned)' if self._tf_use_latest else 'time-aligned'
@@ -908,9 +888,6 @@ class PolicyClientNode(Node):
             self._warn_throttled('episode /reset failed; server will approximate wrt_start with the current pose')
             return
         self._episode_reset_done = True
-        # Chunks from before the reset describe an arm that has since been moved back to a start
-        # pose, so blending them into the new episode's first chunks would drag the target there.
-        self._ensembler.reset()
         self.get_logger().info(f'episode /reset sent (start pose set): {self._reset_url}')
 
     def _submit_reset(self, agent_pos: np.ndarray) -> None:
@@ -1016,10 +993,7 @@ class PolicyClientNode(Node):
             self.get_logger().error(str(e))
             return
         latency_inference = time.monotonic() - t_sent
-        # Blend with the overlapping recent chunks before anything else looks at the actions, so
-        # the preview topic shows what will actually be commanded rather than the raw prediction.
-        # Returns the chunk untouched when disabled or when nothing overlaps it.
-        actions = self._ensembler.blend(t_obs.nanoseconds * 1e-9, chunk.actions)
+        actions = chunk.actions
         latency_model_s = None if chunk.model_ms is None else chunk.model_ms * 1e-3
 
         # Viz-only preview: publish the full commanded chunk (before the stale-drop below) so the

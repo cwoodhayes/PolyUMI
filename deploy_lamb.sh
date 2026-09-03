@@ -63,28 +63,20 @@ ssh "${HOST}" "
     test -f ${REPO}/docker/polyumi_inference.Dockerfile
     echo '    fork + polyumi_inference present'
     # Not synced (see the exclude above) — this only confirms lamb's hand-managed copy is intact,
-    # which is worth catching now rather than as a stage-1 build failure 20 minutes in. Soft check:
-    # lamb's vista dir can be a stub (no Dockerfile/train_day0suite.sh yet), and that must not abort
-    # a deploy that has nothing to do with vista.
+    # which is worth catching now rather than as a stage-1 build failure 20 minutes in.
     if [ -d ${REPO}/external/polyumi_vista_policy ]; then
-        if [ -f ${REPO}/external/polyumi_vista_policy/Dockerfile ] && \
-           [ -f ${REPO}/external/polyumi_vista_policy/scripts/train_day0suite.sh ]; then
-            echo '    vista fork present'
-        else
-            echo '    vista fork present but stub-only (no Dockerfile/train_day0suite.sh) — skipping'
-        fi
+        test -f ${REPO}/external/polyumi_vista_policy/Dockerfile
+        test -f ${REPO}/external/polyumi_vista_policy/scripts/train_day0suite.sh
+        echo '    vista fork present'
     fi
 "
 
 # colcon COPIES sources into install/, so an edited node keeps running the old code until you
 # rebuild — no error, no clue. VIRTUAL_ENV unset so the build uses the system python (see CLAUDE.md).
-# --packages-up-to, not --packages-select: polyumi_ros2 depends on franka_streaming_impedance_client
-# (symlinked into ros2_ws/src/ per CLAUDE.md's impedance-controller section), and --packages-select
-# builds ONLY the named package, silently leaving that dependency at whatever install/ already had.
 echo "==> Building polyumi_ros2 on ${HOST} ..."
 ssh -o ConnectTimeout=10 "${HOST}" \
     "unset VIRTUAL_ENV; cd ${REPO}/ros2_ws && source /opt/ros/kilted/setup.bash \
-     && colcon build --packages-up-to polyumi_ros2"
+     && colcon build --packages-select polyumi_ros2"
 
 # policy_client_node imports polyumi_inference directly (CLAUDE.md, "The Inference Protocol Lives
 # in One Library"). --no-deps so numpy/requests keep coming from apt via rosdep rather than pip
